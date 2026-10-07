@@ -87,6 +87,12 @@ interpret an empty wallet as a lost deposit or keep requesting replacements.
 No public faucet/server pair is certified for this alpha; use isolated regtest
 for the reproducible receive/send walkthrough below.
 
+This build also uses the pinned NU6.3 consensus schedule. NU7 is not enabled in
+its protocol dependencies. Public testnet spending after the
+[scheduled NU7 activation](https://forum.zcashcommunity.com/t/nu7-timeline/57655)
+at block 4,465,026 requires a protocol upgrade and fresh funded acceptance;
+switching servers alone is insufficient. Empty-wallet sync does not verify spending.
+
 To investigate a missing payment:
 
 1. Record its receipt’s transaction ID and mined height. Querying a public explorer
