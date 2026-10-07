@@ -869,6 +869,20 @@ test("rescan rejects invalid/later birthdays and unknown outgoing payments witho
   assert.deepEqual(await wallet.history(), [{ txid, status: "pending" }]);
 });
 
+test("rescan rejects a birthday above a lagging server tip without clearing committed activity", async t => {
+  const f = fixture(t);
+  let tip = 10;
+  const wallet = await f.open({ server: { kind: "fixture", label: "offline", tip: async () => tip,
+    blocks: async () => new Uint8Array(), submit: async () => txid } });
+  await wallet.create({ birthday: 8 });
+  const before = await readSavedSnapshotRecord();
+  tip = 4;
+  await assert.rejects(wallet.rescan({ birthday: 6 }), code("birthday_above_tip"));
+  assert.deepEqual(await readSavedSnapshotRecord(), before);
+  assert.equal((await wallet.load())?.birthdayHeight, 8);
+  assert.equal((await wallet.load())?.scannedHeight, 10);
+});
+
 test("rescan rolls back in-memory state when a mandatory storage commit fails", async t => {
   const f = fixture(t);
   let fail = false;

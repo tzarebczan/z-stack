@@ -38,7 +38,7 @@ export function WalletScreen() {
         </div> : <>
           <div className="actions sync-actions"><button className="primary" disabled={disabled || backup}
             onClick={() => void wallet.sync()}>Sync wallet</button>
-            {["Syncing", "Rescanning"].includes(wallet.busy) && <button onClick={wallet.cancel}>Stop sync</button>}
+            {wallet.busy === "Syncing" && <button onClick={wallet.cancel}>Stop sync</button>}
             <button disabled={disabled || backup || !wallet.spending} onClick={wallet.lock}>Lock spending</button>
             {wallet.busy && <span className="sync-indicator" role="status">{wallet.busy}
               {["Syncing", "Rescanning"].includes(wallet.busy) && wallet.progress !== undefined ? ` · ${Math.round(wallet.progress)}%` : "…"}</span>}

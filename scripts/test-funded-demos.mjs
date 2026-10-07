@@ -158,7 +158,21 @@ try {
     await ui.getByText('Scan an earlier range',{exact:true}).click();
     await ui.getByLabel('Earlier height or date',{exact:true}).fill('1');
     await ui.getByLabel('I want to rebuild scan history',{exact:true}).check();
+    let releaseTip, tipRequested;
+    const tipHeld = new Promise(resolve => { releaseTip = resolve; });
+    const tipStarted = new Promise(resolve => { tipRequested = resolve; });
+    const holdTip = async route => {
+      tipRequested(); await tipHeld; await route.continue();
+    };
+    if (kind === 'next') await ui.route('**/GetLatestBlock', holdTip);
     await ui.getByRole('button',{name:'Rescan wallet',exact:true}).click();
+    if (kind === 'next') {
+      try {
+        await tipStarted;
+        assert.equal(await ui.getByRole('button',{name:'Stop sync',exact:true}).count(), 0,
+          'Stop sync must not be offered while the reset is preparing');
+      } finally { releaseTip(); await ui.unroute('**/GetLatestBlock', holdTip); }
+    }
     await ui.waitForFunction(() => !document.querySelector('#sync')?.disabled && ![...document.querySelectorAll('button')].some(button => button.textContent === 'Sync wallet' && button.disabled), null, {timeout:180_000});
     assert.equal(await ui.getByLabel('I want to rebuild scan history',{exact:true}).isChecked(), false, 'Each rescan needs a new confirmation');
     assert.equal(await ui.locator('#address').innerText(), address, 'Rescan must preserve receiving identity');

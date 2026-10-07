@@ -198,6 +198,8 @@ export function useWallet() {
       wallet.lock();
       // Commit the new birthday first; cancellation of sync keeps a resumable wallet.
       await refresh(wallet, await wallet.rescan({ birthday }));
+      if (owner.current !== wallet) return;
+      setBusy("Syncing");
       await refresh(wallet, await wallet.sync());
       if (owner.current === wallet) {
         const tip = await wallet.tip();

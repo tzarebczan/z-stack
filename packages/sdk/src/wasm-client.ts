@@ -992,6 +992,7 @@ export function createWasmClient(
             const tip = await transport.tip(operation.signal);
             const height = await runtime.resolveBirthday(birthday, tip, 1);
             assertSource(operation, source);
+            if (height > tip) throw new WalletError("birthday_above_tip", "birthday is above chain tip");
             if (height > await source.birthday()) throw new WalletError("rescan_later_birthday", "rescan later birthday");
             if ((await source.pendingRawTxs()).length) throw new WalletError("rescan_pending", "rescan pending payment");
             if (tip - height + 1 > runtime.MAX_GAP && !opts.allowDeepSync) throw new WalletError("deep_sync_rejected", "deep sync requires explicit opt-in");
