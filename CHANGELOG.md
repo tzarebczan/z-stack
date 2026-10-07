@@ -4,6 +4,7 @@
 
 - Prebuilt downloadable archives and a Rust-free example quickstart; npm and Cargo publication remain deferred.
 - Safe earlier-birthday browser rescans with pending-payment, persistence and stale-tab guards.
+- Committed rescans reset transparent and memo completion indicators and reload subtree roots; failed saves preserve the previous state.
 - Numeric birthdays such as zero, NaN and unsafe heights now fail with `invalid_birthday` instead of silently selecting a default. Rescans require an explicit date or height.
 - Typed birthday validation and payment-link hints; forms retain the phrase on local birthday errors.
 - Visible network/server/birthday/scan context, accurate runtime labels, informational ownership checks, TAZ units and favicon assets.

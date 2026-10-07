@@ -1010,6 +1010,12 @@ export function createWasmClient(
             rootsChecked = null;
             assertSource(operation, source);
             await persist({ epoch, baseKey });
+            assertSource(operation, source);
+            // Coverage was cleared by the committed reset. Failed saves keep
+            // the previous session's completion statuses during rollback.
+            transparentScanStatus = transparentScan === "compact" ? "scanning" : "off";
+            sharedMemoStatus = memoFetch === "shared" ? "scanning" : "off";
+            selectiveMemoStatus = "scanning";
           } catch (error) {
             // wallet_changed already adopted the other tab's committed snapshot.
             // Close/forget/replacement have retired this source; never revive it.

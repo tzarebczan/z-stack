@@ -25,18 +25,31 @@ function fixture(t: TestContext) {
   let serial = 0, frees = 0;
   let onSnapshot: (() => void) | undefined;
   let onRevive: (() => void) | undefined;
-  const make = (initial: { address: string; pending: boolean; reserved?: boolean; birthday?: number; scanned?: number }) => {
+  let onRescan: (() => void) | undefined;
+  const make = (initial: { address: string; pending: boolean; reserved?: boolean; birthday?: number; scanned?: number; transparentScanHeight?: number | null; memoScanHeight?: number | null }) => {
     const state = { ...initial };
     return {
       free() { frees++; },
       toSnapshot: () => { onSnapshot?.(); return encode(state); },
       snapshotJson: () => JSON.stringify({ network: "regtest", unifiedAddress: state.address, ufvk,
         birthdayHeight: state.birthday ?? 8, scannedHeight: state.scanned ?? 10,
+        transparentScanHeight: state.transparentScanHeight ?? null, memoScanHeight: state.memoScanHeight ?? null,
         balance: { totalAvailable: state.pending || state.reserved ? 0 : 10, orchardAvailable: state.pending || state.reserved ? 0 : 10, transparentAvailable: 0 } }),
       scannedHeight: () => state.scanned ?? 10,
+      nextHeight: () => (state.scanned ?? 10) + 1,
       birthday: () => state.birthday ?? 8,
       pendingRawTxs: () => JSON.stringify(state.pending ? ["synthetic-transaction"] : []),
-      rescanFrom(height: number) { state.birthday = height; state.scanned = height - 1; },
+      rescanFrom(height: number) {
+        state.birthday = height; state.scanned = height - 1;
+        state.transparentScanHeight = null; state.memoScanHeight = null;
+        onRescan?.();
+      },
+      applyTransparentBlocks(bytes: Uint8Array) {
+        if (bytes.length) state.transparentScanHeight = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0);
+        return 0;
+      },
+      applySharedMemos(json: string) { state.memoScanHeight = JSON.parse(json).end; return 0; },
+      memoEnhancementTxids: () => "[]",
       history: () => JSON.stringify(state.pending ? [{ txid, status: "pending" }] : []),
       nextUnifiedAddress() {},
       attachSeed(secret: string) { if (secret !== words) throw new Error("seed fingerprint does not match"); },
@@ -63,6 +76,7 @@ function fixture(t: TestContext) {
     frees: () => frees,
     onSnapshot(callback: () => void) { onSnapshot = callback; },
     onRevive(callback?: () => void) { onRevive = callback; },
+    onRescan(callback?: () => void) { onRescan = callback; },
     async open(extra: Partial<Parameters<typeof createWallet>[0]> = {}) {
       wallet = await createWallet({ network: "regtest", storage, prewarmProvingKey: false,
         server: { kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(), submit: async () => txid }, ...extra });
@@ -851,6 +865,51 @@ test("rescan retains wallet identity, persists an earlier birthday and remains l
   assert.equal((await reopened.load())?.birthdayHeight, 3);
   assert.equal(reopened.hasSpendingSeed(), false);
 });
+
+for (const memoFetch of ["shared", "auto", "on-demand"] as const) {
+  test(`rescan resets public-data progress only after its durable commit (${memoFetch})`, async t => {
+    const f = fixture(t);
+    let failWrites = false, resets = 0;
+    const storage: typeof f.storage = { available: true,
+      transaction(mode, body, options) {
+        if (failWrites && mode === "readwrite") return Promise.reject(new DOMException("quota", "QuotaExceededError"));
+        return f.storage.transaction(mode, body, options);
+      } };
+    const transparentScan = memoFetch === "shared" ? "compact" : "off";
+    const wallet = await f.open({ storage, memoFetch, transparentScan, server: {
+      kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+      info: async () => ({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }),
+      transparentBlocks: async (_start, end) => {
+        const bytes = new Uint8Array(4); new DataView(bytes.buffer).setUint32(0, end); return bytes;
+      },
+      sharedMemos: async (start, end) => JSON.stringify({ start, end }),
+      tx: async () => { throw new Error("an empty memo queue must not fetch transactions"); },
+    } });
+    await wallet.create({ birthday: 8 });
+    await wallet.sync();
+    await wallet.fetchMemos();
+    const before = await wallet.getWallet();
+    assert.equal(before.transparentScanStatus, transparentScan === "compact" ? "complete" : "off");
+    assert.equal(before.sharedMemoStatus, memoFetch === "shared" ? "complete" : "off");
+    assert.equal(before.memoFetchStatus, memoFetch === "on-demand" ? "off" : "complete");
+    const saved = await readSavedSnapshotRecord();
+    // Fail after the engine has cleared coverage, not during the preceding save.
+    f.onRescan(() => { resets++; failWrites = true; });
+    await assert.rejects(wallet.rescan({ birthday: 3 }), code("storage_full"));
+    assert.equal(resets, 1);
+    assert.deepEqual(await wallet.getWallet(), before);
+    assert.deepEqual(await readSavedSnapshotRecord(), saved);
+    failWrites = false; f.onRescan();
+    const after = await wallet.rescan({ birthday: 3 });
+    assert.equal(after.birthdayHeight, 3);
+    assert.equal(after.scannedHeight, 2);
+    assert.equal(after.transparentScanHeight, null);
+    assert.equal(after.memoScanHeight, null);
+    assert.equal(after.transparentScanStatus, transparentScan === "compact" ? "scanning" : "off");
+    assert.equal(after.sharedMemoStatus, memoFetch === "shared" ? "scanning" : "off");
+    assert.equal(after.memoFetchStatus, memoFetch === "on-demand" ? "off" : "scanning");
+  });
+}
 
 test("rescan rejects invalid/later birthdays and unknown outgoing payments without changing saved state", async t => {
   const f = fixture(t), wallet = await f.open();
