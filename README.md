@@ -7,8 +7,8 @@ their UI, authentication, and backup service.
 **Alpha.** The packages are not published to npm. Original code is Apache-2.0;
 see [licensing](docs/LICENSING.md) and
 [release status](docs/RELEASE.md).
-Build alpha archives from a checkout and integrate them without
-a Rust toolchain in the consuming app.
+Download matching [alpha archives](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.2)
+and run an example without a Rust toolchain.
 
 ## Start here
 
@@ -29,7 +29,31 @@ a Rust toolchain in the consuming app.
 | Build or change the engine | [Contributing](CONTRIBUTING.md) |
 | Review dependencies and patches | [Upstream dependencies](docs/UPSTREAM.md) |
 
-## Build preview packages
+## Run a prebuilt example
+
+Download the preview bundle and checksums from the
+[alpha release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.2).
+Or use GitHub CLI to download the complete matching set:
+
+```sh
+gh release download v0.1.0-alpha.2 --repo tzarebczan/z-stack --dir sdk-alpha
+cd sdk-alpha
+sha256sum -c SHA256SUMS-alpha.2 # macOS: shasum -a 256 -c SHA256SUMS-alpha.2
+tar -xzf z-stack-preview-0.1.0-alpha.2-*.tgz
+cd z-stack-preview
+sha256sum -c SHA256SUMS # macOS: shasum -a 256 -c SHA256SUMS
+node scripts/create-example.mjs next-wallet ../my-wallet --install
+cd ../my-wallet
+npm run dev
+```
+
+Requires Node.js 22.18+ and npm. Choose `browser-wallet` for Vite/TypeScript.
+Use a new or empty app directory. Both demos use testnet, label test coins TAZ,
+and display the server, wallet birthday and scanned height. See the
+[funding and chain-view checks](docs/GETTING-STARTED.md#4-create-or-restore-then-sync)
+before requesting a faucet payment. The published alpha is not an npm release.
+
+## Build from source
 
 Install Node.js 22.18+, pnpm 12.6.0, Rust 1.91, and wasm-pack 0.15.0.
 The checked-in Rust toolchain file installs the stable WASM target. The threaded
@@ -51,9 +75,9 @@ pnpm pack:sdk
 in your app; the SDK archive includes both WASM engines and their workers:
 
 ```sh
-npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.1.tgz \
-  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.1.tgz \
-  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.1.tgz
+npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.2.tgz \
+  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.2.tgz \
+  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.2.tgz
 ```
 
 Configure Vite once:
@@ -75,6 +99,7 @@ const wallet = await createWallet({
   server: "https://zcash-testnet.chainsafe.dev",
   memoFetch: "on-demand",
   autoSync: false,
+  autoShield: false,
 });
 const saved = await wallet.load();
 // If saved is null, let the user choose Create or Restore.

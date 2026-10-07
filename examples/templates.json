@@ -10,7 +10,8 @@
     "src/vite-env.d.ts",
     "tsconfig.json",
     "vite.config.ts",
-    "src/base.ts"
+    "src/base.ts",
+    "public/favicon.svg"
   ],
   "next-wallet": [
     ".gitignore",
@@ -33,7 +34,9 @@
     "package.json",
     "scripts/next.mjs",
     "tsconfig.json",
-    "components/BaseWallet.tsx"
+    "components/BaseWallet.tsx",
+    "components/ScanDetails.tsx",
+    "public/favicon.svg"
   ],
   "react-wallet": [
     "README.md",

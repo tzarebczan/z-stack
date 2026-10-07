@@ -1992,6 +1992,30 @@ impl WebWallet {
         Ok(self.scanned_height)
     }
 
+    /// Start from an earlier birthday without changing account identity. Build the
+    /// replacement first, so validation failure leaves the current wallet intact.
+    pub fn rescan_from(&mut self, birthday: u32) -> Result<()> {
+        if birthday == 0 {
+            return Err(EngineError::Message("invalid birthday height".into()));
+        }
+        if birthday > self.birthday {
+            return Err(EngineError::Message("rescan later birthday".into()));
+        }
+        if self.unmined_pending_txs().next().is_some() {
+            return Err(EngineError::Message("rescan pending payment".into()));
+        }
+        let mut fresh = Self::from_ufvk(self.network, &self.ufvk, birthday, self.account_index)?;
+        fresh.unified_address = self.unified_address.clone();
+        fresh.transparent_address = self.transparent_address.clone();
+        fresh.next_diversifier = self.next_diversifier;
+        fresh.view_only = self.view_only;
+        fresh.hardware = self.hardware.clone();
+        fresh.recent_recipients = self.recent_recipients.clone();
+        fresh.transparent_scan_required = self.transparent_scan_required;
+        *self = fresh;
+        Ok(())
+    }
+
     /// Drop notes, trees, UTXOs, and history. Keep UFVK, birthday, and addresses.
     /// Next `sync` trial-decrypts from birthday.
     pub fn reset_scan(&mut self) {
@@ -4052,6 +4076,77 @@ mod tests {
         let acct =
             account_from_mnemonic(REGTEST_FAUCET_MNEMONIC, crate::Network::Regtest, 0).unwrap();
         WebWallet::from_account(acct, 1).unwrap()
+    }
+
+    #[test]
+    fn rescan_preserves_identity_and_reinitializes_birthday_trees() {
+        let acct =
+            account_from_mnemonic(REGTEST_FAUCET_MNEMONIC, crate::Network::Regtest, 0).unwrap();
+        let mut w = WebWallet::from_account(acct, 100).unwrap();
+        w.next_unified_address().unwrap();
+        let address = w.unified_address.clone();
+        let next = w.next_diversifier;
+        w.orchard_base = 900;
+        w.orchard_next = 901;
+        w.scanned_height = 200;
+        w.rescan_from(50).unwrap();
+        assert_eq!(w.unified_address, address);
+        assert_eq!(w.next_diversifier, next);
+        assert!(!w.view_only);
+        assert_eq!(w.birthday, 50);
+        assert_eq!(w.scanned_height, 49);
+        assert_eq!(w.orchard_base, 0);
+        assert!(!w.trees_ready);
+        assert!(w.birthday_trees.is_none());
+        let bytes = w.to_snapshot().unwrap();
+        assert!(w.rescan_from(0).is_err());
+        assert!(w.rescan_from(51).is_err());
+        assert_eq!(w.to_snapshot().unwrap(), bytes);
+    }
+
+    #[test]
+    fn rescan_keeps_view_only_and_hardware_account_metadata() {
+        let mut w = wallet();
+        w.view_only = true;
+        w.hardware = Some(HardwareAccount {
+            device: "keystone".into(),
+            seed_fingerprint: "07".repeat(32),
+            account_index: 0,
+        });
+        w.rescan_from(1).unwrap();
+        assert!(w.view_only);
+        let hardware = w.hardware.as_ref().unwrap();
+        assert_eq!(hardware.device, "keystone");
+        assert_eq!(hardware.seed_fingerprint, "07".repeat(32));
+        assert_eq!(hardware.account_index, 0);
+        let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert!(restored.view_only);
+        assert_eq!(restored.hardware.unwrap().seed_fingerprint, "07".repeat(32));
+    }
+
+    #[test]
+    fn rescan_refuses_unmined_payment_until_expiry() {
+        let mut w = wallet();
+        let id = zcash_primitives::transaction::TxId::from_bytes([7; 32]);
+        let key = to_hex(id.as_ref());
+        w.pending_txs.insert(id, vec![1, 2, 3]);
+        w.txs.insert(
+            key.clone(),
+            TxAgg {
+                expiry_height: Some(40),
+                ..Default::default()
+            },
+        );
+        let before = w.to_snapshot().unwrap();
+        assert!(w
+            .rescan_from(1)
+            .unwrap_err()
+            .to_string()
+            .contains("rescan pending payment"));
+        assert_eq!(w.to_snapshot().unwrap(), before);
+        w.scanned_height = 40;
+        w.rescan_from(1).unwrap();
+        assert!(w.pending_txs.is_empty());
     }
 
     #[test]

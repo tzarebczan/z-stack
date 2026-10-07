@@ -66,6 +66,7 @@ export {
   ZATOSHI_PER_ZEC,
   SHIELD_THRESHOLD_ZAT,
   BLOCK_SECONDS,
+  validateBirthdayInput,
   canSend,
   canSendReason,
   canShield,

@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>z-stack wallet example</title>
   </head>
   <body>
@@ -10,7 +11,7 @@
       <h1>Testnet wallet</h1>
       <p>A minimal SDK integration. Use test funds only.</p>
       <p id="status" role="status">Loading engine…</p>
-      <p id="balance">— ZEC</p>
+      <p id="balance">— TAZ</p>
       <p id="address"></p>
       <div class="actions">
         <button id="create" disabled>Create wallet</button>
@@ -52,6 +53,17 @@
         <p id="send-status" role="status"></p>
         <button id="cancel-send" type="button" hidden>Cancel before submission</button>
         <section id="send-receipt" hidden aria-label="Payment receipt"><h3>Payment receipt</h3><p id="receipt-state" role="status"></p><code id="receipt-txid"></code><button id="another-send" type="button">New payment</button></section>
+      </section>
+      <section id="scan-panel" hidden aria-label="Scan details">
+        <p id="scan-details"></p>
+        <p>Missing a deposit? Confirm it on this server’s chain. Deposits below the birthday need an earlier scan. Rescanning cannot find a payment on another chain.</p>
+        <details><summary>Scan an earlier range</summary><form id="rescan-form">
+          <label for="rescan-birthday">Earlier height or date</label>
+          <input id="rescan-birthday" required placeholder="Height or YYYY-MM-DD" />
+          <p>Keeps your wallet and address. Rebuilds activity and balance. Pending outgoing payments must confirm or expire first.</p>
+          <label><input id="rescan-confirm" type="checkbox" required /> I want to rebuild scan history</label>
+          <button>Rescan wallet</button>
+        </form></details>
       </section>
       <h2>Activity</h2>
       <ul id="history"></ul>

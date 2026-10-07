@@ -3,6 +3,8 @@
  * Keep lockstep with `z_engine::birthday`.
  */
 
+import { WalletError } from "./errors";
+
 export const BLOCK_SECONDS = 75;
 export const DATE_SAFETY_BLOCKS = 200;
 
@@ -251,16 +253,17 @@ function civilFromDays(z: number): { y: number; m: number; d: number } {
 }
 
 function ymdToUnix(s: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s.trim())) throw new WalletError("invalid_birthday", "invalid birthday date");
   const parts = s.trim().split("-");
-  if (parts.length !== 3) throw new Error("date must be YYYY-MM-DD");
+  if (parts.length !== 3) throw new WalletError("invalid_birthday", "invalid birthday date");
   const y = Number(parts[0]);
   const m = Number(parts[1]);
   const d = Number(parts[2]);
   if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) {
-    throw new Error("date must be YYYY-MM-DD");
+    throw new WalletError("invalid_birthday", "invalid birthday date");
   }
   if (m < 1 || m > 12 || d < 1 || d > daysInMonth(y, m)) {
-    throw new Error("date must be YYYY-MM-DD");
+    throw new WalletError("invalid_birthday", "invalid birthday date");
   }
   return daysFromCivil(y, m, d) * 86400;
 }
@@ -288,11 +291,27 @@ export function ymdDaysAgo(days: number): string {
   return unixToYmd(nowUnix() - days * 86_400);
 }
 
-/**
- * Digits → exact height. `YYYY-MM-DD` → estimated height minus {@link DATE_SAFETY_BLOCKS}.
- * Empty / `auto` → tip − 100.
+/** Validate syntax before clearing a recovery phrase or making a network request.
+ * Empty and `auto` are valid SDK defaults; restore forms should require an explicit value.
+ */
+export function validateBirthdayInput(raw: string | number): void {
+  const s = String(raw).trim();
+  if (typeof raw === "string" && (!s || s.toLowerCase() === "auto")) return;
+  if (typeof raw === "number" || /^\d+$/.test(s)) {
+    const height = Number(raw);
+    if (!Number.isSafeInteger(height) || height < 1 || height > 0xffff_ffff) {
+      throw new WalletError("invalid_birthday", "invalid birthday height");
+    }
+    return;
+  }
+  ymdToUnix(s);
+}
+
+/** Digits are an exact height; dates estimate a height with a safety margin.
+ * Empty / `auto` defaults to tip minus 100.
  */
 export function parseBirthdayInput(raw: string, tipHeight: number): number {
+  validateBirthdayInput(raw);
   const s = raw.trim();
   if (!s || s.toLowerCase() === "auto") return Math.max(1, tipHeight - 100);
   if (/^\d+$/.test(s)) {

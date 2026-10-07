@@ -431,3 +431,13 @@ test("a different recovery phrase has a stable actionable error without exposing
   assert.equal(error.userMessage(), "This recovery phrase does not match your wallet.");
   assert.equal(classifyWalletError("Ledger seed fingerprint does not match this viewing key"), "hardware_mismatch");
 });
+
+
+test("birthday validation rejects malformed dates and unsafe heights before network work", async () => {
+  const { validateBirthdayInput, parseBirthdayInput, WalletError } = await import("../src/index.ts");
+  for (const value of ["yesterday", "2026-13-40", "2025-02-29", "2026-1-01", "1e5", 0, -1, 1.5, NaN, Infinity, 0x1_0000_0000]) {
+    assert.throws(() => validateBirthdayInput(value), error => error instanceof WalletError && error.code === "invalid_birthday");
+  }
+  for (const value of [1, "4468500", "2024-02-29", "auto", ""]) validateBirthdayInput(value);
+  assert.equal(parseBirthdayInput("4468500", 4476000), 4468500);
+});

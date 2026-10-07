@@ -22,6 +22,10 @@ export type WalletErrorCode =
   | "chain_mismatch"
   | "deep_sync_rejected"
   | "birthday_above_tip"
+  | "invalid_birthday"
+  | "rescan_pending"
+  | "rescan_later_birthday"
+  | "unsupported_payment_uri"
   | "broadcast_rejected"
   | "broadcast_failed"
   | "reorg"
@@ -62,6 +66,10 @@ export const WALLET_ERROR_MESSAGES: Record<WalletErrorCode, string> = {
   seed_decrypt_failed: "Could not decrypt the seed. Check the passphrase.",
   chain_mismatch: "This wallet does not match the light server chain.",
   deep_sync_rejected: "Birthday is too far below tip for a default sync.",
+  invalid_birthday: "Enter a positive block height or a valid date in YYYY-MM-DD format.",
+  rescan_pending: "Sync to confirm or expire your pending payment before rescanning.",
+  rescan_later_birthday: "Choose a height or date at or before the wallet’s current birthday.",
+  unsupported_payment_uri: "Paste the recipient address itself. This form does not accept zcash: payment links.",
   birthday_above_tip: "Birthday is above the current chain tip.",
   broadcast_rejected: "The network rejected this transaction.",
   broadcast_failed: "Submission may have succeeded. Check the transaction ID before sending another payment.",
@@ -185,6 +193,9 @@ export function classifyWalletError(message: string): WalletErrorCode {
   if (lower.includes("proving parameters missing") || lower.includes("missing params")) {
     return "missing_params";
   }
+  if (lower.includes("rescan pending payment")) return "rescan_pending";
+  if (lower.includes("rescan later birthday")) return "rescan_later_birthday";
+  if (lower.includes("invalid birthday")) return "invalid_birthday";
   if (lower.includes("chain mismatch")) return "chain_mismatch";
   if (lower.includes("too far below tip") || lower.includes("deep sync"))
     return "deep_sync_rejected";

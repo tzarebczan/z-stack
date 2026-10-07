@@ -60,6 +60,7 @@ export function createWasmClient(
   let spendingSeed: string | null = null;
 
   let disposing = false;
+  let rescanning = false;
 
   // Interrupt external device prompts before draining reservations. Aborting the
   // wallet operation itself here would destroy the session needed for rollback.
@@ -242,7 +243,7 @@ export function createWasmClient(
 
   runtime.bindPersistOnHide();
 
-  runtime.runtimeState.persistOnHide = () => persist(undefined, undefined, true);
+  runtime.runtimeState.persistOnHide = () => rescanning ? Promise.resolve() : persist(undefined, undefined, true);
 
   let syncLock: { epoch: number; promise: Promise<WalletSnapshot> } | null = null;
 
@@ -273,6 +274,7 @@ export function createWasmClient(
   }
 
   function assertReplacementSaved(generation = storageGeneration): void {
+    if (rescanning) throw new WalletError("busy", "rescan is in progress");
     if (generation && runtime.pendingReplacementSaves.has(generation)) {
       throw new WalletError("wallet_changed", "wallet restore is still in progress");
     }
@@ -348,6 +350,7 @@ export function createWasmClient(
     set selectiveMemoStatus(value: WasmClientContext["selectiveMemoStatus"]) { selectiveMemoStatus = value; },
     get memoAbort() { return memoAbort; },
     set memoAbort(value: WasmClientContext["memoAbort"]) { memoAbort = value; },
+    get rescanning() { return rescanning; },
     get disposing() { return disposing; },
     set disposing(value: WasmClientContext["disposing"]) { disposing = value; },
     get beginReservationDrain() { return beginReservationDrain; },
@@ -468,6 +471,7 @@ export function createWasmClient(
           throw WalletError.fromUnknown(e);
         }),
     shield: async (threshold) => {
+      assertReplacementSaved();
       if (!currentSession() && !(await loadIfNeeded())) throw new Error("no wasm wallet");
       const seed = requireSeed("shield");
       const operation = sessionOperation!;
@@ -567,6 +571,7 @@ export function createWasmClient(
       }
     },
     create: async (net, birthday, createOpts) => {
+      if (birthday !== undefined) runtime.validateBirthdayInput(birthday);
       if (opts.requireExplicitReplacement && !createOpts?.replace && await runtime.peekWasmWallet()) {
         throw new WalletError("already_exists", "A saved wallet exists. Confirm replacement explicitly.");
       }
@@ -649,6 +654,7 @@ export function createWasmClient(
       }
     },
     restore: async (mnemonic, net, birthday, restoreOpts) => {
+      if (birthday !== undefined) runtime.validateBirthdayInput(birthday);
       const words = mnemonic.trim();
       if (/^uview/i.test(words)) {
         return client.restoreUfvk(words, net, birthday, restoreOpts);
@@ -710,6 +716,7 @@ export function createWasmClient(
       }
     },
     restoreUfvk: async (ufvk, net, birthday, restoreOpts) => {
+      if (birthday !== undefined) runtime.validateBirthdayInput(birthday);
       runtime.assertViewingKey(ufvk.trim(), net);
       if (opts.requireExplicitReplacement && !restoreOpts?.replace && await runtime.peekWasmWallet()) {
         throw new WalletError("already_exists", "A saved wallet exists. Confirm replacement explicitly.");
@@ -776,6 +783,7 @@ export function createWasmClient(
       }
     },
     restoreHardware: async (account: HardwareAccount, net, birthday, restoreOpts) => {
+      if (birthday !== undefined) runtime.validateBirthdayInput(birthday);
       const ufvk = account.ufvk.trim();
       runtime.assertViewingKey(ufvk, net);
       const fromHardware = runtime.requireBindings().WasmWallet.fromHardware;
@@ -956,6 +964,62 @@ export function createWasmClient(
       await session!.nextUnifiedAddress();
       await persist();
       return snap();
+    },
+    rescan: async ({ birthday }) => {
+      runtime.validateBirthdayInput(birthday);
+      if (typeof birthday === "string" && (!birthday.trim() || birthday.trim().toLowerCase() === "auto")) {
+        throw new WalletError("invalid_birthday", "rescan requires an explicit birthday");
+      }
+      assertReplacementSaved();
+      if (disposing || syncLock || memoLock || runtime.runtimeState.spendingOperation) {
+        throw new WalletError("busy", "another wallet operation is in progress");
+      }
+      rescanning = true;
+      try {
+        return await runtime.withOriginSpendLock(async () => {
+          if (!currentSession() && !(await loadIfNeeded())) throw new WalletError("not_found", "no wasm wallet");
+          const source = session!;
+          const operation = sessionOperation!;
+          await operation.ready();
+          assertSource(operation, source);
+          if (disposing || runtime.runtimeState.spendingOperation) throw new WalletError("busy", "another wallet operation is in progress");
+          runtime.runtimeState.spendingOperation = operation.signal;
+          let backup: Uint8Array | undefined;
+          let epoch = stateEpoch;
+          try {
+            await refreshIfStale(source, operation);
+            assertSource(operation, source);
+            const tip = await transport.tip(operation.signal);
+            const height = await runtime.resolveBirthday(birthday, tip, 1);
+            assertSource(operation, source);
+            if (height > await source.birthday()) throw new WalletError("rescan_later_birthday", "rescan later birthday");
+            if ((await source.pendingRawTxs()).length) throw new WalletError("rescan_pending", "rescan pending payment");
+            if (tip - height + 1 > runtime.MAX_GAP && !opts.allowDeepSync) throw new WalletError("deep_sync_rejected", "deep sync requires explicit opt-in");
+            // A reset must never remove reservations for unknown broadcast outcomes.
+            // Drain any earlier coalesced/pagehide writes before mutating state.
+            await persist();
+            assertSource(operation, source);
+            backup = await source.toSnapshot();
+            assertSource(operation, source);
+            epoch = stateEpoch;
+            const baseKey = savedKeySeen;
+            await source.rescanFrom(height);
+            assertSource(operation, source);
+            await persist({ epoch, baseKey });
+          } catch (error) {
+            // wallet_changed already adopted the other tab's committed snapshot.
+            // Close/forget/replacement have retired this source; never revive it.
+            if (backup && !operation.signal.aborted && source === session && stateEpoch === epoch) {
+              try { await source.fromSnapshot(backup); }
+              catch { retireFailedSession(source); }
+            }
+            throw error;
+          } finally {
+            if (runtime.runtimeState.spendingOperation === operation.signal) runtime.runtimeState.spendingOperation = null;
+          }
+          return snap();
+        });
+      } finally { rescanning = false; }
     },
     resetScan: async () => {
       assertReplacementSaved();

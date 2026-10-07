@@ -4,6 +4,7 @@ const staticExport = process.env.Z_STACK_STATIC_EXPORT === "1";
 const isolated = process.env.Z_STACK_ISOLATION !== "off";
 export default {
   poweredByHeader: false,
+  agentRules: false,
   ...(staticExport ? { output: "export" } : {}),
   reactStrictMode: true,
   async headers() {

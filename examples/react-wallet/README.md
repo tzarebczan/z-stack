@@ -27,9 +27,9 @@ Next.js or Remix deployment test.
 Copy this directory outside the workspace after following the [build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md), then run:
 
 ```sh
-npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.1.tgz \
-  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.1.tgz \
-  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.1.tgz
+npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.2.tgz \
+  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.2.tgz \
+  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.2.tgz
 npm run dev
 ```
 

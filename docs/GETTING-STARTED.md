@@ -6,19 +6,25 @@ application services; they are not needed for this walkthrough.
 
 ## 1. Get matching archives
 
-From a checkout, install the prerequisites in [the README](../README.md)
-and run:
+Download the preview bundle and `SHA256SUMS-alpha.2` from the
+[alpha release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.2).
+Use Node 22.18+ and npm; Rust and an npm account are not needed.
+With GitHub CLI, download all six assets and verify them before extracting:
 
 ```sh
-pnpm install --frozen-lockfile
-pnpm build:sdk
-pnpm pack:sdk
+gh release download v0.1.0-alpha.2 --repo tzarebczan/z-stack --dir sdk-alpha
+cd sdk-alpha
+sha256sum -c SHA256SUMS-alpha.2 # macOS: shasum -a 256 -c SHA256SUMS-alpha.2
+tar -xzf z-stack-preview-0.1.0-alpha.2-*.tgz
+cd z-stack-preview
+sha256sum -c SHA256SUMS # macOS: shasum -a 256 -c SHA256SUMS
 ```
 
-This builds the real Rust single-thread and multi-thread engines and all three
-TypeScript packages. It produces matching `core`, `passkey` and `sdk` archives in
-`artifacts/`. It does not publish anything. If you received a built preview bundle,
-unpack it and start at step 2; no Rust toolchain or npm scope is needed.
+The bundle contains matching packages and the scaffolder. Checksums detect
+changed bytes; authenticate the GitHub release and source revision separately.
+For source changes, use [the README’s build instructions](../README.md#build-from-source).
+Build both engines before packing. Source builds need stable Rust, the pinned
+nightly with rust-src, and wasm-pack; installing the stable toolchain alone is insufficient.
 
 ## 2. Generate an app outside the checkout
 
@@ -62,15 +68,59 @@ for tested limits; an emulated mobile viewport is not a physical-device test.
 ## 4. Create or restore, then sync
 
 Create displays a one-time phrase and waits for your acknowledgement before the
-first durable wallet save. Save it privately. Restore clears the input before
-awaiting the SDK and uses a birthday from before your first deposit. Reopening
+first durable wallet save. Save it privately. Restore validates the birthday before
+clearing the phrase and awaiting the SDK and uses a birthday from before your first deposit. Reopening
 loads viewing data with spending locked. No phrase is posted to Next or a backend.
 
-Copy the receive address and obtain **testnet ZEC** using your chosen testnet
-funding source. Sync explicitly to recover the deposit and activity. Balance and
-activity remain visible while updates run. The endpoint in the app-owned
-`connection.ts` must support gRPC-Web and the host's CORS origin. Public chain
-providers can see IP addresses and request timing; memo lookup remains on-demand.
+Copy the receive address and request **TAZ** (testnet coins). The app-owned
+`connection.ts` must select a gRPC-Web endpoint with CORS for your origin.
+Sync only reports the configured server’s view of the chain; it cannot prove a
+faucet payment exists on that view. Balance and activity remain visible during updates.
+
+**Public funding limitation, checked 2026-10-07:**
+[Fauzec](https://fauzec.com/) accepts shielded testnet addresses, but its linked
+[explorer](https://zexplorer.app/testnet/blocks/4468500) and the default server
+`https://zcash-testnet.chainsafe.dev` returned different block hashes at height
+4,468,500. This pair is not a verified funded walkthrough. Jino Labs’ faucet was
+unreachable and ZecFaucet’s testnet host did not resolve during this check. Do not
+interpret an empty wallet as a lost deposit or keep requesting replacements.
+No public faucet/server pair is certified for this alpha; use isolated regtest
+for the reproducible receive/send walkthrough below.
+
+To investigate a missing payment:
+
+1. Record its receipt’s transaction ID and mined height. Querying a public explorer
+   can link that transaction to your IP; do not submit your phrase or viewing key.
+2. Compare the hash of a common block on the faucet’s explorer and your light
+   server. Heights alone do not identify the same chain. From a built source
+   checkout, `node scripts/check-testnet-chain.mjs --height 4468500` compares public
+   block data without wallet queries. A different hash needs an aligned server or
+   funding source; changing the birthday cannot repair it.
+3. If the receipt is on your server’s chain but below **Wallet birthday**, choose
+   **Scan an earlier range**. This keeps the wallet and receiving address, locks
+   spending in the demo and rebuilds balance/history. Pending outgoing payments
+   must confirm or expire first. A reset is saved before the new scan starts;
+   cancelling sync leaves progress you can resume.
+4. The default deep-scan limit is 150,000 blocks. The SDK rejects a larger reset
+   before changing state unless the client permits deep syncing (`deepSync`; local pipe clients permit it by default).
+   Dates estimate a height with a safety margin; use the receipt’s exact block
+   height or an earlier one when available.
+
+For repeatable funding without a public faucet, run a native loopback validator
+(no Docker required):
+
+```sh
+pnpm regtest:native:up
+pnpm test:funded-demos
+pnpm regtest:native:down
+```
+
+Run these from the source checkout after building/packing the SDK. The test
+scaffolds both demos, funds disposable wallets, proves shielded payments and
+checks confirmation and reload. See [native fixture prerequisites](NODE.md)
+and [verification limits](SUPPORT.md). It is regtest evidence, not public-testnet certification.
+Public chain providers can see IP addresses and request timing; memo retrieval
+remains on-demand. Never use production funds in this walkthrough.
 
 A loopback regtest fixture is used by our funded acceptance tests. Its public
 fixture phrases and tiny activation heights are for that isolated chain only.
@@ -79,7 +129,7 @@ Use a separate origin/profile or [your own namespace](STORAGE.md).
 
 ## 5. Review and send
 
-Enter a shielded recipient address, a positive ZEC amount and an optional memo.
+Enter a shielded recipient address, a positive test-coin amount and an optional memo.
 Review the exact recipient, amount, memo and estimated fee. The demo freezes this
 review, refreshes the balance and fee before proving, and expires review after
 five minutes. Fee estimates are not a cryptographically binding fee cap.

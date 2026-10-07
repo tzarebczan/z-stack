@@ -2,6 +2,7 @@ import {
   HASH_KEEP,
   MAX_SYNC_BLOCKS,
   parseBirthdayInput,
+  validateBirthdayInput,
   WalletError,
   type InspectedAddress,
   type UnlockPolicy,
@@ -217,6 +218,7 @@ export type WasmWalletHandle = {
   attachSeed?: (mnemonic: string) => void;
   recomputePools?: () => void;
   resetScan?: () => void;
+  rescanFrom?: (birthday: number) => void;
 };
 
 export type Bindings = {
@@ -363,12 +365,8 @@ export async function resolveBirthday(
   fallback: number,
 ): Promise<number> {
   if (raw == null || raw === "") return fallback;
-  if (typeof raw === "number") return raw > 0 ? raw : fallback;
-  try {
-    return parseBirthdayInput(raw, tip);
-  } catch (e) {
-    throw new Error((e as Error).message || "invalid birthday");
-  }
+  validateBirthdayInput(raw);
+  return typeof raw === "number" ? raw : parseBirthdayInput(raw, tip);
 }
 
 export type WasmClientOpts = {
@@ -393,7 +391,14 @@ export type WasmClientOpts = {
   unlockPolicy?: UnlockPolicy;
 };
 
+export { validateBirthdayInput };
+
 export type WasmClient = EngineClient & {
+  /** Clear scan state from an earlier birthday, without replacing keys or addresses.
+   * Refuses unresolved outgoing payments. Persists the reset before returning;
+   * call sync afterwards. Does not unlock spending or enable deepSync.
+   */
+  rescan(options: { birthday: BirthdayInput }): Promise<WalletSnapshot>;
   /** Internal owner cleanup. Public applications use Wallet.close(). */
   dispose(): Promise<void>;
   /** Internal saved-state hydration. Public applications use Wallet.load(). */

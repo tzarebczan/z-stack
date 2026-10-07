@@ -40,6 +40,7 @@ type Wallet = HardwareWalletHandle & {
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
   resetScan?: () => void;
+  rescanFrom?: (birthday: number) => void;
   recomputePools?: () => void;
   recomputePoolsWithTick?: (
     cb: (hashed: number, total: number, message: string) => void,
@@ -307,6 +308,14 @@ async function handle(msg: Req): Promise<void> {
         const h = needWallet().rewindTo?.(msg.height ?? 0) ?? 0;
         post({ id: msg.id, height: h });
         return;
+      }
+      case "rescanFrom": {
+        const w = needWallet();
+        if (!w.rescanFrom) throw new Error("this wasm build cannot rescan an earlier birthday");
+        if (!Number.isInteger(msg.birthday) || msg.birthday! < 1 || msg.birthday! > 0xffff_ffff) throw new Error("invalid birthday height");
+        w.rescanFrom(msg.birthday!);
+        post({ id: msg.id });
+        break;
       }
       case "resetScan": {
         const w = needWallet();

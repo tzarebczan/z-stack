@@ -14,9 +14,9 @@ install all three matching `.tgz` files in your app. No registry package is
 currently published. Keep SDK, core, and passkey at the same version.
 
 ```sh
-npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.1.tgz \
-  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.1.tgz \
-  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.1.tgz
+npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.2.tgz \
+  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.2.tgz \
+  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.2.tgz
 ```
 
 Use the [runnable Vite example](../examples/browser-wallet/README.md) as a starting
@@ -72,6 +72,7 @@ const wallet = await createWallet({
   network: "testnet",
   server: "https://zcash-testnet.chainsafe.dev",
   memoFetch: "on-demand",
+  autoSync: false,
   autoShield: false,
 });
 const offSync = wallet.on("sync", (progress) => renderProgress(progress));
@@ -241,3 +242,9 @@ teardown are covered in [error handling](ERRORS.md).
 ### Refresh saved state across tabs
 
 Call `wallet.load()` to reload the current saved wallet. A replacement saved by another tab retires the old session and spending seed; a newer snapshot of the same wallet refreshes its state. An active spend holds the origin lock; loading reports `busy` until it finishes. Use `wallet.getWallet()` for the current in-memory snapshot.
+
+The pinned nightly threaded source build may warn that `target-feature=atomics`
+is unstable. Atomics are required for shared WASM memory. The build verifies the
+real threaded engine; do not remove the feature to silence the warning. Recheck
+both engines and browser acceptance before updating the toolchain. Downloading
+the prebuilt alpha avoids this source-build requirement.

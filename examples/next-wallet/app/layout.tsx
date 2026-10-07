@@ -7,6 +7,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "z-stack · Wallet demo",
   description: "A local Zcash testnet wallet built with the z-stack SDK and Next.js.",
+  icons: { icon: "/favicon.svg" },
   robots: { index: false, follow: false },
 };
 export default function Layout({ children }: { children: ReactNode }) {

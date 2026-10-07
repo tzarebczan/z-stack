@@ -60,6 +60,7 @@ export interface WasmClientContext {
   selectiveMemoStatus: PublicDataStatus;
   memoAbort: AbortController | null;
   disposing: boolean;
+  rescanning: boolean;
   beginReservationDrain: () => (error?: unknown) => void;
   adoptSaved: (source: ScanSession, operation: WalletOperation) => Promise<void>;
   disposeWaits: AbortController;

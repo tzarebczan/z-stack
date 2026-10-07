@@ -1,7 +1,8 @@
 # Package builds and verification
 
-The current version is `0.1.0-alpha.1`. Packages are not published to npm or Cargo;
-use source builds or matching local archives. The browser SDK includes production
+The current version is `0.1.0-alpha.2`. Packages are not published to npm or Cargo;
+download matching [alpha archives](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.2)
+or build from source. The browser SDK includes production
 WASM engines, so an app consuming built packages does not need Rust. See the
 [walkthrough](GETTING-STARTED.md) and [support limits](SUPPORT.md).
 
@@ -108,3 +109,28 @@ breaking supported-API changes increment the minor version. `/engine` and `/lab`
 remain experimental and may change between previews. Registry publication is a
 separate distribution step; Cargo consumers must also account for the workspace
 patch boundary described in [UPSTREAM.md](UPSTREAM.md).
+
+## Assemble downloadable release assets
+
+From a clean, signed, verified source commit, run the build/check commands above,
+then pack all four packages and the preview bundle. The bundle filename includes
+the short source revision. Create the sixth asset (outer checksums) in `artifacts/`:
+
+```sh
+pnpm pack:sdk
+pnpm pack:base
+pnpm bundle:preview
+cd artifacts
+sha256sum z-stack-core-0.1.0-alpha.2.tgz z-stack-passkey-0.1.0-alpha.2.tgz \
+  z-stack-sdk-0.1.0-alpha.2.tgz z-stack-base-0.1.0-alpha.2.tgz \
+  z-stack-preview-0.1.0-alpha.2-*.tgz > SHA256SUMS-alpha.2
+sha256sum -c SHA256SUMS-alpha.2
+# macOS: use shasum -a 256 in place of sha256sum for both commands.
+```
+
+Use a directory with exactly one preview bundle for this version. Upload these
+five archives and the checksums to the prerelease tagged `v0.1.0-alpha.2`, targeting
+the verified commit. Download them again and compare all hashes before publishing.
+Scaffold an app from the downloaded bundle as the final acceptance check. Publishing
+a GitHub prerelease does not publish to npm or Cargo. Keep source tags and signed
+commits separate from checksums: neither authenticates a compromised host by itself.

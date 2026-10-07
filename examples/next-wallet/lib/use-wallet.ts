@@ -27,7 +27,7 @@ export function useWallet() {
   const [pageVisible, setPageVisible] = useState(true);
   const phrase = pageVisible && pending?.address === snapshot?.unifiedAddress ? pending?.phrase ?? "" : "";
   const [spending, setSpending] = useState(false);
-  const [runtime, setRuntime] = useState("Loading engine");
+  const [runtime, setRuntime] = useState("Scan engine starts on sync");
   const [progress, setProgress] = useState<number>();
 
   useEffect(() => {
@@ -47,7 +47,7 @@ export function useWallet() {
   }, [phrase, busy]);
 
   function updateRuntime(wallet: Wallet) {
-    setRuntime(wallet.runtime.mode === "multi-thread" ? `${wallet.runtime.threads} threads` : "Single thread");
+    setRuntime(wallet.runtime.scanWorker ? (wallet.runtime.mode === "multi-thread" ? `${wallet.runtime.threads} threads` : "Single thread") : "Scan engine starts on sync");
     setSpending(wallet.hasSpendingSeed());
   }
   async function refresh(wallet: Wallet, value: WalletSnapshot) {
@@ -117,6 +117,10 @@ export function useWallet() {
       if (owner.current === wallet) { updateRuntime(wallet); setBusy(""); }
     }
   }
+  let serverName = "Configured transport";
+  if (typeof window !== "undefined") {
+    try { if (typeof connection.server === "string") serverName = new URL(connection.server, window.location.href).host; } catch { /* Fixed label for unsupported/custom URLs. */ }
+  }
   return { ready, busy, status, snapshot, history, phrase, spending, runtime, progress, receipt, canCancelPayment, baseAction,
     clearReceipt: () => { setReceipt(undefined); },
     reviewPayment: (draft: SendDraft) => run("Reviewing", wallet => reviewSend(wallet, draft)),
@@ -150,6 +154,7 @@ export function useWallet() {
     }),
     cancelPayment: () => { sendOperation.current?.abort(); setStatus("Stopping before submission · waiting for proof cleanup…"); },
     network: connection.network,
+    server: serverName,
     hidePhrase: () => { if (snapshot) { pendingRecovery.acknowledge(snapshot.unifiedAddress); setStatus("Saving wallet…"); } },
     create: () => run("Creating", async wallet => {
       if (await wallet.load()) { setStatus("A wallet is already saved here."); return; }
@@ -184,7 +189,20 @@ export function useWallet() {
         const updated = await refreshReceipt(wallet, receipt);
         if (owner.current === wallet) setReceipt(updated);
       }
-      if (owner.current === wallet) setStatus("Sync finished.");
+      if (owner.current === wallet) {
+        const tip = await wallet.tip();
+        setStatus(tip.behind === 0 ? `Scanned through block ${tip.scanned.toLocaleString()}.` : `Scan stopped · ${tip.behind.toLocaleString()} blocks remaining.`);
+      }
+    }),
+    rescan: (birthday: string) => run("Rescanning", async wallet => {
+      wallet.lock();
+      // Commit the new birthday first; cancellation of sync keeps a resumable wallet.
+      await refresh(wallet, await wallet.rescan({ birthday }));
+      await refresh(wallet, await wallet.sync());
+      if (owner.current === wallet) {
+        const tip = await wallet.tip();
+        setStatus(tip.behind === 0 ? `Scanned through block ${tip.scanned.toLocaleString()}.` : `Scan stopped · ${tip.behind.toLocaleString()} blocks remaining.`);
+      }
     }),
     cancel: () => { owner.current?.cancelSync(); },
     unlock: (words: string) => run("Unlocking", async wallet => {
