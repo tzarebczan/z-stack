@@ -1005,6 +1005,9 @@ export function createWasmClient(
             epoch = stateEpoch;
             const baseKey = savedKeySeen;
             await source.rescanFrom(height);
+            // The session survives, but its replacement trees no longer contain
+            // the cached roots. A rollback may safely fetch those roots again.
+            rootsChecked = null;
             assertSource(operation, source);
             await persist({ epoch, baseKey });
           } catch (error) {
