@@ -1,4 +1,4 @@
-import { classifyHistory, createWallet, formatZatoshis, WalletError, type WalletSnapshot } from "@z-stack/sdk";
+import { classifyHistory, createWallet, validateBirthdayInput, formatZatoshis, WalletError, type WalletSnapshot } from "@z-stack/sdk";
 import "./style.css";
 import { attachBase } from "./base";
 import { connection } from "./connection";
@@ -27,8 +27,15 @@ async function start() {
     unlockPolicy: "each-spend",
     // An example makes network work explicit; production apps may enable autoSync.
     autoSync: false,
+    threads: 2,
   });
 
+  const unit = connection.network === "testnet" ? "TAZ" : "ZEC";
+  balance.textContent = `— ${unit}`;
+  element("send-panel").setAttribute("aria-label", `Send ${unit}`);
+  for (const el of document.querySelectorAll("h2, label")) if (el.textContent?.includes("ZEC")) el.textContent = el.textContent.replace("ZEC", unit);
+  let server = "Configured transport";
+  try { if (typeof connection.server === "string") server = new URL(connection.server, window.location.href).host; } catch { /* Keep a fixed label; never render credential-bearing URLs. */ }
   let review: SendReview | undefined;
   let receipt: SendReceipt | undefined;
   let sending: AbortController | undefined;
@@ -52,18 +59,20 @@ async function start() {
     status.textContent = progress.stage === "synced" ? "Up to date" : `Syncing · ${Math.round(progress.percent ?? 0)}%`;
   });
   const offBalance = wallet.on("balance", value => {
-    balance.textContent = `${formatZatoshis(BigInt(value.availableZat))} ZEC`;
+    balance.textContent = `${formatZatoshis(BigInt(value.availableZat))} ${unit}`;
   });
 
   async function render(snapshot: WalletSnapshot) {
     identity = snapshot.unifiedAddress;
+    element("scan-panel").hidden = false;
+    element("scan-details").textContent = `${connection.network} · ${server} · Birthday ${snapshot.birthdayHeight.toLocaleString()} · Scanned through ${(snapshot.scannedHeight ?? 0).toLocaleString()}`;
     element("send-panel").hidden = false;
     address.textContent = snapshot.unifiedAddress;
     if (receipt) {
       receipt = await refreshReceipt(wallet, receipt);
       showReceipt(receipt);
     }
-    balance.textContent = `${formatZatoshis(BigInt(snapshot.balance?.totalAvailable ?? 0))} ZEC`;
+    balance.textContent = `${formatZatoshis(BigInt(snapshot.balance?.totalAvailable ?? 0))} ${unit}`;
     const entries = await wallet.history(20);
     const rows = entries.map(entry => {
       const row = document.createElement("li");
@@ -120,14 +129,14 @@ async function start() {
       review = await reviewSend(wallet, draft);
       const details = element("review-details");
       details.replaceChildren();
-      for (const [label, value] of [["To", review.to], ["Amount", `${review.amount} ZEC`],
-        ["Estimated fee", `${formatZatoshis(BigInt(review.feeZat))} ZEC`], ["Memo", review.memo || "None"]]) {
+      for (const [label, value] of [["To", review.to], ["Amount", `${review.amount} ${unit}`],
+        ["Estimated fee", `${formatZatoshis(BigInt(review.feeZat))} ${unit}`], ["Memo", review.memo || "None"]]) {
         const term = document.createElement("dt"), description = document.createElement("dd");
         term.textContent = label; description.textContent = value; details.append(term, description);
       }
       sendForm.hidden = true; reviewPanel.hidden = false;
       sendStatus.textContent = "Check the recipient, amount and memo.";
-      element<HTMLButtonElement>("confirm-send").textContent = `Send ${review.amount} ZEC`;
+      element<HTMLButtonElement>("confirm-send").textContent = `Send ${review.amount} ${unit}`;
       reviewPanel.focus();
     });
   });
@@ -208,6 +217,8 @@ async function start() {
     event.preventDefault();
     const mnemonic = words.value.trim();
     const restoreBirthday = birthday.value.trim();
+    try { validateBirthdayInput(restoreBirthday); }
+    catch (error) { birthday.setCustomValidity(WalletError.fromUnknown(error).userMessage()); birthday.reportValidity(); return; }
     words.value = "";
     void run(async () => {
       // This sample does not implement a replacement-confirmation flow.
@@ -219,6 +230,20 @@ async function start() {
       clearPhrase();
       await render(restored);
       status.textContent = "Wallet restored. Sync to recover activity.";
+    });
+  });
+  birthday.addEventListener("input", () => birthday.setCustomValidity(""));
+  const rescanBirthday = element<HTMLInputElement>("rescan-birthday");
+  rescanBirthday.addEventListener("input", () => rescanBirthday.setCustomValidity(""));
+  element<HTMLFormElement>("rescan-form").addEventListener("submit", event => {
+    event.preventDefault();
+    try { validateBirthdayInput(rescanBirthday.value); }
+    catch (error) { rescanBirthday.setCustomValidity(WalletError.fromUnknown(error).userMessage()); rescanBirthday.reportValidity(); return; }
+    element<HTMLInputElement>("rescan-confirm").checked = false;
+    void run(async () => {
+      wallet.lock();
+      await render(await wallet.rescan({ birthday: rescanBirthday.value.trim() }));
+      await render(await wallet.sync());
     });
   });
   lock.addEventListener("click", () => {

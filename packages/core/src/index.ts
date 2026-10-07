@@ -473,6 +473,7 @@ export {
   lightStallWarning,
   liveScanEtaSecs,
   parseBirthdayInput,
+  validateBirthdayInput,
   scanRateRange,
   syncEta,
   syncTuning,

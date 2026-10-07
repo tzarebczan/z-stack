@@ -644,6 +644,12 @@ impl WasmWallet {
         self.inner.rewind_to_height(height).map_err(js_err)
     }
 
+    /// Rescan an earlier range while retaining keys and current addresses.
+    #[wasm_bindgen(js_name = rescanFrom)]
+    pub fn rescan_from(&mut self, birthday: u32) -> Result<(), JsValue> {
+        self.inner.rescan_from(birthday).map_err(js_err)
+    }
+
     /// Drop scan state (notes/trees/history). Keys and birthday stay. Call sync after.
     #[wasm_bindgen(js_name = resetScan)]
     pub fn reset_scan(&mut self) {

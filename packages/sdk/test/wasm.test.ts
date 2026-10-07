@@ -67,6 +67,28 @@ test("initialize accepts explicit effective defaults and rejects real configurat
   await assert.rejects(initialize({ ...options, threads: defaultThreadCount() + 1 }), /different threads/);
 });
 
+test("a genesis rescan refreshes subtree roots even within the same scan session", async t => {
+  if (!existsSync(gen)) { t.skip("run pnpm build:wasm first"); return; }
+  const { createWallet } = await import("../src/create-wallet.ts");
+  const { memoryWalletStorage } = await import("../src/storage.ts");
+  let roots = 0;
+  const wallet = await createWallet({ network: "regtest", storage: memoryWalletStorage(),
+    prewarmProvingKey: false, server: {
+      kind: "fixture", label: "offline", tip: async () => 2, blocks: async () => new Uint8Array(),
+      subtreeRoots: async () => { roots++; return []; },
+    } });
+  t.after(() => wallet.close());
+  await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 1 });
+  // Empty fixture blocks stop the scan after its real engine's root setup.
+  await assert.rejects(wallet.sync());
+  assert.equal(roots, 2);
+  await assert.rejects(wallet.sync());
+  assert.equal(roots, 2, "an unchanged session should reuse the root cache");
+  await wallet.rescan({ birthday: 1 });
+  await assert.rejects(wallet.sync());
+  assert.equal(roots, 4, "a reset must fetch roots again for the new engine state");
+});
+
 test("wasm wallet: snapshot, history, orchard prove", async (t) => {
   if (!existsSync(gen)) {
     t.skip("run pnpm build:wasm first");

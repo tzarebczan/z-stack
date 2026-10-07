@@ -22,6 +22,15 @@ security findings; the contact is documented there.
 | iOS / Android / constrained-memory devices | Not fully tested for this candidate | Background/resume, eviction, memory and proving limits need device testing |
 | Custom assets / hosting / non-Vite framework | Documented deployment requirements; integrity/asset tests | Custom threaded paths and deployment targets beyond the tested Vite/Next webpack builds need separate acceptance |
 
+The pinned consensus schedule supports through NU6.3. This build does not enable
+the dependencies' experimental NU7 configuration or its activation height.
+Public testnet spending after the
+[scheduled NU7 activation](https://forum.zcashcommunity.com/t/nu7-timeline/57655)
+at block 4,465,026 is unsupported in this alpha. A matching, reachable light server
+and empty-wallet sync do not establish spending compatibility. Protocol upgrades
+need fresh funded acceptance before they become supported; use isolated regtest
+for the reproducible funded walkthrough.
+
 The repository's CI checks installed archives with real WASM engines and runs
 controlled browser and provider fixtures. These checks do not certify a live
 provider or every device. Funded regtest acceptance is a separate, opt-in check;

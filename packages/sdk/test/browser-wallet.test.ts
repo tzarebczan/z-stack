@@ -24,15 +24,32 @@ function fixture(t: TestContext) {
   const ufvk = deriveAccount(words, "regtest").ufvk;
   let serial = 0, frees = 0;
   let onSnapshot: (() => void) | undefined;
-  const make = (initial: { address: string; pending: boolean; reserved?: boolean }) => {
+  let onRevive: (() => void) | undefined;
+  let onRescan: (() => void) | undefined;
+  const make = (initial: { address: string; pending: boolean; reserved?: boolean; birthday?: number; scanned?: number; transparentScanHeight?: number | null; memoScanHeight?: number | null }) => {
     const state = { ...initial };
     return {
       free() { frees++; },
       toSnapshot: () => { onSnapshot?.(); return encode(state); },
       snapshotJson: () => JSON.stringify({ network: "regtest", unifiedAddress: state.address, ufvk,
-        birthdayHeight: 1, scannedHeight: 10,
+        birthdayHeight: state.birthday ?? 8, scannedHeight: state.scanned ?? 10,
+        transparentScanHeight: state.transparentScanHeight ?? null, memoScanHeight: state.memoScanHeight ?? null,
         balance: { totalAvailable: state.pending || state.reserved ? 0 : 10, orchardAvailable: state.pending || state.reserved ? 0 : 10, transparentAvailable: 0 } }),
-      scannedHeight: () => 10,
+      scannedHeight: () => state.scanned ?? 10,
+      nextHeight: () => (state.scanned ?? 10) + 1,
+      birthday: () => state.birthday ?? 8,
+      pendingRawTxs: () => JSON.stringify(state.pending ? ["synthetic-transaction"] : []),
+      rescanFrom(height: number) {
+        state.birthday = height; state.scanned = height - 1;
+        state.transparentScanHeight = null; state.memoScanHeight = null;
+        onRescan?.();
+      },
+      applyTransparentBlocks(bytes: Uint8Array) {
+        if (bytes.length) state.transparentScanHeight = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0);
+        return 0;
+      },
+      applySharedMemos(json: string) { state.memoScanHeight = JSON.parse(json).end; return 0; },
+      memoEnhancementTxids: () => "[]",
       history: () => JSON.stringify(state.pending ? [{ txid, status: "pending" }] : []),
       nextUnifiedAddress() {},
       attachSeed(secret: string) { if (secret !== words) throw new Error("seed fingerprint does not match"); },
@@ -47,7 +64,7 @@ function fixture(t: TestContext) {
   };
   attachWasmBindings({ generateMnemonic: () => words, WasmWallet: {
     create: () => make({ address: `fixture-${++serial}`, pending: false }),
-    fromSnapshot: (bytes: Uint8Array) => make(decode(bytes)),
+    fromSnapshot: (bytes: Uint8Array) => { onRevive?.(); return make(decode(bytes)); },
     hardwareProve: (bytes: Uint8Array) => bytes,
     hardwareSignerCopy: (bytes: Uint8Array) => bytes,
     hardwareCombine: (bytes: Uint8Array) => bytes,
@@ -58,6 +75,8 @@ function fixture(t: TestContext) {
     storage,
     frees: () => frees,
     onSnapshot(callback: () => void) { onSnapshot = callback; },
+    onRevive(callback?: () => void) { onRevive = callback; },
+    onRescan(callback?: () => void) { onRescan = callback; },
     async open(extra: Partial<Parameters<typeof createWallet>[0]> = {}) {
       wallet = await createWallet({ network: "regtest", storage, prewarmProvingKey: false,
         server: { kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(), submit: async () => txid }, ...extra });
@@ -135,12 +154,12 @@ test("lightweight diagnostics observe the public owner across close and reopen",
   const f = fixture(t);
   assert.equal(await ownerStatus(), "pass");
   const wallet = await f.open();
-  assert.equal(await ownerStatus(), "warning");
+  assert.equal(await ownerStatus(), "info");
   await wallet.close();
   assert.equal(await ownerStatus(), "pass");
   const next = await f.open();
   await wallet.close();
-  assert.equal(await ownerStatus(), "warning", "a cached old close released the new owner");
+  assert.equal(await ownerStatus(), "info", "a cached old close released the new owner");
   await next.close();
   assert.equal(await ownerStatus(), "pass");
 });
@@ -831,4 +850,220 @@ test("an old auto-sync tip cannot scan a replacement after forgetting", async t 
   resolveTip(20); await clock.flush();
   assert.equal(blocks, 0, "an old tip result triggered sync on the new wallet");
   await clock.tick(); assert.equal(tips, 2);
+});
+
+
+test("rescan retains wallet identity, persists an earlier birthday and remains locked on reload", async t => {
+  const f = fixture(t), wallet = await f.open();
+  const created = await wallet.create({ birthday: 8 });
+  const rescanned = await wallet.rescan({ birthday: 3 });
+  assert.equal(rescanned.unifiedAddress, created.wallet.unifiedAddress);
+  assert.equal(rescanned.birthdayHeight, 3);
+  assert.equal(rescanned.scannedHeight, 2);
+  await wallet.close();
+  const reopened = await f.open();
+  assert.equal((await reopened.load())?.birthdayHeight, 3);
+  assert.equal(reopened.hasSpendingSeed(), false);
+});
+
+for (const memoFetch of ["shared", "auto", "on-demand"] as const) {
+  test(`rescan resets public-data progress only after its durable commit (${memoFetch})`, async t => {
+    const f = fixture(t);
+    let failWrites = false, resets = 0;
+    const storage: typeof f.storage = { available: true,
+      transaction(mode, body, options) {
+        if (failWrites && mode === "readwrite") return Promise.reject(new DOMException("quota", "QuotaExceededError"));
+        return f.storage.transaction(mode, body, options);
+      } };
+    const transparentScan = memoFetch === "shared" ? "compact" : "off";
+    const wallet = await f.open({ storage, memoFetch, transparentScan, server: {
+      kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+      info: async () => ({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }),
+      transparentBlocks: async (_start, end) => {
+        const bytes = new Uint8Array(4); new DataView(bytes.buffer).setUint32(0, end); return bytes;
+      },
+      sharedMemos: async (start, end) => JSON.stringify({ start, end }),
+      tx: async () => { throw new Error("an empty memo queue must not fetch transactions"); },
+    } });
+    await wallet.create({ birthday: 8 });
+    await wallet.sync();
+    await wallet.fetchMemos();
+    const before = await wallet.getWallet();
+    assert.equal(before.transparentScanStatus, transparentScan === "compact" ? "complete" : "off");
+    assert.equal(before.sharedMemoStatus, memoFetch === "shared" ? "complete" : "off");
+    assert.equal(before.memoFetchStatus, memoFetch === "on-demand" ? "off" : "complete");
+    const saved = await readSavedSnapshotRecord();
+    // Fail after the engine has cleared coverage, not during the preceding save.
+    f.onRescan(() => { resets++; failWrites = true; });
+    await assert.rejects(wallet.rescan({ birthday: 3 }), code("storage_full"));
+    assert.equal(resets, 1);
+    assert.deepEqual(await wallet.getWallet(), before);
+    assert.deepEqual(await readSavedSnapshotRecord(), saved);
+    failWrites = false; f.onRescan();
+    const after = await wallet.rescan({ birthday: 3 });
+    assert.equal(after.birthdayHeight, 3);
+    assert.equal(after.scannedHeight, 2);
+    assert.equal(after.transparentScanHeight, null);
+    assert.equal(after.memoScanHeight, null);
+    assert.equal(after.transparentScanStatus, transparentScan === "compact" ? "scanning" : "off");
+    assert.equal(after.sharedMemoStatus, memoFetch === "shared" ? "scanning" : "off");
+    assert.equal(after.memoFetchStatus, memoFetch === "on-demand" ? "off" : "scanning");
+  });
+}
+
+test("rescan rejects invalid/later birthdays and unknown outgoing payments without changing saved state", async t => {
+  const f = fixture(t), wallet = await f.open();
+  await wallet.create({ birthday: 8 });
+  const before = await readSavedSnapshotRecord();
+  await assert.rejects(wallet.rescan({ birthday: "" }), code("invalid_birthday"));
+  await assert.rejects(wallet.rescan({ birthday: "auto" }), code("invalid_birthday"));
+  await assert.rejects(wallet.rescan({ birthday: "yesterday" }), code("invalid_birthday"));
+  await assert.rejects(wallet.rescan({ birthday: 9 }), code("rescan_later_birthday"));
+  assert.deepEqual(await readSavedSnapshotRecord(), before);
+  await wallet.unlock(words);
+  await wallet.send("fixture", "0.00005");
+  const pending = await readSavedSnapshotRecord();
+  await assert.rejects(wallet.rescan({ birthday: 3 }), code("rescan_pending"));
+  assert.deepEqual(await readSavedSnapshotRecord(), pending);
+  assert.deepEqual(await wallet.history(), [{ txid, status: "pending" }]);
+});
+
+test("rescan rejects a birthday above a lagging server tip without clearing committed activity", async t => {
+  const f = fixture(t);
+  let tip = 10;
+  const wallet = await f.open({ server: { kind: "fixture", label: "offline", tip: async () => tip,
+    blocks: async () => new Uint8Array(), submit: async () => txid } });
+  await wallet.create({ birthday: 8 });
+  const before = await readSavedSnapshotRecord();
+  tip = 4;
+  await assert.rejects(wallet.rescan({ birthday: 6 }), code("birthday_above_tip"));
+  assert.deepEqual(await readSavedSnapshotRecord(), before);
+  assert.equal((await wallet.load())?.birthdayHeight, 8);
+  assert.equal((await wallet.load())?.scannedHeight, 10);
+});
+
+test("rescan rolls back in-memory state when a mandatory storage commit fails", async t => {
+  const f = fixture(t);
+  let fail = false;
+  const storage: typeof f.storage = { available: true,
+    transaction(mode, body, options) {
+      if (fail && mode === "readwrite") return Promise.reject(new DOMException("quota", "QuotaExceededError"));
+      return f.storage.transaction(mode, body, options);
+    } };
+  const wallet = await f.open({ storage });
+  await wallet.create({ birthday: 8 });
+  const before = await readSavedSnapshotRecord();
+  fail = true;
+  await assert.rejects(wallet.rescan({ birthday: 3 }), code("storage_full"));
+  assert.equal((await wallet.getWallet()).birthdayHeight, 8);
+  assert.deepEqual(await readSavedSnapshotRecord(), before);
+  fail = false;
+  assert.equal((await wallet.rescan({ birthday: 3 })).birthdayHeight, 3);
+});
+
+test("a stale rescan adopts the winning tab's pending state instead of rolling it back", async t => {
+  const f = fixture(t);
+  let held = false, arrived!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { arrived = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const storage: typeof f.storage = { available: true,
+    async transaction(mode, body, options) {
+      if (held && mode === "readwrite") { held = false; arrived(); await gate; }
+      return f.storage.transaction(mode, body, options);
+    } };
+  const wallet = await f.open({ storage });
+  await wallet.create({ birthday: 8 });
+  const record = (await readSavedSnapshotRecord())!;
+  held = true;
+  const rescan = wallet.rescan({ birthday: 3 });
+  await waiting;
+  const other = { ...decode(record.bytes), address: "winning-tab-address", pending: true, birthday: 7 };
+  await saveWalletSnapshot(encode(other), { network: "regtest", unifiedAddress: other.address,
+    birthdayHeight: 7, scannedHeight: 10, balance: { totalAvailable: 0, orchardAvailable: 0 } },
+    () => true, record.generation, record.key);
+  release();
+  await assert.rejects(rescan, code("wallet_changed"));
+  assert.equal((await wallet.getWallet()).unifiedAddress, other.address);
+  assert.equal((await wallet.getWallet()).birthdayHeight, 7);
+  assert.deepEqual(await wallet.history(), [{ txid, status: "pending" }]);
+});
+
+test("close during rescan leaves the original committed birthday available on reopening", async t => {
+  const f = fixture(t);
+  let held = false, arrived!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { arrived = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const storage: typeof f.storage = { available: true,
+    async transaction(mode, body, options) {
+      if (held && mode === "readwrite") { held = false; arrived(); await gate; }
+      return f.storage.transaction(mode, body, options);
+    } };
+  const wallet = await f.open({ storage });
+  await wallet.create({ birthday: 8 });
+  const original = await readSavedSnapshotRecord();
+  held = true;
+  const rescan = wallet.rescan({ birthday: 3 });
+  await waiting;
+  await wallet.close();
+  release();
+  await assert.rejects(rescan, code("cancelled"));
+  const reopened = await f.open();
+  assert.deepEqual(await readSavedSnapshotRecord(), original);
+  assert.equal((await reopened.load())?.birthdayHeight, 8);
+});
+
+
+test("every sync entry point refuses to mutate a rescan waiting for its durable save", async t => {
+  const f = fixture(t);
+  let held = false, arrived!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { arrived = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const storage: typeof f.storage = { available: true,
+    async transaction(mode, body, options) {
+      if (held && mode === "readwrite") { held = false; arrived(); await gate; }
+      return f.storage.transaction(mode, body, options);
+    } };
+  const wallet = await f.open({ storage });
+  await wallet.create({ birthday: 8 });
+  held = true;
+  const rescan = wallet.rescan({ birthday: 3 });
+  await waiting;
+  await assert.rejects(wallet.sync(), code("busy"));
+  await assert.rejects(wallet.waitUntilCaughtUp({ timeoutMs: 100 }), code("busy"));
+  await assert.rejects(wallet.fetchMemos(), code("busy"));
+  await assert.rejects(wallet.shield(), code("busy"));
+  release();
+  assert.equal((await rescan).birthdayHeight, 3);
+});
+
+test("a deep rescan needs client opt-in and rejects before changing state", async t => {
+  const f = fixture(t), wallet = await f.open({ server: {
+    kind: "fixture", label: "offline", tip: async () => 200000, blocks: async () => new Uint8Array(),
+  } });
+  await wallet.create({ birthday: 8 });
+  const before = await readSavedSnapshotRecord();
+  await assert.rejects(wallet.rescan({ birthday: 3 }), code("deep_sync_rejected"));
+  assert.deepEqual(await readSavedSnapshotRecord(), before);
+  assert.equal((await wallet.getWallet()).birthdayHeight, 8);
+});
+
+
+test("a failed in-memory rescan rollback retires the source and keeps the original save error", async t => {
+  const f = fixture(t);
+  let fail = false;
+  const storage: typeof f.storage = { available: true,
+    transaction(mode, body, options) {
+      if (fail && mode === "readwrite") return Promise.reject(new DOMException("quota", "QuotaExceededError"));
+      return f.storage.transaction(mode, body, options);
+    } };
+  const wallet = await f.open({ storage });
+  await wallet.create({ birthday: 8 });
+  const before = await readSavedSnapshotRecord();
+  f.onRevive(() => { throw new Error("injected rollback failure"); });
+  fail = true;
+  await assert.rejects(wallet.rescan({ birthday: 3 }), code("storage_full"));
+  assert.ok(f.frees() > 0, "unsaved scan session must be retired");
+  f.onRevive(); fail = false;
+  assert.equal((await wallet.getWallet()).birthdayHeight, 8);
+  assert.deepEqual(await readSavedSnapshotRecord(), before);
 });

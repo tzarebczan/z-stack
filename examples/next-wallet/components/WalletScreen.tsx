@@ -5,6 +5,7 @@ import { useWallet } from "../lib/use-wallet";
 import { SecretForm } from "./SecretForm";
 import { SetupChecks } from "./SetupChecks";
 import { BaseWallet } from "./BaseWallet";
+import { ScanDetails } from "./ScanDetails";
 import { SendPayment } from "./SendPayment";
 
 export function WalletScreen() {
@@ -14,6 +15,7 @@ export function WalletScreen() {
   const [copied, setCopied] = useState("");
   const disabled = !wallet.ready || !!wallet.busy;
   const backup = !!wallet.phrase;
+  const unit = wallet.network === "testnet" ? "TAZ" : "ZEC";
   return <>
     <div className="title-row"><div><p className="eyebrow">Your local wallet</p><h1>A little pocket of privacy.</h1></div>
       <span className="network">{wallet.network === "testnet" ? "Testnet" : "Regtest fixture"}</span></div>
@@ -21,7 +23,7 @@ export function WalletScreen() {
       <section className="wallet-main" aria-label="Wallet">
         <div className="balance-block"><p className="eyebrow">Available balance</p>
           <p className="balance" id="balance">{wallet.snapshot ? formatZatoshis(BigInt(wallet.snapshot.balance?.totalAvailable ?? 0)) : "—"}
-            <span>ZEC</span></p>
+            <span>{unit}</span></p>
           <div className="wallet-state"><span>{wallet.spending ? "Spending unlocked" : "Spending locked"}</span>
             <span>{wallet.runtime}</span></div>
         </div>
@@ -39,7 +41,7 @@ export function WalletScreen() {
             {wallet.busy === "Syncing" && <button onClick={wallet.cancel}>Stop sync</button>}
             <button disabled={disabled || backup || !wallet.spending} onClick={wallet.lock}>Lock spending</button>
             {wallet.busy && <span className="sync-indicator" role="status">{wallet.busy}
-              {wallet.busy === "Syncing" && wallet.progress !== undefined ? ` · ${Math.round(wallet.progress)}%` : "…"}</span>}
+              {["Syncing", "Rescanning"].includes(wallet.busy) && wallet.progress !== undefined ? ` · ${Math.round(wallet.progress)}%` : "…"}</span>}
           </div>
           {backup && <section className="backup" aria-label="Recovery backup"><h2>Save these 24 words.</h2>
             <p>This is your recovery phrase. Keep it somewhere private.</p>
@@ -49,7 +51,7 @@ export function WalletScreen() {
             <button disabled={!saved} onClick={wallet.hidePhrase}>Done, hide phrase</button></section>}
           {!backup && !wallet.spending && <details><summary>Unlock with your recovery phrase</summary>
             <SecretForm disabled={disabled} submit={words => wallet.unlock(words)} /></details>}
-          {!backup && <SendPayment key={wallet.snapshot.unifiedAddress} disabled={disabled} canCancel={wallet.canCancelPayment}
+          {!backup && <SendPayment unit={unit} key={wallet.snapshot.unifiedAddress} disabled={disabled} canCancel={wallet.canCancelPayment}
             receipt={wallet.receipt} reviewPayment={wallet.reviewPayment} sendPayment={wallet.sendPayment}
             cancelPayment={wallet.cancelPayment} clearReceipt={wallet.clearReceipt} />}
           {!backup && <BaseWallet identity={wallet.snapshot.unifiedAddress} disabled={disabled} withWallet={wallet.baseAction} />}
@@ -58,7 +60,7 @@ export function WalletScreen() {
             {wallet.history.length ? <ul>{wallet.history.map(entry => <li key={entry.txid}>
               <strong>{classifyHistory(entry).action}</strong><code>{entry.txid}</code></li>)}</ul>
               : <div className="empty"><span className="empty-mark" aria-hidden="true">↗</span><p>No activity yet.</p>
-                <p className="hint">Receive test ZEC, then sync to see it here.</p></div>}
+                <p className="hint">Receive {unit}, then sync to see it here.</p></div>}
           </section>
         </>}
       </section>
@@ -74,6 +76,8 @@ export function WalletScreen() {
             }}>Copy address</button><p role="status" className="hint">{copied}</p></>
             : <p className="hint">Your address will appear after you create or restore a wallet.</p>}
         </section>
+        {wallet.snapshot && !backup && <ScanDetails snapshot={wallet.snapshot} server={wallet.server}
+          disabled={disabled} rescan={wallet.rescan} />}
         <SetupChecks />
         {wallet.snapshot && !backup && <details className="remove"><summary>Remove local wallet</summary>
           <p className="hint">Deletes this browser’s saved copy. Your funds stay on-chain.</p>

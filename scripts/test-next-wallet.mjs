@@ -167,6 +167,11 @@ async function flows(origin, engine, name, isolated) {
     await page.goto(origin);
     await status("Ready to create or restore.").waitFor({timeout:90_000});
     console.log(`Next.js ${name}: browser ready (${isolated ? "isolated" : "non-isolated"})`);
+    // A warm worker may already report its real mode. The key loader alone
+    // must not label an isolated, MT-capable deployment as single-threaded.
+    await page.getByText(isolated ? /^(Scan engine starts on sync|2 threads)$/
+      : /^(Scan engine starts on sync|Single thread)$/, {exact:true}).waitFor();
+    assert.equal((await page.request.get(`${origin}/favicon.svg`)).status(), 200);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "demo overflows the viewport");
     await page.getByRole("button", {name:"Create wallet",exact:true}).click();
     await page.getByRole("heading", {name:"Save these 24 words."}).waitFor();
@@ -182,7 +187,8 @@ async function flows(origin, engine, name, isolated) {
     await page.getByRole("button", {name:"Done, hide phrase"}).click();
     console.log(`Next.js ${name}: create and backup validated`);
     await page.getByRole("button", {name:"Sync wallet",exact:true}).click();
-    await status("Sync finished.").waitFor({timeout:90_000});
+    await status("Scanned through block 1.").waitFor({timeout:90_000});
+    await page.getByText("Scanned to 1", {exact:true}).waitFor();
     await page.getByText(isolated ? "2 threads" : "Single thread", {exact:true}).waitFor();
     console.log(`Next.js ${name}: initial sync and runtime validated`);
     assert.ok(workers.length >= 1, "scanner did not run in a worker");
@@ -192,7 +198,7 @@ async function flows(origin, engine, name, isolated) {
     await page.getByRole("button", {name:"Stop sync",exact:true}).waitFor();
     assert.equal(await page.locator("#balance").textContent(), balance);
     assert.equal(await page.getByText("No activity yet.", {exact:true}).isVisible(), true);
-    await status("Sync finished.").waitFor({timeout:90_000});
+    await status("Scanned through block 2.").waitFor({timeout:90_000});
     await page.getByText("Scanned to 2", {exact:true}).waitFor();
     await configure({tip:"2",fail:"1"});
     await page.getByRole("button", {name:"Sync wallet",exact:true}).click();
@@ -225,11 +231,20 @@ async function flows(origin, engine, name, isolated) {
     await page.getByText("Check this deployment", {exact:true}).click();
     await page.getByRole("button", {name:"Run setup checks",exact:true}).click();
     await status("Deployment checks passed.").waitFor({timeout:90_000});
+    assert.match(await page.locator(".checks li").filter({hasText:"wallet owner"}).innerText(), /info/);
     await configure({tip:"3",delay:"1"});
     await page.getByRole("button", {name:"Sync wallet",exact:true}).click();
     await page.getByRole("button", {name:"Stop sync",exact:true}).click();
     await page.waitForFunction(() => !document.querySelector(".sync-actions button").disabled);
     assert.equal(await page.locator("#balance").textContent(), balance, "cancelled sync cleared balance");
+    await page.getByText("Scanned to 2", {exact:true}).waitFor();
+    assert.doesNotMatch(await page.locator(".wallet-main > .status").innerText(), /Scanned through block 3/,
+      "cancelled scan must not claim the target was reached");
+    await configure({tip:"3"});
+    await page.getByRole("button", {name:"Sync wallet",exact:true}).click();
+    await status("Scanned through block 3.").waitFor({timeout:90_000});
+    await page.getByText("Scanned to 3", {exact:true}).waitFor();
+    assert.equal(await page.locator("#address").textContent(), address, "resumed sync replaced the wallet");
     await configure({tip:"2"});
     await page.getByText("Remove local wallet", {exact:true}).click();
     await page.getByLabel("I have the recovery phrase").check();

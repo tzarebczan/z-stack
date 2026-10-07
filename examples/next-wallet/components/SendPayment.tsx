@@ -3,8 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { formatZatoshis } from "@z-stack/sdk";
 import type { SendDraft, SendReview, SendReceipt } from "../lib/send";
 
-export function SendPayment({ disabled, canCancel, receipt, reviewPayment, sendPayment, cancelPayment, clearReceipt }: {
-  disabled: boolean; canCancel: boolean; receipt?: SendReceipt;
+export function SendPayment({ unit, disabled, canCancel, receipt, reviewPayment, sendPayment, cancelPayment, clearReceipt }: {
+  unit: string; disabled: boolean; canCancel: boolean; receipt?: SendReceipt;
   reviewPayment(draft: SendDraft): Promise<SendReview | undefined>;
   sendPayment(review: SendReview, words: string): Promise<void | undefined>;
   cancelPayment(): void; clearReceipt(): void;
@@ -29,11 +29,11 @@ export function SendPayment({ disabled, canCancel, receipt, reviewPayment, sendP
       setReview(undefined); setDraft({ to: "", amount: "", memo: "" }); clearReceipt();
     }}>New payment</button>}
   </section>;
-  return <section className="payment" aria-label="Send ZEC" ref={panel} tabIndex={-1}>
-    <h2>{review ? "Review payment" : "Send ZEC"}</h2>
+  return <section className="payment" aria-label={`Send ${unit}`} ref={panel} tabIndex={-1}>
+    <h2>{review ? "Review payment" : `Send ${unit}`}</h2>
     {review ? <>
-      <dl><dt>To</dt><dd>{review.to}</dd><dt>Amount</dt><dd>{review.amount} ZEC</dd>
-        <dt>Estimated fee</dt><dd>{formatZatoshis(BigInt(review.feeZat))} ZEC</dd>
+      <dl><dt>To</dt><dd>{review.to}</dd><dt>Amount</dt><dd>{review.amount} {unit}</dd>
+        <dt>Estimated fee</dt><dd>{formatZatoshis(BigInt(review.feeZat))} {unit}</dd>
         <dt>Memo</dt><dd>{review.memo || "None"}</dd></dl>
       <p className="hint">Fee is estimated. The wallet checks it again before proving.</p>
       <form onSubmit={event => {
@@ -44,7 +44,7 @@ export function SendPayment({ disabled, canCancel, receipt, reviewPayment, sendP
         <textarea id="send-words" ref={words} required disabled={disabled} rows={3}
           autoComplete="off" autoCapitalize="none" spellCheck={false} autoCorrect="off" />
         <p className="hint">Used locally and cleared when you send.</p>
-        <div className="actions"><button className="primary" disabled={disabled}>Send {review.amount} ZEC</button>
+        <div className="actions"><button className="primary" disabled={disabled}>Send {review.amount} {unit}</button>
           <button type="button" disabled={disabled} onClick={() => { clearWords(); setReview(undefined); }}>Edit</button>
           {canCancel && <button type="button" onClick={cancelPayment}>Cancel before submission</button>}</div>
       </form>
@@ -54,7 +54,7 @@ export function SendPayment({ disabled, canCancel, receipt, reviewPayment, sendP
       <label htmlFor="send-to">Recipient address</label>
       <textarea id="send-to" name="recipient" required disabled={disabled} rows={2} autoComplete="off"
         autoCapitalize="none" spellCheck={false} value={draft.to} onChange={event => setDraft({ ...draft, to: event.target.value })} />
-      <label htmlFor="send-amount">Amount (ZEC)</label>
+      <label htmlFor="send-amount">Amount ({unit})</label>
       <input id="send-amount" name="amount" required disabled={disabled} inputMode="decimal" autoComplete="off"
         value={draft.amount} onChange={event => setDraft({ ...draft, amount: event.target.value })} />
       <label htmlFor="send-memo">Memo (optional)</label>

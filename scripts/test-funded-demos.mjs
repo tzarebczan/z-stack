@@ -43,7 +43,7 @@ const server = createServer((req, res) => {
   const path = resolve(staticRoot, '.' + (pathname === '/' ? '/index.html' : pathname));
   if (!path.startsWith(staticRoot + sep)) { res.writeHead(403).end(); return; }
   try { res.setHeader('Content-Type', path.endsWith('.wasm') ? 'application/wasm' : path.endsWith('.js') ? 'application/javascript'
-    : path.endsWith('.css') ? 'text/css' : 'text/html'); res.end(readFileSync(path)); }
+    : path.endsWith('.css') ? 'text/css' : path.endsWith('.svg') ? 'image/svg+xml' : 'text/html'); res.end(readFileSync(path)); }
   catch { res.writeHead(404).end(); }
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -115,12 +115,22 @@ try {
     await ui.goto(origin); console.log(`Funded ${kind}: opening UI`);
     if (kind==='next') await ui.getByText('Restore an existing wallet',{exact:true}).click();
     await ui.getByLabel('Recovery phrase',{exact:true}).fill(faucetWords);
-    await ui.getByLabel(kind==='vite'?'Birthday height or date':'Wallet birthday',{exact:true}).fill('1');
+    const birthdayInput = ui.getByLabel(kind==='vite'?'Birthday height or date':'Wallet birthday',{exact:true});
+    await birthdayInput.fill('2026-13-40');
+    await ui.getByRole('button',{name:'Restore wallet',exact:true}).click();
+    assert.equal(await ui.getByLabel('Recovery phrase',{exact:true}).inputValue(), faucetWords, 'Local birthday errors must retain the phrase');
+    assert.equal(await birthdayInput.evaluate(input => input.validity.valid), false);
+    await birthdayInput.fill('3');
     await ui.getByRole('button',{name:'Restore wallet',exact:true}).click();
     await ui.getByRole('button',{name:kind==='vite'?'Sync':'Sync wallet',exact:true}).waitFor();
     for(let attempt=0; attempt<100;attempt++){ if(await ui.getByRole('button',{name:kind==='vite'?'Sync':'Sync wallet',exact:true}).isEnabled())break; await ui.waitForTimeout(200); }
     await syncUi(ui,kind);
     const address=await ui.locator('#address').innerText(); assert.ok(address.startsWith('uregtest'));
+    assert.equal((await ui.request.get(origin + '/favicon.svg')).status(), 200);
+    await ui.getByLabel('Recipient address',{exact:true}).fill('zcash:' + address);
+    await ui.getByLabel('Amount (ZEC)',{exact:true}).fill('0.0005');
+    await ui.getByRole('button',{name:'Review payment',exact:true}).click();
+    await ui.getByText(/This form does not accept zcash: payment links/).waitFor();
     let txid;
     for (const uncertain of baseOnly ? [] : [false, true]) {
     await ui.getByLabel('Recipient address',{exact:true}).fill(address);
@@ -145,6 +155,28 @@ try {
     await ui.getByText('Confirmed on-chain',{exact:true}).waitFor({timeout:180_000});
     if (!uncertain) await ui.getByRole('button',{name:'New payment',exact:true}).click();
     }
+    await ui.getByText('Scan an earlier range',{exact:true}).click();
+    await ui.getByLabel('Earlier height or date',{exact:true}).fill('1');
+    await ui.getByLabel('I want to rebuild scan history',{exact:true}).check();
+    let releaseTip, tipRequested;
+    const tipHeld = new Promise(resolve => { releaseTip = resolve; });
+    const tipStarted = new Promise(resolve => { tipRequested = resolve; });
+    const holdTip = async route => {
+      tipRequested(); await tipHeld; await route.continue();
+    };
+    if (kind === 'next') await ui.route('**/GetLatestBlock', holdTip);
+    await ui.getByRole('button',{name:'Rescan wallet',exact:true}).click();
+    if (kind === 'next') {
+      try {
+        await tipStarted;
+        assert.equal(await ui.getByRole('button',{name:'Stop sync',exact:true}).count(), 0,
+          'Stop sync must not be offered while the reset is preparing');
+      } finally { releaseTip(); await ui.unroute('**/GetLatestBlock', holdTip); }
+    }
+    await ui.waitForFunction(() => !document.querySelector('#sync')?.disabled && ![...document.querySelectorAll('button')].some(button => button.textContent === 'Sync wallet' && button.disabled), null, {timeout:180_000});
+    assert.equal(await ui.getByLabel('I want to rebuild scan history',{exact:true}).isChecked(), false, 'Each rescan needs a new confirmation');
+    assert.equal(await ui.locator('#address').innerText(), address, 'Rescan must preserve receiving identity');
+    if (txid) await ui.locator(kind==='vite'?'#history':'.activity').getByText(txid,{exact:kind==='next'}).waitFor({timeout:60_000});
     if (withBase) await exerciseCombinedBase(ui, baseFixture, faucetWords);
     await ui.setViewportSize({width:390,height:844});
     assert.equal(await ui.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'Mobile layout overflows');

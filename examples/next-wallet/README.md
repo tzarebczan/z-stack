@@ -14,9 +14,9 @@ Use [the setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETT
 outside the SDK checkout. From your copy:
 
 ```sh
-npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.1.tgz \
-  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.1.tgz \
-  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.1.tgz
+npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.2.tgz \
+  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.2.tgz \
+  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.2.tgz
 npm run build
 npm run start
 ```
@@ -99,3 +99,14 @@ asset behavior. `pnpm test:packages:browser` adds actual Chromium/Firefox/WebKit
 startup and ST/MT flows. Its disposable empty-regtest fixture replaces only the
 app-owned chain connection; the wallet, storage and Rust engines remain real.
 It is not funded payment, physical-device, hosting-platform or Turbopack certification.
+
+The demo displays the network, server, birthday and scanned height. Use **Scan an
+earlier range** for older deposits on the same chain; it retains the wallet and
+address. Check [the current public funding limitation](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#4-create-or-restore-then-sync)
+before claiming test coins. On testnet, amounts are TAZ. The amount parser still
+uses Zcash’s eight-decimal units. `zcash:` links require a dedicated review UI;
+this example asks for the recipient address itself.
+
+Next’s generated agent-rule files are disabled with `agentRules: false`. The
+Rayon circular-chunk webpack warning is described in [framework integration](https://github.com/tzarebczan/z-stack/blob/main/docs/INTEGRATION.md);
+verify the production worker and WASM assets rather than suppressing build errors.

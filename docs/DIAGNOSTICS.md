@@ -53,3 +53,6 @@ bounded deadline; a stalled provider cannot keep it pending indefinitely.
 
 Use [adapter acceptance](ADAPTERS.md) for storage semantics and the
 [release checks](RELEASE.md) for actual engine/browser verification.
+
+An active `wallet_owner` check has status `info`, not `warning`. It is the normal
+state after opening a client. Await that client’s close before opening another.

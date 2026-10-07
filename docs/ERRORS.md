@@ -10,6 +10,10 @@ message and cause remain available for private debugging.
 | --- | --- |
 | `cancelled`, `hardware_cancelled` | Keep the last committed state; let the user retry |
 | `seed_locked` | Ask for local reauthentication from a user action |
+| `invalid_birthday` | Correct the height/date before clearing secret inputs |
+| `rescan_later_birthday` | Use a birthday at or before the current one |
+| `rescan_pending` | Sync to confirm or expire the outgoing payment before rescanning |
+| `unsupported_payment_uri` | Paste the recipient address; payment links need a separate review UI |
 | `busy` | Await the current operation or the previous client's close |
 | `closed` | Stop using this handle; await teardown before creating a new one |
 | `already_exists` | Load the saved wallet; require deliberate backup/replacement |

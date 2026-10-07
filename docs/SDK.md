@@ -372,3 +372,24 @@ another payment merely because the UI could not refresh.
 The signal/review predicate prevents submission when cancelled before the final
 check. Proof work may finish before cancellation is observed. Cancellation
 cannot retract a request that has already started.
+
+## Rescan an earlier range
+
+```ts
+import { validateBirthdayInput } from "@z-stack/sdk";
+validateBirthdayInput(input); // Local syntax/calendar check before clearing secret inputs.
+wallet.lock();
+await wallet.rescan({ birthday: input });
+await wallet.sync();
+```
+
+`rescan` is a browser-wallet method. It keeps account keys, hardware metadata,
+view-only status, current addresses and the next address index. It removes scan
+state and old birthday frontiers, then saves the new birthday atomically before
+returning. A failed save restores the in-memory state; a stale tab adopts the
+newer committed wallet. Close, deletion and replacement never revive the old session.
+It rejects later birthdays, unresolved unmined outgoing transactions and ranges
+beyond the default scan limit unless the client permits deep syncing (`deepSync`; local pipe clients permit it by default).
+It does not unlock the seed or enable automatic shielding. Use the older
+`resetScan()` only for same-birthday repair with a deliberately reviewed workflow.
+A rescan cannot recover a transaction absent from the configured server’s chain.

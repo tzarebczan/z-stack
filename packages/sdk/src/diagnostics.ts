@@ -6,7 +6,7 @@ export type SetupCheckCode = "browser" | "secure_context" | "webassembly" | "web
   "storage" | "isolation" | "wallet_owner" | "module_worker" | "assets" |
   "asset_missing" | "asset_format" | "integrity_mismatch" | "asset_unavailable" |
   "server" | "shared_memos" | "cancelled";
-export type SetupCheck = { code: SetupCheckCode; status: "pass" | "warning" | "fail" | "skipped"; message: string };
+export type SetupCheck = { code: SetupCheckCode; status: "pass" | "info" | "warning" | "fail" | "skipped"; message: string };
 export type SetupReport = { ok: boolean; checks: SetupCheck[] };
 export interface SetupCheckOptions {
   /** Explicitly fetch and hash the selected bundled engine, or these custom ST assets. */
@@ -26,7 +26,7 @@ const messages = {
   webcrypto: "This browser needs WebCrypto in a secure context.",
   storage: "IndexedDB is unavailable; supply a transactional local storage adapter.",
   isolation: "Threaded mode needs cross-origin isolation and SharedArrayBuffer; single-thread mode remains available.",
-  wallet_owner: "A wallet client owns this page's engine. Await close before opening another.",
+  wallet_owner: "This page has an active wallet client. Await close before opening another.",
   module_worker: "Check module-worker support, worker URLs and worker-src CSP.",
   assets: "Engine bytes match their integrity manifest. This does not authenticate your deployment host.",
   asset_missing: "Deploy matching WASM and integrity files; disable app-shell fallback for asset paths.",
@@ -111,7 +111,7 @@ export async function checkWalletSetup(options: SetupCheckOptions = {}): Promise
   add("webcrypto", typeof crypto !== "undefined" && !!crypto.subtle ? "pass" : "fail");
   add("storage", typeof indexedDB !== "undefined" ? "pass" : "warning");
   add("isolation", globalThis.crossOriginIsolated === true && typeof SharedArrayBuffer !== "undefined" ? "pass" : "warning");
-  add("wallet_owner", browserWalletActive() ? "warning" : "pass");
+  add("wallet_owner", browserWalletActive() ? "info" : "pass");
   const controller = new AbortController();
   const cancel = () => controller.abort();
   options.signal?.addEventListener("abort", cancel, { once: true });

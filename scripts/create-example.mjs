@@ -92,7 +92,7 @@ export function createExample(template, destination, archives, { withBase = fals
   const target = resolve(destination);
   if (existsSync(target)) {
     assert.ok(lstatSync(target).isDirectory() && !lstatSync(target).isSymbolicLink(), 'Destination must be an ordinary directory');
-    assert.equal(readdirSync(target).length, 0, 'Destination is not empty; refusing to overwrite it');
+    assert.equal(readdirSync(target).length, 0, 'Destination is not empty; choose a new subdirectory or an empty directory. Existing files will not be overwritten');
   }
   const packages = inspectArchives(resolve(archives), undefined, template === "base-wallet" ? ["base"] : ["core", "passkey", "sdk", ...(withBase ? ["base"] : [])]);
   mkdirSync(dirname(target), { recursive: true });
@@ -149,6 +149,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         cwd: target, stdio: 'inherit', shell: process.platform === 'win32' });
       assert.equal(result.status, 0, 'Install failed; the generated app is preserved. Retry npm install there.');
     }
-    console.log('Next: open that directory, run npm install --ignore-scripts, then npm run dev. Use test funds only.');
+    console.log(`Next: open that directory, ${install ? 'run npm run dev' : 'run npm install --ignore-scripts, then npm run dev'}. Use test funds only.`);
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

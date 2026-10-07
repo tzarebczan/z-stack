@@ -35,7 +35,7 @@ import type { WasmClientContext } from './wasm-client-context';
 import * as runtime from './wasm-client-runtime';
 
 /** Block scanning and optional public-data enhancement. */
-export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" | "bus" | "session" | "snap" | "currentSession" | "syncLock" | "memoLock" | "loadIfNeeded" | "preferWorker" | "transport" | "memoFetch" | "persist" | "opts" | "transparentScan" | "localLight" | "syncOpts" | "grpcWeb" | "lwdPipe" | "retireFailedSession" | "spendingSeed" | "prewarmProvingKey" | "sessionOperation" | "client" | "unlockPolicy" | "rootsChecked" | "assertSource" | "network" | "refreshIfStale" | "stateEpoch" | "transparentScanStatus" | "sharedMemoStatus" | "selectiveMemoStatus" | "memoAbort" | "storageGeneration">) {
+export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" | "bus" | "session" | "snap" | "currentSession" | "syncLock" | "memoLock" | "loadIfNeeded" | "preferWorker" | "transport" | "memoFetch" | "persist" | "opts" | "transparentScan" | "localLight" | "syncOpts" | "grpcWeb" | "lwdPipe" | "retireFailedSession" | "spendingSeed" | "prewarmProvingKey" | "sessionOperation" | "client" | "unlockPolicy" | "rootsChecked" | "assertSource" | "network" | "refreshIfStale" | "stateEpoch" | "transparentScanStatus" | "sharedMemoStatus" | "selectiveMemoStatus" | "memoAbort" | "storageGeneration" | "rescanning">) {
 
   function report(p: runtime.WasmProgress): void {
     ctx.onProgress?.(p);
@@ -97,6 +97,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
   }
 
   function runSync(): Promise<WalletSnapshot> {
+    if (ctx.rescanning) return Promise.reject(new WalletError("busy", "rescan is in progress"));
     ctx.currentSession();
     if (ctx.syncLock?.epoch === runtime.runtimeState.wasmSyncEpoch) return ctx.syncLock.promise;
     if (ctx.memoLock?.epoch === runtime.runtimeState.wasmSyncEpoch) {
@@ -752,6 +753,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
   }
 
   async function refreshUtxos(doPersist = true): Promise<void> {
+    if (ctx.rescanning) throw new WalletError("busy", "rescan is in progress");
     if (!ctx.session || !ctx.transport.utxos) return;
     const source = ctx.session;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
@@ -766,6 +768,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
   }
 
   async function refreshMempool(doPersist = true): Promise<void> {
+    if (ctx.rescanning) throw new WalletError("busy", "rescan is in progress");
     if (!ctx.session || !ctx.transport.mempool) return;
     const source = ctx.session;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
@@ -960,6 +963,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
   }
 
   function fetchMemos(): Promise<WalletSnapshot> {
+    if (ctx.rescanning) return Promise.reject(new WalletError("busy", "rescan is in progress"));
     ctx.currentSession();
     if (ctx.memoLock?.epoch === runtime.runtimeState.wasmSyncEpoch) return ctx.memoLock.promise;
     const operation = captureWalletOperation();

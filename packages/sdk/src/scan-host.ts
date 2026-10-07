@@ -58,6 +58,7 @@ export type ScanSession = {
   memoEnhancementTxids: (limit: number) => Promise<string[] | null>;
   rewindTo: (height: number) => Promise<number>;
   resetScan: () => Promise<void>;
+  rescanFrom: (birthday: number) => Promise<void>;
   recomputePools: (onTick?: (p: { hashed: number; total: number; message: string }) => void) => Promise<void>;
   nextUnifiedAddress: () => Promise<void>;
   attachSeed: (mnemonic: string) => Promise<void>;
@@ -113,6 +114,7 @@ type WalletHandle = HardwareWalletHandle & {
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
   resetScan?: () => void;
+  rescanFrom?: (birthday: number) => void;
   recomputePools?: () => void;
   recomputePoolsWithTick?: (
     cb: (hashed: number, total: number, message: string) => void,
@@ -241,6 +243,11 @@ export function localScanSession(
       return cur.memoEnhancementTxids ? JSON.parse(cur.memoEnhancementTxids(limit)) as string[] : null;
     },
     rewindTo: async (height) => w().rewindTo?.(height) ?? 0,
+    rescanFrom: async (birthday) => {
+      const cur = w();
+      if (!cur.rescanFrom) throw new Error("this wasm build cannot rescan an earlier birthday");
+      cur.rescanFrom(birthday);
+    },
     resetScan: async () => {
       const cur = w();
       if (typeof cur.resetScan !== "function") throw new Error("this wasm build cannot reset scan");
@@ -743,6 +750,7 @@ export function workerScanSession(): ScanSession | null {
       const data = await sessionRpc("rewindTo", { height });
       return Number(data.height) || 0;
     },
+    rescanFrom: async (birthday) => { await sessionRpc("rescanFrom", { birthday }); },
     resetScan: async () => {
       await sessionRpc("resetScan");
     },
