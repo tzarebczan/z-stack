@@ -1,0 +1,8 @@
+z-stack optional Base wallet
+Copyright (c) 2026 tzarebczan
+
+Original z-stack code is licensed under Apache-2.0.
+This package uses viem and its runtime dependencies. Attribution, source versions
+and original license texts are retained in THIRD_PARTY_DEPENDENCIES.json and
+THIRD_PARTY_LICENSES.txt in the package archive (licenses/base in source).
+No Zcash engine or WASM dependency is included in this optional package.

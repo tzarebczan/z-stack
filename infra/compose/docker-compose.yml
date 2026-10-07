@@ -1,0 +1,28 @@
+# Stub compose for a local Zakura + Zaino node.
+# Pin digests before relying on this in production.
+#
+# Desktop / z-wallet / z-desktop web bridge: native gRPC 127.0.0.1:8137
+# Traefik is OPTIONAL (profile grpcweb) for hosted wasm only:
+#   docker compose --profile grpcweb up
+# See docs/NODE.md
+
+services:
+  zakura:
+    image: zakuracore/zakura:1.4.0
+    profiles: ["node"]
+
+  zaino:
+    # Published image is zingodevops/zainod (zingolabs/zaino is not on Docker Hub).
+    # 0.10 speaks Ironwood valuePools. ShieldedProtocol::Ironwood subtree roots
+    # are still not in the released proto.
+    image: zingodevops/zainod:0.10.0
+    profiles: ["node"]
+
+  traefik:
+    image: traefik:v3.7.13
+    profiles: ["grpcweb"]
+    ports:
+      - "1234:1234"
+
+  # tor:
+  #   profiles: ["tor"]

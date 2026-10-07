@@ -1,0 +1,4 @@
+# Preserve the exact upstream archive files and patch context.
+vendor/zakura/** linguist-vendored=true
+vendor/zakura/*/LICENSE-APACHE whitespace=-blank-at-eof
+patches/zakura/*.patch whitespace=-blank-at-eol

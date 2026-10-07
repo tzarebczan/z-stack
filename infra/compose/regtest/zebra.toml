@@ -1,0 +1,32 @@
+# Zebra regtest. NU schedule matches z-engine `Network::Regtest` (NU6.3 at 1_000_000).
+# Faucet miner = REGTEST_FAUCET_TRANSPARENT from crates/z-engine/src/keys.rs
+
+[network]
+network = "Regtest"
+
+[network.testnet_parameters.activation_heights]
+BeforeOverwinter = 1
+Overwinter = 1
+Sapling = 1
+Blossom = 1
+Heartwood = 1
+Canopy = 1
+NU5 = 2
+NU6 = 2
+"NU6.1" = 2
+"NU6.2" = 2
+"NU6.3" = 1000000
+
+[rpc]
+listen_addr = "0.0.0.0:18232"
+enable_cookie_auth = false
+
+[mining]
+miner_address = "tmV1zYhR2xisn6VWdCNKHpeD4S7L1U1nPH6"
+
+[health]
+listen_addr = "0.0.0.0:8080"
+min_connected_peers = 0
+
+[state]
+cache_dir = "/home/zebra/.cache/zebra"

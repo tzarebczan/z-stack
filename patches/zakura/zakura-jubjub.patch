@@ -1,0 +1,79 @@
+diff --git a/zakura-jubjub/src/util.rs b/zakura-jubjub/src/util.rs
+index bd25dd0..bd5b84a 100644
+--- a/zakura-jubjub/src/util.rs
++++ b/zakura-jubjub/src/util.rs
+@@ -15,8 +15,41 @@ pub const fn sbb(a: u64, b: u64, borrow: u64) -> (u64, u64) {
+ /// Compute a + (b * c) + carry, returning the result and the new carry over.
+ #[inline(always)]
+ pub const fn mac(a: u64, b: u64, c: u64, carry: u64) -> (u64, u64) {
+-    let ret = (a as u128) + ((b as u128) * (c as u128)) + (carry as u128);
+-    (ret as u64, (ret >> 64) as u64)
++    #[cfg(target_arch = "wasm32")]
++    {
++        // wasm32 has no 64x64->128 multiply, so LLVM lowers a `u128` product
++        // to a `__multi3` libcall that computes a full 128x128 product. Four
++        // 32x32->64 products (one `i64.mul` each) are exact here; this one
++        // change removes about half of a WASM wallet scan's run time.
++        let (lo, hi) = mul_wide_u32_parts(b, c);
++        let (lo, c1) = lo.overflowing_add(a);
++        let (lo, c2) = lo.overflowing_add(carry);
++        // b * c + a + carry < 2^128, so the high word cannot overflow.
++        (lo, hi + c1 as u64 + c2 as u64)
++    }
++    #[cfg(not(target_arch = "wasm32"))]
++    {
++        let ret = (a as u128) + ((b as u128) * (c as u128)) + (carry as u128);
++        (ret as u64, (ret >> 64) as u64)
++    }
++}
++
++/// Returns the low and high words of `x * y` using only 32x32->64 products.
++#[cfg(any(target_arch = "wasm32", test))]
++#[inline(always)]
++pub const fn mul_wide_u32_parts(x: u64, y: u64) -> (u64, u64) {
++    let (x0, x1) = (x & 0xffff_ffff, x >> 32);
++    let (y0, y1) = (y & 0xffff_ffff, y >> 32);
++    let p00 = x0 * y0;
++    let p01 = x0 * y1;
++    let p10 = x1 * y0;
++    let p11 = x1 * y1;
++    // At most 3 * (2^32 - 1), so this sum cannot overflow.
++    let mid = (p00 >> 32) + (p01 & 0xffff_ffff) + (p10 & 0xffff_ffff);
++    (
++        (p00 & 0xffff_ffff) | (mid << 32),
++        p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32),
++    )
+ }
+ 
+ macro_rules! impl_add_binop_specify_output {
+@@ -172,3 +205,30 @@ macro_rules! impl_binops_multiplicative {
+         }
+     };
+ }
++
++#[cfg(test)]
++mod wasm32_mac_tests {
++    use super::mul_wide_u32_parts;
++
++    #[test]
++    fn split_product_matches_u128() {
++        let mut x = 0x9e37_79b9_7f4a_7c15u64;
++        let edges = [0, 1, 2, 0xffff_ffff, 0x1_0000_0000, u64::MAX - 1, u64::MAX];
++        for &a in &edges {
++            for &b in &edges {
++                let p = (a as u128) * (b as u128);
++                assert_eq!(mul_wide_u32_parts(a, b), (p as u64, (p >> 64) as u64));
++            }
++        }
++        for _ in 0..100_000 {
++            // xorshift64*
++            x ^= x >> 12;
++            x ^= x << 25;
++            x ^= x >> 27;
++            let a = x.wrapping_mul(0x2545_f491_4f6c_dd1d);
++            let b = a.rotate_left(29) ^ x;
++            let p = (a as u128) * (b as u128);
++            assert_eq!(mul_wide_u32_parts(a, b), (p as u64, (p >> 64) as u64));
++        }
++    }
++}

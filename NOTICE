@@ -1,0 +1,25 @@
+z-stack
+Copyright (c) 2026 tzarebczan
+
+Original z-stack code is licensed under Apache-2.0.
+
+The browser engine includes third-party software under the licenses declared in
+THIRD_PARTY_DEPENDENCIES.json in npm archives (licenses/WASM-dependencies.json
+in source). Full texts, attribution and source provenance
+are retained in THIRD_PARTY_LICENSES.txt; these terms remain in force.
+
+Wallet history inference and display helpers retain their original MIT notice:
+Copyright (c) 2024 zStealthLabs. Modifications Copyright 2026 tzarebczan.
+Full text: THIRD_PARTY_LICENSES.txt (wallet history helpers).
+
+Ledger APDU, parsing and serialization code is adapted from Vizor:
+Copyright 2026 Vizor contributors. Licensed under Apache-2.0.
+Source: chainapsis/vizor-wallet, commit e5f6bea.
+Modifications Copyright 2026 tzarebczan.
+Changed files and behavior are described in docs/THIRD_PARTY.md.
+
+Vendor field optimizations retain the upstream licenses and copyright notices.
+See vendor/zakura/README.md and docs/UPSTREAM.md for patch provenance.
+
+Native/desktop distributions require their own dependency inventory; the browser
+inventory is not a notice bundle for every workspace artifact.

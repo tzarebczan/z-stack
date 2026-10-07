@@ -1,0 +1,99 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    # Forks can run release checks without a third-party runner installation.
+    runs-on: ubuntu-24.04
+    env:
+      # Same release used for the verified local production MT build.
+      Z_STACK_WASM_MT_TOOLCHAIN: nightly-2026-09-22
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91"
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - name: Engine check + tests
+        run: |
+          cargo check -p z-engine --features native,cli
+          cargo test -p z-engine --features native --lib
+      - name: Desktop check
+        run: cargo check -p z-desktop
+      - name: Node launcher check
+        run: cargo check -p z-node-launcher
+      - name: Wasm target (engine default-features off)
+        run: cargo check -p z-wasm --target wasm32-unknown-unknown
+      - name: Patched field crates (wasm32 backend tests run natively too)
+        run: |
+          for c in zakura-pasta-curves zakura-bls12-381 zakura-jubjub; do
+            (cd "vendor/zakura/$c" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/vendor-tests" cargo test --release --lib)
+          done
+      - name: Compile ignored regtest test (no docker)
+        run: cargo test -p z-engine --test regtest --no-run
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.3"
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: WASM build tools
+        run: |
+          cargo install wasm-pack --version 0.15.0 --locked
+          rustup toolchain install "$Z_STACK_WASM_MT_TOOLCHAIN" --profile minimal --component rust-src
+          rustup target add wasm32-unknown-unknown --toolchain "$Z_STACK_WASM_MT_TOOLCHAIN"
+      # Test against both production artifacts; several lifecycle tests and
+      # package-export checks need real WASM, not executable stubs.
+      - name: Build production WASM and integrator packages
+        run: |
+          pnpm build:wasm
+          pnpm build:wasm:mt
+          pnpm --filter @z-stack/core build
+          pnpm --filter @z-stack/passkey build
+          pnpm --filter @z-stack/sdk build
+          pnpm --filter @z-stack/base build
+      - name: SDK, core, and passkey types and regression tests
+        run: |
+          pnpm --filter @z-stack/core typecheck
+          pnpm --filter @z-stack/passkey typecheck
+          pnpm --filter @z-stack/sdk typecheck
+          pnpm --filter @z-stack/base typecheck
+          pnpm test
+          pnpm check:docs
+          pnpm docs:api
+          pnpm check:patches
+          pnpm check:licenses
+          pnpm test:packages
+          pnpm test:base:package
+          pnpm test:combined:package
+      - name: Browser diagnostic app production build
+        run: pnpm web:build
+      - name: Chromium, Firefox and WebKit packaged consumers
+        run: |
+          pnpm exec playwright install --with-deps chromium firefox webkit
+          pnpm test:packages:browser
+          pnpm test:base:browser
+      - name: Reviewable API reference
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-reference-${{ github.sha }}
+          path: docs/api/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Preview archives
+        run: |
+          pnpm pack:sdk
+          pnpm pack:base
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-preview-${{ github.sha }}
+          path: artifacts/*.tgz
+          retention-days: 14
+          if-no-files-found: error

@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Wallet storage benchmark</title>
+<style>body{font:16px system-ui;max-width:1000px;margin:40px auto;padding:20px}button{padding:12px}pre{white-space:pre-wrap}</style>
+<h1>Wallet storage benchmark</h1>
+<p>Run on a fresh <code>127.0.0.1:15176</code> origin. Measures actual IndexedDB writes, preview reads and full reads with synthetic 1, 16 and 60 MiB payloads. Rust serialization is measured separately.</p>
+<button id="run">Run storage benchmark</button><pre id="results">Ready</pre>
+<script type="module" src="./storage-benchmark.ts"></script></html>

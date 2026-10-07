@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>WASM regtest integration</title>
+<style>body{font:16px system-ui;max-width:1050px;margin:40px auto;padding:20px}button{padding:12px}pre{white-space:pre-wrap}</style>
+<h1>WASM regtest integration</h1>
+<p>Use the isolated <code>127.0.0.1:15177</code> origin with <code>?mode=st</code> or <code>?mode=mt</code>.
+Runs the real scan worker to a fixed, hash-anchored regtest height, reloads this page, checks memo reuse, wipes and rescans.
+The chain may continue mining; downloaded blocks and returned UTXOs stay bounded by that captured height.
+The public regtest faucet is restored as view-only. No mining or spending. Existing wallet records are refused.</p>
+<button id="run">Run WASM regtest integration</button><pre id="results">Ready</pre>
+<script type="module" src="./wasm-regtest.ts"></script></html>

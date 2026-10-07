@@ -1,0 +1,25 @@
+{
+  "name": "z-stack-remote-backup-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host localhost",
+    "server": "tsx server/main.ts",
+    "check": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "test": "tsx --test server/*.test.ts"
+  },
+  "dependencies": {
+    "@simplewebauthn/server": "14.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.15",
+    "tsx": "4.23.0",
+    "typescript": "5.9.3",
+    "vite": "6.4.3"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "license": "Apache-2.0"
+}

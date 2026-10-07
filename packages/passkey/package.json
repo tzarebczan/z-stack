@@ -1,0 +1,55 @@
+{
+  "name": "@z-stack/passkey",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "Protect a secret (e.g. a recovery phrase) with one or more passkeys: WebAuthn PRF, envelope encryption, no dependencies.",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "@z-stack/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_LICENSES.txt",
+    "THIRD_PARTY_DEPENDENCIES.json"
+  ],
+  "scripts": {
+    "build": "node ../../scripts/build-package.mjs passkey",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "prepack": "node ../../scripts/check-package.mjs passkey"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tzarebczan/z-stack.git",
+    "directory": "packages/passkey"
+  },
+  "homepage": "https://github.com/tzarebczan/z-stack/tree/main/packages/passkey",
+  "bugs": {
+    "url": "https://github.com/tzarebczan/z-stack/issues"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      }
+    }
+  }
+}

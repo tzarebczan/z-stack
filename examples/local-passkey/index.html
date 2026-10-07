@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>z-stack local-passkey example</title></head><body><main><h1>Local passkey wallet</h1><p>Testnet only. Passkeys protect this browser’s copy; keep your recovery phrase.</p>
+<p id="status" role="status">Opening wallet…</p><p id="balance">— ZEC</p><p id="address"></p>
+<div class="actions"><button id="create" disabled>Create wallet</button><button id="sync" disabled>Sync</button><button id="lock" disabled>Lock</button></div>
+<pre id="phrase" hidden></pre><button id="hide-phrase" hidden>Hide recovery phrase</button>
+<label for="wallet-name">Wallet name in your password manager</label><input id="wallet-name" value="Testnet wallet" maxlength="64" autocomplete="off" disabled>
+<div class="actions"><button id="protect" disabled>Protect with passkey</button><button id="unlock" disabled>Unlock with passkey</button></div>
+<h2>Activity</h2><ul id="history"></ul></main><script type="module" src="/src/main.ts"></script></body></html>

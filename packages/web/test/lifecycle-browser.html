@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Wallet lifecycle regressions</title>
+<style>body{font:16px system-ui;max-width:1000px;margin:40px auto;padding:20px}button{padding:12px}pre{white-space:pre-wrap}</style>
+<h1>Wallet lifecycle regressions</h1>
+<p>Uses synthetic fixtures on the dedicated <code>127.0.0.1:15180</code> origin. Verifies real IndexedDB rollback and WebCrypto cancellation. Refuses to run if existing records are present.</p>
+<button id="run">Run lifecycle checks</button><pre id="results">Ready</pre>
+<script type="module" src="./lifecycle-browser.ts"></script></html>

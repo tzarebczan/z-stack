@@ -1,0 +1,8 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><link rel="icon" href="data:,"><title>Encrypted backup example</title></head>
+<body><main><h1>Encrypted backup</h1><p>Local reference for developers. Use a disposable phrase and a PRF-capable passkey.</p>
+<p id="status" role="status" aria-live="polite">No account requests run until you choose an action.</p>
+<section><h2>Create</h2><label for="phrase">Disposable recovery phrase</label><textarea id="phrase" autocomplete="off" spellcheck="false"></textarea>
+<button id="prepare-register">Prepare registration</button><button id="register">Create passkey and account</button><button id="upload">Upload encrypted backup</button></section>
+<section><h2>Recover</h2><button id="prepare-sign-in">Prepare sign-in</button><button id="sign-in">Sign in</button><button id="retrieve">Retrieve backup</button><button id="unlock">Unlock locally</button></section>
+<section><h2>Manage</h2><button id="logout">Sign out</button><button id="forget-local">Forget local vault</button><button id="forget-remote">Forget remote backup</button><button id="delete-account">Delete account and backup</button></section>
+</main><script type="module" src="/src/main.ts"></script></body></html>

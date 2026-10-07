@@ -1,0 +1,76 @@
+# Local Zebra + Zaino regtest for automated wallet tests.
+#
+#   docker compose -f infra/compose/docker-compose.regtest.yml up -d
+#   node scripts/regtest-up.mjs
+#
+# Host endpoints:
+#   Zebra JSON-RPC  http://127.0.0.1:29232
+#   Zaino gRPC      http://127.0.0.1:28137  (plaintext h2c)
+#
+# Images: Zebra 6.3.0 + Zaino 0.10.0-no-tls. Zakura is the operator full-node
+# path; Zebra is used here because its regtest + generate RPC is the documented
+# test recipe. Zaino 0.10 still has no ShieldedProtocol::Ironwood (the unreleased
+# enum entry was dropped), so regtest keeps the empty-stream Ironwood subtree workaround.
+
+name: z-stack-regtest
+
+services:
+  zebra:
+    mem_limit: 1g
+    image: ${Z_STACK_ZEBRA_IMAGE:-zfnd/zebra:6.3.0}
+    restart: unless-stopped
+    environment:
+      RUST_LOG: ${Z_STACK_ZEBRA_RUST_LOG:-info}
+      ZEBRA_NETWORK__NETWORK: Regtest
+      ZEBRA_RPC__LISTEN_ADDR: 0.0.0.0:18232
+      ZEBRA_RPC__ENABLE_COOKIE_AUTH: "false"
+      ZEBRA_HEALTH__LISTEN_ADDR: 0.0.0.0:8080
+      ZEBRA_HEALTH__MIN_CONNECTED_PEERS: "0"
+      ZEBRA_MINING__MINER_ADDRESS: tmV1zYhR2xisn6VWdCNKHpeD4S7L1U1nPH6
+      ZEBRA_STATE__CACHE_DIR: /home/zebra/.cache/zebra
+    volumes:
+      - zebra-regtest:/home/zebra/.cache/zebra
+      - ./regtest/zebra.toml:/home/zebra/.config/zebrad.toml:ro
+    ports:
+      - "127.0.0.1:${Z_STACK_REGTEST_RPC_PORT:-29232}:18232"
+      - "127.0.0.1:${Z_STACK_REGTEST_HEALTH_PORT:-28080}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -sf -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"getblockchaininfo\",\"params\":[],\"id\":1}' http://127.0.0.1:18232 || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  zaino:
+    mem_limit: 512m
+    image: ${Z_STACK_ZAINO_IMAGE:-zingodevops/zainod:0.10.0-no-tls}
+    platform: linux/amd64
+    restart: unless-stopped
+    depends_on:
+      zebra:
+        condition: service_healthy
+    environment:
+      RUST_LOG: ${Z_STACK_ZAINO_RUST_LOG:-info}
+      ZAINO_NETWORK: Regtest
+      ZAINO_VALIDATOR_SETTINGS__VALIDATOR_JSONRPC_LISTEN_ADDRESS: zebra:18232
+      ZAINO_GRPC_SETTINGS__LISTEN_ADDRESS: 0.0.0.0:8137
+    volumes:
+      - zaino-regtest:/app/data
+      - ./regtest/zaino.toml:/etc/zaino/zindexer.toml:ro
+    command: ["start", "--config", "/etc/zaino/zindexer.toml"]
+    ports:
+      - "127.0.0.1:${Z_STACK_REGTEST_LWD_PORT:-28137}:8137"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/8137' 2>/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+volumes:
+  zebra-regtest:
+  zaino-regtest:

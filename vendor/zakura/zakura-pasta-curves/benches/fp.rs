@@ -1,0 +1,266 @@
+///! Benchmarks for the Fp field.
+use criterion::{Bencher, Criterion, black_box, criterion_group, criterion_main};
+
+use rand::SeedableRng;
+use rand_xorshift::XorShiftRng;
+
+use ff::{Field, PrimeField};
+use pasta_curves::Fp;
+use pasta_curves::arithmetic::square_fp_n;
+
+const PROVER_DOMAIN_EXPONENT: u32 = 11;
+
+fn criterion_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Fp");
+
+    group.bench_function("double", bench_fp_double);
+    group.bench_function("add_assign", bench_fp_add_assign);
+    group.bench_function("sub_assign", bench_fp_sub_assign);
+    group.bench_function("mul_assign", bench_fp_mul_assign);
+    group.bench_function("square", bench_fp_square);
+    group.bench_function("invert", bench_fp_invert);
+    group.bench_function("neg", bench_fp_neg);
+    group.bench_function("sqrt", bench_fp_sqrt);
+    group.bench_function("to_repr", bench_fp_to_repr);
+    group.bench_function("from_repr", bench_fp_from_repr);
+    group.bench_function("eq/equal", |b| bench_fp_eq(b, true));
+    group.bench_function("eq/unequal", |b| bench_fp_eq(b, false));
+    group.bench_function("pow 2^11/constant-time", bench_fp_pow_power_of_two);
+    group.bench_function("pow 2^11/repeated-squaring", bench_fp_square_n);
+}
+
+fn bench_fp_pow_power_of_two(b: &mut Bencher) {
+    let value = Fp::from(0x9e37_79b9_7f4a_7c15);
+    b.iter(|| black_box(value).pow([1 << PROVER_DOMAIN_EXPONENT, 0, 0, 0]));
+}
+
+fn bench_fp_square_n(b: &mut Bencher) {
+    let value = Fp::from(0x9e37_79b9_7f4a_7c15);
+    b.iter(|| square_fp_n(black_box(&value), PROVER_DOMAIN_EXPONENT));
+}
+
+fn bench_fp_eq(b: &mut Bencher, equal: bool) {
+    const SAMPLES: usize = 1000;
+
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+    let values: Vec<_> = (0..SAMPLES)
+        .map(|_| {
+            let lhs = Fp::random(&mut rng);
+            let rhs = if equal { lhs } else { Fp::random(&mut rng) };
+            (lhs, rhs)
+        })
+        .collect();
+    assert!(values.iter().all(|(lhs, rhs)| (*lhs == *rhs) == equal));
+
+    let mut count = 0;
+    b.iter(|| {
+        let result = values[count].0 == values[count].1;
+        count = (count + 1) % SAMPLES;
+        result
+    });
+}
+
+fn bench_fp_double(b: &mut Bencher) {
+    const SAMPLES: usize = 1000;
+
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+
+    let v: Vec<Fp> = (0..SAMPLES).map(|_| Fp::random(&mut rng)).collect();
+
+    let mut count = 0;
+    b.iter(|| {
+        let mut tmp = v[count];
+        tmp = tmp.double();
+        count = (count + 1) % SAMPLES;
+        tmp
+    });
+}
+
+fn bench_fp_add_assign(b: &mut Bencher) {
+    const SAMPLES: usize = 1000;
+
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+
+    let v: Vec<(Fp, Fp)> = (0..SAMPLES)
+        .map(|_| (Fp::random(&mut rng), Fp::random(&mut rng)))
+        .collect();
+
+    let mut count = 0;
+    b.iter(|| {
+        let mut tmp = v[count].0;
+        tmp += &v[count].1;
+        count = (count + 1) % SAMPLES;
+        tmp
+    });
+}
+
+fn bench_fp_sub_assign(b: &mut Bencher) {
+    const SAMPLES: usize = 1000;
+
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+
+    let v: Vec<(Fp, Fp)> = (0..SAMPLES)
+        .map(|_| (Fp::random(&mut rng), Fp::random(&mut rng)))
+        .collect();
+
+    let mut count = 0;
+    b.iter(|| {
+        let mut tmp = v[count].0;
+        tmp -= &v[count].1;
+        count = (count + 1) % SAMPLES;
+        tmp
+    });
+}
+
+fn bench_fp_mul_assign(b: &mut Bencher) {
+    const SAMPLES: usize = 1000;
+
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+
+    let v: Vec<(Fp, Fp)> = (0..SAMPLES)
+        .map(|_| (Fp::random(&mut rng), Fp::random(&mut rng)))
+        .collect();
+
+    let mut count = 0;
+    b.iter(|| {
+        let mut tmp = v[count].0;
+        tmp *= &v[count].1;
+        count = (count + 1) % SAMPLES;
+        tmp
+    });
+}
+
+fn bench_fp_square(b: &mut Bencher) {
+    const SAMPLES: usize = 1000;
+
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+
+    let v: Vec<Fp> = (0..SAMPLES).map(|_| Fp::random(&mut rng)).collect();
+
+    let mut count = 0;
+    b.iter(|| {
+        let mut tmp = v[count];
+        tmp = tmp.square();
+        count = (count + 1) % SAMPLES;
+        tmp
+    });
+}
+
+fn bench_fp_invert(b: &mut Bencher) {
+    const SAMPLES: usize = 1000;
+
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+
+    let v: Vec<Fp> = (0..SAMPLES).map(|_| Fp::random(&mut rng)).collect();
+
+    // The unit-test instrumentation is compiled out of bench builds; sanity-
+    // check the production codegen of the divstep inversion once per run.
+    assert_eq!(v[0] * v[0].invert().unwrap(), Fp::ONE);
+
+    let mut count = 0;
+    b.iter(|| {
+        count = (count + 1) % SAMPLES;
+        v[count].invert()
+    });
+}
+
+fn bench_fp_neg(b: &mut Bencher) {
+    const SAMPLES: usize = 1000;
+
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+
+    let v: Vec<Fp> = (0..SAMPLES).map(|_| Fp::random(&mut rng)).collect();
+
+    let mut count = 0;
+    b.iter(|| {
+        let mut tmp = v[count];
+        tmp = tmp.neg();
+        count = (count + 1) % SAMPLES;
+        tmp
+    });
+}
+
+fn bench_fp_sqrt(b: &mut Bencher) {
+    const SAMPLES: usize = 1000;
+
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+
+    let v: Vec<Fp> = (0..SAMPLES)
+        .map(|_| {
+            let tmp = Fp::random(&mut rng);
+            tmp.square()
+        })
+        .collect();
+
+    let mut count = 0;
+    b.iter(|| {
+        count = (count + 1) % SAMPLES;
+        v[count].sqrt()
+    });
+}
+
+fn bench_fp_to_repr(b: &mut Bencher) {
+    const SAMPLES: usize = 1000;
+
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+
+    let v: Vec<Fp> = (0..SAMPLES).map(|_| Fp::random(&mut rng)).collect();
+
+    let mut count = 0;
+    b.iter(|| {
+        count = (count + 1) % SAMPLES;
+        v[count].to_repr()
+    });
+}
+
+fn bench_fp_from_repr(b: &mut Bencher) {
+    const SAMPLES: usize = 1000;
+
+    let mut rng = XorShiftRng::from_seed([
+        0x59, 0x62, 0xbe, 0x5d, 0x76, 0x3d, 0x31, 0x8d, 0x17, 0xdb, 0x37, 0x32, 0x54, 0x06, 0xbc,
+        0xe5,
+    ]);
+
+    let v: Vec<<Fp as PrimeField>::Repr> = (0..SAMPLES)
+        .map(|_| Fp::random(&mut rng).to_repr())
+        .collect();
+
+    let mut count = 0;
+    b.iter(|| {
+        count = (count + 1) % SAMPLES;
+        Fp::from_repr(v[count])
+    });
+}
+
+criterion_group!(benches, criterion_benchmark);
+criterion_main!(benches);

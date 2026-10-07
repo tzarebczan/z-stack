@@ -1,0 +1,13 @@
+# Zaino fetch-backend indexer for the local regtest Zebra.
+# Username/password is unused while Zebra cookie auth is off; kept for the Z3-shaped config.
+network = "Regtest"
+# 0.8 accepts "rpc" (JSON-RPC to the validator). "fetch" remains an alias.
+backend = "rpc"
+
+[grpc_settings]
+listen_address = "0.0.0.0:8137"
+
+[validator_settings]
+validator_jsonrpc_listen_address = "zebra:18232"
+validator_user = "zebra"
+validator_password = "zebra"

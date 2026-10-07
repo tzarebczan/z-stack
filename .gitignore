@@ -1,0 +1,49 @@
+/target
+**/target
+node_modules
+dist
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
+*.cookie
+params/
+.cache/
+*.tar.zst
+
+# Wallet data — never commit seeds or DBs
+wallet-data/
+**/wallet-data/
+wallet-data-*/
+wallet-data-demo/
+z-stack-desktop.json
+mnemonic.txt
+seed.enc
+*.sqlite
+*.sqlite-*
+data.sqlite
+
+# wasm-pack output (rebuild with pnpm build:wasm)
+packages/sdk/src/generated/*
+!packages/sdk/src/generated/README.md
+packages/sdk/src/generated-mt/**
+!packages/sdk/src/generated-mt/README.md
+
+# Local release artifacts and an existing checkout of the retired submodule.
+/artifacts/
+/forks/
+
+# Copied from root during package builds.
+/packages/*/LICENSE
+/packages/*/NOTICE
+/packages/*/THIRD_PARTY_LICENSES.txt
+/packages/*/THIRD_PARTY_DEPENDENCIES.json
+
+/docs/api/
+
+# Private local coordination and review records.
+/coord/

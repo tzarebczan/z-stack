@@ -1,0 +1,17 @@
+[
+  {
+    "component": "wallet history helpers",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2024 zStealthLabs",
+    "files": [
+      "packages/core/src/history.ts"
+    ],
+    "originalRevision": "d07b5fc0ad3cec6a2d2eb52575d6ad93a9c60e7d",
+    "licenseText": {
+      "file": "licenses/wallet-history-MIT.txt",
+      "sha256": "7deac7a38d93b86432057184cdbf0170fe70d76a3ad1d2e5183585abdcd5750e"
+    },
+    "originalFile": "lib/transactionHistory.ts",
+    "originalFileSha256": "389703b5e3cccef5b6b5f62a43d85bd29e1a097e2e231cee218b8b80d0246455"
+  }
+]

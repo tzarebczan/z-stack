@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Snapshot storage format benchmark</title>
+<style>body{font:16px system-ui;max-width:1100px;margin:40px auto;padding:20px}button{padding:12px}pre{white-space:pre-wrap}</style>
+<h1>Snapshot storage format benchmark</h1>
+<p>Use isolated <code>127.0.0.1:15178</code>. Compares Uint8Array, ArrayBuffer and Blob at 16 and 60 MiB.
+Measures synchronous construction and IndexedDB put, construction through commit, and complete hydration reads.
+Uses a dedicated benchmark database, refuses preexisting records, and deletes its fixture records afterward.</p>
+<button id="run">Run storage format benchmark</button><pre id="results">Ready</pre>
+<script type="module" src="./storage-formats.ts"></script></html>

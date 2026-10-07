@@ -1,0 +1,41 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "z-stack SDK",
+  "entryPoints": [
+    "packages/sdk/src/index.ts",
+    "packages/sdk/src/vite.ts",
+    "packages/core/src/index.ts",
+    "packages/passkey/src/index.ts",
+    "packages/sdk/src/services.ts",
+    "packages/sdk/src/hardware.ts",
+    "packages/sdk/src/native.ts",
+    "packages/sdk/src/engine-tools.ts",
+    "packages/sdk/src/diagnostics.ts",
+    "packages/sdk/src/lab.ts",
+    "packages/base/src/index.ts",
+    "packages/base/src/smart-account/index.ts"
+  ],
+  "tsconfig": "tsconfig.docs.json",
+  "out": "docs/api",
+  "readme": "packages/sdk/README.md",
+  "includeVersion": true,
+  "excludeInternal": true,
+  "excludePrivate": true,
+  "disableSources": true,
+  "navigationLinks": {
+    "Integration": "https://github.com/tzarebczan/z-stack/blob/main/docs/INTEGRATION.md",
+    "GitHub": "https://github.com/tzarebczan/z-stack"
+  },
+  "treatWarningsAsErrors": true,
+  "externalSymbolLinkMappings": {
+    "viem": {
+      "*": "https://viem.sh/docs/getting-started"
+    },
+    "viem/accounts": {
+      "*": "https://viem.sh/docs/accounts/local"
+    },
+    "viem/account-abstraction": {
+      "*": "https://viem.sh/account-abstraction"
+    }
+  }
+}

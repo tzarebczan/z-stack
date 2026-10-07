@@ -1,0 +1,46 @@
+[
+  {
+    "file": "bitcoin_hashes-CC0.txt",
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/CC0-1.0.txt"
+  },
+  {
+    "file": "blake2_simd-LICENSE",
+    "url": "https://raw.githubusercontent.com/oconnor663/blake2_simd/47714dc3c424e82213d7f2eb4a833e3843017be5/LICENSE"
+  },
+  {
+    "file": "librustzcash-COPYING.md",
+    "url": "https://raw.githubusercontent.com/zcash/librustzcash/eafd51ace8818198a21dbadfe921273e06d66999/COPYING.md"
+  },
+  {
+    "file": "librustzcash-LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/zcash/librustzcash/eafd51ace8818198a21dbadfe921273e06d66999/LICENSE-APACHE"
+  },
+  {
+    "file": "librustzcash-LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/zcash/librustzcash/eafd51ace8818198a21dbadfe921273e06d66999/LICENSE-MIT"
+  },
+  {
+    "file": "tonic-LICENSE",
+    "url": "https://raw.githubusercontent.com/hyperium/tonic/6cb6056b5a748bc5a29bd48f4602dbc4e552bb7d/LICENSE"
+  },
+  {
+    "file": "zcash_script-LICENSE",
+    "url": "https://raw.githubusercontent.com/ZcashFoundation/zcash_script/cc4ec7ee8b96103586588e51e0f7cb3ebad4d944/LICENSE"
+  },
+  {
+    "file": "vizor-LICENSE",
+    "url": "https://raw.githubusercontent.com/chainapsis/vizor-wallet/e5f6bea/LICENSE"
+  },
+  {
+    "file": "pczt-librustzcash-COPYING.md",
+    "url": "https://raw.githubusercontent.com/zcash/librustzcash/34f2b1e810ac8d00e671f0d254c7af7048c8985c/COPYING.md"
+  },
+  {
+    "file": "pczt-librustzcash-LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/zcash/librustzcash/34f2b1e810ac8d00e671f0d254c7af7048c8985c/LICENSE-APACHE"
+  },
+  {
+    "file": "pczt-librustzcash-LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/zcash/librustzcash/34f2b1e810ac8d00e671f0d254c7af7048c8985c/LICENSE-MIT"
+  }
+]

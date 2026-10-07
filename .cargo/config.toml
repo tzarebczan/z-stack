@@ -1,0 +1,5 @@
+# Same SIMD flag WebZjs used on wasm32 (`justfile` RUSTFLAGS `+simd128`).
+# Multicore builds still pass atomics/shared-memory via scripts/build-wasm-mt.mjs
+# (env RUSTFLAGS replaces these, so that script must include simd128 too).
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128,+bulk-memory,+mutable-globals"]

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>z-stack wallet example</title>
+  </head>
+  <body>
+    <main>
+      <h1>Testnet wallet</h1>
+      <p>A minimal SDK integration. Use test funds only.</p>
+      <p id="status" role="status">Loading engine…</p>
+      <p id="balance">— ZEC</p>
+      <p id="address"></p>
+      <div class="actions">
+        <button id="create" disabled>Create wallet</button>
+        <button id="sync" disabled>Sync</button>
+        <button id="lock" disabled>Lock</button>
+        <button id="hide-phrase" hidden>I saved these words — finish</button>
+      </div>
+      <pre id="phrase" hidden></pre>
+      <form id="restore-form">
+        <label for="words">Recovery phrase</label>
+        <textarea id="words" autocomplete="off" autocapitalize="none" spellcheck="false" required></textarea>
+        <button id="clear-words" type="button">Clear phrase</button>
+        <label for="birthday">Birthday height or date</label>
+        <input id="birthday" required placeholder="Height or YYYY-MM-DD" />
+        <button id="restore" disabled>Restore wallet</button>
+      </form>
+      <section id="send-panel" hidden aria-label="Send ZEC">
+        <h2>Send ZEC</h2>
+        <form id="send-form">
+          <label for="send-to">Recipient address</label>
+          <textarea id="send-to" name="recipient" required rows="2" autocomplete="off" autocapitalize="none" spellcheck="false"></textarea>
+          <label for="send-amount">Amount (ZEC)</label>
+          <input id="send-amount" name="amount" required inputmode="decimal" autocomplete="off" />
+          <label for="send-memo">Memo (optional)</label>
+          <textarea id="send-memo" name="memo" rows="2" maxlength="512"></textarea>
+          <button id="review-send">Review payment</button>
+        </form>
+        <section id="send-review" hidden aria-label="Review payment" tabindex="-1">
+          <h3>Review payment</h3>
+          <dl id="review-details"></dl>
+          <p>Fee is estimated. The wallet checks it again before proving.</p>
+          <form id="confirm-send-form">
+            <label for="send-words">Recovery phrase for this payment</label>
+            <textarea id="send-words" name="phrase" required rows="3" autocomplete="off" autocapitalize="none" spellcheck="false"></textarea>
+            <p>Used locally and cleared when you send.</p>
+            <div class="actions"><button id="confirm-send">Send payment</button><button id="edit-send" type="button">Edit</button></div>
+          </form>
+        </section>
+        <p id="send-status" role="status"></p>
+        <button id="cancel-send" type="button" hidden>Cancel before submission</button>
+        <section id="send-receipt" hidden aria-label="Payment receipt"><h3>Payment receipt</h3><p id="receipt-state" role="status"></p><code id="receipt-txid"></code><button id="another-send" type="button">New payment</button></section>
+      </section>
+      <h2>Activity</h2>
+      <ul id="history"></ul>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

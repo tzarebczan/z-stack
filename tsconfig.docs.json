@@ -1,0 +1,19 @@
+{
+  "extends": "./packages/sdk/tsconfig.json",
+  "include": [
+    "packages/sdk/src/index.ts",
+    "packages/sdk/src/vite.ts",
+    "packages/sdk/src/wasm-shim.d.ts",
+    "packages/core/src/index.ts",
+    "packages/passkey/src/index.ts",
+    "packages/sdk/src/services.ts",
+    "packages/sdk/src/native.ts",
+    "packages/sdk/src/engine-tools.ts",
+    "packages/sdk/src/hardware.ts",
+    "packages/sdk/src/storage.ts",
+    "packages/sdk/src/diagnostics.ts",
+    "packages/sdk/src/lab.ts",
+    "packages/base/src/index.ts",
+    "packages/base/src/smart-account/index.ts"
+  ]
+}

@@ -1,0 +1,138 @@
+{
+  "name": "@z-stack/sdk",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "Zcash wallet SDK for the browser (Rust/WASM engine) and the native desktop engine.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "@z-stack/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./lab": {
+      "@z-stack/source": "./src/lab.ts",
+      "types": "./dist/lab.d.ts",
+      "import": "./dist/lab.js"
+    },
+    "./vite": {
+      "@z-stack/source": "./src/vite.ts",
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.js"
+    },
+    "./services": {
+      "@z-stack/source": "./src/services.ts",
+      "types": "./dist/services.d.ts",
+      "import": "./dist/services.js"
+    },
+    "./native": {
+      "@z-stack/source": "./src/native.ts",
+      "types": "./dist/native.d.ts",
+      "import": "./dist/native.js"
+    },
+    "./hardware": {
+      "@z-stack/source": "./src/hardware.ts",
+      "types": "./dist/hardware.d.ts",
+      "import": "./dist/hardware.js"
+    },
+    "./core": {
+      "@z-stack/source": "./src/core.ts",
+      "types": "./dist/core.d.ts",
+      "import": "./dist/core.js"
+    },
+    "./engine": {
+      "@z-stack/source": "./src/engine-tools.ts",
+      "types": "./dist/engine-tools.d.ts",
+      "import": "./dist/engine-tools.js"
+    },
+    "./diagnostics": {
+      "@z-stack/source": "./src/diagnostics.ts",
+      "types": "./dist/diagnostics.d.ts",
+      "import": "./dist/diagnostics.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_LICENSES.txt",
+    "THIRD_PARTY_DEPENDENCIES.json"
+  ],
+  "scripts": {
+    "build": "node ../../scripts/build-package.mjs sdk",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:wasm": "node ../../scripts/build-wasm.mjs",
+    "prepack": "node ../../scripts/check-package.mjs sdk"
+  },
+  "dependencies": {
+    "@z-stack/core": "workspace:*",
+    "@z-stack/passkey": "workspace:*"
+  },
+  "peerDependencies": {
+    "vite": ">=5"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tzarebczan/z-stack.git",
+    "directory": "packages/sdk"
+  },
+  "homepage": "https://github.com/tzarebczan/z-stack/tree/main/packages/sdk",
+  "bugs": {
+    "url": "https://github.com/tzarebczan/z-stack/issues"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      },
+      "./lab": {
+        "types": "./dist/lab.d.ts",
+        "import": "./dist/lab.js"
+      },
+      "./vite": {
+        "types": "./dist/vite.d.ts",
+        "import": "./dist/vite.js"
+      },
+      "./services": {
+        "types": "./dist/services.d.ts",
+        "import": "./dist/services.js"
+      },
+      "./native": {
+        "types": "./dist/native.d.ts",
+        "import": "./dist/native.js"
+      },
+      "./hardware": {
+        "types": "./dist/hardware.d.ts",
+        "import": "./dist/hardware.js"
+      },
+      "./core": {
+        "types": "./dist/core.d.ts",
+        "import": "./dist/core.js"
+      },
+      "./engine": {
+        "types": "./dist/engine-tools.d.ts",
+        "import": "./dist/engine-tools.js"
+      },
+      "./diagnostics": {
+        "types": "./dist/diagnostics.d.ts",
+        "import": "./dist/diagnostics.js"
+      }
+    }
+  }
+}

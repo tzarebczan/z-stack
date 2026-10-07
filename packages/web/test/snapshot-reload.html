@@ -1,0 +1,10 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Large snapshot reload diagnostic</title>
+<h1>Large snapshot reload diagnostic</h1>
+<p>Use an isolated browser profile at <code>127.0.0.1:15181</code>.
+Writes 160 random-data 40 MB snapshots, reloads, and verifies the final bytes.
+Verifies chunked storage in normal and private browser contexts. Existing records are refused. No keys or network wallet requests are used.</p>
+<button id="run">Run disposable test</button>
+<pre id="results">Ready</pre>
+<script type="module" src="./snapshot-reload.ts"></script>

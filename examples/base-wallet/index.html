@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Optional Base wallet · z-stack</title>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">z-stack / Base Sepolia</p>
+      <h1>A wallet you own.</h1>
+      <p>This example uses testnet only. Use a disposable recovery phrase.</p>
+      <form id="connect">
+        <label
+          >RPC endpoint<input
+            id="rpc"
+            type="url"
+            value="https://sepolia.base.org"
+            required /></label
+        ><label
+          >Recovery phrase<input
+            id="secret"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            required /></label
+        ><button>Open Base wallet</button>
+      </form>
+      <section id="wallet" hidden>
+        <h2>Your Base wallet</h2>
+        <output id="address"></output>
+        <p id="balance"></p>
+        <button id="refresh" type="button">Refresh balance</button
+        ><button id="disconnect" type="button">Disconnect</button>
+        <form id="payment">
+          <label
+            >Asset<select id="asset">
+              <option value="usdc">USDC</option>
+              <option value="eth">ETH</option>
+            </select></label
+          ><label>Recipient<input id="recipient" required autocomplete="off" /></label
+          ><label>Amount<input id="amount" inputmode="decimal" required /></label
+          ><button>Review payment</button>
+        </form>
+        <form id="approval" hidden>
+          <h2>Review payment</h2>
+          <p id="review"></p>
+          <label
+            >Unlock with your recovery phrase<input
+              id="unlock"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              required /></label
+          ><button>Confirm and send</button><button id="cancel" type="button">Cancel</button>
+        </form>
+        <button id="status" type="button" hidden>Check saved payment</button>
+        <button id="retry" type="button" hidden>Retry saved transaction</button>
+        <button id="archive" type="button" hidden>
+          I checked Base activity — archive unverified payment
+        </button>
+      </section>
+      <p id="message" role="status" aria-live="polite"></p>
+      <p class="note">
+        No account service, cloud backup or paymaster is connected. The phrase is cleared after each
+        unlock. Base activity is public.
+      </p>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

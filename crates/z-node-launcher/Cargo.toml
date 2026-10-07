@@ -1,0 +1,19 @@
+[package]
+name = "z-node-launcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Zakura snapshot bootstrap + Zaino/Tor compose helpers"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "z-node-launcher"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }

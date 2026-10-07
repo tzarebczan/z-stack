@@ -1,0 +1,82 @@
+{
+  "browser-wallet": [
+    "README.md",
+    "index.html",
+    "package.json",
+    "src/connection.ts",
+    "src/main.ts",
+    "src/send.ts",
+    "src/style.css",
+    "src/vite-env.d.ts",
+    "tsconfig.json",
+    "vite.config.ts",
+    "src/base.ts"
+  ],
+  "next-wallet": [
+    ".gitignore",
+    "README.md",
+    "app/about/page.tsx",
+    "app/globals.css",
+    "app/layout.tsx",
+    "app/page.tsx",
+    "components/RecoveryGuard.tsx",
+    "components/SecretForm.tsx",
+    "components/SendPayment.tsx",
+    "components/SetupChecks.tsx",
+    "components/WalletScreen.tsx",
+    "lib/connection.ts",
+    "lib/lifetime.ts",
+    "lib/recovery-memory.ts",
+    "lib/send.ts",
+    "lib/use-wallet.ts",
+    "next.config.mjs",
+    "package.json",
+    "scripts/next.mjs",
+    "tsconfig.json",
+    "components/BaseWallet.tsx"
+  ],
+  "react-wallet": [
+    "README.md",
+    "index.html",
+    "package.json",
+    "src/WalletPanel.tsx",
+    "src/lifetime.ts",
+    "src/main.tsx",
+    "src/style.css",
+    "tsconfig.json",
+    "vite.config.ts"
+  ],
+  "local-passkey": [
+    "README.md",
+    "index.html",
+    "package.json",
+    "src/main.ts",
+    "src/style.css",
+    "tsconfig.json",
+    "vite.config.ts"
+  ],
+  "remote-backup": [
+    ".gitignore",
+    "README.md",
+    "index.html",
+    "package.json",
+    "server/app.ts",
+    "server/database.test.ts",
+    "server/database.ts",
+    "server/main.ts",
+    "server/record.ts",
+    "src/main.ts",
+    "src/providers.ts",
+    "src/style.css",
+    "tsconfig.json",
+    "vite.config.ts"
+  ],
+  "base-wallet": [
+    "README.md",
+    "index.html",
+    "package.json",
+    "src/main.ts",
+    "src/style.css",
+    "tsconfig.json"
+  ]
+}

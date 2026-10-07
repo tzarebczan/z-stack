@@ -1,0 +1,402 @@
+diff --git a/zakura-bls12-381/src/lib.rs b/zakura-bls12-381/src/lib.rs
+index c3e28d7..6712fdd 100644
+--- a/zakura-bls12-381/src/lib.rs
++++ b/zakura-bls12-381/src/lib.rs
+@@ -36,6 +36,8 @@ mod tests;
+ 
+ #[macro_use]
+ mod util;
++#[cfg(any(target_arch = "wasm32", test))]
++mod wasm32;
+ 
+ /// Notes about how the BLS12-381 elliptic curve is designed, specified
+ /// and implemented by this library.
+diff --git a/zakura-bls12-381/src/scalar.rs b/zakura-bls12-381/src/scalar.rs
+index 59db476..0cd8a95 100644
+--- a/zakura-bls12-381/src/scalar.rs
++++ b/zakura-bls12-381/src/scalar.rs
+@@ -339,6 +339,19 @@ impl Scalar {
+     /// Squares this element.
+     #[inline]
+     pub const fn square(&self) -> Scalar {
++        #[cfg(target_arch = "wasm32")]
++        {
++            Scalar(crate::wasm32::square(&self.0, &MODULUS.0))
++        }
++        #[cfg(not(target_arch = "wasm32"))]
++        {
++            self.square_u64()
++        }
++    }
++
++    #[cfg(not(target_arch = "wasm32"))]
++    #[inline(always)]
++    const fn square_u64(&self) -> Scalar {
+         let (r1, carry) = mac(0, self.0[0], self.0[1], 0);
+         let (r2, carry) = mac(0, self.0[0], self.0[2], carry);
+         let (r3, r4) = mac(0, self.0[0], self.0[3], carry);
+@@ -552,6 +565,19 @@ impl Scalar {
+     /// Multiplies `rhs` by `self`, returning the result.
+     #[inline]
+     pub const fn mul(&self, rhs: &Self) -> Self {
++        #[cfg(target_arch = "wasm32")]
++        {
++            Scalar(crate::wasm32::mul(&self.0, &rhs.0, &MODULUS.0))
++        }
++        #[cfg(not(target_arch = "wasm32"))]
++        {
++            self.mul_u64(rhs)
++        }
++    }
++
++    #[cfg(not(target_arch = "wasm32"))]
++    #[inline(always)]
++    const fn mul_u64(&self, rhs: &Self) -> Self {
+         // Schoolbook multiplication
+ 
+         let (r0, carry) = mac(0, self.0[0], rhs.0[0], 0);
+diff --git a/zakura-bls12-381/src/util.rs b/zakura-bls12-381/src/util.rs
+index bd25dd0..bd5b84a 100644
+--- a/zakura-bls12-381/src/util.rs
++++ b/zakura-bls12-381/src/util.rs
+@@ -15,8 +15,41 @@ pub const fn sbb(a: u64, b: u64, borrow: u64) -> (u64, u64) {
+ /// Compute a + (b * c) + carry, returning the result and the new carry over.
+ #[inline(always)]
+ pub const fn mac(a: u64, b: u64, c: u64, carry: u64) -> (u64, u64) {
+-    let ret = (a as u128) + ((b as u128) * (c as u128)) + (carry as u128);
+-    (ret as u64, (ret >> 64) as u64)
++    #[cfg(target_arch = "wasm32")]
++    {
++        // wasm32 has no 64x64->128 multiply, so LLVM lowers a `u128` product
++        // to a `__multi3` libcall that computes a full 128x128 product. Four
++        // 32x32->64 products (one `i64.mul` each) are exact here; this one
++        // change removes about half of a WASM wallet scan's run time.
++        let (lo, hi) = mul_wide_u32_parts(b, c);
++        let (lo, c1) = lo.overflowing_add(a);
++        let (lo, c2) = lo.overflowing_add(carry);
++        // b * c + a + carry < 2^128, so the high word cannot overflow.
++        (lo, hi + c1 as u64 + c2 as u64)
++    }
++    #[cfg(not(target_arch = "wasm32"))]
++    {
++        let ret = (a as u128) + ((b as u128) * (c as u128)) + (carry as u128);
++        (ret as u64, (ret >> 64) as u64)
++    }
++}
++
++/// Returns the low and high words of `x * y` using only 32x32->64 products.
++#[cfg(any(target_arch = "wasm32", test))]
++#[inline(always)]
++pub const fn mul_wide_u32_parts(x: u64, y: u64) -> (u64, u64) {
++    let (x0, x1) = (x & 0xffff_ffff, x >> 32);
++    let (y0, y1) = (y & 0xffff_ffff, y >> 32);
++    let p00 = x0 * y0;
++    let p01 = x0 * y1;
++    let p10 = x1 * y0;
++    let p11 = x1 * y1;
++    // At most 3 * (2^32 - 1), so this sum cannot overflow.
++    let mid = (p00 >> 32) + (p01 & 0xffff_ffff) + (p10 & 0xffff_ffff);
++    (
++        (p00 & 0xffff_ffff) | (mid << 32),
++        p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32),
++    )
+ }
+ 
+ macro_rules! impl_add_binop_specify_output {
+@@ -172,3 +205,30 @@ macro_rules! impl_binops_multiplicative {
+         }
+     };
+ }
++
++#[cfg(test)]
++mod wasm32_mac_tests {
++    use super::mul_wide_u32_parts;
++
++    #[test]
++    fn split_product_matches_u128() {
++        let mut x = 0x9e37_79b9_7f4a_7c15u64;
++        let edges = [0, 1, 2, 0xffff_ffff, 0x1_0000_0000, u64::MAX - 1, u64::MAX];
++        for &a in &edges {
++            for &b in &edges {
++                let p = (a as u128) * (b as u128);
++                assert_eq!(mul_wide_u32_parts(a, b), (p as u64, (p >> 64) as u64));
++            }
++        }
++        for _ in 0..100_000 {
++            // xorshift64*
++            x ^= x >> 12;
++            x ^= x << 25;
++            x ^= x >> 27;
++            let a = x.wrapping_mul(0x2545_f491_4f6c_dd1d);
++            let b = a.rotate_left(29) ^ x;
++            let p = (a as u128) * (b as u128);
++            assert_eq!(mul_wide_u32_parts(a, b), (p as u64, (p >> 64) as u64));
++        }
++    }
++}
+diff --git a/zakura-bls12-381/src/wasm32.rs b/zakura-bls12-381/src/wasm32.rs
+new file mode 100644
+index 0000000..7cc37b8
+--- /dev/null
++++ b/zakura-bls12-381/src/wasm32.rs
+@@ -0,0 +1,260 @@
++//! Montgomery multiplication and squaring for `wasm32`.
++//!
++//! WebAssembly has no 64x64->128 multiply, so the four-limb `mac` chains cost
++//! four `i64.mul`s each plus the carry logic that joins them. This backend
++//! works on nine 29-bit limbs instead: every limb product fits in 58 bits, so
++//! a column can accumulate all of its products (at most 17 of them) in a
++//! `u64` without carrying, and each product is a single `i64.mul` and
++//! `i64.add`.
++//!
++//! The representation is unchanged: four little-endian `u64` limbs in
++//! Montgomery form with `R = 2^256`. The reduction removes eight 29-bit
++//! digits and then one 24-bit digit, 256 bits in total, so results are
++//! identical to the portable multiplication limb for limb.
++//!
++//! Requirements on the modulus `p`, checked by `debug_assert`s and the tests:
++//! `p = 1 (mod 2^29)`, which makes the Montgomery constant `-p^-1` equal to
++//! `-1` modulo `2^29` and `2^24`, and `p < 2^255`, which keeps a result below
++//! `2p` inside four limbs. The Pallas, Vesta and BLS12-381 scalar moduli all
++//! end in the 32-bit limb `0x00000001`.
++//!
++//! Inputs may be any value below `2^256` for the left operand when the right
++//! operand is below `p`, the same contract as the portable reduction; the
++//! output is canonical.
++
++const M29: u64 = (1 << 29) - 1;
++const M24: u64 = (1 << 24) - 1;
++
++/// Splits four 64-bit limbs into nine 29-bit limbs (the last one 24 bits).
++#[inline(always)]
++const fn to29(x: &[u64; 4]) -> [u64; 9] {
++    [
++        x[0] & M29,
++        (x[0] >> 29) & M29,
++        ((x[0] >> 58) | (x[1] << 6)) & M29,
++        (x[1] >> 23) & M29,
++        ((x[1] >> 52) | (x[2] << 12)) & M29,
++        (x[2] >> 17) & M29,
++        ((x[2] >> 46) | (x[3] << 18)) & M29,
++        (x[3] >> 11) & M29,
++        x[3] >> 40,
++    ]
++}
++
++/// Returns `x * y * 2^-256 mod p`.
++#[inline(always)]
++pub(crate) const fn mul(x: &[u64; 4], y: &[u64; 4], p: &[u64; 4]) -> [u64; 4] {
++    let a = to29(x);
++    let b = to29(y);
++    let mut t = [0u64; 18];
++    let mut i = 0;
++    while i < 9 {
++        let mut j = 0;
++        while j < 9 {
++            t[i + j] += a[i] * b[j];
++            j += 1;
++        }
++        i += 1;
++    }
++    reduce(t, p)
++}
++
++/// Returns `x^2 * 2^-256 mod p`.
++#[inline(always)]
++pub(crate) const fn square(x: &[u64; 4], p: &[u64; 4]) -> [u64; 4] {
++    let a = to29(x);
++    let mut t = [0u64; 18];
++    let mut i = 0;
++    while i < 9 {
++        t[2 * i] += a[i] * a[i];
++        // Off-diagonal products appear twice; 2 * a[i] < 2^30 keeps each
++        // doubled product below 2^59.
++        let d = a[i] << 1;
++        let mut j = i + 1;
++        while j < 9 {
++            t[i + j] += d * a[j];
++            j += 1;
++        }
++        i += 1;
++    }
++    reduce(t, p)
++}
++
++/// Montgomery-reduces the 18 unnormalized columns of a product.
++///
++/// Column bound: at most nine limb products (below `2^58`, or five doubled
++/// ones below `2^59` when squaring), eight reduction products below `2^58`
++/// and a carry below `2^34`, so every column stays below `2^63`.
++#[inline(always)]
++const fn reduce(mut t: [u64; 18], p: &[u64; 4]) -> [u64; 4] {
++    debug_assert!(p[0] & M29 == 1);
++    debug_assert!(p[3] >> 63 == 0);
++    let q = to29(p);
++
++    // Eight 29-bit rounds. With p = 1 mod 2^29 the quotient digit is simply
++    // -t[k] mod 2^29, and adding it clears the low 29 bits of column k.
++    let mut k = 0;
++    while k < 8 {
++        let m = t[k].wrapping_neg() & M29;
++        t[k + 1] += (t[k] + m) >> 29;
++        // q[0] = 1 was folded into the line above; zero limbs of sparse
++        // moduli (Pallas and Vesta) fold away once this is inlined.
++        let mut j = 1;
++        while j < 9 {
++            t[k + j] += m * q[j];
++            j += 1;
++        }
++        k += 1;
++    }
++
++    // A 24-bit round brings the total shift to 8 * 29 + 24 = 256. Column 8
++    // is then divisible by 2^24; the shift happens while repacking.
++    let m = t[8].wrapping_neg() & M24;
++    t[8] += m;
++    let mut j = 1;
++    while j < 9 {
++        t[8 + j] += m * q[j];
++        j += 1;
++    }
++
++    // Normalize columns 8..=17 into 29-bit limbs.
++    let mut i = 8;
++    while i < 17 {
++        t[i + 1] += t[i] >> 29;
++        t[i] &= M29;
++        i += 1;
++    }
++
++    // Repack (sum of t[8 + i] * 2^(29 i)) >> 24 into four u64 limbs. The value
++    // is below 2p < 2^256, so no bits are lost.
++    let r = [
++        (t[8] >> 24) | (t[9] << 5) | (t[10] << 34) | (t[11] << 63),
++        (t[11] >> 1) | (t[12] << 28) | (t[13] << 57),
++        (t[13] >> 7) | (t[14] << 22) | (t[15] << 51),
++        (t[15] >> 13) | (t[16] << 16) | (t[17] << 45),
++    ];
++
++    // Subtract p once if r >= p.
++    let (d0, b0) = r[0].overflowing_sub(p[0]);
++    let (d1, b1a) = r[1].overflowing_sub(p[1]);
++    let (d1, b1b) = d1.overflowing_sub(b0 as u64);
++    let (d2, b2a) = r[2].overflowing_sub(p[2]);
++    let (d2, b2b) = d2.overflowing_sub((b1a | b1b) as u64);
++    let (d3, b3a) = r[3].overflowing_sub(p[3]);
++    let (d3, b3b) = d3.overflowing_sub((b2a | b2b) as u64);
++    let keep = 0u64.wrapping_sub((b3a | b3b) as u64);
++    [
++        (r[0] & keep) | (d0 & !keep),
++        (r[1] & keep) | (d1 & !keep),
++        (r[2] & keep) | (d2 & !keep),
++        (r[3] & keep) | (d3 & !keep),
++    ]
++}
++
++#[cfg(test)]
++mod tests {
++    //! Runs on every target so native CI covers this backend too.
++
++    /// Classical 4x64 Montgomery multiplication with `u128` arithmetic.
++    fn reference(x: &[u64; 4], y: &[u64; 4], p: &[u64; 4]) -> [u64; 4] {
++        let inv = {
++            // -p^-1 mod 2^64 by Newton iteration.
++            let mut v = 1u64;
++            for _ in 0..6 {
++                v = v.wrapping_mul(2u64.wrapping_sub(p[0].wrapping_mul(v)));
++            }
++            v.wrapping_neg()
++        };
++        let mut t = [0u64; 9];
++        for &xi in x {
++            let mut c = 0u128;
++            for j in 0..4 {
++                let s = t[j] as u128 + (xi as u128) * (y[j] as u128) + c;
++                t[j] = s as u64;
++                c = s >> 64;
++            }
++            let s = t[4] as u128 + c;
++            t[4] = s as u64;
++            t[5] = (s >> 64) as u64;
++            let m = t[0].wrapping_mul(inv);
++            let mut c = (t[0] as u128 + (m as u128) * (p[0] as u128)) >> 64;
++            for j in 1..4 {
++                let s = t[j] as u128 + (m as u128) * (p[j] as u128) + c;
++                t[j - 1] = s as u64;
++                c = s >> 64;
++            }
++            let s = t[4] as u128 + c;
++            t[3] = s as u64;
++            t[4] = t[5] + (s >> 64) as u64;
++        }
++        let r = [t[0], t[1], t[2], t[3]];
++        let mut d = [0u64; 4];
++        let mut borrow = 0u128;
++        for i in 0..4 {
++            let s = (r[i] as u128).wrapping_sub(p[i] as u128 + borrow);
++            d[i] = s as u64;
++            borrow = (s >> 127) & 1;
++        }
++        if t[4] == 0 && borrow == 1 { r } else { d }
++    }
++
++    fn lt(a: &[u64; 4], b: &[u64; 4]) -> bool {
++        (0..4).rev().find(|&i| a[i] != b[i]).is_some_and(|i| a[i] < b[i])
++    }
++
++    struct Rng(u64);
++    impl Rng {
++        fn next(&mut self) -> u64 {
++            self.0 ^= self.0 >> 12;
++            self.0 ^= self.0 << 25;
++            self.0 ^= self.0 >> 27;
++            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
++        }
++        fn below(&mut self, p: &[u64; 4]) -> [u64; 4] {
++            loop {
++                let top = 64 - p[3].leading_zeros();
++                let v = [self.next(), self.next(), self.next(), self.next() >> (64 - top)];
++                if lt(&v, p) {
++                    return v;
++                }
++            }
++        }
++    }
++
++    const MODULI: [[u64; 4]; 3] = [
++        // Pallas
++        [0x992d30ed00000001, 0x224698fc094cf91b, 0, 0x4000000000000000],
++        // Vesta
++        [0x8c46eb2100000001, 0x224698fc0994a8dd, 0, 0x4000000000000000],
++        // BLS12-381 scalar field
++        [
++            0xffffffff00000001,
++            0x53bda402fffe5bfe,
++            0x3339d80809a1d805,
++            0x73eda753299d7d48,
++        ],
++    ];
++
++    #[test]
++    fn matches_classical_montgomery() {
++        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
++        for p in &MODULI {
++            let pm1 = [p[0] - 1, p[1], p[2], p[3]];
++            let mut edges = vec![[0; 4], [1, 0, 0, 0], pm1, [p[0] - 2, p[1], p[2], p[3]]];
++            edges.push([u64::MAX, u64::MAX, u64::MAX, u64::MAX]);
++            for x in &edges {
++                for y in &edges[..4] {
++                    assert_eq!(super::mul(x, y, p), reference(x, y, p), "{p:x?}");
++                }
++            }
++            for _ in 0..20_000 {
++                let (x, y) = (rng.below(p), rng.below(p));
++                assert_eq!(super::mul(&x, &y, p), reference(&x, &y, p));
++                assert_eq!(super::square(&x, p), reference(&x, &x, p));
++                // Unreduced left operand, as `from_u512` passes.
++                let w = [rng.next(), rng.next(), rng.next(), rng.next()];
++                assert_eq!(super::mul(&w, &y, p), reference(&w, &y, p));
++            }
++        }
++    }
++}

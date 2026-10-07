@@ -1,0 +1,13 @@
+import { mkdirSync, chmodSync } from "node:fs";
+import { resolve } from "node:path";
+import { BackupDatabase } from "./database.ts";
+import { createBackupServer } from "./app.ts";
+const directory = resolve(".data");
+mkdirSync(directory, { recursive: true, mode: 0o700 });
+const path = resolve(directory, "backup.sqlite");
+const database = new BackupDatabase(path); chmodSync(path, 0o600);
+const server = createBackupServer(database, process.env.Z_STACK_BACKUP_EXAMPLE_ORIGIN ?? "http://localhost:5173");
+const port = Number(process.env.Z_STACK_BACKUP_EXAMPLE_PORT ?? 3010);
+if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("Invalid example port.");
+server.listen(port, "127.0.0.1", () => console.log(`BACKUP_READY:${(server.address() as { port: number }).port}`));
+for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => server.close(() => { database.close(); process.exit(0); }));

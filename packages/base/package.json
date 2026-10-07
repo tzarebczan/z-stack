@@ -1,0 +1,25 @@
+{
+  "name": "@z-stack/base",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "Optional Base wallet and explicit Simple7702 paymaster primitives for z-stack integrations",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "@z-stack/source": "./src/index.ts", "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./smart-account": { "@z-stack/source": "./src/smart-account/index.ts", "types": "./dist/smart-account/index.d.ts", "import": "./dist/smart-account/index.js" }
+  },
+  "publishConfig": { "access": "public", "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./smart-account": { "types": "./dist/smart-account/index.d.ts", "import": "./dist/smart-account/index.js" }
+  } },
+  "files": ["dist", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt", "THIRD_PARTY_DEPENDENCIES.json"],
+  "scripts": { "build": "node ../../scripts/build-package.mjs base", "typecheck": "tsc --noEmit", "prepack": "node ../../scripts/check-package.mjs base" },
+  "dependencies": { "viem": "2.44.4" },
+  "engines": { "node": ">=22.18.0" },
+  "repository": { "type": "git", "url": "https://github.com/tzarebczan/z-stack.git", "directory": "packages/base" },
+  "homepage": "https://github.com/tzarebczan/z-stack/tree/main/packages/base",
+  "bugs": { "url": "https://github.com/tzarebczan/z-stack/issues" }
+}

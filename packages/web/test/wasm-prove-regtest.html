@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>WASM regtest proving acceptance</title>
+<style>body{font:16px system-ui;max-width:1100px;margin:40px auto;padding:20px}button{padding:12px;margin:4px}pre{white-space:pre-wrap}</style>
+<h1>WASM regtest proving acceptance</h1>
+<p>Isolated <code>127.0.0.1:15179</code> only. Creates a fresh disposable regtest wallet and scans existing history before its first receipt.
+The coordinator funds the displayed address and mines; this page then scans the receipt, reloads its saved wallet, and proves a 5,000-zatoshi return to the public faucet in a real worker.
+The seed stays in the SDK's current browser session; it is never displayed or exported. Existing wallet data is refused. This page cannot mine.</p>
+<p>Each phase requires its own button. Only <strong>Prove and submit return</strong> broadcasts a transaction; the coordinator must authorize that phase first.</p>
+<button id="prepare">Prepare fresh fixture (read-only chain)</button>
+<button id="receipt" disabled>Scan funded receipt and reload</button>
+<button id="send" disabled>Prove and submit 5,000-zatoshi return</button>
+<button id="confirm" disabled>Confirm mined return and clean up</button>
+<button id="cleanup" disabled>Remove this fixture</button>
+<pre id="results">Ready. Prepare only after the coordinator confirms the isolated regtest endpoints.</pre>
+<script type="module" src="./wasm-prove-regtest.ts"></script></html>

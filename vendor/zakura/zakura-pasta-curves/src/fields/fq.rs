@@ -1,0 +1,1907 @@
+use core::fmt;
+use core::ops::{Add, Mul, Neg, Sub};
+
+use ff::{Field, FromUniformBytes, PrimeField, WithSmallOrderMulGroup};
+use rand::TryRng;
+use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
+
+#[cfg(feature = "sqrt-table")]
+use crate::once::OnceTable;
+
+#[cfg(feature = "bits")]
+use ff::{FieldBits, PrimeFieldBits};
+
+use super::portable;
+use crate::arithmetic::{SqrtTableHelpers, adc, mac, sbb};
+#[cfg(all(feature = "deferred", target_arch = "aarch64"))]
+use crate::deferred::INNER_PRODUCT_BLOCK_SIZE;
+#[cfg(feature = "deferred")]
+use crate::deferred::{DeferredField, Product};
+
+#[cfg(feature = "sqrt-table")]
+use crate::arithmetic::SqrtTables;
+
+/// This represents an element of $\mathbb{F}_q$ where
+///
+/// `q = 0x40000000000000000000000000000000224698fc0994a8dd8c46eb2100000001`
+///
+/// is the base field of the Vesta curve.
+// The internal representation of this type is four 64-bit unsigned
+// integers in little-endian order. `Fq` values are always in
+// Montgomery form; i.e., Fq(a) = aR mod q, with R = 2^256.
+#[derive(Clone, Copy, Eq)]
+#[repr(transparent)]
+pub struct Fq(pub(crate) [u64; 4]);
+
+impl fmt::Debug for Fq {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let tmp = self.to_repr();
+        write!(f, "0x")?;
+        for &b in tmp.iter().rev() {
+            write!(f, "{:02x}", b)?;
+        }
+        Ok(())
+    }
+}
+
+impl From<bool> for Fq {
+    fn from(bit: bool) -> Fq {
+        if bit { Fq::one() } else { Fq::zero() }
+    }
+}
+
+impl From<u64> for Fq {
+    fn from(val: u64) -> Fq {
+        Fq([val, 0, 0, 0]) * R2
+    }
+}
+
+impl ConstantTimeEq for Fq {
+    fn ct_eq(&self, other: &Self) -> Choice {
+        self.0[0].ct_eq(&other.0[0])
+            & self.0[1].ct_eq(&other.0[1])
+            & self.0[2].ct_eq(&other.0[2])
+            & self.0[3].ct_eq(&other.0[3])
+    }
+}
+
+impl PartialEq for Fq {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.eq_vartime(other)
+    }
+}
+
+impl core::cmp::Ord for Fq {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        let left = self.to_repr();
+        let right = other.to_repr();
+        left.iter()
+            .zip(right.iter())
+            .rev()
+            .find_map(|(left_byte, right_byte)| match left_byte.cmp(right_byte) {
+                core::cmp::Ordering::Equal => None,
+                res => Some(res),
+            })
+            .unwrap_or(core::cmp::Ordering::Equal)
+    }
+}
+
+impl core::cmp::PartialOrd for Fq {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl ConditionallySelectable for Fq {
+    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
+        Fq([
+            u64::conditional_select(&a.0[0], &b.0[0], choice),
+            u64::conditional_select(&a.0[1], &b.0[1], choice),
+            u64::conditional_select(&a.0[2], &b.0[2], choice),
+            u64::conditional_select(&a.0[3], &b.0[3], choice),
+        ])
+    }
+}
+
+/// Constant representing the modulus
+/// q = 0x40000000000000000000000000000000224698fc0994a8dd8c46eb2100000001
+const MODULUS: Fq = Fq([
+    0x8c46eb2100000001,
+    0x224698fc0994a8dd,
+    0x0,
+    0x4000000000000000,
+]);
+
+/// The modulus as u32 limbs.
+#[cfg(not(target_pointer_width = "64"))]
+const MODULUS_LIMBS_32: [u32; 8] = [
+    0x0000_0001,
+    0x8c46_eb21,
+    0x0994_a8dd,
+    0x2246_98fc,
+    0x0000_0000,
+    0x0000_0000,
+    0x0000_0000,
+    0x4000_0000,
+];
+
+impl<'a> Neg for &'a Fq {
+    type Output = Fq;
+
+    #[inline]
+    fn neg(self) -> Fq {
+        self.neg()
+    }
+}
+
+impl Neg for Fq {
+    type Output = Fq;
+
+    #[inline]
+    fn neg(self) -> Fq {
+        -&self
+    }
+}
+
+impl<'a, 'b> Sub<&'b Fq> for &'a Fq {
+    type Output = Fq;
+
+    #[inline]
+    fn sub(self, rhs: &'b Fq) -> Fq {
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little",
+        ))]
+        {
+            Fq(super::aarch64_asm::sub(&self.0, &rhs.0, &MODULUS.0))
+        }
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little",
+        )))]
+        {
+            self.sub(rhs)
+        }
+    }
+}
+
+impl<'a, 'b> Add<&'b Fq> for &'a Fq {
+    type Output = Fq;
+
+    #[inline]
+    fn add(self, rhs: &'b Fq) -> Fq {
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little",
+        ))]
+        {
+            Fq(super::aarch64_asm::add(&self.0, &rhs.0, &MODULUS.0))
+        }
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little",
+        )))]
+        {
+            self.add(rhs)
+        }
+    }
+}
+
+impl<'a, 'b> Mul<&'b Fq> for &'a Fq {
+    type Output = Fq;
+
+    #[inline]
+    fn mul(self, rhs: &'b Fq) -> Fq {
+        self.mul_runtime(rhs)
+    }
+}
+
+impl_binops_additive!(Fq, Fq);
+impl_binops_multiplicative!(Fq, Fq);
+
+impl<T: ::core::borrow::Borrow<Fq>> ::core::iter::Sum<T> for Fq {
+    fn sum<I: Iterator<Item = T>>(iter: I) -> Self {
+        iter.fold(Self::ZERO, |acc, item| acc + item.borrow())
+    }
+}
+
+impl<T: ::core::borrow::Borrow<Fq>> ::core::iter::Product<T> for Fq {
+    fn product<I: Iterator<Item = T>>(iter: I) -> Self {
+        iter.fold(Self::ONE, |acc, item| acc * item.borrow())
+    }
+}
+
+/// INV = -(q^{-1} mod 2^64) mod 2^64
+const INV: u64 = 0x8c46eb20ffffffff;
+
+/// R = 2^256 mod q
+const R: Fq = Fq([
+    0x5b2b3e9cfffffffd,
+    0x992c350be3420567,
+    0xffffffffffffffff,
+    0x3fffffffffffffff,
+]);
+
+/// R^2 = 2^512 mod q
+const R2: Fq = Fq([
+    0xfc9678ff0000000f,
+    0x67bb433d891a16e3,
+    0x7fae231004ccf590,
+    0x096d41af7ccfdaa9,
+]);
+
+/// R^3 = 2^768 mod q
+const R3: Fq = Fq([
+    0x008b421c249dae4c,
+    0xe13bda50dba41326,
+    0x88fececb8e15cb63,
+    0x07dd97a06e6792c8,
+]);
+
+/// `GENERATOR = 5 mod q` is a generator of the `q - 1` order multiplicative
+/// subgroup, or in other words a primitive root of the field.
+const GENERATOR: Fq = Fq::from_raw([
+    0x0000_0000_0000_0005,
+    0x0000_0000_0000_0000,
+    0x0000_0000_0000_0000,
+    0x0000_0000_0000_0000,
+]);
+
+const S: u32 = 32;
+
+/// GENERATOR^t where t * 2^s + 1 = q
+/// with t odd. In other words, this
+/// is a 2^s root of unity.
+const ROOT_OF_UNITY: Fq = Fq::from_raw([
+    0xa70e2c1102b6d05f,
+    0x9bb97ea3c106f049,
+    0x9e5c4dfd492ae26e,
+    0x2de6a9b8746d3f58,
+]);
+
+/// GENERATOR^{2^s} where t * 2^s + 1 = q
+/// with t odd. In other words, this
+/// is a t root of unity.
+const DELTA: Fq = Fq::from_raw([
+    0x8494392472d1683c,
+    0xe3ac3376541d1140,
+    0x06f0a88e7f7949f8,
+    0x2237d54423724166,
+]);
+
+/// `(t - 1) // 2` where t * 2^s + 1 = p with t odd.
+#[cfg(any(test, not(feature = "sqrt-table")))]
+const T_MINUS1_OVER2: [u64; 4] = [
+    0x04ca_546e_c623_7590,
+    0x0000_0000_1123_4c7e,
+    0x0000_0000_0000_0000,
+    0x0000_0000_2000_0000,
+];
+
+impl Default for Fq {
+    #[inline]
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+impl Fq {
+    /// Returns zero, the additive identity.
+    #[inline]
+    pub const fn zero() -> Fq {
+        Fq([0, 0, 0, 0])
+    }
+
+    /// Returns one, the multiplicative identity.
+    #[inline]
+    pub const fn one() -> Fq {
+        R
+    }
+
+    /// Doubles this field element.
+    #[inline]
+    pub const fn double(&self) -> Fq {
+        // TODO: This can be achieved more efficiently with a bitshift.
+        self.add(self)
+    }
+
+    fn from_u512(limbs: [u64; 8]) -> Fq {
+        // We reduce an arbitrary 512-bit number by decomposing it into two 256-bit digits
+        // with the higher bits multiplied by 2^256. Thus, we perform two reductions
+        //
+        // 1. the lower bits are multiplied by R^2, as normal
+        // 2. the upper bits are multiplied by R^2 * 2^256 = R^3
+        //
+        // and computing their sum in the field. It remains to see that arbitrary 256-bit
+        // numbers can be placed into Montgomery form safely using the reduction. The
+        // reduction works so long as the product is less than R=2^256 multiplied by
+        // the modulus. This holds because for any `c` smaller than the modulus, we have
+        // that (2^256 - 1)*c is an acceptable product for the reduction. Therefore, the
+        // reduction always works so long as `c` is in the field; in this case it is either the
+        // constant `R2` or `R3`.
+        let d0 = Fq([limbs[0], limbs[1], limbs[2], limbs[3]]);
+        let d1 = Fq([limbs[4], limbs[5], limbs[6], limbs[7]]);
+        // Convert to Montgomery form. `d0` and `d1` are unreduced, so use the
+        // portable multiplication: its classical 8-limb reduction is valid for
+        // any 256-bit value times a canonical constant, with no precondition
+        // on the constant's limbs. The inline-assembly `mul` tolerates an
+        // unreduced lhs only while every rhs limb stays at most `2^64 - 4`
+        // (see `aarch64_asm.rs`); this cold path is not worth carrying that
+        // coupling, and hashing dominates its callers anyway.
+        Fq::mul(&d0, &R2).add(&Fq::mul(&d1, &R3))
+    }
+
+    /// Variable-time equality on the canonical Montgomery limbs.
+    #[inline(always)]
+    pub(crate) fn eq_vartime(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+
+    /// Converts from an integer represented in little endian
+    /// into its (congruent) `Fq` representation.
+    pub const fn from_raw(val: [u64; 4]) -> Self {
+        (&Fq(val)).mul(&R2)
+    }
+
+    /// Squares this element.
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub const fn square(&self) -> Fq {
+        #[cfg(target_arch = "x86_64")]
+        {
+            Fq(portable::square(&self.0, &MODULUS.0, INV))
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            Fq(super::wasm32::square(&self.0, &MODULUS.0))
+        }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
+        {
+            let u = self.square_unreduced();
+            Fq::montgomery_reduce(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7])
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(feature = "uninline-portable"), inline(always))]
+    const fn montgomery_reduce(
+        r0: u64,
+        r1: u64,
+        r2: u64,
+        r3: u64,
+        r4: u64,
+        r5: u64,
+        r6: u64,
+        r7: u64,
+    ) -> Self {
+        // The Montgomery reduction here is based on Algorithm 14.32 in
+        // Handbook of Applied Cryptography
+        // <http://cacr.uwaterloo.ca/hac/about/chap14.pdf>.
+
+        let k = r0.wrapping_mul(INV);
+        let (_, carry) = mac(r0, k, MODULUS.0[0], 0);
+        let (r1, carry) = mac(r1, k, MODULUS.0[1], carry);
+        let (r2, carry) = mac(r2, k, MODULUS.0[2], carry);
+        let (r3, carry) = mac(r3, k, MODULUS.0[3], carry);
+        let (r4, carry2) = adc(r4, 0, carry);
+
+        let k = r1.wrapping_mul(INV);
+        let (_, carry) = mac(r1, k, MODULUS.0[0], 0);
+        let (r2, carry) = mac(r2, k, MODULUS.0[1], carry);
+        let (r3, carry) = mac(r3, k, MODULUS.0[2], carry);
+        let (r4, carry) = mac(r4, k, MODULUS.0[3], carry);
+        let (r5, carry2) = adc(r5, carry2, carry);
+
+        let k = r2.wrapping_mul(INV);
+        let (_, carry) = mac(r2, k, MODULUS.0[0], 0);
+        let (r3, carry) = mac(r3, k, MODULUS.0[1], carry);
+        let (r4, carry) = mac(r4, k, MODULUS.0[2], carry);
+        let (r5, carry) = mac(r5, k, MODULUS.0[3], carry);
+        let (r6, carry2) = adc(r6, carry2, carry);
+
+        let k = r3.wrapping_mul(INV);
+        let (_, carry) = mac(r3, k, MODULUS.0[0], 0);
+        let (r4, carry) = mac(r4, k, MODULUS.0[1], carry);
+        let (r5, carry) = mac(r5, k, MODULUS.0[2], carry);
+        let (r6, carry) = mac(r6, k, MODULUS.0[3], carry);
+        let (r7, _) = adc(r7, carry2, carry);
+
+        // Result may be within MODULUS of the correct value
+        (&Fq([r4, r5, r6, r7])).sub(&MODULUS)
+    }
+
+    /// Multiplies `rhs` by `self`, returning the result.
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub const fn mul(&self, rhs: &Self) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        {
+            Fq(super::wasm32::mul(&self.0, &rhs.0, &MODULUS.0))
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let u = self.mul_unreduced(rhs);
+            Fq::montgomery_reduce(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7])
+        }
+    }
+
+    /// Multiplies `self` by `2^-exponent`.
+    #[inline]
+    pub(crate) fn mul_by_inverse_power_of_two(&self, exponent: u32) -> Self {
+        Fq(super::mul_by_inverse_power_of_two(
+            self.0, MODULUS.0, INV, exponent,
+        ))
+    }
+
+    #[inline]
+    fn mul_runtime(&self, rhs: &Self) -> Self {
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        ))]
+        {
+            Fq(super::aarch64_asm::mul(&self.0, &rhs.0, &MODULUS.0, INV))
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        )))]
+        {
+            self.mul(rhs)
+        }
+    }
+
+    #[inline]
+    fn square_runtime(&self) -> Self {
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        ))]
+        {
+            Fq(super::aarch64_asm::square(&self.0, &MODULUS.0, INV))
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        )))]
+        {
+            self.square()
+        }
+    }
+
+    /// Squares `self` `n` times (`n` must be at least 1), then multiplies the
+    /// result by `by`. The assembly backend keeps the accumulator in
+    /// registers for the whole chain.
+    #[inline]
+    fn sqr_n_mul_runtime(&self, n: u32, by: &Self) -> Self {
+        assert!(n >= 1);
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        ))]
+        {
+            Fq(super::aarch64_asm::sqr_n_mul(
+                &self.0, n as usize, &by.0, &MODULUS.0, INV,
+            ))
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        )))]
+        {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let mut acc = *self;
+                for _ in 0..n {
+                    acc = acc.square();
+                }
+                acc.mul(by)
+            }
+            // Leave the accumulator unreduced between squarings. The closing
+            // multiplication canonicalizes its result.
+            #[cfg(not(target_arch = "wasm32"))]
+            Fq(portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV)).mul(by)
+        }
+    }
+
+    /// Squares `self` `n` times (`n` must be at least 1). Reached through
+    /// [`SqrtTableHelpers`], which nothing uses without `sqrt-table`.
+    #[cfg_attr(not(feature = "sqrt-table"), allow(dead_code))]
+    #[inline]
+    fn sqr_n_runtime(&self, n: u32) -> Self {
+        assert!(n >= 1);
+
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        ))]
+        {
+            // Calling the dedicated single-square routine is faster than
+            // entering the repeated-squaring loop for a one-element chain.
+            if n == 1 {
+                self.square_runtime()
+            } else {
+                Fq(super::aarch64_asm::sqr_n(
+                    &self.0, n as usize, &MODULUS.0, INV,
+                ))
+            }
+        }
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        )))]
+        {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let mut acc = *self;
+                for _ in 0..n {
+                    acc = acc.square();
+                }
+                acc
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Fq(portable::canonicalize(
+                &portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV),
+                &MODULUS.0,
+            ))
+        }
+    }
+
+    /// Subtracts `rhs` from `self`, returning the result.
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub const fn sub(&self, rhs: &Self) -> Self {
+        let (d0, borrow) = sbb(self.0[0], rhs.0[0], 0);
+        let (d1, borrow) = sbb(self.0[1], rhs.0[1], borrow);
+        let (d2, borrow) = sbb(self.0[2], rhs.0[2], borrow);
+        let (d3, borrow) = sbb(self.0[3], rhs.0[3], borrow);
+
+        // If underflow occurred on the final limb, borrow = 0xfff...fff, otherwise
+        // borrow = 0x000...000. Thus, we use it as a mask to conditionally add the modulus.
+        let (d0, carry) = adc(d0, MODULUS.0[0] & borrow, 0);
+        let (d1, carry) = adc(d1, MODULUS.0[1] & borrow, carry);
+        let (d2, carry) = adc(d2, MODULUS.0[2] & borrow, carry);
+        let (d3, _) = adc(d3, MODULUS.0[3] & borrow, carry);
+
+        Fq([d0, d1, d2, d3])
+    }
+
+    /// Adds `rhs` to `self`, returning the result.
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub const fn add(&self, rhs: &Self) -> Self {
+        let (d0, carry) = adc(self.0[0], rhs.0[0], 0);
+        let (d1, carry) = adc(self.0[1], rhs.0[1], carry);
+        let (d2, carry) = adc(self.0[2], rhs.0[2], carry);
+        let (d3, _) = adc(self.0[3], rhs.0[3], carry);
+
+        // Attempt to subtract the modulus, to ensure the value
+        // is smaller than the modulus.
+        (&Fq([d0, d1, d2, d3])).sub(&MODULUS)
+    }
+
+    /// Negates `self`.
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub const fn neg(&self) -> Self {
+        // Subtract `self` from `MODULUS` to negate. Ignore the final
+        // borrow because it cannot underflow; self is guaranteed to
+        // be in the field.
+        let (d0, borrow) = sbb(MODULUS.0[0], self.0[0], 0);
+        let (d1, borrow) = sbb(MODULUS.0[1], self.0[1], borrow);
+        let (d2, borrow) = sbb(MODULUS.0[2], self.0[2], borrow);
+        let (d3, _) = sbb(MODULUS.0[3], self.0[3], borrow);
+
+        // `tmp` could be `MODULUS` if `self` was zero. Create a mask that is
+        // zero if `self` was zero, and `u64::max_value()` if self was nonzero.
+        let mask = (((self.0[0] | self.0[1] | self.0[2] | self.0[3]) == 0) as u64).wrapping_sub(1);
+
+        Fq([d0 & mask, d1 & mask, d2 & mask, d3 & mask])
+    }
+
+    /// Multiplies `rhs` by `self`, returning the unreduced 512-bit product.
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) const fn mul_unreduced(&self, rhs: &Self) -> [u64; 8] {
+        // Schoolbook multiplication
+
+        let (r0, carry) = mac(0, self.0[0], rhs.0[0], 0);
+        let (r1, carry) = mac(0, self.0[0], rhs.0[1], carry);
+        let (r2, carry) = mac(0, self.0[0], rhs.0[2], carry);
+        let (r3, r4) = mac(0, self.0[0], rhs.0[3], carry);
+
+        let (r1, carry) = mac(r1, self.0[1], rhs.0[0], 0);
+        let (r2, carry) = mac(r2, self.0[1], rhs.0[1], carry);
+        let (r3, carry) = mac(r3, self.0[1], rhs.0[2], carry);
+        let (r4, r5) = mac(r4, self.0[1], rhs.0[3], carry);
+
+        let (r2, carry) = mac(r2, self.0[2], rhs.0[0], 0);
+        let (r3, carry) = mac(r3, self.0[2], rhs.0[1], carry);
+        let (r4, carry) = mac(r4, self.0[2], rhs.0[2], carry);
+        let (r5, r6) = mac(r5, self.0[2], rhs.0[3], carry);
+
+        let (r3, carry) = mac(r3, self.0[3], rhs.0[0], 0);
+        let (r4, carry) = mac(r4, self.0[3], rhs.0[1], carry);
+        let (r5, carry) = mac(r5, self.0[3], rhs.0[2], carry);
+        let (r6, r7) = mac(r6, self.0[3], rhs.0[3], carry);
+
+        [r0, r1, r2, r3, r4, r5, r6, r7]
+    }
+
+    /// Squares this element, returning the unreduced 512-bit product.
+    /// On x86-64, `square` reduces the product's halves separately, so this
+    /// only feeds the `deferred` accumulator and the tests on that target.
+    #[cfg_attr(
+        all(target_arch = "x86_64", not(feature = "deferred")),
+        allow(dead_code)
+    )]
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    pub(crate) const fn square_unreduced(&self) -> [u64; 8] {
+        portable::square_wide(&self.0)
+    }
+}
+
+#[cfg(all(feature = "deferred", target_arch = "aarch64"))]
+#[inline(always)]
+fn inner_product_limbs(value: &Fq) -> &[u64; 4] {
+    &value.0
+}
+
+#[cfg(feature = "deferred")]
+impl DeferredField for Fq {
+    type Accumulator = Product<Fq>;
+
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    fn mul_accumulate(acc: &mut Self::Accumulator, a: &Fq, b: &Fq) {
+        acc.mul_accumulate(&a.0, &b.0);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    fn inner_product(lhs: &[Fq], rhs: &[Fq]) -> Fq {
+        assert_eq!(lhs.len(), rhs.len());
+        let mut accumulator = Self::Accumulator::default();
+        for (lhs, rhs) in lhs
+            .chunks(INNER_PRODUCT_BLOCK_SIZE)
+            .zip(rhs.chunks(INNER_PRODUCT_BLOCK_SIZE))
+        {
+            accumulator.mul_accumulate_block(lhs, rhs, inner_product_limbs);
+        }
+        Self::reduce(accumulator)
+    }
+
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    fn square_accumulate(acc: &mut Self::Accumulator, a: &Fq) {
+        acc.accumulate(a.square_unreduced());
+    }
+
+    #[cfg_attr(not(feature = "uninline-portable"), inline)]
+    fn reduce(acc: Self::Accumulator) -> Fq {
+        /// 2^448 mod q (little-endian limbs).
+        const B448: [u64; 4] = [
+            0xcc920bb9994a8dd9,
+            0x87a7dcbe1ff6e0d7,
+            0x496d41af7ccfdaa9,
+            0x0ee4537bfffffffc,
+        ];
+        let limbs = acc.partial_reduce(&B448, &R2.0);
+        Fq::montgomery_reduce(
+            limbs[0], limbs[1], limbs[2], limbs[3], limbs[4], limbs[5], limbs[6], limbs[7],
+        )
+    }
+}
+
+impl From<Fq> for [u8; 32] {
+    fn from(value: Fq) -> [u8; 32] {
+        value.to_repr()
+    }
+}
+
+impl<'a> From<&'a Fq> for [u8; 32] {
+    fn from(value: &'a Fq) -> [u8; 32] {
+        value.to_repr()
+    }
+}
+
+impl ff::Field for Fq {
+    const ZERO: Self = Self::zero();
+    const ONE: Self = Self::one();
+
+    fn try_random<R: TryRng + ?Sized>(rng: &mut R) -> Result<Self, R::Error> {
+        Ok(Self::from_u512([
+            rng.try_next_u64()?,
+            rng.try_next_u64()?,
+            rng.try_next_u64()?,
+            rng.try_next_u64()?,
+            rng.try_next_u64()?,
+            rng.try_next_u64()?,
+            rng.try_next_u64()?,
+            rng.try_next_u64()?,
+        ]))
+    }
+
+    #[inline(always)]
+    fn double(&self) -> Self {
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple",
+            target_pointer_width = "64",
+            target_endian = "little",
+        ))]
+        {
+            Self(super::aarch64_asm::add(&self.0, &self.0, &MODULUS.0))
+        }
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            target_vendor = "apple",
+            target_pointer_width = "64",
+            target_endian = "little",
+        )))]
+        {
+            self.double()
+        }
+    }
+
+    #[inline(always)]
+    fn square(&self) -> Self {
+        self.square_runtime()
+    }
+
+    #[inline(always)]
+    fn is_zero_vartime(&self) -> bool {
+        self.0 == [0, 0, 0, 0]
+    }
+
+    fn sqrt_ratio(num: &Self, div: &Self) -> (Choice, Self) {
+        #[cfg(feature = "sqrt-table")]
+        {
+            fq_tables().sqrt_ratio(num, div)
+        }
+
+        #[cfg(not(feature = "sqrt-table"))]
+        ff::helpers::sqrt_ratio_generic(num, div)
+    }
+
+    #[cfg(feature = "sqrt-table")]
+    fn sqrt_alt(&self) -> (Choice, Self) {
+        fq_tables().sqrt_alt(self)
+    }
+
+    /// Computes the square root of this element, if it exists.
+    fn sqrt(&self) -> CtOption<Self> {
+        #[cfg(feature = "sqrt-table")]
+        {
+            let (is_square, res) = fq_tables().sqrt_alt(self);
+            CtOption::new(res, is_square)
+        }
+
+        #[cfg(not(feature = "sqrt-table"))]
+        ff::helpers::sqrt_tonelli_shanks(self, &T_MINUS1_OVER2)
+    }
+
+    /// Computes the multiplicative inverse of this element,
+    /// failing if the element is zero.
+    ///
+    /// This runs a **variable-time** 62-divstep safegcd inversion (the
+    /// crate-internal `modinv62` module): its timing depends on the value
+    /// being inverted, which every inversion call site in this crate
+    /// tolerates. The result and the `is_some` flag are identical to the
+    /// previous (data-oblivious) Fermat implementation, which remains
+    /// expressible as `self.pow_vartime(&[q - 2])`.
+    fn invert(&self) -> CtOption<Self> {
+        match super::modinv62::invert::<super::modinv62::FqParams>(&self.0) {
+            Some(limbs) => CtOption::new(Fq(limbs), Choice::from(1)),
+            None => CtOption::new(Self::zero(), Choice::from(0)),
+        }
+    }
+
+    fn pow_vartime<S: AsRef<[u64]>>(&self, exp: S) -> Self {
+        // Walk the exponent bits MSB-first, fusing each run of squarings with
+        // the multiplication that follows it. This performs exactly the same
+        // field operations as the classic square-and-multiply loop, but lets
+        // the assembly backend keep the accumulator in registers for the
+        // whole run.
+        let mut res: Option<Self> = None;
+        let mut squares = 0;
+        for e in exp.as_ref().iter().rev() {
+            for i in (0..64).rev() {
+                if res.is_some() {
+                    squares += 1;
+                }
+
+                if ((*e >> i) & 1) == 1 {
+                    res = Some(match res {
+                        Some(res) => {
+                            let res = res.sqr_n_mul_runtime(squares, self);
+                            squares = 0;
+                            res
+                        }
+                        None => *self,
+                    });
+                }
+            }
+        }
+
+        let mut res = match res {
+            Some(res) => res,
+            None => return Self::one(),
+        };
+        // Flush any trailing zero bits as one lazy squaring chain.
+        if squares != 0 {
+            res = res.sqr_n_runtime(squares);
+        }
+        res
+    }
+}
+
+impl ff::PrimeField for Fq {
+    type Repr = [u8; 32];
+
+    const MODULUS: &'static str =
+        "0x40000000000000000000000000000000224698fc0994a8dd8c46eb2100000001";
+    const NUM_BITS: u32 = 255;
+    const CAPACITY: u32 = 254;
+    const TWO_INV: Self = Fq::from_raw([
+        0xc623759080000001,
+        0x11234c7e04ca546e,
+        0x0000000000000000,
+        0x2000000000000000,
+    ]);
+    const MULTIPLICATIVE_GENERATOR: Self = GENERATOR;
+    const S: u32 = S;
+    const ROOT_OF_UNITY: Self = ROOT_OF_UNITY;
+    const ROOT_OF_UNITY_INV: Self = Fq::from_raw([
+        0x57eecda0a84b6836,
+        0x4ad38b9084b8a80c,
+        0xf4c8f353124086c1,
+        0x2235e1a7415bf936,
+    ]);
+    const DELTA: Self = DELTA;
+
+    fn from_u128(v: u128) -> Self {
+        Fq::from_raw([v as u64, (v >> 64) as u64, 0, 0])
+    }
+
+    fn from_repr(repr: Self::Repr) -> CtOption<Self> {
+        let mut tmp = Fq([0, 0, 0, 0]);
+
+        tmp.0[0] = u64::from_le_bytes(repr[0..8].try_into().unwrap());
+        tmp.0[1] = u64::from_le_bytes(repr[8..16].try_into().unwrap());
+        tmp.0[2] = u64::from_le_bytes(repr[16..24].try_into().unwrap());
+        tmp.0[3] = u64::from_le_bytes(repr[24..32].try_into().unwrap());
+
+        // Try to subtract the modulus
+        let (_, borrow) = sbb(tmp.0[0], MODULUS.0[0], 0);
+        let (_, borrow) = sbb(tmp.0[1], MODULUS.0[1], borrow);
+        let (_, borrow) = sbb(tmp.0[2], MODULUS.0[2], borrow);
+        let (_, borrow) = sbb(tmp.0[3], MODULUS.0[3], borrow);
+
+        // If the element is smaller than MODULUS then the
+        // subtraction will underflow, producing a borrow value
+        // of 0xffff...ffff. Otherwise, it'll be zero.
+        let is_some = (borrow as u8) & 1;
+
+        // Convert to Montgomery form by computing
+        // (a.R^0 * R^2) / R = a.R
+        tmp *= &R2;
+
+        CtOption::new(tmp, Choice::from(is_some))
+    }
+
+    fn to_repr(&self) -> Self::Repr {
+        // Turn into canonical form by computing
+        // (a.R) / R = a
+        #[cfg(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        ))]
+        let tmp = Fq(super::aarch64_asm::from_mont(&self.0, &MODULUS.0, INV));
+
+        #[cfg(not(all(
+            feature = "aarch64-asm",
+            target_arch = "aarch64",
+            any(target_family = "unix", target_os = "none"),
+            target_pointer_width = "64",
+            target_endian = "little"
+        )))]
+        let tmp = Fq::montgomery_reduce(self.0[0], self.0[1], self.0[2], self.0[3], 0, 0, 0, 0);
+
+        let mut res = [0; 32];
+        res[0..8].copy_from_slice(&tmp.0[0].to_le_bytes());
+        res[8..16].copy_from_slice(&tmp.0[1].to_le_bytes());
+        res[16..24].copy_from_slice(&tmp.0[2].to_le_bytes());
+        res[24..32].copy_from_slice(&tmp.0[3].to_le_bytes());
+
+        res
+    }
+
+    fn is_odd(&self) -> Choice {
+        Choice::from(self.to_repr()[0] & 1)
+    }
+}
+
+#[cfg(all(feature = "bits", not(target_pointer_width = "64")))]
+type ReprBits = [u32; 8];
+
+#[cfg(all(feature = "bits", target_pointer_width = "64"))]
+type ReprBits = [u64; 4];
+
+#[cfg(feature = "bits")]
+impl PrimeFieldBits for Fq {
+    type ReprBits = ReprBits;
+
+    fn to_le_bits(&self) -> FieldBits<Self::ReprBits> {
+        let bytes = self.to_repr();
+
+        #[cfg(not(target_pointer_width = "64"))]
+        let limbs = [
+            u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            u32::from_le_bytes(bytes[16..20].try_into().unwrap()),
+            u32::from_le_bytes(bytes[20..24].try_into().unwrap()),
+            u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            u32::from_le_bytes(bytes[28..32].try_into().unwrap()),
+        ];
+
+        #[cfg(target_pointer_width = "64")]
+        let limbs = [
+            u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+        ];
+
+        FieldBits::new(limbs)
+    }
+
+    fn char_le_bits() -> FieldBits<Self::ReprBits> {
+        #[cfg(not(target_pointer_width = "64"))]
+        {
+            FieldBits::new(MODULUS_LIMBS_32)
+        }
+
+        #[cfg(target_pointer_width = "64")]
+        FieldBits::new(MODULUS.0)
+    }
+}
+
+#[cfg(feature = "sqrt-table")]
+static FQ_TABLES: OnceTable<SqrtTables<Fq>> = OnceTable::new();
+
+// The perfect hash parameters were found by searching the normalized
+// Montgomery representations of the order-256 subgroup. Construction and
+// `fq_sqrt_table_hash_is_perfect` exhaustively check their safety invariant.
+#[cfg(feature = "sqrt-table")]
+fn fq_tables() -> &'static SqrtTables<Fq> {
+    FQ_TABLES.get_or_init(|| SqrtTables::new(0x4B7FDD31))
+}
+
+impl SqrtTableHelpers for Fq {
+    fn pow_by_t_minus1_over2(&self) -> Self {
+        let s10 = self.square_runtime();
+        let s11 = s10 * self;
+        let s111 = s11.sqr_n_mul_runtime(1, self);
+        let s1001 = s111 * s10;
+        let s1011 = s1001 * s10;
+        let s1101 = s1011 * s10;
+        let sa = self.sqr_n_mul_runtime(129, self);
+        let sb = sa.sqr_n_mul_runtime(7, &s1001);
+        let sc = sb.sqr_n_mul_runtime(7, &s1101);
+        let sd = sc.sqr_n_mul_runtime(4, &s11);
+        let se = sd.sqr_n_mul_runtime(6, &s111);
+        let sf = se.sqr_n_mul_runtime(3, &s111);
+        let sg = sf.sqr_n_mul_runtime(10, &s1001);
+        let sh = sg.sqr_n_mul_runtime(4, &s1001);
+        let si = sh.sqr_n_mul_runtime(5, &s1001);
+        let sj = si.sqr_n_mul_runtime(5, &s1001);
+        let sk = sj.sqr_n_mul_runtime(3, &s1001);
+        let sl = sk.sqr_n_mul_runtime(4, &s1011);
+        let sm = sl.sqr_n_mul_runtime(4, &s1011);
+        let sn = sm.sqr_n_mul_runtime(5, &s11);
+        let so = sn.sqr_n_mul_runtime(4, self);
+        let sp = so.sqr_n_mul_runtime(5, &s11);
+        let sq = sp.sqr_n_mul_runtime(4, &s111);
+        let sr = sq.sqr_n_mul_runtime(5, &s1011);
+        let ss = sr.sqr_n_mul_runtime(3, self);
+        ss.sqr_n_runtime(4) // st
+    }
+
+    fn sqr_n(&self, n: u32) -> Self {
+        self.sqr_n_runtime(n)
+    }
+
+    fn sqr_n_mul(&self, n: u32, by: &Self) -> Self {
+        self.sqr_n_mul_runtime(n, by)
+    }
+
+    fn sqrt_hash_key(&self) -> u32 {
+        self.0[0] as u32
+    }
+}
+
+impl WithSmallOrderMulGroup<3> for Fq {
+    const ZETA: Self = Fq::from_raw([
+        0x2aa9d2e050aa0e4f,
+        0x0fed467d47c033af,
+        0x511db4d81cf70f5a,
+        0x06819a58283e528e,
+    ]);
+}
+
+impl FromUniformBytes<64> for Fq {
+    /// Converts a 512-bit little endian integer into
+    /// a `Fq` by reducing by the modulus.
+    fn from_uniform_bytes(bytes: &[u8; 64]) -> Fq {
+        Fq::from_u512([
+            u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+            u64::from_le_bytes(bytes[32..40].try_into().unwrap()),
+            u64::from_le_bytes(bytes[40..48].try_into().unwrap()),
+            u64::from_le_bytes(bytes[48..56].try_into().unwrap()),
+            u64::from_le_bytes(bytes[56..64].try_into().unwrap()),
+        ])
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl ec_gpu::GpuName for Fq {
+    fn name() -> alloc::string::String {
+        ec_gpu::name!()
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl ec_gpu::GpuField for Fq {
+    fn one() -> alloc::vec::Vec<u32> {
+        crate::fields::u64_to_u32(&R.0[..])
+    }
+
+    fn r2() -> alloc::vec::Vec<u32> {
+        crate::fields::u64_to_u32(&R2.0[..])
+    }
+
+    fn modulus() -> alloc::vec::Vec<u32> {
+        crate::fields::u64_to_u32(&MODULUS.0[..])
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    any(target_family = "unix", target_os = "none"),
+    target_pointer_width = "64",
+    target_endian = "little"
+))]
+fn aarch64_asm_portable_repr(value: Fq) -> [u8; 32] {
+    let value = Fq::montgomery_reduce(value.0[0], value.0[1], value.0[2], value.0[3], 0, 0, 0, 0);
+    let mut repr = [0; 32];
+    for (bytes, limb) in repr.chunks_exact_mut(8).zip(value.0) {
+        bytes.copy_from_slice(&limb.to_le_bytes());
+    }
+    repr
+}
+
+#[cfg(all(
+    test,
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    any(target_family = "unix", target_os = "none"),
+    target_pointer_width = "64",
+    target_endian = "little"
+))]
+fn aarch64_asm_check_repr(value: Fq) {
+    let portable = aarch64_asm_portable_repr(value);
+    assert_eq!(value.to_repr(), portable);
+    assert_eq!(Fq::from_repr(portable).unwrap(), value);
+    assert_eq!(value.is_odd().unwrap_u8(), portable[0] & 1);
+}
+
+#[cfg(all(
+    test,
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    any(target_family = "unix", target_os = "none"),
+    target_pointer_width = "64",
+    target_endian = "little"
+))]
+fn aarch64_asm_portable_cmp(lhs: Fq, rhs: Fq) -> core::cmp::Ordering {
+    aarch64_asm_portable_repr(lhs)
+        .iter()
+        .zip(aarch64_asm_portable_repr(rhs).iter())
+        .rev()
+        .find_map(|(lhs, rhs)| match lhs.cmp(rhs) {
+            core::cmp::Ordering::Equal => None,
+            ordering => Some(ordering),
+        })
+        .unwrap_or(core::cmp::Ordering::Equal)
+}
+
+#[cfg(all(
+    test,
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    any(target_family = "unix", target_os = "none"),
+    target_pointer_width = "64",
+    target_endian = "little"
+))]
+#[test]
+fn aarch64_asm_matches_portable_arithmetic() {
+    use rand::{Rng, SeedableRng};
+
+    let max_montgomery_residue = Fq([MODULUS.0[0] - 1, MODULUS.0[1], MODULUS.0[2], MODULUS.0[3]]);
+    // Raw Montgomery residues straddling the doubling reduction threshold.
+    let half_modulus = Fq(core::array::from_fn(|limb| {
+        (MODULUS.0[limb] >> 1) | (MODULUS.0.get(limb + 1).copied().unwrap_or(0) << 63)
+    }));
+    let raw_one = Fq([1, 0, 0, 0]);
+    let boundaries = [
+        Fq::zero(),
+        Fq::one(),
+        -Fq::one(),
+        Fq::from_raw([1, 0, 0, 0]),
+        max_montgomery_residue,
+        Fq::sub(&half_modulus, &raw_one),
+        half_modulus,
+        Fq::add(&half_modulus, &raw_one),
+        Fq::from_raw([u64::MAX; 4]),
+    ];
+
+    fn portable_sqr_n_mul(value: Fq, n: u32, by: Fq) -> Fq {
+        (0..n).fold(value, |acc, _| Fq::square(&acc)).mul(&by)
+    }
+
+    fn portable_sqr_n(value: Fq, n: u32) -> Fq {
+        (0..n).fold(value, |acc, _| Fq::square(&acc))
+    }
+
+    for lhs in boundaries {
+        aarch64_asm_check_repr(lhs);
+        assert_eq!(<Fq as Field>::double(&lhs), Fq::double(&lhs));
+        assert_eq!(<Fq as Field>::square(&lhs), Fq::square(&lhs));
+        for n in [1, 2, 7, 129] {
+            assert_eq!(lhs.sqr_n_runtime(n), portable_sqr_n(lhs, n));
+        }
+        for rhs in boundaries {
+            assert_eq!(lhs.cmp(&rhs), aarch64_asm_portable_cmp(lhs, rhs));
+            assert_eq!(&lhs * &rhs, Fq::mul(&lhs, &rhs));
+            assert_eq!(&lhs + &rhs, Fq::add(&lhs, &rhs));
+            assert_eq!(&lhs - &rhs, Fq::sub(&lhs, &rhs));
+            for n in [1, 2, 7] {
+                assert_eq!(
+                    lhs.sqr_n_mul_runtime(n, &rhs),
+                    portable_sqr_n_mul(lhs, n, rhs)
+                );
+            }
+        }
+    }
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0xa5; 16]);
+    // Exercise carries across each limb and sums immediately around p.
+    // These are raw Montgomery residues; 2^bit < p for bit < 254.
+    for bit in 0..254 {
+        let mut limbs = [0; 4];
+        limbs[bit / 64] = 1 << (bit % 64);
+        let lhs = Fq(limbs);
+        let complement = Fq::sub(&MODULUS, &lhs);
+        let raw_one = Fq([1, 0, 0, 0]);
+        // Subtracting one from a single set bit borrows across lower limbs;
+        // reversing the operands also exercises conditional modulus addition.
+        assert_eq!(&lhs - &raw_one, Fq::sub(&lhs, &raw_one));
+        assert_eq!(&raw_one - &lhs, Fq::sub(&raw_one, &lhs));
+        assert_eq!(&lhs - &lhs, Fq::ZERO);
+        assert_eq!(<Fq as Field>::double(&lhs), Fq::double(&lhs));
+        for rhs in [complement.sub(&Fq([1, 0, 0, 0])), complement] {
+            assert_eq!(&lhs + &rhs, Fq::add(&lhs, &rhs));
+        }
+        assert_eq!(&lhs + &lhs, Fq::double(&lhs));
+    }
+
+    for _ in 0..1024 {
+        let lhs = Fq::from_raw([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ]);
+        let rhs = Fq::from_raw([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ]);
+
+        assert_eq!(<Fq as Field>::double(&lhs), Fq::double(&lhs));
+        aarch64_asm_check_repr(lhs);
+        assert_eq!(lhs.cmp(&rhs), aarch64_asm_portable_cmp(lhs, rhs));
+        assert_eq!(&lhs * &rhs, Fq::mul(&lhs, &rhs));
+        assert_eq!(&lhs + &rhs, Fq::add(&lhs, &rhs));
+        assert_eq!(&lhs - &rhs, Fq::sub(&lhs, &rhs));
+        assert_eq!(&lhs + &lhs, Fq::double(&lhs));
+        assert_eq!(<Fq as Field>::square(&lhs), Fq::square(&lhs));
+        for n in [1, 129] {
+            assert_eq!(lhs.sqr_n_runtime(n), portable_sqr_n(lhs, n));
+            assert_eq!(
+                lhs.sqr_n_mul_runtime(n, &rhs),
+                portable_sqr_n_mul(lhs, n, rhs)
+            );
+        }
+    }
+}
+
+#[test]
+fn test_inv() {
+    // Compute -(r^{-1} mod 2^64) mod 2^64 by exponentiating
+    // by totient(2**64) - 1
+
+    let mut inv = 1u64;
+    for _ in 0..63 {
+        inv = inv.wrapping_mul(inv);
+        inv = inv.wrapping_mul(MODULUS.0[0]);
+    }
+    inv = inv.wrapping_neg();
+
+    assert_eq!(inv, INV);
+}
+
+#[test]
+fn test_sqrt() {
+    // NB: TWO_INV is standing in as a "random" field element
+    let v = (Fq::TWO_INV).square().sqrt().unwrap();
+    assert!(v == Fq::TWO_INV || (-v) == Fq::TWO_INV);
+}
+
+#[cfg(feature = "sqrt-table")]
+#[test]
+fn fq_sqrt_table_hash_is_perfect() {
+    fq_tables().assert_hash_table_is_consistent();
+}
+
+#[cfg(feature = "sqrt-table")]
+#[test]
+fn fq_sqrt_table_matches_tonelli_shanks() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x71; 16]);
+    for _ in 0..1_000 {
+        let input = Fq::random(&mut rng);
+        let table = input.sqrt();
+        let reference = ff::helpers::sqrt_tonelli_shanks(&input, &T_MINUS1_OVER2);
+
+        assert_eq!(table.is_some().unwrap_u8(), reference.is_some().unwrap_u8());
+        if bool::from(table.is_some()) {
+            let table = table.unwrap();
+            let reference = reference.unwrap();
+            assert!(table == reference || table == -reference);
+        }
+    }
+}
+
+#[test]
+fn test_sqrt_32bit_overflow() {
+    assert!((Fq::from(5)).sqrt().is_none().unwrap_u8() == 1);
+}
+
+#[test]
+fn low_half_reduction_matches_classical() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x3c; 16]);
+    let classical =
+        |t: [u64; 8]| Fq::montgomery_reduce(t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]);
+    let low_half = |t: [u64; 8]| {
+        Fq(super::portable::canonicalize(
+            &super::portable::montgomery_reduce_low_lazy(&t, &MODULUS.0, INV),
+            &MODULUS.0,
+        ))
+    };
+    // Any `t_lo + R * t_hi` with canonical `t_hi` is below `R * q`, the whole
+    // domain both reductions accept; squares and products are a subset.
+    for _ in 0..20_000 {
+        let hi = <Fq as ff::Field>::random(&mut rng);
+        let lo = <Fq as ff::Field>::random(&mut rng);
+        let t = [
+            lo.0[0], lo.0[1], lo.0[2], lo.0[3], hi.0[0], hi.0[1], hi.0[2], hi.0[3],
+        ];
+        assert_eq!(low_half(t), classical(t));
+        let a = <Fq as ff::Field>::random(&mut rng);
+        let u = a.square_unreduced();
+        assert_eq!(a.square(), classical(u));
+        assert_eq!(a.square(), low_half(u));
+    }
+
+    // Boundary values: zero, `R * (q - 1)`, an all-ones low half under both
+    // the largest canonical and a zero high half, and `(q - 1)^2`.
+    let max = -Fq::one();
+    let ones = [u64::MAX; 4];
+    for t in [
+        [0u64; 8],
+        [0, 0, 0, 0, max.0[0], max.0[1], max.0[2], max.0[3]],
+        [
+            ones[0], ones[1], ones[2], ones[3], max.0[0], max.0[1], max.0[2], max.0[3],
+        ],
+        [ones[0], ones[1], ones[2], ones[3], 0, 0, 0, 0],
+        max.square_unreduced(),
+    ] {
+        assert_eq!(low_half(t), classical(t));
+    }
+    assert_eq!(max.square(), classical(max.square_unreduced()));
+}
+
+#[test]
+fn sqr_n_chains_match_eager_squaring() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x71; 16]);
+
+    // Test chains much longer than any production caller uses.
+    for _ in 0..100 {
+        let a = <Fq as ff::Field>::random(&mut rng);
+        let by = <Fq as ff::Field>::random(&mut rng);
+
+        let mut eager = a;
+        for n in 1..=512u32 {
+            eager = eager.square();
+            assert_eq!(a.sqr_n_runtime(n), eager, "sqr_n, n = {n}");
+            assert_eq!(
+                a.sqr_n_mul_runtime(n, &by),
+                eager * by,
+                "sqr_n_mul, n = {n}"
+            );
+        }
+    }
+
+    assert_eq!(Fq::zero().sqr_n_runtime(7), Fq::zero());
+    assert_eq!(Fq::one().sqr_n_mul_runtime(7, &Fq::one()), Fq::one());
+    let a = <Fq as ff::Field>::random(&mut rng);
+    assert_eq!(a.sqr_n(9), a.sqr_n_runtime(9));
+    assert_eq!(a.sqr_n_mul(9, &a), a.sqr_n_mul_runtime(9, &a));
+}
+
+#[test]
+fn sqr_n_lazy_accumulator_stays_below_two_q() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x9d; 16]);
+
+    let two_q = {
+        let (d0, c0) = MODULUS.0[0].overflowing_add(MODULUS.0[0]);
+        let (d1, c1) = MODULUS.0[1].overflowing_add(MODULUS.0[1]);
+        let (d1, c2) = d1.overflowing_add(c0 as u64);
+        let (d2, c3) = MODULUS.0[2].overflowing_add(MODULUS.0[2]);
+        let (d2, c4) = d2.overflowing_add((c1 | c2) as u64);
+        let d3 = MODULUS.0[3]
+            .wrapping_add(MODULUS.0[3])
+            .wrapping_add((c3 | c4) as u64);
+        [d0, d1, d2, d3]
+    };
+    let below_two_q = |x: &[u64; 4]| {
+        let mut i = 4;
+        while i > 0 {
+            i -= 1;
+            if x[i] != two_q[i] {
+                return x[i] < two_q[i];
+            }
+        }
+        false
+    };
+
+    // Exercise random starts and the largest canonical value.
+    for i in 0..51 {
+        let start = if i < 50 {
+            <Fq as ff::Field>::random(&mut rng).0
+        } else {
+            (-Fq::one()).0
+        };
+        let mut acc = start;
+        for n in 1..=2048u32 {
+            acc = portable::sqr_n_lazy(&acc, 1, &MODULUS.0, INV);
+            assert!(below_two_q(&acc), "accumulator reached 2q at step {n}");
+            if n.is_power_of_two() {
+                assert_eq!(
+                    Fq(portable::canonicalize(&acc, &MODULUS.0)),
+                    Fq(start).sqr_n_runtime(n)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_pow_vartime() {
+    use rand::{Rng, SeedableRng};
+
+    // The classic square-and-multiply loop, as a reference for the fused
+    // implementation.
+    fn pow_vartime_reference(base: &Fq, exp: &[u64]) -> Fq {
+        let mut res = Fq::one();
+        let mut found_one = false;
+        for e in exp.iter().rev() {
+            for i in (0..64).rev() {
+                if found_one {
+                    res = Fq::square(&res);
+                }
+
+                if ((*e >> i) & 1) == 1 {
+                    found_one = true;
+                    res = Fq::mul(&res, base);
+                }
+            }
+        }
+        res
+    }
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0xa5; 16]);
+
+    let mut exponents = vec![
+        [0, 0, 0, 0],
+        [1, 0, 0, 0],
+        [2, 0, 0, 0],
+        // A single high bit exercises the trailing-squarings flush.
+        [0, 0, 0, 1 << 63],
+        [1 << 63, 0, 0, 0],
+        [u64::MAX; 4],
+        // The q - 2 exponent used by `invert`.
+        [
+            0x8c46eb20ffffffff,
+            0x224698fc0994a8dd,
+            0x0,
+            0x4000000000000000,
+        ],
+    ];
+    for _ in 0..10 {
+        exponents.push([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+        ]);
+    }
+
+    for base in [
+        Fq::zero(),
+        Fq::one(),
+        -Fq::one(),
+        Fq::random(&mut rng),
+        Fq::random(&mut rng),
+    ] {
+        for exp in &exponents {
+            assert_eq!(base.pow_vartime(exp), pow_vartime_reference(&base, exp));
+        }
+        // Short and empty exponent slices behave like zero-padded ones.
+        assert_eq!(base.pow_vartime([7]), pow_vartime_reference(&base, &[7]));
+        assert_eq!(
+            base.pow_vartime([0u64; 0]),
+            pow_vartime_reference(&base, &[])
+        );
+    }
+}
+
+#[test]
+fn test_pow_by_t_minus1_over2() {
+    // NB: TWO_INV is standing in as a "random" field element
+    let v = (Fq::TWO_INV).pow_by_t_minus1_over2();
+    assert!(v == ff::Field::pow_vartime(&Fq::TWO_INV, &T_MINUS1_OVER2));
+}
+
+#[test]
+fn test_sqrt_ratio_and_alt() {
+    // (true, sqrt(num/div)), if num and div are nonzero and num/div is a square in the field
+    let num = (Fq::TWO_INV).square();
+    let div = Fq::from(25);
+    let div_inverse = div.invert().unwrap();
+    let expected = Fq::TWO_INV * Fq::from(5).invert().unwrap();
+    let (is_square, v) = Fq::sqrt_ratio(&num, &div);
+    assert!(bool::from(is_square));
+    assert!(v == expected || (-v) == expected);
+
+    let (is_square_alt, v_alt) = Fq::sqrt_alt(&(num * div_inverse));
+    assert!(bool::from(is_square_alt));
+    assert!(v_alt == v);
+
+    // (false, sqrt(ROOT_OF_UNITY * num/div)), if num and div are nonzero and num/div is a nonsquare in the field
+    let num = num * Fq::ROOT_OF_UNITY;
+    let expected = Fq::TWO_INV * Fq::ROOT_OF_UNITY * Fq::from(5).invert().unwrap();
+    let (is_square, v) = Fq::sqrt_ratio(&num, &div);
+    assert!(!bool::from(is_square));
+    assert!(v == expected || (-v) == expected);
+
+    let (is_square_alt, v_alt) = Fq::sqrt_alt(&(num * div_inverse));
+    assert!(!bool::from(is_square_alt));
+    assert!(v_alt == v);
+
+    // (true, 0), if num is zero
+    let num = Fq::zero();
+    let expected = Fq::zero();
+    let (is_square, v) = Fq::sqrt_ratio(&num, &div);
+    assert!(bool::from(is_square));
+    assert!(v == expected);
+
+    let (is_square_alt, v_alt) = Fq::sqrt_alt(&(num * div_inverse));
+    assert!(bool::from(is_square_alt));
+    assert!(v_alt == v);
+
+    // (false, 0), if num is nonzero and div is zero
+    let num = (Fq::TWO_INV).square();
+    let div = Fq::zero();
+    let expected = Fq::zero();
+    let (is_square, v) = Fq::sqrt_ratio(&num, &div);
+    assert!(!bool::from(is_square));
+    assert!(v == expected);
+}
+
+#[test]
+fn test_zeta() {
+    assert_eq!(
+        format!("{:?}", Fq::ZETA),
+        "0x06819a58283e528e511db4d81cf70f5a0fed467d47c033af2aa9d2e050aa0e4f"
+    );
+    let a = Fq::ZETA;
+    assert!(a != Fq::one());
+    let b = a * a;
+    assert!(b != Fq::one());
+    let c = b * a;
+    assert!(c == Fq::one());
+}
+
+#[test]
+fn test_root_of_unity() {
+    assert_eq!(
+        Fq::ROOT_OF_UNITY.pow_vartime(&[1 << Fq::S, 0, 0, 0]),
+        Fq::one()
+    );
+}
+
+#[test]
+fn test_inv_root_of_unity() {
+    assert_eq!(Fq::ROOT_OF_UNITY_INV, Fq::ROOT_OF_UNITY.invert().unwrap());
+}
+
+#[test]
+fn test_inv_2() {
+    assert_eq!(Fq::TWO_INV, Fq::from(2).invert().unwrap());
+}
+
+#[test]
+fn mul_by_inverse_power_of_two_matches_field_multiplication() {
+    use rand::SeedableRng;
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0xd2; 16]);
+    for value in core::iter::once(Fq::ZERO)
+        .chain(core::iter::once(-Fq::ONE))
+        .chain((0..1024).map(|_| Fq::random(&mut rng)))
+    {
+        for exponent in super::INVERSE_POWER_OF_TWO_TEST_EXPONENTS {
+            let expected = value * Fq::TWO_INV.pow_vartime([u64::from(exponent)]);
+            assert_eq!(value.mul_by_inverse_power_of_two(exponent), expected);
+        }
+    }
+}
+
+#[test]
+fn test_delta() {
+    assert_eq!(Fq::DELTA, GENERATOR.pow(&[1u64 << Fq::S, 0, 0, 0]));
+    assert_eq!(
+        Fq::DELTA,
+        Fq::MULTIPLICATIVE_GENERATOR.pow(&[1u64 << Fq::S, 0, 0, 0])
+    );
+}
+
+#[cfg(not(target_pointer_width = "64"))]
+#[test]
+fn consistent_modulus_limbs() {
+    for (a, &b) in MODULUS
+        .0
+        .iter()
+        .flat_map(|&limb| {
+            Some(limb as u32)
+                .into_iter()
+                .chain(Some((limb >> 32) as u32))
+        })
+        .zip(MODULUS_LIMBS_32.iter())
+    {
+        assert_eq!(a, b);
+    }
+}
+
+#[test]
+fn test_from_u512() {
+    assert_eq!(
+        Fq::from_raw([
+            0xe22bd0d1b22cc43e,
+            0x6b84e5b52490a7c8,
+            0x264262941ac9e229,
+            0x27dcfdf361ce4254
+        ]),
+        Fq::from_u512([
+            0x64a80cce0b5a2369,
+            0x84f2ef0501bc783c,
+            0x696e5e63c86bbbde,
+            0x924072f52dc6cc62,
+            0x8288a507c8d61128,
+            0x3b2efb1ef697e3fe,
+            0x75a4998d06855f27,
+            0x52ea589e69712cc0
+        ])
+    );
+}
+
+#[cfg(all(
+    test,
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    any(target_family = "unix", target_os = "none"),
+    target_pointer_width = "64",
+    target_endian = "little"
+))]
+#[test]
+fn aarch64_asm_mul_unreduced_lhs_matches_portable() {
+    use rand::{Rng, SeedableRng};
+
+    // `from_u512` feeds raw (unreduced) 256-bit digits as the lhs of the
+    // inline `mul`, with `R2`/`R3` as the rhs. The five-limb accumulator
+    // tolerates an unreduced lhs only while every rhs limb is at most
+    // `2^64 - 4` (see the contract in `aarch64_asm.rs`); assert the
+    // selected rhs values keep that invariant, then pin the behaviour against
+    // the portable implementation on the most adversarial inputs known.
+    let mut max_canonical = MODULUS;
+    max_canonical.0[0] -= 1;
+    let dense_limb = u64::MAX - 3;
+    let mut dense_canonical = Fq([dense_limb; 4]);
+    dense_canonical.0[3] = MODULUS.0[3] - 1;
+    let canonical_rhs = [R2, R3, max_canonical, dense_canonical];
+    for by in canonical_rhs {
+        for limb in by.0 {
+            assert!(limb <= u64::MAX - 3);
+        }
+    }
+
+    // lhs values with the low limbs solved so the first two Montgomery
+    // quotients hit (R2) or approach (R3, whose low limb is even) their
+    // maximum `2^64 - 1` while the top
+    // limbs are all-ones: jointly the nearest known approach to the
+    // carry-chain wrap described in `aarch64_asm.rs`.
+    let forced_q_r2 = Fq([0xf3bfcadeeeeeeeef, 0x27fa6352b2545d71, u64::MAX, u64::MAX]);
+    let forced_q_r3 = Fq([0x0000000000000d24, 0x00000000000007c2, u64::MAX, u64::MAX]);
+
+    let check = |lhs: Fq, by: Fq| {
+        // Inherent `Fq::mul` is the portable implementation; its classical
+        // 8-limb reduction is valid for any lhs when `by` is canonical.
+        assert_eq!(lhs.mul_runtime(&by), Fq::mul(&lhs, &by), "lhs {:x?}", lhs.0);
+    };
+
+    check(Fq([u64::MAX; 4]), R2);
+    check(Fq([u64::MAX; 4]), R3);
+    check(forced_q_r2, R2);
+    check(forced_q_r3, R3);
+    // These maximize the full 256-bit lhs while taking the canonical rhs
+    // close to q. They exercise the final candidate's `T < 2q < R` bound.
+    check(Fq([u64::MAX; 4]), max_canonical);
+    check(Fq([u64::MAX; 4]), dense_canonical);
+
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x6b; 16]);
+    for i in 0..20_000u32 {
+        let mut l = [0u64; 4];
+        for w in l.iter_mut() {
+            *w = rng.next_u64();
+        }
+        if i % 2 == 0 {
+            l[3] = u64::MAX;
+            l[2] = u64::MAX;
+        }
+        check(Fq(l), R2);
+        check(Fq(l), R3);
+    }
+
+    // End-to-end `from_u512` against a portable recomposition.
+    let portable_from_u512 = |l: [u64; 8]| {
+        let d0 = Fq([l[0], l[1], l[2], l[3]]);
+        let d1 = Fq([l[4], l[5], l[6], l[7]]);
+        Fq::mul(&d0, &R2).add(&Fq::mul(&d1, &R3))
+    };
+    assert_eq!(
+        Fq::from_u512([u64::MAX; 8]),
+        portable_from_u512([u64::MAX; 8])
+    );
+    for _ in 0..10_000u32 {
+        let mut l = [0u64; 8];
+        for w in l.iter_mut() {
+            *w = rng.next_u64();
+        }
+        l[3] |= 0xc000000000000000;
+        l[7] |= 0xc000000000000000;
+        assert_eq!(Fq::from_u512(l), portable_from_u512(l), "limbs {:x?}", l);
+    }
+}
+
+/// Whether `x` holds a reduced residue (limbs below the modulus).
+#[cfg(test)]
+fn is_canonical(x: &Fq) -> bool {
+    for i in (0..4).rev() {
+        if x.0[i] != MODULUS.0[i] {
+            return x.0[i] < MODULUS.0[i];
+        }
+    }
+    false
+}
+
+#[test]
+fn constants_are_canonical() {
+    // Every named constant must be a reduced residue: the `aarch64-asm`
+    // multiplication requires a canonical rhs, and constants are the one
+    // class of values that bypass the reducing constructors.
+    assert!(
+        !is_canonical(&MODULUS),
+        "the modulus itself is not canonical"
+    );
+    let constants: [(&str, Fq); 11] = [
+        ("R", R),
+        ("R2", R2),
+        ("R3", R3),
+        ("GENERATOR", GENERATOR),
+        ("ROOT_OF_UNITY", ROOT_OF_UNITY),
+        ("DELTA", DELTA),
+        ("TWO_INV", <Fq as ff::PrimeField>::TWO_INV),
+        (
+            "MULTIPLICATIVE_GENERATOR",
+            <Fq as ff::PrimeField>::MULTIPLICATIVE_GENERATOR,
+        ),
+        (
+            "ROOT_OF_UNITY_INV",
+            <Fq as ff::PrimeField>::ROOT_OF_UNITY_INV,
+        ),
+        ("ZETA", <Fq as ff::WithSmallOrderMulGroup<3>>::ZETA),
+        ("zero", Fq::zero()),
+    ];
+    for (name, value) in constants {
+        assert!(
+            is_canonical(&value),
+            "{name} is not canonical: {:x?}",
+            value.0
+        );
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    any(target_family = "unix", target_os = "none"),
+    target_pointer_width = "64",
+    target_endian = "little"
+))]
+#[test]
+fn aarch64_asm_mul_canonical_sweep_matches_portable() {
+    use rand::{Rng, SeedableRng};
+
+    // Random canonical operands: the inline `mul` must agree with the
+    // portable implementation and return a canonical residue.
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x42; 16]);
+    let mut random = || {
+        let mut l = [0u64; 4];
+        for w in l.iter_mut() {
+            *w = rng.next_u64();
+        }
+        Fq::from_raw(l)
+    };
+    for _ in 0..200_000u32 {
+        let a = random();
+        let b = random();
+        let asm = a.mul_runtime(&b);
+        assert_eq!(asm, Fq::mul(&a, &b), "lhs {:x?} rhs {:x?}", a.0, b.0);
+        assert!(is_canonical(&asm));
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    any(target_family = "unix", target_os = "none"),
+    target_pointer_width = "64",
+    target_endian = "little"
+))]
+#[test]
+fn aarch64_asm_mul_unreduced_lhs_near_modulus_rhs_matches_portable() {
+    use rand::{Rng, SeedableRng};
+
+    // The inline `mul` omits the fifth candidate limb on the strength of
+    // `(lhs * rhs + m * modulus) / R < 2 * modulus < R`, which holds for any
+    // 256-bit lhs once the rhs is canonical. Stress that bound where it is
+    // tightest: lhs with its top bit set, rhs within a few limbs of the
+    // modulus (kept canonical, and within the per-limb no-wrap condition
+    // that an unreduced lhs separately requires).
+    let mut rng = rand_xorshift::XorShiftRng::from_seed([0x17; 16]);
+    let mut n = 0u32;
+    while n < 100_000 {
+        let lhs = Fq([
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64(),
+            rng.next_u64() | (1 << 63),
+        ]);
+        let mut rhs = MODULUS;
+        rhs.0[0] = rhs.0[0].wrapping_sub(rng.next_u64() >> (rng.next_u32() % 64));
+        if rng.next_u32() & 1 == 1 {
+            rhs.0[1] = rhs.0[1].wrapping_sub(rng.next_u64() >> 60);
+        }
+        if !is_canonical(&rhs) || rhs.0.iter().any(|&l| l > u64::MAX - 3) {
+            continue;
+        }
+        n += 1;
+        let asm = lhs.mul_runtime(&rhs);
+        assert_eq!(
+            asm,
+            Fq::mul(&lhs, &rhs),
+            "lhs {:x?} rhs {:x?}",
+            lhs.0,
+            rhs.0
+        );
+        assert!(is_canonical(&asm));
+    }
+}
+
+#[cfg(all(
+    test,
+    debug_assertions,
+    feature = "aarch64-asm",
+    target_arch = "aarch64",
+    any(target_family = "unix", target_os = "none"),
+    target_pointer_width = "64",
+    target_endian = "little"
+))]
+#[test]
+#[should_panic(expected = "requires a canonical rhs")]
+fn aarch64_asm_mul_rejects_non_canonical_rhs_in_debug() {
+    // The modulus itself is the smallest non-canonical value.
+    let _ = Fq::one().mul_runtime(&MODULUS);
+}

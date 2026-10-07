@@ -1,0 +1,175 @@
+[package]
+name = "z-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Shared Zcash wallet engine (Zakura-backed)"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = ["native"]
+# Full native wallet path.
+native = [
+    "native-sqlite",
+    "lwd",
+    "sync",
+    "transparent-inputs",
+    "seed-store",
+    "dep:directories",
+    "dep:async-trait",
+    "dep:rusqlite",
+    "dep:zcash_script",
+    "tokio/net",
+    "tokio/io-util",
+    "tokio/time",
+    "dep:zcash_proofs",
+    "zcash_proofs/local-prover",
+    "zcash_proofs/download-params",
+    "zcash_proofs/directories",
+    "zcash_proofs/multicore",
+    "orchard/circuit",
+    "orchard/multicore",
+    "zcash_primitives/circuits",
+    "rand/sys_rng",
+    "hardware",
+]
+native-sqlite = [
+    "dep:zcash_client_sqlite",
+    "zcash_client_sqlite/orchard",
+    "zcash_client_sqlite/transparent-inputs",
+    "pczt",
+]
+lwd = [
+    "dep:tonic",
+    "dep:tokio",
+    "dep:http-body-util",
+    "dep:http-body",
+    "dep:http",
+    "dep:bytes",
+    "dep:tower",
+    "zcash_client_backend/lightwalletd-tonic",
+    "zcash_client_backend/lightwalletd-tonic-tls-webpki-roots",
+]
+sync = ["lwd", "zcash_client_backend/sync"]
+transparent-inputs = ["zcash_client_backend/transparent-inputs", "dep:transparent"]
+# WASM proving (Orchard/Ironwood in-process). Sapling params stay out of the blob.
+wasm-prove = ["orchard/circuit", "zcash_primitives/circuits"]
+# Hardware signers (Keystone, Ledger) via PCZTs: create, prove, redact, apply
+# device signatures, finalize; Ledger APDU plans. Wasm-safe; z-wasm enables it.
+hardware = [
+    "pczt",
+    "pczt/prover",
+    "zcash_client_backend/pczt",
+    "transparent-inputs",
+    "dep:zcash_script",
+    "dep:ff",
+    "dep:blake2b_simd",
+    "dep:zcash_note_encryption",
+    # hardware.rs proves Orchard/Ironwood PCZTs. `native` already enables these;
+    # a hardware-only build must too.
+    "orchard/circuit",
+    "zcash_primitives/circuits",
+]
+# pasta/orchard Rayon MSM — only with atomics + initThreadPool.
+wasm-multicore = ["orchard/multicore"]
+seed-store = [
+    "dep:argon2",
+    "dep:chacha20poly1305",
+    "dep:keyring",
+]
+cli = [
+    "dep:clap",
+    "dep:tracing-subscriber",
+    "dep:rustls",
+    "tokio/rt-multi-thread",
+    "tokio/macros",
+    "tokio/net",
+    "tokio/io-util",
+]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+# Always available (wasm-safe defaults). Heavy/native pieces are feature-gated.
+orchard = { workspace = true, default-features = false }
+zcash_keys = { workspace = true, default-features = false, features = [
+    "std",
+    "orchard",
+    "sapling",
+    "transparent-inputs",
+] }
+zcash_primitives = { workspace = true, default-features = false, features = ["std"] }
+zcash_protocol = { version = "=0.10.6", default-features = false, features = ["std"] }
+zcash_address = { version = "=0.13.0", default-features = false, features = ["std"] }
+zip32 = { version = "=0.2.1", default-features = false }
+rand = { version = "0.10", default-features = false, features = ["std", "sys_rng"] }
+secrecy = "0.8"
+sapling = { version = "=1.2.0", package = "zakura-sapling-crypto", default-features = false, features = ["circuit"] }
+incrementalmerkletree = { version = "0.8.2", default-features = false }
+shardtree = "0.7.1"
+jubjub = { version = "=1.2.0", package = "zakura-jubjub", default-features = false }
+bls12_381 = { version = "=1.2.0", package = "zakura-bls12-381", default-features = false }
+rand_core = { version = "0.10", default-features = false }
+bip39 = "2"
+getrandom = "0.2"
+zeroize = { version = "1", features = ["derive"] }
+
+# Native / LWD (optional)
+tokio = { workspace = true, optional = true }
+tonic = { version = "0.14", default-features = false, features = ["transport", "tls-webpki-roots"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+http-body = { version = "1", optional = true }
+http = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+tower = { version = "0.5", optional = true, default-features = false }
+async-trait = { version = "0.1", optional = true }
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+prost = { version = "0.14", default-features = false, features = ["std"] }
+rayon = "1.10"
+directories = { version = "5", optional = true }
+argon2 = { version = "0.5", optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+keyring = { version = "3", optional = true, default-features = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
+
+zcash_proofs = { workspace = true, default-features = false, optional = true }
+zcash_client_backend = { workspace = true, default-features = false, features = ["orchard", "unstable-serialization"] }
+pczt = { workspace = true, optional = true, default-features = false, features = [
+    "orchard",
+    "sapling",
+    "transparent",
+    "io-finalizer",
+    "signer",
+    "spend-finalizer",
+    "tx-extractor",
+] }
+zcash_client_sqlite = { workspace = true, optional = true }
+transparent = { version = "0.10", package = "zcash_transparent", optional = true, default-features = false, features = ["transparent-inputs"] }
+zcash_script = { version = "0.4", optional = true }
+ff = { version = "0.14", optional = true, default-features = false }
+blake2b_simd = { version = "1", optional = true }
+zcash_note_encryption = { version = "=0.4.2", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+# `create_proposed_transactions` stamps OffsetDateTime::now_utc(); without this
+# std::time::SystemTime::now panics on wasm32-unknown-unknown.
+time = { version = "0.3.22", default-features = false, features = ["std", "wasm-bindgen"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = "3"
+zcash_note_encryption = "=0.4.2"
+
+[[bin]]
+name = "z-wallet"
+path = "src/bin/z_wallet.rs"
+required-features = ["native", "cli"]
