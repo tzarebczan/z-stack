@@ -48,10 +48,18 @@ export function WalletScreen() {
             <ol className="words">{wallet.phrase.split(" ").map((word, index) => <li key={index}>{word}</li>)}</ol>
             <label className="checkbox"><input type="checkbox" checked={saved} onChange={event => setSaved(event.target.checked)} />
               I saved my recovery phrase</label>
+            <button onClick={() => {
+              void (async () => {
+                try { await navigator.clipboard.writeText(wallet.phrase); setCopied("Phrase copied. Your clipboard contains your recovery words."); }
+                catch { setCopied("Could not copy. Select the words instead."); }
+              })();
+            }}>Copy recovery phrase</button>
+            <p role="status">{copied}</p>
             <button disabled={!saved} onClick={wallet.hidePhrase}>Done, hide phrase</button></section>}
           {!backup && !wallet.spending && <details><summary>Unlock with your recovery phrase</summary>
             <SecretForm disabled={disabled} submit={words => wallet.unlock(words)} /></details>}
-          {!backup && <SendPayment unit={unit} key={wallet.snapshot.unifiedAddress} disabled={disabled} canCancel={wallet.canCancelPayment}
+          {!backup && <SendPayment unit={unit} key={wallet.snapshot.unifiedAddress} disabled={disabled} canReview={(wallet.snapshot.scannedHeight ?? 0) >= wallet.snapshot.birthdayHeight}
+            clearStatus={wallet.clearStatus} canCancel={wallet.canCancelPayment}
             receipt={wallet.receipt} reviewPayment={wallet.reviewPayment} sendPayment={wallet.sendPayment}
             cancelPayment={wallet.cancelPayment} clearReceipt={wallet.clearReceipt} />}
           {!backup && <BaseWallet identity={wallet.snapshot.unifiedAddress} disabled={disabled} withWallet={wallet.baseAction} />}

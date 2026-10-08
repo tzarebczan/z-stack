@@ -53,6 +53,14 @@ export function inspectArchives(directory, version = JSON.parse(readFileSync(joi
     }
     assert.ok(members.has('package/dist/index.js'), `${manifest.name}: missing built entry point`);
     if (manifest.name === '@z-stack/sdk') {
+      for (const dep of ['core', 'passkey']) {
+        const helper = packages.get(`@z-stack/${dep}`);
+        assert.ok(helper, `Missing matching ${dep} archive`);
+        for (const [name, bytes] of archiveMembers(helper.file)) {
+          const bundled = members.get(name.replace('package/', `package/node_modules/@z-stack/${dep}/`));
+          assert.ok(bundled?.equals(bytes), `SDK bundled ${dep} differs from the matching archive; run pnpm pack:sdk`);
+        }
+      }
       for (const kind of ['generated', 'generated-mt']) {
         const bytes = members.get(`package/dist/${kind}/z_wasm_bg.wasm`);
         const integrity = JSON.parse(members.get(`package/dist/${kind}/integrity.json`)?.toString() || 'null');
@@ -86,6 +94,18 @@ export function copyTemplate(template, destination) {
   }
 }
 
+export function generatedReadme(text) {
+  const match = /```sh\n([\s\S]*?)\n```/.exec(text);
+  if (!match) return text.replace(/From the repository,[\s\S]*?In the generated directory, run `npm run dev`\./,
+    'Matching archives are already in `vendor/`. Run `npm install --ignore-scripts` if you did not use `--install`, then `npm run dev` in this directory.');
+  const start = text.slice(0, match.index).trimEnd().lastIndexOf('\n\n');
+  const commands = match[1].replace(/(?:cd [^\n]+\n)?npm install [^\n]*(?:\n +[^\n]*)*/,
+    'npm install --ignore-scripts');
+  return text.slice(0, start < 0 ? match.index : start) +
+    '\n\nMatching SDK archives are already in `vendor/`; package.json uses local file dependencies. If you used `--install`, skip the install command. Run from this app directory:\n\n```sh\n' +
+    commands + '\n```' + text.slice(match.index + match[0].length);
+}
+
 export function createExample(template, destination, archives, { withBase = false } = {}) {
   assert.ok(!withBase || ["browser-wallet", "next-wallet"].includes(template), "--with-base supports browser-wallet and next-wallet");
   assert.ok(templates.includes(template), `Choose ${templates.join(', ')}`);
@@ -104,7 +124,11 @@ export function createExample(template, destination, archives, { withBase = fals
     const manifest = JSON.parse(readFileSync(manifestFile));
     for (const [name, pkg] of packages) {
       cpSync(pkg.file, join(scratch, 'vendor', pkg.filename));
-      (manifest.dependencies ??= {})[name] = `file:vendor/${pkg.filename}`;
+      // The SDK archive includes its core/passkey helpers. Installing those again
+      // at the app root creates duplicate class identities; use SDK re-exports.
+      if (name === '@z-stack/sdk' || name === '@z-stack/base') {
+        (manifest.dependencies ??= {})[name] = `file:vendor/${pkg.filename}`;
+      }
     }
     if (withBase) {
       const addon = join(root, 'examples', 'shared-base');
@@ -123,6 +147,7 @@ export function createExample(template, destination, archives, { withBase = fals
       writeFileSync(join(scratch, css), readFileSync(join(scratch, css), 'utf8') + '\n.base-panel { margin-block: 32px; padding-block: 24px; border-block: 1px solid #829b90; min-width: 0; }\n.base-panel code, .base-panel [role=status], #base-review { overflow-wrap: anywhere; }\n.base-panel select { font: inherit; width: 100%; min-height: 48px; border: 1px solid #829b90; border-radius: 8px; padding: 10px; background: white; }\n.base-panel [hidden] { display: none !important; }\n');
       writeFileSync(join(scratch, 'README.md'), readFileSync(join(scratch, 'README.md'), 'utf8') + '\n## Optional Base wallet\n\nThis app was scaffolded with `--with-base`. Restore or create the Zcash wallet first, then select **Enable Base Sepolia**. Use that same disposable recovery phrase. Each Base payment verifies the phrase against the selected Zcash wallet and clears it after unlocking. No separate seed or account service is required.\n\nThe Base panel uses your chosen Base Sepolia RPC, native ETH/USDC payment review, an app-owned Web Lock and a durable pending transaction hash. Check the saved payment before another send, including after a lost acknowledgement or reload. This local journal coordinates this origin only, not other devices. Base transactions and your Base address are public; the RPC sees balance queries and your IP. Base Sepolia is separate from the Zcash network. No paymaster is enabled in this demo.\n');
     }
+    writeFileSync(join(scratch, 'README.md'), generatedReadme(readFileSync(join(scratch, 'README.md'), 'utf8')));
     writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
     writeFileSync(join(scratch, 'SDK-ARCHIVES.json'), JSON.stringify(Object.fromEntries([...packages].map(([name, { filename, version, sha256 }]) => [name, { filename, version, sha256 }])), null, 2) + '\n');
     if (existsSync(target)) rmdirSync(target); // Only the verified empty directory.

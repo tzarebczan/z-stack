@@ -3,8 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { formatZatoshis } from "@z-stack/sdk";
 import type { SendDraft, SendReview, SendReceipt } from "../lib/send";
 
-export function SendPayment({ unit, disabled, canCancel, receipt, reviewPayment, sendPayment, cancelPayment, clearReceipt }: {
-  unit: string; disabled: boolean; canCancel: boolean; receipt?: SendReceipt;
+export function SendPayment({ unit, disabled, canReview, clearStatus, canCancel, receipt, reviewPayment, sendPayment, cancelPayment, clearReceipt }: {
+  unit: string; disabled: boolean; canReview: boolean; clearStatus(): void; canCancel: boolean; receipt?: SendReceipt;
   reviewPayment(draft: SendDraft): Promise<SendReview | undefined>;
   sendPayment(review: SendReview, words: string): Promise<void | undefined>;
   cancelPayment(): void; clearReceipt(): void;
@@ -48,8 +48,8 @@ export function SendPayment({ unit, disabled, canCancel, receipt, reviewPayment,
           <button type="button" disabled={disabled} onClick={() => { clearWords(); setReview(undefined); }}>Edit</button>
           {canCancel && <button type="button" onClick={cancelPayment}>Cancel before submission</button>}</div>
       </form>
-    </> : <form onSubmit={event => {
-      event.preventDefault(); void reviewPayment(draft).then(value => { if (value) setReview(value); });
+    </> : <form onInput={clearStatus} onInvalidCapture={clearStatus} onSubmit={event => {
+      event.preventDefault(); if (!canReview) return; void reviewPayment(draft).then(value => { if (value) setReview(value); });
     }}>
       <label htmlFor="send-to">Recipient address</label>
       <textarea id="send-to" name="recipient" required disabled={disabled} rows={2} autoComplete="off"
@@ -60,7 +60,8 @@ export function SendPayment({ unit, disabled, canCancel, receipt, reviewPayment,
       <label htmlFor="send-memo">Memo (optional)</label>
       <textarea id="send-memo" name="memo" disabled={disabled} rows={2} maxLength={512}
         value={draft.memo} onChange={event => setDraft({ ...draft, memo: event.target.value })} />
-      <button className="primary" disabled={disabled}>Review payment</button>
+      <p className="hint" hidden={canReview}>Sync the wallet before reviewing a payment.</p>
+      <button className="primary" disabled={disabled || !canReview}>Review payment</button>
     </form>}
   </section>;
 }

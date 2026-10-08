@@ -368,6 +368,8 @@ test("WalletError maps known engine strings and leaves unknown intact", () => {
   assert.equal(classifyWalletError("insufficient funds"), "insufficient_funds");
   assert.equal(classifyWalletError("propose_transfer: Insufficient funds"), "insufficient_funds");
   assert.equal(classifyWalletError("sync required before this operation"), "sync_required");
+  assert.equal(classifyWalletError("propose_transfer: Must scan blocks first"), "sync_required");
+  assert.equal(WalletError.fromMessage("propose_transfer: Must scan blocks first").userMessage(), "Sync the wallet before sending.");
   assert.equal(
     classifyWalletError(
       "seed unlock required (passphrase, OS keychain / Hello, or paste the words)",

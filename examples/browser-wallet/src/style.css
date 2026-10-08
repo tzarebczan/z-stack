@@ -22,3 +22,7 @@ li { margin-bottom: 12px; }
 dl { margin: 16px 0; } dt { font-size: 13px; margin-top: 14px; } dd { margin: 4px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 #receipt-txid { display: block; overflow-wrap: anywhere; margin-block: 14px; }
 @media (max-width: 480px) { body { padding: 16px; } main { margin: 12px auto; } button { min-height: 48px; } }
+
+#phrase { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 24px; padding: 20px 20px 20px 44px; background: white; border: 1px solid #bac9c2; border-radius: 8px; }
+#phrase li { margin: 0; }
+@media (max-width: 480px) { #phrase { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

@@ -1,8 +1,11 @@
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 // Next's webpack compiler understands the SDK's module-worker URLs. Emit WASM
 // as a file: the SDK fetches, verifies and instantiates it itself.
 const staticExport = process.env.Z_STACK_STATIC_EXPORT === "1";
 const isolated = process.env.Z_STACK_ISOLATION !== "off";
 export default {
+  outputFileTracingRoot: dirname(fileURLToPath(import.meta.url)),
   poweredByHeader: false,
   agentRules: false,
   ...(staticExport ? { output: "export" } : {}),

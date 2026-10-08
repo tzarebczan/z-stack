@@ -10,13 +10,15 @@ local archives. The steps below cover adapting your own application.
 ## Install
 
 Build the preview archives as described in the [README](../README.md), then
-install all three matching `.tgz` files in your app. No registry package is
-currently published. Keep SDK, core, and passkey at the same version.
+install the SDK `.tgz` in your app. Archives produced by `pnpm pack:sdk` bundle
+the matching core and passkey helpers. No registry package is
+currently published. Import helpers through SDK re-exports in wallet apps to
+share the same error classes. Standalone core/passkey archives are for apps
+using those packages directly. Node 22.18+ is required for setup tools; npm’s
+`engines` check is advisory, so an install warning does not certify older Node.
 
 ```sh
-npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.3.tgz \
-  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.3.tgz \
-  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
+npm install /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
 ```
 
 Use the [runnable Vite example](../examples/browser-wallet/README.md) as a starting

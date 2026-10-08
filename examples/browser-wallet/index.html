@@ -13,13 +13,17 @@
       <p id="status" role="status">Loading engine…</p>
       <p id="balance">— TAZ</p>
       <p id="address"></p>
+      <button id="copy-address" type="button" hidden>Copy address</button>
+      <p id="copy-status" role="status"></p>
       <div class="actions">
         <button id="create" disabled>Create wallet</button>
         <button id="sync" disabled>Sync</button>
         <button id="lock" disabled>Lock</button>
         <button id="hide-phrase" hidden>I saved these words — finish</button>
       </div>
-      <pre id="phrase" hidden></pre>
+      <ol id="phrase" hidden></ol>
+      <button id="copy-phrase" type="button" hidden>Copy recovery phrase</button>
+      <p id="phrase-copy-status" role="status" hidden></p>
       <form id="restore-form">
         <label for="words">Recovery phrase</label>
         <textarea id="words" autocomplete="off" autocapitalize="none" spellcheck="false" required></textarea>
@@ -37,7 +41,8 @@
           <input id="send-amount" name="amount" required inputmode="decimal" autocomplete="off" />
           <label for="send-memo">Memo (optional)</label>
           <textarea id="send-memo" name="memo" rows="2" maxlength="512"></textarea>
-          <button id="review-send">Review payment</button>
+          <p id="send-readiness">Sync the wallet before reviewing a payment.</p>
+          <button id="review-send" disabled>Review payment</button>
         </form>
         <section id="send-review" hidden aria-label="Review payment" tabindex="-1">
           <h3>Review payment</h3>
@@ -67,6 +72,7 @@
       </section>
       <h2>Activity</h2>
       <ul id="history"></ul>
+      <p id="history-empty">Create or restore a wallet to see activity.</p>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>

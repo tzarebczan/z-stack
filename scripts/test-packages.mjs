@@ -24,6 +24,25 @@ function run(command, args, cwd = app) {
 }
 try {
   run(process.execPath, [join(root, "scripts", "pack-sdk.mjs"), archives], root);
+  // Installing just the SDK must work with an unreachable registry and no cache.
+  const standalone = join(scratch, "standalone");
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync(standalone);
+  writeFileSync(join(standalone, "package.json"), JSON.stringify({private:true, type:"module"}));
+  const sdkArchive = join(archives, `z-stack-sdk-${JSON.parse(readFileSync(join(root, "package.json"))).version}.tgz`);
+  run("npm", ["install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund",
+    "--cache", join(scratch, "empty-cache"), "--registry", "http://127.0.0.1:1", sdkArchive], standalone);
+  run(process.execPath, ["--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    const sdk = await import('@z-stack/sdk');
+    const services = await import('@z-stack/sdk/services');
+    const lab = await import('@z-stack/sdk/lab');
+    assert.equal(typeof sdk.createWallet, 'function');
+    assert.equal(sdk.WalletError.fromMessage('propose_transfer: Must scan blocks first').code, 'sync_required');
+    assert.equal(await services.memoryVaultStore().get('missing'), undefined);
+    assert.equal(typeof lab.checkVaultStoreAdapter, 'function');
+    console.log('SDK archive alone: root/services/lab import with no registry or cache');
+  `], standalone);
   createExample("browser-wallet", app, archives);
   const tarballs = readdirSync(archives).filter(file => file.endsWith(".tgz")).sort();
   assert.equal(tarballs.length, 3);

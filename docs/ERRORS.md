@@ -9,6 +9,7 @@ message and cause remain available for private debugging.
 | Code | Next action |
 | --- | --- |
 | `cancelled`, `hardware_cancelled` | Keep the last committed state; let the user retry |
+| `sync_required` | Complete the first scan before enabling payment review |
 | `seed_locked` | Ask for local reauthentication from a user action |
 | `invalid_birthday` | Correct the height/date before clearing secret inputs |
 | `rescan_later_birthday` | Use a birthday at or before the current one |

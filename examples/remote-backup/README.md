@@ -11,12 +11,10 @@ No email, Google account, wallet address, viewing key or chain query is required
 Build and pack the SDK from the repository root (`pnpm build:sdk`, then
 `pnpm pack:sdk`). Copy this example outside the checkout, then run the following
 commands in that copy. Install paths below refer to the original `artifacts/`
-directory; all three archives must come from the same build.
+directory; the SDK archive includes its matching core and passkey helpers.
 
 ```sh
-npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.3.tgz \
-  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.3.tgz \
-  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
+npm install /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
 npm run server
 ```
 
