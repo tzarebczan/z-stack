@@ -12,7 +12,8 @@ export function WalletScreen() {
   const wallet = useWallet();
   const [saved, setSaved] = useState(false);
   const [remove, setRemove] = useState(false);
-  const [copied, setCopied] = useState("");
+  const [phraseCopied, setPhraseCopied] = useState("");
+  const [addressCopied, setAddressCopied] = useState("");
   const disabled = !wallet.ready || !!wallet.busy;
   const backup = !!wallet.phrase;
   const unit = wallet.network === "testnet" ? "TAZ" : "ZEC";
@@ -31,7 +32,7 @@ export function WalletScreen() {
         {!wallet.snapshot ? <div className="welcome">
           <h2>Start with test funds.</h2><p>Create a wallet or bring your saved phrase. No sign-up needed.</p>
           <button className="primary" disabled={disabled} onClick={() => {
-            setSaved(false); void wallet.create();
+            setSaved(false); setPhraseCopied(""); setAddressCopied(""); void wallet.create();
           }}>{wallet.busy === "Creating" ? "Creating…" : "Create wallet"}</button>
           <details><summary>Restore an existing wallet</summary>
             <SecretForm restore disabled={disabled} submit={wallet.restore} /></details>
@@ -48,10 +49,18 @@ export function WalletScreen() {
             <ol className="words">{wallet.phrase.split(" ").map((word, index) => <li key={index}>{word}</li>)}</ol>
             <label className="checkbox"><input type="checkbox" checked={saved} onChange={event => setSaved(event.target.checked)} />
               I saved my recovery phrase</label>
-            <button disabled={!saved} onClick={wallet.hidePhrase}>Done, hide phrase</button></section>}
+            <button onClick={() => {
+              void (async () => {
+                try { await navigator.clipboard.writeText(wallet.phrase); setPhraseCopied("Phrase copied. Your clipboard contains your recovery words."); }
+                catch { setPhraseCopied("Could not copy. Save the numbered words in order."); }
+              })();
+            }}>Copy recovery phrase</button>
+            <p role="status">{phraseCopied}</p>
+            <button disabled={!saved} onClick={() => { setPhraseCopied(""); wallet.hidePhrase(); }}>Done, hide phrase</button></section>}
           {!backup && !wallet.spending && <details><summary>Unlock with your recovery phrase</summary>
             <SecretForm disabled={disabled} submit={words => wallet.unlock(words)} /></details>}
-          {!backup && <SendPayment unit={unit} key={wallet.snapshot.unifiedAddress} disabled={disabled} canCancel={wallet.canCancelPayment}
+          {!backup && <SendPayment unit={unit} key={wallet.snapshot.unifiedAddress} disabled={disabled} canReview={(wallet.snapshot.scannedHeight ?? 0) >= wallet.snapshot.birthdayHeight}
+            clearStatus={wallet.clearStatus} canCancel={wallet.canCancelPayment}
             receipt={wallet.receipt} reviewPayment={wallet.reviewPayment} sendPayment={wallet.sendPayment}
             cancelPayment={wallet.cancelPayment} clearReceipt={wallet.clearReceipt} />}
           {!backup && <BaseWallet identity={wallet.snapshot.unifiedAddress} disabled={disabled} withWallet={wallet.baseAction} />}
@@ -68,12 +77,12 @@ export function WalletScreen() {
         <section className="receive"><p className="eyebrow">Receive</p><h2>Your private address</h2>
           {wallet.snapshot ? <><p className="hint">Use this unified address for shielded test deposits.</p>
             <code id="address">{wallet.snapshot.unifiedAddress}</code>
-            <button onClick={() => {
+            {!backup && <><button onClick={() => {
               void (async () => {
-                try { await navigator.clipboard.writeText(wallet.snapshot!.unifiedAddress); setCopied("Address copied."); }
-                catch { setCopied("Could not copy. Select the address instead."); }
+                try { await navigator.clipboard.writeText(wallet.snapshot!.unifiedAddress); setAddressCopied("Address copied."); }
+                catch { setAddressCopied("Could not copy. Select the address instead."); }
               })();
-            }}>Copy address</button><p role="status" className="hint">{copied}</p></>
+            }}>Copy address</button><p role="status" className="hint">{addressCopied}</p></>}</>
             : <p className="hint">Your address will appear after you create or restore a wallet.</p>}
         </section>
         {wallet.snapshot && !backup && <ScanDetails snapshot={wallet.snapshot} server={wallet.server}
@@ -84,7 +93,7 @@ export function WalletScreen() {
           <label className="checkbox"><input type="checkbox" checked={remove} onChange={event => setRemove(event.target.checked)} />
             I have the recovery phrase</label>
           <button className="danger" disabled={disabled || !remove} onClick={() => {
-            void wallet.forget().then(() => { setRemove(false); setCopied(""); });
+            void wallet.forget().then(() => { setRemove(false); setPhraseCopied(""); setAddressCopied(""); });
           }}>Remove from this browser</button></details>}
       </aside>
     </div>

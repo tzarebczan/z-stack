@@ -5,13 +5,12 @@ balance, activity, shielded payment review/proving/receipts and spending lock. I
 It demonstrates SDK integration, not a production recovery or login flow.
 
 Use [the guided setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md), or first build and pack z-stack using the [root instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md).
+
 Copy this directory outside the z-stack workspace, then install the archives:
 
 ```sh
 cd /path/to/copied/browser-wallet
-npm install /path/to/z-stack/artifacts/z-stack-core-0.1.0-alpha.3.tgz \
-  /path/to/z-stack/artifacts/z-stack-passkey-0.1.0-alpha.3.tgz \
-  /path/to/z-stack/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
+npm install /path/to/z-stack/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
 npm run dev
 ```
 
@@ -45,3 +44,9 @@ address. Check [the current public funding limitation](https://github.com/tzareb
 before claiming test coins. On testnet, amounts are TAZ. The amount parser still
 uses Zcash’s eight-decimal units. `zcash:` links require a dedicated review UI;
 this example asks for the recipient address itself.
+
+Payment review is disabled until the first block scan. A refused restore keeps
+the pasted words; a successful import clears them. Copy actions
+are explicit. Copying recovery words puts the secret on the system clipboard.
+Startup diagnostics log a fixed error code only; raw provider errors may contain
+private data and are not printed.

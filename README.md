@@ -30,34 +30,33 @@ predate NU7.
 | Build or change the engine | [Contributing](CONTRIBUTING.md) |
 | Review dependencies and patches | [Upstream dependencies](docs/UPSTREAM.md) |
 
-## Run a prebuilt example
+## Run the published preview
 
-Build from source for alpha.3 today. Once its prerelease is published on the
-[releases page](https://github.com/tzarebczan/z-stack/releases), download the preview
-bundle and matching checksums to run an example without Rust:
+The available prebuilt preview is **alpha.2**. It predates NU7: use it for local
+setup and UI exploration, not post-NU7 public-testnet payments. For NU7, build
+alpha.3 from source below. Node 22.18+ is required.
 
+Download the published bundle, verify both checksum layers, then generate an app:
 
 ```sh
-gh release download v0.1.0-alpha.3 --repo tzarebczan/z-stack --dir sdk-alpha
+gh release download v0.1.0-alpha.2 --repo tzarebczan/z-stack --dir sdk-alpha
 cd sdk-alpha
-sha256sum -c SHA256SUMS-alpha.3 # macOS: shasum -a 256 -c SHA256SUMS-alpha.3
-tar -xzf z-stack-preview-0.1.0-alpha.3-*.tgz
+sha256sum -c SHA256SUMS-alpha.2
+tar -xzf z-stack-preview-0.1.0-alpha.2-*.tgz
 cd z-stack-preview
-sha256sum -c SHA256SUMS # macOS: shasum -a 256 -c SHA256SUMS
-node scripts/create-example.mjs next-wallet ../my-wallet --install
+sha256sum -c SHA256SUMS
+node scripts/create-example.mjs browser-wallet ../my-wallet --install
 cd ../my-wallet
 npm run dev
 ```
 
-Requires Node.js 22.18+ and npm. Choose `browser-wallet` for Vite/TypeScript.
-Use a new or empty app directory. Both demos use testnet, label test coins TAZ,
-and display the server, wallet birthday and scanned height. See the
-[funding and chain-view checks](docs/GETTING-STARTED.md#4-create-or-restore-then-sync)
-before requesting a faucet payment. The published alpha is not an npm release.
+On macOS, replace `sha256sum` with `shasum -a 256`. Use the scripts **inside that
+bundle**; a scaffolder from a different source version expects different archives.
+See [the walkthrough](docs/GETTING-STARTED.md) for Next.js and funding limitations.
 
 ## Build from source
 
-Install Node.js 22.18+, pnpm 12.6.0, Rust 1.91, and wasm-pack 0.15.0.
+Install Node.js 22.18+, pnpm 12.6.0, Rust 1.91, wasm-pack 0.15.0 and `tar`.
 The checked-in Rust toolchain file installs the stable WASM target. The threaded
 build also uses a pinned nightly toolchain:
 
@@ -71,15 +70,16 @@ rustup toolchain install nightly-2026-09-22 --profile minimal --component rust-s
 rustup target add wasm32-unknown-unknown --toolchain nightly-2026-09-22
 pnpm build:sdk
 pnpm pack:sdk
+node scripts/create-example.mjs browser-wallet ../my-wallet --install
+cd ../my-wallet
+npm run dev
 ```
 
-`artifacts/` contains matching SDK, core, and passkey archives. Install all three
-in your app; the SDK archive includes both WASM engines and their workers:
+`artifacts/` contains matching archives. The SDK archive bundles core and passkey
+helpers, both WASM engines and their workers. For a wallet app, install it alone:
 
 ```sh
-npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.3.tgz \
-  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.3.tgz \
-  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
+npm install /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
 ```
 
 Configure Vite once:

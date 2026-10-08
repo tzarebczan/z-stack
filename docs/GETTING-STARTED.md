@@ -6,28 +6,27 @@ application services; they are not needed for this walkthrough.
 
 ## 1. Get matching archives
 
-Alpha.3 is currently available from source. Follow [the build instructions](../README.md#build-from-source),
-then run `pnpm bundle:preview` to generate its matching preview bundle.
+Alpha.3 supports NU7 and is currently available **from source**. Follow
+[the build instructions](../README.md#build-from-source) through `pnpm pack:sdk`.
+Run the scaffolder from that checkout; its default archive directory is `artifacts/`.
 
-After the alpha.3 prerelease is published on the [releases page](https://github.com/tzarebczan/z-stack/releases),
-you can download the preview bundle and `SHA256SUMS-alpha.3` without building Rust.
-Use Node 22.18+ and npm; an npm account is not needed. Download all six assets and
-verify them before extracting:
+For a prebuilt local setup, the published preview is **alpha.2**, which predates
+NU7 and is unsuitable for post-NU7 public-testnet payments. Use Node 22.18+ and npm;
+an npm account is not needed. Download and verify both checksum layers:
 
 ```sh
-gh release download v0.1.0-alpha.3 --repo tzarebczan/z-stack --dir sdk-alpha
+gh release download v0.1.0-alpha.2 --repo tzarebczan/z-stack --dir sdk-alpha
 cd sdk-alpha
-sha256sum -c SHA256SUMS-alpha.3 # macOS: shasum -a 256 -c SHA256SUMS-alpha.3
-tar -xzf z-stack-preview-0.1.0-alpha.3-*.tgz
+sha256sum -c SHA256SUMS-alpha.2 # macOS: shasum -a 256 -c SHA256SUMS-alpha.2
+tar -xzf z-stack-preview-0.1.0-alpha.2-*.tgz
 cd z-stack-preview
 sha256sum -c SHA256SUMS # macOS: shasum -a 256 -c SHA256SUMS
 ```
 
-The bundle contains matching packages and the scaffolder. Checksums detect
-changed bytes; authenticate the GitHub release and source revision separately.
-For source changes, use [the README’s build instructions](../README.md#build-from-source).
-Build both engines before packing. Source builds need stable Rust, the pinned
-nightly with rust-src, and wasm-pack; installing the stable toolchain alone is insufficient.
+Continue from **inside the extracted bundle**, using its scripts and matching
+archives. Do not mix its packages with the current source scaffolder. Checksums
+detect changed bytes; authenticate the GitHub release and source revision separately.
+No prebuilt alpha.3 release is available yet.
 
 ## 2. Generate an app outside the checkout
 
@@ -71,24 +70,28 @@ for tested limits; an emulated mobile viewport is not a physical-device test.
 ## 4. Create or restore, then sync
 
 Create displays a one-time phrase and waits for your acknowledgement before the
-first durable wallet save. Save it privately. Restore validates the birthday before
-clearing the phrase and awaiting the SDK and uses a birthday from before your first deposit. Reopening
+first durable wallet save. Save it privately. Choose a birthday before your first deposit. Restore checks the birthday and
+refuses to replace a saved wallet before clearing the phrase input. Reopening
 loads viewing data with spending locked. No phrase is posted to Next or a backend.
 
-Copy the receive address and request **TAZ** (testnet coins). The app-owned
-`connection.ts` must select a gRPC-Web endpoint with CORS for your origin.
-Sync only reports the configured server’s view of the chain; it cannot prove a
-faucet payment exists on that view. Balance and activity remain visible during updates.
+**Before requesting test funds:** the public funding path is not certified.
+On 2026-10-08, ChainSafe and Zexplorer agree at height **4,465,025**, then report
+different hashes at NU7 activation, **4,465,026**. ChainSafe reports
+`000089ba27100beede16d64b34e3d1b626b428cb7ee9fe6dcfdc217ce24e78af`;
+Zexplorer reports `0713a6429dc1cef50224668082022ca8881593e09a3170717e6a725491c03b96`.
+An explorer link from a faucet does not establish which chain its payment uses.
+Compare a block hash at the same post-activation height on your wallet server and
+the faucet's node before requesting TAZ. If you cannot establish agreement, stop
+here for public funding; use the isolated regtest steps below for receive/send checks.
+An empty balance on another chain is not evidence that a deposit was lost.
 
-**Public funding limitation, checked 2026-10-07:**
-[Fauzec](https://fauzec.com/) accepts shielded testnet addresses, but its linked
-[explorer](https://zexplorer.app/testnet/blocks/4468500) and the default server
-`https://zcash-testnet.chainsafe.dev` returned different block hashes at height
-4,468,500. This pair is not a verified funded walkthrough. Jino Labs’ faucet was
-unreachable and ZecFaucet’s testnet host did not resolve during this check. Do not
-interpret an empty wallet as a lost deposit or keep requesting replacements.
-No public faucet/server pair is certified for this alpha; use isolated regtest
-for the reproducible receive/send walkthrough below.
+Once the faucet and wallet server agree, copy the receive address and request
+TAZ (testnet coins). `connection.ts` must select a gRPC-Web endpoint with CORS
+for your origin. ChainSafe's root website redirects to `testnet.zec.rocks`, but
+its gRPC-Web RPC paths still respond. Do not change the configured URL based on
+that website redirect: native `application/grpc` is not browser gRPC-Web.
+Sync reports the configured server's view; it cannot prove a faucet payment
+exists on that chain. Balance and activity stay visible during updates.
 
 The engine supports the pinned NU7 testnet schedule at block **4,465,026**.
 Mainnet's NU7 height is not set upstream. Updating the engine does not reconcile
@@ -101,7 +104,7 @@ To investigate a missing payment:
    can link that transaction to your IP; do not submit your phrase or viewing key.
 2. Compare the hash of a common block on the faucet’s explorer and your light
    server. Heights alone do not identify the same chain. From a built source
-   checkout, `node scripts/check-testnet-chain.mjs --height 4468500` compares public
+   checkout, `node scripts/check-testnet-chain.mjs --height 4465026` compares public
    block data without wallet queries. A different hash needs an aligned server or
    funding source; changing the birthday cannot repair it.
 3. If the receipt is on your server’s chain but below **Wallet birthday**, choose

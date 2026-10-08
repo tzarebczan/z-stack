@@ -24,12 +24,12 @@ chain fixture also exercises recovery confirmation, unconfirmed unmount/reload
 and acknowledged locked reopening. It is not a
 Next.js or Remix deployment test.
 
-Copy this directory outside the workspace after following the [build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md), then run:
+Follow the [build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md).
+
+Copy this directory outside the workspace, then run:
 
 ```sh
-npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.3.tgz \
-  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.3.tgz \
-  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
+npm install /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
 npm run dev
 ```
 

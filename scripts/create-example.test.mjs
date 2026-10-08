@@ -1,9 +1,10 @@
 import { test } from 'node:test';
+import { markdownAnchors } from './doc-anchors.mjs';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { copyTemplate, createExample, inspectArchives, archiveMembers } from './create-example.mjs';
+import { copyTemplate, createExample, inspectArchives, archiveMembers, generatedReadme } from './create-example.mjs';
 
 test('scaffolding refuses an occupied destination before reading archives', () => {
   const dir=mkdtempSync(join(tmpdir(),'sdk-scaffold-'));
@@ -25,4 +26,35 @@ test('archive inspection rejects invalid compression',()=>{
 
 test('Base addon is explicit and refuses unsupported templates', () => {
   assert.throws(() => createExample('local-passkey', '/unused', '/missing', {withBase:true}), /supports browser-wallet/);
+});
+
+
+test('generated instructions use already-vendored archives and retain template commands', () => {
+  const input = '# Demo\n\nDescription.\n\nCopy this directory and install archives:\n\n```sh\ncd /path/to/copied/demo\nnpm install /path/core.tgz \\\n  /path/passkey.tgz \\\n  /path/sdk.tgz\nnpm run build\nnpm run start\n```\n\nMore guidance.\n';
+  const result = generatedReadme(input);
+  assert.doesNotMatch(result, /Copy this directory|\/path\//);
+  assert.match(result, /npm install --ignore-scripts/);
+  assert.match(result, /npm run build\nnpm run start/);
+  assert.match(result, /Description/);
+  assert.match(result, /More guidance/);
+});
+
+
+test('heading anchors reject stale quickstart links and ignore fenced headings', () => {
+  const ids = markdownAnchors('# SDK\n## Build from source\n## Build from source\n```sh\n# build-preview-packages\n```\n## `@z-stack/sdk` — API\n');
+  assert.ok(ids.has('build-from-source'));
+  assert.ok(ids.has('build-from-source-1'));
+  assert.ok(ids.has('z-stacksdk--api'));
+  assert.ok(!ids.has('build-preview-packages'));
+});
+
+test('generated wallet guides retain setup links from the actual templates', () => {
+  for (const name of ['browser-wallet', 'next-wallet', 'react-wallet', 'local-passkey']) {
+    const source = readFileSync(new URL(`../examples/${name}/README.md`, import.meta.url), 'utf8');
+    const generated = generatedReadme(source);
+    for (const link of source.matchAll(/https:\/\/github.com\/tzarebczan\/z-stack[^)]+/g)) {
+      assert.ok(generated.includes(link[0]), `${name}: missing ${link[0]}`);
+    }
+    assert.doesNotMatch(generated, /Copy this directory|\/path\/to\//);
+  }
 });

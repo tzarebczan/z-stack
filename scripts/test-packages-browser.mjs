@@ -175,13 +175,19 @@ async function verifyExampleRecovery(app, chromium) {
     export * from '@z-stack/sdk';
     export async function createWallet(options: Parameters<typeof realCreateWallet>[0]) {
       const transport: BlockTransport = {
-        kind: 'recovery-test', label: 'Offline recovery fixture', tip: async () => 3000000,
-        blocks: async () => { throw new Error('unexpected sync'); },
+        kind: 'recovery-test', label: 'Offline recovery fixture', tip: async () => 1,
+        blocks: async (start, end) => {
+          if (start !== 1 || end !== 1) throw new Error('unexpected fixture range');
+          const metadata = [8,0,16,0,24,0];
+          const proto = [16,1,26,32,...new Array(32).fill(1),34,32,...new Array(32).fill(0),66,metadata.length,...metadata];
+          return new Uint8Array([0,0,0,proto.length,...proto]);
+        },
       };
-      const wallet = await realCreateWallet({ ...options, server: transport, prewarmProvingKey: false });
+      const wallet = await realCreateWallet({ ...options, network: "regtest", server: transport, prewarmProvingKey: false });
+      let failHistory = true;
       return new Proxy(wallet, {
         get(target, key) {
-          if (key === 'history') return async () => { throw new Error('injected activity read failure'); };
+          if (key === 'history') return async (...args: Parameters<typeof target.history>) => { if (failHistory) { failHistory=false; throw new Error('injected activity read failure'); } return target.history(...args); };
           const value = Reflect.get(target, key, target);
           return typeof value === 'function' ? value.bind(target) : value;
         },
@@ -205,18 +211,42 @@ async function verifyExampleRecovery(app, chromium) {
   try {
     browser = await launchBrowser(chromium, { headless: true });
     const page = await browser.newPage();
-    const errors = [];
+    const errors = [], diagnostics = [];
     page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => diagnostics.push(message.text()));
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", { configurable:true, value:{writeText:async value => {
+        if (window.rejectCopy) throw new Error("clipboard denied");
+        window.copiedValue = value;
+      }} });
+    });
     await page.route("**/*", route => {
       assert.equal(new URL(route.request().url()).hostname, "127.0.0.1", "recovery fixture contacted a remote host");
       return route.continue();
     });
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.waitForFunction(() => document.getElementById("status").textContent === "Create a wallet or restore one.");
+    assert.equal(await page.locator("#sync").isDisabled(), true);
+    assert.equal(await page.locator("#lock").isDisabled(), true);
+    await page.locator("#words").fill("not a valid recovery phrase");
+    await page.locator("#birthday").fill("1");
+    await page.locator("#restore").click();
+    await page.locator("#status").filter({hasText:"Something went wrong."}).waitFor();
+    assert.equal(await page.locator("#words").inputValue(), "not a valid recovery phrase", "invalid restore erased its input");
+    await page.locator("#clear-words").click();
     await page.locator("#create").click();
     await page.locator("#phrase").waitFor({state:"visible"});
+    assert.equal(await page.locator("#restore-form").isVisible(), false);
+    assert.equal(await page.locator("#copy-phrase").isEnabled(), true);
     const phrase = await page.locator("#phrase").textContent();
     assert.equal(phrase.trim().split(/\s+/).length, 24);
+    await page.locator("#copy-phrase").click();
+    assert.equal(await page.evaluate(() => window.copiedValue), phrase.trim());
+    await page.locator("#phrase-copy-status").filter({hasText:"clipboard"}).waitFor();
+    await page.evaluate(() => { window.rejectCopy = true; });
+    await page.locator("#copy-phrase").click();
+    await page.locator("#phrase-copy-status").filter({hasText:"Save the numbered words in order"}).waitFor();
+    await page.evaluate(() => { window.rejectCopy = false; });
     assert.equal(await page.locator("#create").isDisabled(), true);
     assert.equal(await page.locator("#clear-words").isDisabled(), true);
     page.once("dialog", dialog => dialog.accept());
@@ -227,15 +257,48 @@ async function verifyExampleRecovery(app, chromium) {
     await page.locator("#phrase").waitFor({state:"visible"});
     assert.equal((await page.locator("#phrase").textContent()).trim().split(/\s+/).length, 24);
     await page.locator("#hide-phrase").click();
-    await page.waitForFunction(() => !document.getElementById("create").disabled);
+    await page.waitForFunction(() => !document.getElementById("sync").disabled);
     assert.ok(await page.locator("#address").textContent(), "confirmed wallet creation did not complete");
     assert.equal(await page.locator("#phrase").textContent(), "");
     assert.equal(await page.locator("#phrase").isVisible(), false);
-    await page.locator("#create").click();
+    assert.equal(await page.locator("#review-send").isDisabled(), true);
+    assert.equal(await page.locator("#copy-address").isVisible(), true);
+    await page.locator("#copy-address").click();
+    assert.equal(await page.evaluate(() => window.copiedValue), await page.locator("#address").textContent());
+    await page.evaluate(() => { window.rejectCopy = true; });
+    await page.locator("#copy-address").click();
+    await page.locator("#copy-status").filter({hasText:"Could not copy"}).waitFor();
+    assert.equal(await page.locator("#create").isDisabled(), true);
+    await page.locator("#words").fill(phrase.trim());
+    await page.locator("#birthday").fill("1");
+    await page.locator("#restore").click();
     await page.waitForFunction(() => document.getElementById("status").textContent.includes("already saved"));
+    assert.equal(await page.locator("#words").inputValue(), phrase.trim(), "refused restore erased the phrase");
+    assert.equal(await page.locator("#birthday").inputValue(), "1");
+    await page.locator("#sync").click();
+    await page.waitForFunction(() => !document.getElementById("review-send").disabled, null, {timeout:90000});
+    await page.locator("#send-to").fill(await page.locator("#address").textContent());
+    await page.locator("#send-amount").fill("0.1");
+    await page.locator("#review-send").click();
+    await page.locator("#status").filter({hasText:"Not enough shielded funds"}).waitFor();
+    await page.locator("#send-amount").fill("invalid");
+    await page.locator("#review-send").click();
+    await page.locator("#status").filter({hasText:"Enter a valid amount"}).waitFor();
+    assert.ok(!(await page.locator("#status").textContent()).includes("ZEC"));
+    await page.locator("#send-to").fill("zcash:fixture");
+    await page.locator("#send-amount").fill("0.1");
+    await page.locator("#review-send").click();
+    await page.locator("#status").filter({hasText:"This form does not accept zcash:"}).waitFor();
+    await page.locator("#send-to").fill("");
+    await page.locator("#review-send").click();
+    assert.equal(await page.locator("#status").textContent(), "");
+    await page.locator("#send-status").filter({hasText:"Complete the required payment fields."}).waitFor();
     await page.reload();
-    await page.waitForFunction(() => !document.getElementById("create").disabled);
+    await page.waitForFunction(() => !document.getElementById("sync").disabled);
     assert.ok(await page.locator("#address").textContent(), "the created wallet did not persist through reload");
+    await page.setViewportSize({width:390,height:844});
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "wallet example overflows mobile viewport");
+    assert.ok(diagnostics.every(message => !message.includes("injected activity read failure")), "raw provider error reached the console");
     assert.deepEqual(errors, [], "example recovery failure escaped its UI handler");
     console.log("Installed example: confirmation precedes persistence; unconfirmed reload cancels; confirmed wallet survives activity-read failure/retry/reload");
   } finally {

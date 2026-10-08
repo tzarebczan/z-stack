@@ -2,7 +2,7 @@
 
 Use Node.js 22.18+, pnpm 12.6.0, Rust 1.91, wasm-pack 0.15.0, and
 `nightly-2026-09-22` with `rust-src` for threaded WASM. See the
-[README setup](README.md#build-preview-packages). All required source patches
+[README setup](README.md#build-from-source). All required source patches
 are checked in; no separate fork checkout is needed.
 
 ## Build and test

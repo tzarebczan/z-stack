@@ -123,6 +123,7 @@ export function useWallet() {
   }
   return { ready, busy, status, snapshot, history, phrase, spending, runtime, progress, receipt, canCancelPayment, baseAction,
     clearReceipt: () => { setReceipt(undefined); },
+    clearStatus: () => { if (!running.current) setStatus(""); },
     reviewPayment: (draft: SendDraft) => run("Reviewing", wallet => reviewSend(wallet, draft)),
     sendPayment: (review: SendReview, words: string) => run("Sending", async wallet => {
       const operation = new AbortController(); sendOperation.current = operation; setCanCancelPayment(true);

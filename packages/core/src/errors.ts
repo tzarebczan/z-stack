@@ -80,7 +80,7 @@ export const WALLET_ERROR_MESSAGES: Record<WalletErrorCode, string> = {
   storage_full: "Could not save recent wallet progress: browser storage is full. Free device space and retry. Keep this site's data and your recovery backup.",
   invalid_network: "Unknown network.",
   invalid_address: "That address is not a valid Zcash destination.",
-  invalid_amount: "Enter a valid ZEC amount.",
+  invalid_amount: "Enter a valid amount with up to eight decimal places.",
   invalid_memo: "Memo is too long.",
   auth: "This action needs the bridge token from `z-wallet serve`.",
   unsupported_transparent: "Transparent send is not supported. Shield first.",
@@ -170,7 +170,7 @@ export function classifyWalletError(message: string): WalletErrorCode {
   if (/bridge token|401 |unauthorized|not a zaino password/.test(lower)) return "auth";
   if (lower.includes("origin not allowed")) return "auth";
   if (lower.includes("insufficient") || lower.includes("no spendable")) return "insufficient_funds";
-  if (lower.includes("sync required") || lower.includes("still behind tip")) return "sync_required";
+  if (lower.includes("sync required") || lower.includes("still behind tip") || lower.includes("must scan blocks first")) return "sync_required";
   if (
     lower.includes("seed unlock") ||
     lower.includes("seedlocked") ||

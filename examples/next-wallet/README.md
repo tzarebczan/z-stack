@@ -10,13 +10,12 @@ The Next CLI wrapper disables its telemetry during dev/build/start.
 ## Run
 
 Use [the setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md), or follow the
-[SDK build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md), then copy this directory
-outside the SDK checkout. From your copy:
+[SDK build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md).
+
+Copy this directory outside the SDK checkout. From your copy:
 
 ```sh
-npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.3.tgz \
-  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.3.tgz \
-  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
+npm install /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
 npm run build
 npm run start
 ```
@@ -33,7 +32,8 @@ mount can open. Imports and server rendering perform no wallet work. A failed
 close is observed; reopening still checks SDK ownership and loads durable state.
 This follows Next’s [client component behavior](https://nextjs.org/docs/app/getting-started/server-and-client-components).
 
-`next.config.mjs` uses the webpack compiler and emits `.wasm` as an asset. The SDK
+`next.config.mjs` pins file tracing to this app directory, so a parent lockfile
+does not change its tracing root. It uses the webpack compiler and emits `.wasm` as an asset. The SDK
 owns integrity verification and instantiation. Webpack emits module workers and
 matching WASM/manifests; no copied assets, source aliases or Vite plugin are used.
 Build with `--webpack`, as the CLI scripts do. Turbopack is a separate unverified
