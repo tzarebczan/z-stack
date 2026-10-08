@@ -331,7 +331,7 @@ export function App() {
     const etaOpts = { grpcWeb, lwdPipe };
     try {
       if (birthdayDate.trim()) {
-        const h = parseBirthdayInput(birthdayDate.trim(), liveTip);
+        const h = parseBirthdayInput(birthdayDate.trim(), liveTip, network);
         return {
           height: h,
           date: birthdayDate.trim(),
@@ -342,20 +342,20 @@ export function App() {
         const h = Number(birthday);
         return {
           height: h,
-          date: dateFromHeight(h, liveTip),
+          date: dateFromHeight(h, liveTip, network),
           eta: syncEta(h, liveTip, localLight, etaOpts).human,
         };
       }
       const h = Math.max(1, liveTip - 100);
       return {
         height: h,
-        date: dateFromHeight(h, liveTip),
+        date: dateFromHeight(h, liveTip, network),
         eta: syncEta(h, liveTip, localLight, etaOpts).human,
       };
     } catch (e) {
       return { error: (e as Error).message };
     }
-  }, [birthday, birthdayDate, liveTip, localLight, grpcWeb, lwdPipe]);
+  }, [birthday, birthdayDate, liveTip, network, localLight, grpcWeb, lwdPipe]);
 
   const birthdayRef = useRef(birthday);
   birthdayRef.current = birthday;
@@ -2070,7 +2070,7 @@ export function App() {
                 <div className="err">{birthdayPreview.error}</div>
               ) : (
                 <div className="status ok">
-                  Scan from {birthdayPreview.height} · ~{birthdayPreview.date} (75s/block est.) ·{" "}
+                  Scan from {birthdayPreview.height} · ~{birthdayPreview.date} (date estimate) ·{" "}
                   {birthdayPreview.eta}
                 </div>
               )}

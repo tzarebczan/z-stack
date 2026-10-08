@@ -6,6 +6,7 @@
 - Testnet NU7 activation at 4,465,026; mainnet activation remains unset upstream.
 - Network-aware birthday estimates span Blossom and NU7 spacing changes while preserving the date safety margin in seconds.
 - Native HTTP date birthdays resolve against the selected server’s live tip; CLI date restores use the same safety margin.
+- Diagnostic birthday previews and reverse-date estimates use the selected network’s block spacing.
 - Optional regtest NU7 scheduling reaches page, scan and proving instances; incompatible runtime configurations are rejected.
 - NU7 hardware PCZTs select the post-NU6.3 proof circuit.
 - Native memo and status queues use the wallet libraries' separate APIs without public fallback for private-routed work.
