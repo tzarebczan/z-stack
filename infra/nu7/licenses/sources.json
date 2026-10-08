@@ -1,0 +1,161 @@
+{
+  "bitcoin_hashes-bitcoin_hashes-CC0.txt": {
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/CC0-1.0.txt",
+    "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+  },
+  "blake2b_simd-blake2_simd-LICENSE": {
+    "url": "https://raw.githubusercontent.com/oconnor663/blake2_simd/47714dc3c424e82213d7f2eb4a833e3843017be5/LICENSE",
+    "sha256": "27e0387973d6b8507cb15f825f6f26e0278d4d5857082c1f56b49a7b39a90183"
+  },
+  "blake2s_simd-blake2_simd-LICENSE": {
+    "url": "https://raw.githubusercontent.com/oconnor663/blake2_simd/47714dc3c424e82213d7f2eb4a833e3843017be5/LICENSE",
+    "sha256": "27e0387973d6b8507cb15f825f6f26e0278d4d5857082c1f56b49a7b39a90183"
+  },
+  "equihash-librustzcash-COPYING.md": {
+    "url": "https://raw.githubusercontent.com/zcash/librustzcash/eafd51ace8818198a21dbadfe921273e06d66999/COPYING.md",
+    "sha256": "1b0f8332e3f8b72835e1bf816a7471103c74e82b16c149e08f36136e175d9846"
+  },
+  "equihash-librustzcash-LICENSE-APACHE": {
+    "url": "https://raw.githubusercontent.com/zcash/librustzcash/eafd51ace8818198a21dbadfe921273e06d66999/LICENSE-APACHE",
+    "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026"
+  },
+  "equihash-librustzcash-LICENSE-MIT": {
+    "url": "https://raw.githubusercontent.com/zcash/librustzcash/eafd51ace8818198a21dbadfe921273e06d66999/LICENSE-MIT",
+    "sha256": "bf145b7a25b6cc65f07176f8b8a6e789ca1d1c762bfbd3c53450bf8031ef5291"
+  },
+  "tonic-prost-build-tonic-LICENSE": {
+    "url": "https://raw.githubusercontent.com/hyperium/tonic/6cb6056b5a748bc5a29bd48f4602dbc4e552bb7d/LICENSE",
+    "sha256": "e24a56698aa6feaf3a02272b3624f9dc255d982970c5ed97ac4525a95056a5b3"
+  },
+  "zcash_script-zcash_script-LICENSE": {
+    "url": "https://raw.githubusercontent.com/ZcashFoundation/zcash_script/cc4ec7ee8b96103586588e51e0f7cb3ebad4d944/LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  },
+  "documented-0.9.2-LICENSE": {
+    "url": "https://raw.githubusercontent.com/cyqsimon/documented/8c748ea3d41fca4a94d2f19ad61b25d34da08a6c/LICENSE",
+    "sha256": "aeaa4b03b4576c13681e89c95872fcbd8ac012256eba6263a74325a3f0154eca"
+  },
+  "documented-macros-0.9.2-LICENSE": {
+    "url": "https://raw.githubusercontent.com/cyqsimon/documented/8c748ea3d41fca4a94d2f19ad61b25d34da08a6c/LICENSE",
+    "sha256": "aeaa4b03b4576c13681e89c95872fcbd8ac012256eba6263a74325a3f0154eca"
+  },
+  "fixed-hash-0.8.0-LICENSE-MIT": {
+    "url": "https://raw.githubusercontent.com/paritytech/parity-common/6aa58bfeaa870b4f7387e50319004151443f7297/LICENSE-MIT",
+    "sha256": "4fd70c448a560ab3226168373907c277e610a6cc21f8d618decee144421070ca"
+  },
+  "iroh-metrics-derive-1.0.1-LICENSE-MIT": {
+    "url": "https://raw.githubusercontent.com/n0-computer/iroh-metrics/a9afb7cd49bb3804fffefec61647993851f9b8c8/LICENSE-MIT",
+    "sha256": "339060c99d5c80c2742cae417f765980afe6b0149a78f959bbf2a79f19ab3af5"
+  },
+  "iroh-metrics-derive-1.0.1-LICENSE-APACHE": {
+    "url": "https://raw.githubusercontent.com/n0-computer/iroh-metrics/a9afb7cd49bb3804fffefec61647993851f9b8c8/LICENSE-APACHE",
+    "sha256": "7953ad8cebf4e01199521a5faa221ef59bec5cee0a9856b179590613a8560cbc"
+  },
+  "jsonrpsee-0.24.11-LICENSE": {
+    "url": "https://raw.githubusercontent.com/paritytech/jsonrpsee/527f3aa8ec118c045e8d2748d7bac0bf3d3fd10c/LICENSE",
+    "sha256": "bda793fa30c98598d1e498b364962e6f0201fa194e71f621986dadfc2949e6e7"
+  },
+  "jsonrpsee-core-0.24.11-LICENSE": {
+    "url": "https://raw.githubusercontent.com/paritytech/jsonrpsee/527f3aa8ec118c045e8d2748d7bac0bf3d3fd10c/LICENSE",
+    "sha256": "bda793fa30c98598d1e498b364962e6f0201fa194e71f621986dadfc2949e6e7"
+  },
+  "jsonrpsee-proc-macros-0.24.11-LICENSE": {
+    "url": "https://raw.githubusercontent.com/paritytech/jsonrpsee/527f3aa8ec118c045e8d2748d7bac0bf3d3fd10c/LICENSE",
+    "sha256": "bda793fa30c98598d1e498b364962e6f0201fa194e71f621986dadfc2949e6e7"
+  },
+  "jsonrpsee-server-0.24.11-LICENSE": {
+    "url": "https://raw.githubusercontent.com/paritytech/jsonrpsee/527f3aa8ec118c045e8d2748d7bac0bf3d3fd10c/LICENSE",
+    "sha256": "bda793fa30c98598d1e498b364962e6f0201fa194e71f621986dadfc2949e6e7"
+  },
+  "jsonrpsee-types-0.24.11-LICENSE": {
+    "url": "https://raw.githubusercontent.com/paritytech/jsonrpsee/527f3aa8ec118c045e8d2748d7bac0bf3d3fd10c/LICENSE",
+    "sha256": "bda793fa30c98598d1e498b364962e6f0201fa194e71f621986dadfc2949e6e7"
+  },
+  "librocksdb-sys-0.17.3+10.4.2-LICENSE": {
+    "url": "https://raw.githubusercontent.com/rust-rocksdb/rust-rocksdb/bb7d2168eab1bc7849f23adbcb825e3aba1bd2f4/LICENSE",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  "libzcash_script-0.1.0-LICENSE": {
+    "url": "https://raw.githubusercontent.com/ZcashFoundation/zcash_script/543c3790c3da6b3281025ff0c90e6f463d348d17/LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  },
+  "n0-error-macros-1.0.1-LICENSE-MIT": {
+    "url": "https://raw.githubusercontent.com/n0-computer/n0-error/596f4113918712d545cbb25b7fa12c7153706f54/LICENSE-MIT",
+    "sha256": "339060c99d5c80c2742cae417f765980afe6b0149a78f959bbf2a79f19ab3af5"
+  },
+  "n0-error-macros-1.0.1-LICENSE-APACHE": {
+    "url": "https://raw.githubusercontent.com/n0-computer/n0-error/596f4113918712d545cbb25b7fa12c7153706f54/LICENSE-APACHE",
+    "sha256": "7953ad8cebf4e01199521a5faa221ef59bec5cee0a9856b179590613a8560cbc"
+  },
+  "netwatch-0.19.3-LICENSE-MIT": {
+    "url": "https://raw.githubusercontent.com/n0-computer/net-tools/0030e57fc70981895bb86212ff0f059cc41c8a4e/LICENSE-MIT",
+    "sha256": "33616ec4c88b6e00de66e6c06f1a55d80bb32a9d7939f3aa83d28e673a1adcae"
+  },
+  "netwatch-0.19.3-LICENSE-APACHE": {
+    "url": "https://raw.githubusercontent.com/n0-computer/net-tools/0030e57fc70981895bb86212ff0f059cc41c8a4e/LICENSE-APACHE",
+    "sha256": "7986218ec4ea89de3511a843ae27fea2584a525036c220ff7b26589179f07888"
+  },
+  "primitive-types-0.12.2-LICENSE-MIT": {
+    "url": "https://raw.githubusercontent.com/paritytech/parity-common/5bfb87dc1dccdf392f32c589b1d734a1cf814261/LICENSE-MIT",
+    "sha256": "4fd70c448a560ab3226168373907c277e610a6cc21f8d618decee144421070ca"
+  },
+  "uint-0.10.0-LICENSE-MIT": {
+    "url": "https://raw.githubusercontent.com/paritytech/parity-common/63c5afbf8e0e903439d3c127c59b0e4a7991000b/LICENSE-MIT",
+    "sha256": "4fd70c448a560ab3226168373907c277e610a6cc21f8d618decee144421070ca"
+  },
+  "uint-0.9.5-LICENSE-MIT": {
+    "url": "https://raw.githubusercontent.com/paritytech/parity-common/c41d51df8a314150c46cbbff31f8140a35dfb02c/LICENSE-MIT",
+    "sha256": "4fd70c448a560ab3226168373907c277e610a6cc21f8d618decee144421070ca"
+  },
+  "lmdb-sys-0.8.0-LICENSE": {
+    "url": "https://raw.githubusercontent.com/danburkert/lmdb-rs/90e88809954459869953cfa595ecd1e644bbfc87/LICENSE",
+    "sha256": "db6d163be642e3b568c5fb2104013da632316ecd4e75935df1613af8b0b37933"
+  },
+  "enum-assoc-1.4.1-LICENSE-DECLARATION.toml": {
+    "url": "https://raw.githubusercontent.com/Eolu/enum-assoc/351b306939b150601451df752a183b077b0de85a/Cargo.toml",
+    "sha256": "ac76a8e989ded142df50e3b796c8926e90c7e0f42d2428ff9ef62a359d38f582",
+    "note": "The published crate and pinned upstream declare MIT OR Apache-2.0 but omit legal files. Retain the original declaration and clearly labelled SPDX license templates without inventing a copyright notice."
+  },
+  "enum-assoc-1.4.1-LICENSE-MIT-TEMPLATE.txt": {
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/d46e94e2c78ceede1cfc63cfa0396472d2798d4c/text/MIT.txt",
+    "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+    "note": "The published crate and pinned upstream declare MIT OR Apache-2.0 but omit legal files. Retain the original declaration and clearly labelled SPDX license templates without inventing a copyright notice."
+  },
+  "zakura-assets-0.3490665.0-LICENSE-MIT": {
+    "url": "https://raw.githubusercontent.com/zakura-core/zakura/61e679ad4d188988d4683852b6031e0cffad9ebf/LICENSE-MIT",
+    "sha256": "2f5332fab8254065a5796c4d76c2717661f30f6757b0d2325cfdbdfc93a25af6"
+  },
+  "zakura-assets-0.3490665.0-LICENSE-APACHE": {
+    "url": "https://raw.githubusercontent.com/zakura-core/zakura/61e679ad4d188988d4683852b6031e0cffad9ebf/LICENSE-APACHE",
+    "sha256": "f8f096ab5ee815515b5db3c5764754cb2efa38f19e9d93dfe509c09850b2ecc2"
+  },
+  "zakura-header-chain-4.0.0-LICENSE-MIT": {
+    "url": "https://raw.githubusercontent.com/zakura-core/zakura/ebda15e23ed0189787e21b4625c6e4f62d10932f/LICENSE-MIT",
+    "sha256": "2f5332fab8254065a5796c4d76c2717661f30f6757b0d2325cfdbdfc93a25af6"
+  },
+  "zakura-header-chain-4.0.0-LICENSE-APACHE": {
+    "url": "https://raw.githubusercontent.com/zakura-core/zakura/ebda15e23ed0189787e21b4625c6e4f62d10932f/LICENSE-APACHE",
+    "sha256": "f8f096ab5ee815515b5db3c5764754cb2efa38f19e9d93dfe509c09850b2ecc2"
+  },
+  "zakura-iroh-base-1.1.0-rc.1-LICENSE-MIT": {
+    "url": "https://raw.githubusercontent.com/zakura-core/iroh/6562f6f3be8a9c9591fc89911cf8217196b824ec/LICENSE-MIT",
+    "sha256": "f169adb8124d3b005416d8485d00777c9a7bdd9099982c52a4493f9732e6d050"
+  },
+  "zakura-iroh-base-1.1.0-rc.1-LICENSE-APACHE": {
+    "url": "https://raw.githubusercontent.com/zakura-core/iroh/6562f6f3be8a9c9591fc89911cf8217196b824ec/LICENSE-APACHE",
+    "sha256": "903131e2786f073a942fbf8fae122d9e576e4dad758c6da7f9f2ba58fd8611ab"
+  },
+  "zakura-iroh-dns-1.1.0-rc.1-LICENSE-MIT": {
+    "url": "https://raw.githubusercontent.com/zakura-core/iroh/6562f6f3be8a9c9591fc89911cf8217196b824ec/LICENSE-MIT",
+    "sha256": "f169adb8124d3b005416d8485d00777c9a7bdd9099982c52a4493f9732e6d050"
+  },
+  "zakura-iroh-dns-1.1.0-rc.1-LICENSE-APACHE": {
+    "url": "https://raw.githubusercontent.com/zakura-core/iroh/6562f6f3be8a9c9591fc89911cf8217196b824ec/LICENSE-APACHE",
+    "sha256": "903131e2786f073a942fbf8fae122d9e576e4dad758c6da7f9f2ba58fd8611ab"
+  },
+  "enum-assoc-1.4.1-LICENSE-APACHE-TEMPLATE.txt": {
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/d46e94e2c78ceede1cfc63cfa0396472d2798d4c/text/Apache-2.0.txt",
+    "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+    "note": "The published crate and pinned upstream declare MIT OR Apache-2.0 but omit legal files. Retain the original declaration and clearly labelled SPDX license templates without inventing a copyright notice."
+  }
+}

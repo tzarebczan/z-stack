@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!zaino-0.10.1-zakura.patch
+!ZAINO-LICENSE
+!license-inventory.py
+!licenses/
+!licenses/**

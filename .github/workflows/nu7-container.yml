@@ -1,0 +1,175 @@
+name: nu7-container
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/nu7-container.yml'
+      - 'infra/nu7/**'
+      - 'scripts/regtest-container*'
+      - 'scripts/regtest-native.mjs'
+  release:
+    types: [published]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: nu7-container-${{ github.event_name == 'pull_request' && github.ref || 'publication' }}
+  cancel-in-progress: false
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      Z_STACK_REGTEST_NU6_3: '150'
+      Z_STACK_REGTEST_NU7: '250'
+      Z_STACK_NU7_ZAINO_IMAGE: z-stack-zaino:candidate
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: target/container-acceptance
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Validate the source revision
+        id: source
+        run: |
+          echo "Z_STACK_REGTEST_DIR=$RUNNER_TEMP/nu7-chain" >> "$GITHUB_ENV"
+          echo "ZAKURAD=$RUNNER_TEMP/zakura/bin/zakurad" >> "$GITHUB_ENV"
+          if test "$GITHUB_EVENT_NAME" = release; then git merge-base --is-ancestor "$GITHUB_SHA" origin/main; fi
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build the pinned candidate
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: infra/nu7
+          platforms: linux/amd64
+          load: true
+          tags: z-stack-zaino:candidate
+          build-args: |
+            SOURCE_REVISION=${{ github.sha }}
+            IMAGE_VERSION=${{ steps.source.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify fixture dependencies and runtime
+        run: |
+          mkdir -p "$RUNNER_TEMP/zakura"
+          curl --fail --location --retry 3 -o "$RUNNER_TEMP/zakura.tar.gz" https://github.com/zakura-core/zakura/releases/download/v1.6.0/zakurad-v1.6.0-linux-x86_64.tar.gz
+          echo "12842638072feb3b2fab500b60da979738d884b484194c4d2aef5220f7a3f372  $RUNNER_TEMP/zakura.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/zakura.tar.gz" -C "$RUNNER_TEMP/zakura" ./bin/zakurad
+          docker run --rm z-stack-zaino:candidate --version
+          docker run --rm --entrypoint /bin/sh z-stack-zaino:candidate -c 'test "$(id -u)" != 0; cd /usr/share/z-stack-zaino; sha256sum --check SHA256SUMS'
+          rustup toolchain install 1.91 --profile minimal
+          node scripts/regtest-native.mjs up
+      - name: Cache the native acceptance build
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/container-acceptance
+          key: nu7-native-linux-x64-1.91-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('crates/z-engine/**', 'vendor/zakura/**') }}
+          restore-keys: |
+            nu7-native-linux-x64-1.91-${{ hashFiles('Cargo.lock') }}-
+      - name: Funded acceptance before and after NU7
+        env:
+          Z_STACK_REGTEST: '1'
+        run: |
+          cargo test -p z-engine --features native --test regtest ironwood_turnstile_shield_send --release -- --ignored --nocapture
+          cargo test -p z-engine --features native --test regtest nu7_shielded_roundtrip --release -- --ignored --nocapture
+      - name: Save exactly the tested image
+        run: docker save z-stack-zaino:candidate | gzip > "$RUNNER_TEMP/zaino-image.tar.gz"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tested-nu7-image
+          path: ${{ runner.temp }}/zaino-image.tar.gz
+          retention-days: 7
+      - name: Stop only this run's fixture
+        if: always()
+        run: |
+          if test -f "$Z_STACK_REGTEST_DIR/zaino.container"; then docker logs "$(cat "$Z_STACK_REGTEST_DIR/zaino.container")"; fi
+          node scripts/regtest-native.mjs down
+  publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' || github.event_name == 'release'
+    needs: build-test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+      packages: write
+      attestations: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      IMAGE: ghcr.io/${{ github.repository_owner }}/z-stack-zaino
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify source and release
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          export VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          RELEASE_COMMIT=$(git rev-parse "$TAG^{commit}")
+          git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
+          if test -n "$EVENT_TAG"; then
+            test "$EVENT_TAG" = "$TAG"
+            test "$RELEASE_COMMIT" = "$GITHUB_SHA"
+          fi
+          gh release view "$TAG" --json isDraft --jq 'if .isDraft then error("Release is a draft") else . end'
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          # Fail on existing version tags, including API errors other than a missing package.
+          python3 - <<'PY'
+          import json, os, subprocess
+          endpoint = f"/users/{os.environ['GITHUB_REPOSITORY_OWNER']}/packages/container/z-stack-zaino/versions?per_page=100"
+          result = subprocess.run(['gh', 'api', '--paginate', '--slurp', endpoint], capture_output=True, text=True)
+          if result.returncode:
+              if '(HTTP 404)' not in result.stderr:
+                  raise SystemExit(result.stderr)
+          else:
+              for page in json.loads(result.stdout):
+                  for version in page:
+                      tags = version['metadata']['container']['tags']
+                      if os.environ.get('VERSION', '') in tags or ('sha-' + os.environ['GITHUB_SHA']) in tags:
+                          raise SystemExit('Image tag already exists; publication is immutable')
+          PY
+      - name: Download the tested image
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: gh run download "$RUN_ID" --name tested-nu7-image --dir "$RUNNER_TEMP/image"
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Push exactly the tested image
+        id: push
+        run: |
+          docker load < "$RUNNER_TEMP/image/zaino-image.tar.gz"
+          test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' z-stack-zaino:candidate)" = "$GITHUB_SHA"
+          docker tag z-stack-zaino:candidate "$IMAGE:$VERSION"
+          docker tag z-stack-zaino:candidate "$IMAGE:sha-$GITHUB_SHA"
+          docker push "$IMAGE:$VERSION"
+          docker push "$IMAGE:sha-$GITHUB_SHA"
+          DIGEST=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE:$VERSION" \
+            | awk -v prefix="$IMAGE@" 'index($0,prefix)==1 { print substr($0,length(prefix)+1) }' | sort -u)
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          node -e 'require("fs").writeFileSync("z-stack-zaino-image.json", JSON.stringify({image: process.env.IMAGE + "@" + process.argv[1], version: process.env.VERSION, sourceRevision: process.env.GITHUB_SHA, upstreamRevision: "3244a74bb09fa6a09a4b2deeb6be53bab0890747", platform: "linux/amd64", workflowRun: process.env.GITHUB_SERVER_URL + "/" + process.env.GITHUB_REPOSITORY + "/actions/runs/" + process.env.GITHUB_RUN_ID}, null, 2) + "\n")' "$DIGEST"
+      - name: Sign GitHub build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Sign the digest receipt
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: z-stack-zaino-image.json
+      - name: Attach the digest receipt to the matching SDK release
+        run: |
+          gh release upload "$RELEASE_TAG" z-stack-zaino-image.json
+          cat z-stack-zaino-image.json >> "$GITHUB_STEP_SUMMARY"
