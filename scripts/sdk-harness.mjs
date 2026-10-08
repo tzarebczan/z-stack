@@ -17,11 +17,17 @@ export function assertLocalRegtestChain(info, rpcUrl) {
   const expected = { Overwinter: 1, Sapling: 1, Blossom: 1, Heartwood: 1, Canopy: 1,
     NU5: 2, NU6: 2, "NU6.1": 2, "NU6.2": 2,
     "NU6.3": Number(process.env.Z_STACK_REGTEST_NU6_3 || 1_000_000) };
-  if (process.env.Z_STACK_REGTEST_NU7 !== undefined) expected.NU7 = Number(process.env.Z_STACK_REGTEST_NU7);
+  if (process.env.Z_STACK_REGTEST_NU7 !== undefined) {
+    const height = Number(process.env.Z_STACK_REGTEST_NU7);
+    if (!Number.isInteger(height) || height <= expected["NU6.3"] || height > 0xffff_ffff) {
+      throw new Error("regtest NU7 height must be a uint32 after NU6.3");
+    }
+    expected.NU7 = height;
+  }
   const upgrades = Object.values(info.upgrades ?? {});
   const nu7 = upgrades.find(u => u.name === "NU7")?.activationheight;
-  if (process.env.Z_STACK_REGTEST_NU7 === undefined && nu7 !== undefined && nu7 <= info.blocks) {
-    throw new Error("validator has active NU7; configure Z_STACK_REGTEST_NU7 for every client");
+  if (process.env.Z_STACK_REGTEST_NU7 === undefined && nu7 !== undefined) {
+    throw new Error("validator has scheduled NU7; configure Z_STACK_REGTEST_NU7 for every client");
   }
   for (const [name, height] of Object.entries(expected)) {
     if (!upgrades.some((upgrade) => upgrade.name === name && upgrade.activationheight === height)) {

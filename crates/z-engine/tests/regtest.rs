@@ -78,12 +78,33 @@ fn require_regtest_chain(info: &serde_json::Value) -> anyhow::Result<()> {
         .find(|u| u["name"].as_str() == Some("NU7"))
         .and_then(|u| u["activationheight"].as_u64());
     anyhow::ensure!(
-        configured.map(u64::from) == scheduled
-            || (configured.is_none()
-                && scheduled.is_none_or(|h| h > info["blocks"].as_u64().unwrap_or(0))),
+        configured.map(u64::from) == scheduled,
         "validator NU7 schedule does not match the client"
     );
     Ok(())
+}
+
+#[test]
+fn mining_guard_requires_exact_nu7_schedule_even_before_activation() {
+    let mut info = serde_json::json!({
+        "chain": "regtest", "blocks": 1,
+        "upgrades": {
+            "nu5": { "name": "NU5", "activationheight": 2 },
+            "nu62": { "name": "NU6.2", "activationheight": 2 },
+            "nu63": { "name": "NU6.3", "activationheight": z_engine::regtest_nu6_3_height() }
+        }
+    });
+    let configured = z_engine::regtest_nu7_height().map(u64::from);
+    if let Some(height) = configured {
+        info["upgrades"]["nu7"] = serde_json::json!({"name":"NU7", "activationheight":height});
+    }
+    assert!(require_regtest_chain(&info).is_ok());
+    for height in [2_000_000, 2_000_001] {
+        if Some(height) != configured {
+            info["upgrades"]["nu7"] = serde_json::json!({"name":"NU7", "activationheight":height});
+            assert!(require_regtest_chain(&info).is_err());
+        }
+    }
 }
 
 async fn wait_zaino_height(min: u32) -> anyhow::Result<u32> {

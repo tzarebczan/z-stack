@@ -19,6 +19,34 @@ test("mining fixture identity requires a loopback validator and the full regtest
     NU5: { name: "NU5", activationheight: 1_842_420 } } }, "http://127.0.0.1:29232"), /NU5 at 2/);
 });
 
+test("mining rejects an omitted future NU7 schedule and requires valid matching client heights", () => {
+  const names = ["Z_STACK_REGTEST_NU6_3", "Z_STACK_REGTEST_NU7"];
+  const before = names.map(name => process.env[name]);
+  try {
+    delete process.env.Z_STACK_REGTEST_NU6_3;
+    delete process.env.Z_STACK_REGTEST_NU7;
+    const upgrades = Object.fromEntries(Object.entries({ Overwinter: 1, Sapling: 1, Blossom: 1,
+      Heartwood: 1, Canopy: 1, NU5: 2, NU6: 2, "NU6.1": 2, "NU6.2": 2, "NU6.3": 1_000_000,
+      NU7: 1_000_001 }).map(([name, activationheight]) => [name, { name, activationheight }]));
+    const fixture = { chain: "regtest", blocks: 1, upgrades };
+    const rpc = "http://127.0.0.1:29232";
+    assert.throws(() => assertLocalRegtestChain(fixture, rpc), /scheduled NU7/);
+    assert.throws(() => assertLocalRegtestChain({ ...fixture, blocks: 1_000_001 }, rpc), /scheduled NU7/);
+    process.env.Z_STACK_REGTEST_NU7 = "1000001";
+    assert.doesNotThrow(() => assertLocalRegtestChain(fixture, rpc));
+    process.env.Z_STACK_REGTEST_NU7 = "1000002";
+    assert.throws(() => assertLocalRegtestChain(fixture, rpc), /activation schedule/);
+    for (const invalid of ["0", "250", "1000000", "1000000.5", "4294967296", "not-a-height"]) {
+      process.env.Z_STACK_REGTEST_NU7 = invalid;
+      assert.throws(() => assertLocalRegtestChain(fixture, rpc), /uint32 after NU6.3/);
+    }
+  } finally {
+    names.forEach((name, i) => {
+      if (before[i] === undefined) delete process.env[name]; else process.env[name] = before[i];
+    });
+  }
+});
+
 async function server(t: TestContext, handler: RequestListener): Promise<string> {
   const http = createServer(handler).listen(0, "127.0.0.1");
   await once(http, "listening");
