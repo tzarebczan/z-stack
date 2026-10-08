@@ -11,6 +11,7 @@
  * blocks after it Ironwood. Export the same variable for z-wallet, cargo tests
  * and the SDK harness so the wallet uses the validator's schedule.
  *
+ * Set Z_STACK_NU7_ZAINO_IMAGE to use the optional Linux container in place of ZAINOD.
  * Binaries: ZAKURAD / ZAINOD, else the newest `zakurad-*` / `zainod-*` under
  * ~/.local/share/z-stack/mainnet/bin. Chain data and logs live in
  * Z_STACK_REGTEST_DIR (default ~/.local/share/z-stack/regtest); `--fresh`
@@ -20,7 +21,8 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { containerRunning, startContainer, stopContainer } from "./regtest-container.mjs";
 import { generate, waitForZebra, zebraRpc, ZEBRA_RPC } from "./regtest-rpc.mjs";
 
 const cmd = process.argv[2];
@@ -28,7 +30,8 @@ const rpcPort = Number(new URL(ZEBRA_RPC).port || 80);
 const lwdPort = Number(process.env.Z_STACK_REGTEST_LWD_PORT || 28137);
 if (!Number.isInteger(lwdPort) || lwdPort < 1 || lwdPort > 65535) throw new Error("Invalid regtest light-server port");
 const fresh = process.argv.includes("--fresh");
-const dir = process.env.Z_STACK_REGTEST_DIR || join(homedir(), ".local", "share", "z-stack", "regtest");
+const dir = resolve(process.env.Z_STACK_REGTEST_DIR || join(homedir(), ".local", "share", "z-stack", "regtest"));
+const zainoImage = process.env.Z_STACK_NU7_ZAINO_IMAGE;
 const nu63 = Number(process.env.Z_STACK_REGTEST_NU6_3 || 150);
 const nu7 = process.env.Z_STACK_REGTEST_NU7 === undefined ? undefined : Number(process.env.Z_STACK_REGTEST_NU7);
 const binDir = join(homedir(), ".local", "share", "z-stack", "mainnet", "bin");
@@ -156,10 +159,15 @@ path = "${join(dir, "zaino")}"
 }
 
 if (cmd === "down") {
+  let containerError;
+  try {
+    if (stopContainer(dir)) console.log("stopped fixture Zaino container");
+  } catch (error) { containerError = error; }
   for (const name of ["zaino", "zakura"]) {
     const pid = stop(name);
     console.log(pid ? `stopped ${name} (${pid})` : `${name} not running`);
   }
+  if (containerError) throw containerError;
   process.exit(0);
 }
 
@@ -170,8 +178,8 @@ if (cmd !== "up") {
 
 const zakurad = process.env.ZAKURAD || newest("zakurad");
 const zainod = process.env.ZAINOD || newest("zainod");
-if (!zakurad || !zainod) {
-  console.error(`set ZAKURAD and ZAINOD (nothing under ${binDir})`);
+if (!zakurad || (!zainod && !zainoImage)) {
+  console.error(`set ZAKURAD and either ZAINOD or Z_STACK_NU7_ZAINO_IMAGE (nothing under ${binDir})`);
   process.exit(1);
 }
 if (!Number.isInteger(nu63) || nu63 < 3) {
@@ -181,7 +189,11 @@ if (!Number.isInteger(nu63) || nu63 < 3) {
 if (nu7 !== undefined && (!Number.isInteger(nu7) || nu7 <= nu63 || nu7 > 0xffff_ffff)) {
   throw new Error("Z_STACK_REGTEST_NU7 must be an integer after NU6.3 and within uint32");
 }
+if (zainoImage && running("zaino")) throw new Error("Native Zaino is running; run down before switching to a container");
+if (!zainoImage && existsSync(join(dir, "zaino.container"))) throw new Error("Container Zaino exists; run down before switching to a binary");
+if (zainoImage) containerRunning(dir, zainoImage);
 if (fresh) {
+  stopContainer(dir);
   stop("zaino");
   stop("zakura");
   await new Promise((r) => setTimeout(r, 1000));
@@ -224,9 +236,14 @@ if (scheduledNu7 !== nu7) {
   throw new Error(`validator reports NU7 at ${scheduledNu7}, expected ${nu7 ?? "unscheduled"}; match the client and validator schedules`);
 }
 if ((Number(info.blocks) || 0) < 2) await generate(2 - (Number(info.blocks) || 0));
-if (!running("zaino")) start("zaino", zainod, ["start", "--config", join(dir, "zaino.toml")]);
+if (zainoImage) startContainer(dir, zainoImage);
+else if (!running("zaino")) start("zaino", zainod, ["start", "--config", join(dir, "zaino.toml")]);
 await waitPort(lwdPort);
+if (zainoImage && !containerRunning(dir, zainoImage))
+  throw new Error("Fixture Zaino container exited; inspect its container logs before retrying");
 const after = await waitForZebra();
 console.log(`ready: height=${after.blocks}, NU6.3 at ${nu63}, NU7 ${nu7 ?? "unscheduled"}`);
 console.log(`  validator RPC http://127.0.0.1:${rpcPort}   Zaino gRPC http://127.0.0.1:${lwdPort}`);
 console.log(`  export Z_STACK_REGTEST_NU6_3=${nu63}${nu7 === undefined ? "" : ` Z_STACK_REGTEST_NU7=${nu7}`}   logs: ${join(dir, "logs")}`);
+
+if (zainoImage) console.log(`  container logs: docker logs ${readFileSync(join(dir, "zaino.container"), "utf8").trim()}`);

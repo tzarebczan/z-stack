@@ -59,8 +59,9 @@ do not substitute a newer crypto engine during routine packaging.
 
 Use [Zakura 1.6.0](https://github.com/zakura-core/zakura/releases/tag/v1.6.0)
 or a compatible later validator and a matching light server. The stock Zaino
-0.10.0 fixture cannot serve NU7; build the pinned [NU7 light-server fixture](../infra/nu7/README.md)
-and set `ZAINOD` explicitly. Verify downloaded binaries against their release
+0.10.0 fixture cannot serve NU7; use the digest-pinned container or build the
+[NU7 light-server fixture](../infra/nu7/README.md) and set `ZAINOD` explicitly.
+For the container, set `Z_STACK_NU7_ZAINO_IMAGE` as documented there and omit `ZAINOD`. Verify downloaded binaries against their release
 checksums. Choose a separate local chain directory:
 
 ```sh
