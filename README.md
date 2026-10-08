@@ -7,8 +7,9 @@ their UI, authentication, and backup service.
 **Alpha.** The packages are not published to npm. Original code is Apache-2.0;
 see [licensing](docs/LICENSING.md) and
 [release status](docs/RELEASE.md).
-Download matching [alpha archives](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.2)
-and run an example without a Rust toolchain.
+NU7 support is available in the alpha.3 source build. Prebuilt alpha.3 archives
+have not been published; [earlier releases](https://github.com/tzarebczan/z-stack/releases)
+predate NU7.
 
 ## Start here
 
@@ -31,15 +32,16 @@ and run an example without a Rust toolchain.
 
 ## Run a prebuilt example
 
-Download the preview bundle and checksums from the
-[alpha release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.2).
-Or use GitHub CLI to download the complete matching set:
+Build from source for alpha.3 today. Once its prerelease is published on the
+[releases page](https://github.com/tzarebczan/z-stack/releases), download the preview
+bundle and matching checksums to run an example without Rust:
+
 
 ```sh
-gh release download v0.1.0-alpha.2 --repo tzarebczan/z-stack --dir sdk-alpha
+gh release download v0.1.0-alpha.3 --repo tzarebczan/z-stack --dir sdk-alpha
 cd sdk-alpha
-sha256sum -c SHA256SUMS-alpha.2 # macOS: shasum -a 256 -c SHA256SUMS-alpha.2
-tar -xzf z-stack-preview-0.1.0-alpha.2-*.tgz
+sha256sum -c SHA256SUMS-alpha.3 # macOS: shasum -a 256 -c SHA256SUMS-alpha.3
+tar -xzf z-stack-preview-0.1.0-alpha.3-*.tgz
 cd z-stack-preview
 sha256sum -c SHA256SUMS # macOS: shasum -a 256 -c SHA256SUMS
 node scripts/create-example.mjs next-wallet ../my-wallet --install
@@ -75,9 +77,9 @@ pnpm pack:sdk
 in your app; the SDK archive includes both WASM engines and their workers:
 
 ```sh
-npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.2.tgz \
-  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.2.tgz \
-  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.2.tgz
+npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.3.tgz \
+  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.3.tgz \
+  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
 ```
 
 Configure Vite once:

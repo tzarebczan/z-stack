@@ -14,7 +14,7 @@ pnpm pack:base
 node scripts/create-example.mjs base-wallet /path/to/base-demo --install
 ```
 
-Or install `artifacts/z-stack-base-0.1.0-alpha.2.tgz` in an existing application.
+Or install `artifacts/z-stack-base-0.1.0-alpha.3.tgz` in an existing application.
 No npm publication is required. The [Base-only demo](../examples/base-wallet/README.md)
 uses Base Sepolia. Zcash examples continue installing only SDK/core/passkey.
 

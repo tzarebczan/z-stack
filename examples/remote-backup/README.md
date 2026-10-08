@@ -14,9 +14,9 @@ commands in that copy. Install paths below refer to the original `artifacts/`
 directory; all three archives must come from the same build.
 
 ```sh
-npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.2.tgz \
-  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.2.tgz \
-  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.2.tgz
+npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.3.tgz \
+  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.3.tgz \
+  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
 npm run server
 ```
 

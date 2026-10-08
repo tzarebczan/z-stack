@@ -96,7 +96,7 @@ export type WalletOptions = {
   autoSync?: boolean | { intervalMs?: number };
   /** Prepare the proving key after a funded sync, never during initial loading. Default true. */
   prewarmProvingKey?: boolean;
-} & Pick<SdkInitOptions, "threads" | "preferMulticore" | "regtestNu63Height" | "wasmBasePath">;
+} & Pick<SdkInitOptions, "threads" | "preferMulticore" | "regtestNu63Height" | "regtestNu7Height" | "wasmBasePath">;
 
 export type Wallet = Omit<WasmClient, "baseUrl" | "health" | "probeSetup" | "saveSetup" | "dispose" | "create" | "restore" | "restoreUfvk" | "restoreHardware" | "attachSeed" | "setUnlockPolicy" | "unlockPolicy"> & {
   /** The recovery phrase is separate from state/events and returned only here. */
@@ -182,6 +182,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
       // otherwise build the same key in both ST and MT workers during catch-up.
       prewarmProvingKey: false,
       ...(opts.regtestNu63Height !== undefined ? { regtestNu63Height: opts.regtestNu63Height } : {}),
+      ...(opts.regtestNu7Height !== undefined ? { regtestNu7Height: opts.regtestNu7Height } : {}),
       ...(opts.wasmBasePath !== undefined ? { wasmBasePath: opts.wasmBasePath } : {}),
     });
     const transport =

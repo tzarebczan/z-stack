@@ -5,6 +5,7 @@
 
 import { WalletError } from "./errors";
 
+/** Post-Blossom, pre-NU7 spacing; use blockSpacingSeconds for a network and height. */
 export const BLOCK_SECONDS = 75;
 export const DATE_SAFETY_BLOCKS = 200;
 
@@ -13,7 +14,7 @@ export function typicalTip(network: string): number {
     case "mainnet":
       return 3_470_000;
     case "testnet":
-      return 4_320_000;
+      return 4_470_000;
     default:
       return 200;
   }
@@ -273,18 +274,63 @@ function unixToYmd(unix: number): string {
   return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 }
 
-export function heightFromDate(ymd: string, tipHeight: number): number {
-  const dateUnix = ymdToUnix(ymd);
-  const now = nowUnix();
-  if (dateUnix >= now) return Math.max(1, tipHeight);
-  const agoBlocks = Math.floor((now - dateUnix) / BLOCK_SECONDS);
-  return Math.max(1, tipHeight - agoBlocks);
+export type BirthdayNetwork = string | {
+  network: string;
+  /** Regtest only; match the validator. NU7 is otherwise unscheduled. */
+  regtestNu7Height?: number;
+};
+
+function spacingEras(config: BirthdayNetwork): Array<[number, number]> {
+  const network = typeof config === "string" ? config : config.network;
+  if (!["mainnet", "testnet", "regtest"].includes(network)) throw new WalletError("invalid_birthday", "invalid network");
+  const eras: Array<[number, number]> = [[1, 150]];
+  eras.push([network === "mainnet" ? 653_600 : network === "testnet" ? 584_000 : 1, 75]);
+  // Common 2.2.0 does not schedule mainnet NU7. Never infer it from wall time.
+  const nu7 = network === "testnet" ? 4_465_026 : network === "regtest" && typeof config !== "string" ? config.regtestNu7Height : undefined;
+  if (nu7 !== undefined) {
+    if (!Number.isInteger(nu7) || nu7 < 3 || nu7 > 0xffff_ffff) {
+      throw new WalletError("invalid_birthday", "invalid regtest NU7 height");
+    }
+    eras.push([nu7, 25]);
+  }
+  return eras;
 }
 
-export function dateFromHeight(height: number, tipHeight: number): string {
-  const behind = Math.max(0, tipHeight - height);
-  const unix = nowUnix() - behind * BLOCK_SECONDS;
-  return unixToYmd(unix);
+/** Consensus spacing at a height, in seconds. */
+export function blockSpacingSeconds(network: BirthdayNetwork, height: number): number {
+  return spacingEras(network).filter(([start]) => height >= start).at(-1)?.[1] ?? 150;
+}
+
+function heightBeforeSeconds(tip: number, seconds: number, network: BirthdayNetwork): number {
+  let height = Math.max(1, tip);
+  for (const [start, spacing] of spacingEras(network).reverse()) {
+    if (height < start) continue;
+    const span = (height - start + 1) * spacing;
+    if (seconds < span) return Math.max(1, height - Math.floor(seconds / spacing));
+    seconds -= span;
+    height = start - 1;
+  }
+  return 1;
+}
+
+/** Approximate conversion from a live tip and wall clock, across spacing changes.
+ * Prefer the wallet's exact birthday height when available.
+ */
+export function heightFromDate(ymd: string, tipHeight: number, network: BirthdayNetwork = "mainnet"): number {
+  const seconds = Math.max(0, nowUnix() - ymdToUnix(ymd));
+  return heightBeforeSeconds(tipHeight, seconds, network);
+}
+
+export function dateFromHeight(height: number, tipHeight: number, network: BirthdayNetwork = "mainnet"): string {
+  let cursor = tipHeight;
+  let seconds = 0;
+  for (const [start, spacing] of spacingEras(network).reverse()) {
+    if (cursor < start || cursor <= height) continue;
+    const lower = Math.max(height, start - 1);
+    seconds += (cursor - lower) * spacing;
+    cursor = lower;
+  }
+  return unixToYmd(nowUnix() - seconds);
 }
 
 export function ymdDaysAgo(days: number): string {
@@ -310,7 +356,7 @@ export function validateBirthdayInput(raw: string | number): void {
 /** Digits are an exact height; dates estimate a height with a safety margin.
  * Empty / `auto` defaults to tip minus 100.
  */
-export function parseBirthdayInput(raw: string, tipHeight: number): number {
+export function parseBirthdayInput(raw: string, tipHeight: number, network: BirthdayNetwork = "mainnet"): number {
   validateBirthdayInput(raw);
   const s = raw.trim();
   if (!s || s.toLowerCase() === "auto") return Math.max(1, tipHeight - 100);
@@ -319,5 +365,5 @@ export function parseBirthdayInput(raw: string, tipHeight: number): number {
     if (!Number.isInteger(h) || h < 1) throw new Error("birthday height is not a number");
     return h;
   }
-  return Math.max(1, heightFromDate(s, tipHeight) - DATE_SAFETY_BLOCKS);
+  return heightBeforeSeconds(heightFromDate(s, tipHeight, network), DATE_SAFETY_BLOCKS * BLOCK_SECONDS, network);
 }

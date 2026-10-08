@@ -1,7 +1,7 @@
 {
   "target": "wasm32-unknown-unknown",
   "edges": "normal,build",
-  "cargoLockSha256": "59dc1c3f36e8c4f490ae6cb4860de41fc469db3c938dc551dbb81301285c7ada",
+  "cargoLockSha256": "b809078ece4ed12d95852519fd513f93541fe4ec581b18aa628f2a2150f95fd8",
   "dependencies": [
     {
       "name": "aead",
@@ -812,31 +812,6 @@
       ]
     },
     {
-      "name": "equihash",
-      "version": "0.3.0",
-      "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/equihash/0.3.0",
-      "repository": "https://github.com/zcash/librustzcash",
-      "texts": [
-        {
-          "file": "librustzcash-COPYING.md",
-          "sha256": "1b0f8332e3f8b72835e1bf816a7471103c74e82b16c149e08f36136e175d9846",
-          "origin": "https://raw.githubusercontent.com/zcash/librustzcash/eafd51ace8818198a21dbadfe921273e06d66999/COPYING.md"
-        },
-        {
-          "file": "librustzcash-LICENSE-APACHE",
-          "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://raw.githubusercontent.com/zcash/librustzcash/eafd51ace8818198a21dbadfe921273e06d66999/LICENSE-APACHE"
-        },
-        {
-          "file": "librustzcash-LICENSE-MIT",
-          "sha256": "bf145b7a25b6cc65f07176f8b8a6e789ca1d1c762bfbd3c53450bf8031ef5291",
-          "origin": "https://raw.githubusercontent.com/zcash/librustzcash/eafd51ace8818198a21dbadfe921273e06d66999/LICENSE-MIT"
-        }
-      ],
-      "licenseTextOrigin": "retained upstream texts; published archive omits legal files"
-    },
-    {
       "name": "equivalent",
       "version": "1.0.2",
       "license": "Apache-2.0 OR MIT",
@@ -1127,6 +1102,25 @@
           "file": "LICENSE-MIT",
           "sha256": "42fa16951ce7f24b5a467a40e5b449a1d41e662f97ca779864f053f39e097737",
           "origin": "https://docs.rs/crate/getrandom/0.2.17/source/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "getrandom",
+      "version": "0.3.4",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://crates.io/crates/getrandom/0.3.4",
+      "repository": "https://github.com/rust-random/getrandom",
+      "texts": [
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "aaff376532ea30a0cd5330b9502ad4a4c8bf769c539c87ffe78819d188a18ebf",
+          "origin": "https://docs.rs/crate/getrandom/0.3.4/source/LICENSE-APACHE"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "29e9fe5074bd27e0e5d5d110394fbbcd841baee2651a3c4b4560a632702cede4",
+          "origin": "https://docs.rs/crate/getrandom/0.3.4/source/LICENSE-MIT"
         }
       ]
     },
@@ -3152,293 +3146,336 @@
       ]
     },
     {
-      "name": "zakura-bellman",
-      "version": "1.2.0",
+      "name": "zakura-address",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-bellman/1.2.0",
+      "source": "https://crates.io/crates/zakura-address/2.2.0",
+      "repository": "https://github.com/zakura-core/common",
+      "texts": [
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
+          "origin": "https://docs.rs/crate/zakura-address/2.2.0/source/LICENSE-APACHE"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "e205942aefc85685b201f7ef18a65e40926ad2f8df962b772cf1097a165a4cbe",
+          "origin": "https://docs.rs/crate/zakura-address/2.2.0/source/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "zakura-bellman",
+      "version": "2.2.0",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://crates.io/crates/zakura-bellman/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "88425d0546bb5c83897bd6551573d6e452225f3f87b115d3424ba982f5be1413",
-          "origin": "https://docs.rs/crate/zakura-bellman/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-bellman/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-bellman/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-bellman/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-bellman/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-bellman/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-bls12-381",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-bls12-381/1.2.0",
+      "source": "https://crates.io/crates/zakura-bls12-381/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "ec0c9211057a8b5494218d10913a42c257f73420c4b53c119749098216838d40",
-          "origin": "https://docs.rs/crate/zakura-bls12-381/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-bls12-381/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-bls12-381/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-bls12-381/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-bls12-381/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-bls12-381/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-client-backend",
-      "version": "0.1.0-rc5",
+      "version": "0.1.0-rc7",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-client-backend/0.1.0-rc5",
+      "source": "https://crates.io/crates/zakura-client-backend/0.1.0-rc7",
       "repository": "https://github.com/zakura-core/wallet-libraries",
       "texts": [
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-client-backend/0.1.0-rc5/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-client-backend/0.1.0-rc7/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "5746c0bdf1827f3ae16352345242bd67da23fda8e2d7e504264bc1aaea21c678",
-          "origin": "https://docs.rs/crate/zakura-client-backend/0.1.0-rc5/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-client-backend/0.1.0-rc7/source/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "zakura-equihash",
+      "version": "2.2.0",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://crates.io/crates/zakura-equihash/2.2.0",
+      "repository": "https://github.com/zakura-core/common",
+      "texts": [
+        {
+          "file": "COPYRIGHT",
+          "sha256": "a702b904725c6ca456fec4df542c719636750051460893e6c09be7f311f9d56c",
+          "origin": "https://docs.rs/crate/zakura-equihash/2.2.0/source/COPYRIGHT"
+        },
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "origin": "https://docs.rs/crate/zakura-equihash/2.2.0/source/LICENSE-APACHE"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "bf145b7a25b6cc65f07176f8b8a6e789ca1d1c762bfbd3c53450bf8031ef5291",
+          "origin": "https://docs.rs/crate/zakura-equihash/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-halo2-gadgets",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-halo2-gadgets/1.2.0",
+      "source": "https://crates.io/crates/zakura-halo2-gadgets/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "70f6537da4aba768aaed5361139f5c36b324817f09c9258c4af19336eaa9a83c",
-          "origin": "https://docs.rs/crate/zakura-halo2-gadgets/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-halo2-gadgets/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-halo2-gadgets/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-halo2-gadgets/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-halo2-gadgets/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-halo2-gadgets/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-halo2-legacy-pdqsort",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-halo2-legacy-pdqsort/1.2.0",
+      "source": "https://crates.io/crates/zakura-halo2-legacy-pdqsort/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "4bccceb1c5dcbf40b261d1038a1f6886e23b9e795a547b99549b81148a975ec7",
-          "origin": "https://docs.rs/crate/zakura-halo2-legacy-pdqsort/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-halo2-legacy-pdqsort/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-halo2-legacy-pdqsort/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-halo2-legacy-pdqsort/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-halo2-legacy-pdqsort/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-halo2-legacy-pdqsort/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-halo2-poseidon",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-halo2-poseidon/1.2.0",
+      "source": "https://crates.io/crates/zakura-halo2-poseidon/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "02b9c86d7cf4872417855f334ef0a0799e5133e406716bd5626ca13f197687df",
-          "origin": "https://docs.rs/crate/zakura-halo2-poseidon/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-halo2-poseidon/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-halo2-poseidon/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-halo2-poseidon/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-halo2-poseidon/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-halo2-poseidon/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-halo2-proofs",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-halo2-proofs/1.2.0",
+      "source": "https://crates.io/crates/zakura-halo2-proofs/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "b2e76149ab4931765fa4e9118cc12016ccc5c8ff6bc5cae6668e905423b31b71",
-          "origin": "https://docs.rs/crate/zakura-halo2-proofs/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-halo2-proofs/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-halo2-proofs/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-halo2-proofs/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-halo2-proofs/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-halo2-proofs/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-jubjub",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-jubjub/1.2.0",
+      "source": "https://crates.io/crates/zakura-jubjub/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "1f251ca35cc9d4327375a0fd720ec345fe2e2577c1554264cb8cc7238c026c2b",
-          "origin": "https://docs.rs/crate/zakura-jubjub/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-jubjub/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-jubjub/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-jubjub/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-jubjub/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-jubjub/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-keys",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-keys/1.2.0",
+      "source": "https://crates.io/crates/zakura-keys/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "df4acab04ebdbd33e0d89b4458b0f22602d1c6e5423c0240c14df7b920316505",
-          "origin": "https://docs.rs/crate/zakura-keys/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-keys/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-keys/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-keys/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-keys/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-keys/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-orchard",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-orchard/1.2.0",
+      "source": "https://crates.io/crates/zakura-orchard/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "7dda72e8ee366de6695920287b96b9dc2a3b464252346e49340fb7cfa885e8f3",
-          "origin": "https://docs.rs/crate/zakura-orchard/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-orchard/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-orchard/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-orchard/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-orchard/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-orchard/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-pairing",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-pairing/1.2.0",
+      "source": "https://crates.io/crates/zakura-pairing/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "ce06e146aaab2577becb18857b1ae0c4bb5c8c468b6424c7360ee92909173fbc",
-          "origin": "https://docs.rs/crate/zakura-pairing/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-pairing/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-pairing/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-pairing/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-pairing/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-pairing/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-pasta-curves",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-pasta-curves/1.2.0",
+      "source": "https://crates.io/crates/zakura-pasta-curves/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "a814a0f41b6e64d83868c7d2d4535e9e2888db06d1c3242e0cb2b1b30e05fd16",
-          "origin": "https://docs.rs/crate/zakura-pasta-curves/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-pasta-curves/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-pasta-curves/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-pasta-curves/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-pasta-curves/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-pasta-curves/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-pczt",
-      "version": "0.1.0-rc3",
+      "version": "0.1.0-rc4",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-pczt/0.1.0-rc3",
+      "source": "https://crates.io/crates/zakura-pczt/0.1.0-rc4",
       "repository": "https://github.com/zakura-core/wallet-libraries",
       "texts": [
         {
@@ -3461,141 +3498,195 @@
       "note": "The crate declares MIT OR Apache-2.0 in Cargo.toml and README. PCZT originates in zcash/librustzcash. Texts are retained from its root at 34f2b1e810ac8d00e671f0d254c7af7048c8985c, the source revision vendored by Zakura for this release; pczt's README links to absent legal files. Upstream packaging fix: https://github.com/zakura-core/wallet-libraries/pull/109."
     },
     {
-      "name": "zakura-primitives",
-      "version": "1.2.0",
+      "name": "zakura-pir-enhance-types",
+      "version": "0.0.1-rc0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-primitives/1.2.0",
+      "source": "https://crates.io/crates/zakura-pir-enhance-types/0.0.1-rc0",
+      "repository": "https://github.com/zakura-core/wallet-libraries",
+      "texts": [
+        {
+          "file": "pir-enhance-types-LICENSE-APACHE",
+          "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+          "origin": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/Apache-2.0.txt"
+        }
+      ],
+      "licenseTextOrigin": "retained upstream texts; published archive omits legal files",
+      "note": "The published crate declares MIT OR Apache-2.0 and omits legal files. Retained standard Apache-2.0 text is used under that license option, without inventing a copyright notice. Source: zakura-core/wallet-libraries at d60d1442526afce96a40bfbea0f35c63f116d2af, zakura/pir-enhance-types."
+    },
+    {
+      "name": "zakura-primitives",
+      "version": "2.2.0",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://crates.io/crates/zakura-primitives/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "66a37c64425c75c46078bc33a55484b48a1477c9b376080184dbac55fb066eb4",
-          "origin": "https://docs.rs/crate/zakura-primitives/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-primitives/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-primitives/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-primitives/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-primitives/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-primitives/2.2.0/source/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "zakura-protocol",
+      "version": "2.2.0",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://crates.io/crates/zakura-protocol/2.2.0",
+      "repository": "https://github.com/zakura-core/common",
+      "texts": [
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "origin": "https://docs.rs/crate/zakura-protocol/2.2.0/source/LICENSE-APACHE"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "f3e4d7ec962e170da7bebee8b1b7c2d7fdb5141d665d89f8467f4770a4b9a7e0",
+          "origin": "https://docs.rs/crate/zakura-protocol/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-reddsa",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-reddsa/1.2.0",
+      "source": "https://crates.io/crates/zakura-reddsa/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "e4696bf4ce0295699fe4321b2c32f79e48a3c22e826bc7edd9e1ec502034e9d9",
-          "origin": "https://docs.rs/crate/zakura-reddsa/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-reddsa/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-reddsa/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-reddsa/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-reddsa/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-reddsa/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-redjubjub",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-redjubjub/1.2.0",
+      "source": "https://crates.io/crates/zakura-redjubjub/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "9c9882a1812c9eabcfb42c4b1d682bf357c2639ddd29d15807b9926868c83a1c",
-          "origin": "https://docs.rs/crate/zakura-redjubjub/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-redjubjub/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-redjubjub/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-redjubjub/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-redjubjub/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-redjubjub/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-sapling-crypto",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-sapling-crypto/1.2.0",
+      "source": "https://crates.io/crates/zakura-sapling-crypto/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "41cb7503965d634bd6b0609b31e7355c9aeb20e11a5e7c253565e23d21917d17",
-          "origin": "https://docs.rs/crate/zakura-sapling-crypto/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-sapling-crypto/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-sapling-crypto/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-sapling-crypto/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-sapling-crypto/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-sapling-crypto/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
       "name": "zakura-sinsemilla",
-      "version": "1.2.0",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zakura-sinsemilla/1.2.0",
+      "source": "https://crates.io/crates/zakura-sinsemilla/2.2.0",
       "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "COPYRIGHT",
           "sha256": "769ca0da7747094f993d5f66e1d89bc8014b4537102c681123c3279c4620cb56",
-          "origin": "https://docs.rs/crate/zakura-sinsemilla/1.2.0/source/COPYRIGHT"
+          "origin": "https://docs.rs/crate/zakura-sinsemilla/2.2.0/source/COPYRIGHT"
         },
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zakura-sinsemilla/1.2.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-sinsemilla/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
           "sha256": "faaf24f6a66f3436cb333c284db042b52c1daa9f60dc3b7deadf5aa5cbc364a7",
-          "origin": "https://docs.rs/crate/zakura-sinsemilla/1.2.0/source/LICENSE-MIT"
+          "origin": "https://docs.rs/crate/zakura-sinsemilla/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
     {
-      "name": "zcash_address",
-      "version": "0.13.0",
+      "name": "zakura-transparent",
+      "version": "2.2.0",
       "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zcash_address/0.13.0",
-      "repository": "https://github.com/zcash/librustzcash",
+      "source": "https://crates.io/crates/zakura-transparent/2.2.0",
+      "repository": "https://github.com/zakura-core/common",
       "texts": [
         {
           "file": "LICENSE-APACHE",
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zcash_address/0.13.0/source/LICENSE-APACHE"
+          "origin": "https://docs.rs/crate/zakura-transparent/2.2.0/source/LICENSE-APACHE"
         },
         {
           "file": "LICENSE-MIT",
-          "sha256": "e205942aefc85685b201f7ef18a65e40926ad2f8df962b772cf1097a165a4cbe",
-          "origin": "https://docs.rs/crate/zcash_address/0.13.0/source/LICENSE-MIT"
+          "sha256": "4e4148baf65ea0c815c65481c6add35545e32611edab6653d263a0e850135d2c",
+          "origin": "https://docs.rs/crate/zakura-transparent/2.2.0/source/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "zakura-zip321",
+      "version": "2.2.0",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://crates.io/crates/zakura-zip321/2.2.0",
+      "repository": "https://github.com/zakura-core/common",
+      "texts": [
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
+          "origin": "https://docs.rs/crate/zakura-zip321/2.2.0/source/LICENSE-APACHE"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "4e4148baf65ea0c815c65481c6add35545e32611edab6653d263a0e850135d2c",
+          "origin": "https://docs.rs/crate/zakura-zip321/2.2.0/source/LICENSE-MIT"
         }
       ]
     },
@@ -3638,25 +3729,6 @@
       ]
     },
     {
-      "name": "zcash_protocol",
-      "version": "0.10.6",
-      "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zcash_protocol/0.10.6",
-      "repository": "https://github.com/zcash/librustzcash",
-      "texts": [
-        {
-          "file": "LICENSE-APACHE",
-          "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zcash_protocol/0.10.6/source/LICENSE-APACHE"
-        },
-        {
-          "file": "LICENSE-MIT",
-          "sha256": "f3e4d7ec962e170da7bebee8b1b7c2d7fdb5141d665d89f8467f4770a4b9a7e0",
-          "origin": "https://docs.rs/crate/zcash_protocol/0.10.6/source/LICENSE-MIT"
-        }
-      ]
-    },
-    {
       "name": "zcash_script",
       "version": "0.4.5",
       "license": "Apache-2.0",
@@ -3687,25 +3759,6 @@
           "file": "LICENSE-MIT",
           "sha256": "23ea6f745f7a6dd1f620d84060b559071b4dd124405fbc77ddae0c465db32763",
           "origin": "https://docs.rs/crate/zcash_spec/0.2.1/source/LICENSE-MIT"
-        }
-      ]
-    },
-    {
-      "name": "zcash_transparent",
-      "version": "0.10.0",
-      "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zcash_transparent/0.10.0",
-      "repository": "https://github.com/zcash/librustzcash",
-      "texts": [
-        {
-          "file": "LICENSE-APACHE",
-          "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zcash_transparent/0.10.0/source/LICENSE-APACHE"
-        },
-        {
-          "file": "LICENSE-MIT",
-          "sha256": "4e4148baf65ea0c815c65481c6add35545e32611edab6653d263a0e850135d2c",
-          "origin": "https://docs.rs/crate/zcash_transparent/0.10.0/source/LICENSE-MIT"
         }
       ]
     },
@@ -3768,25 +3821,6 @@
           "file": "LICENSE-MIT",
           "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
           "origin": "https://docs.rs/crate/zip32/0.2.1/source/LICENSE-MIT"
-        }
-      ]
-    },
-    {
-      "name": "zip321",
-      "version": "0.9.0",
-      "license": "MIT OR Apache-2.0",
-      "source": "https://crates.io/crates/zip321/0.9.0",
-      "repository": "https://github.com/zcash/librustzcash",
-      "texts": [
-        {
-          "file": "LICENSE-APACHE",
-          "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "origin": "https://docs.rs/crate/zip321/0.9.0/source/LICENSE-APACHE"
-        },
-        {
-          "file": "LICENSE-MIT",
-          "sha256": "4e4148baf65ea0c815c65481c6add35545e32611edab6653d263a0e850135d2c",
-          "origin": "https://docs.rs/crate/zip321/0.9.0/source/LICENSE-MIT"
         }
       ]
     },

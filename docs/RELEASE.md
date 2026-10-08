@@ -1,9 +1,9 @@
 # Package builds and verification
 
-The current version is `0.1.0-alpha.2`. Packages are not published to npm or Cargo;
-download matching [alpha archives](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.2)
-or build from source. The browser SDK includes production
-WASM engines, so an app consuming built packages does not need Rust. See the
+The current source version is `0.1.0-alpha.3`; its downloadable prerelease is not
+published yet. Build from source for NU7 support. [Earlier archives](https://github.com/tzarebczan/z-stack/releases)
+predate NU7. Packages are not published to npm or Cargo. The browser SDK includes
+production WASM engines, so an app consuming built packages does not need Rust. See the
 [walkthrough](GETTING-STARTED.md) and [support limits](SUPPORT.md).
 
 ## Build archives and a preview bundle
@@ -55,6 +55,35 @@ cargo check -p z-wasm --target wasm32-unknown-unknown
 Rebuild both WASM variants after Rust changes. TypeScript-only changes can reuse
 existing engines with `pnpm build:packages`. Keep dependency updates deliberate;
 do not substitute a newer crypto engine during routine packaging.
+
+## NU7 acceptance
+
+Use [Zakura 1.6.0](https://github.com/zakura-core/zakura/releases/tag/v1.6.0)
+or a compatible later validator and a matching light server. The stock Zaino
+0.10.0 fixture cannot serve NU7; build the pinned [NU7 light-server fixture](../infra/nu7/README.md)
+and set `ZAINOD` explicitly. Verify downloaded binaries against their release
+checksums. Choose a separate local chain directory:
+
+```sh
+export ZAKURAD=/path/to/zakurad
+export ZAINOD=/path/to/zaino-nu7/target/debug/zainod
+export Z_STACK_REGTEST_DIR=/path/to/disposable-nu7-chain
+export Z_STACK_REGTEST_NU6_3=150
+export Z_STACK_REGTEST_NU7=250
+pnpm regtest:native:up
+Z_STACK_REGTEST=1 cargo test -p z-engine --features native --test regtest \
+  ironwood_turnstile_shield_send --release -- --ignored --nocapture
+Z_STACK_REGTEST=1 cargo test -p z-engine --features native --test regtest \
+  nu7_shielded_roundtrip --release -- --ignored --nocapture
+pnpm test:funded-demos
+pnpm regtest:native:down
+```
+
+Run these sequentially against that fixture. The first test exercises the prior
+branch; the second crosses into NU7 and spends shielded notes. The browser demos
+read both activation heights from the validator and configure every WASM instance.
+Omitting `Z_STACK_REGTEST_NU7` leaves NU7 unscheduled in the engine. Do not reuse a
+chain directory with another activation schedule; `--fresh` deletes its chain data.
 
 ## Browser acceptance
 
@@ -121,15 +150,15 @@ pnpm pack:sdk
 pnpm pack:base
 pnpm bundle:preview
 cd artifacts
-sha256sum z-stack-core-0.1.0-alpha.2.tgz z-stack-passkey-0.1.0-alpha.2.tgz \
-  z-stack-sdk-0.1.0-alpha.2.tgz z-stack-base-0.1.0-alpha.2.tgz \
-  z-stack-preview-0.1.0-alpha.2-*.tgz > SHA256SUMS-alpha.2
-sha256sum -c SHA256SUMS-alpha.2
+sha256sum z-stack-core-0.1.0-alpha.3.tgz z-stack-passkey-0.1.0-alpha.3.tgz \
+  z-stack-sdk-0.1.0-alpha.3.tgz z-stack-base-0.1.0-alpha.3.tgz \
+  z-stack-preview-0.1.0-alpha.3-*.tgz > SHA256SUMS-alpha.3
+sha256sum -c SHA256SUMS-alpha.3
 # macOS: use shasum -a 256 in place of sha256sum for both commands.
 ```
 
 Use a directory with exactly one preview bundle for this version. Upload these
-five archives and the checksums to the prerelease tagged `v0.1.0-alpha.2`, targeting
+five archives and the checksums to the prerelease tagged `v0.1.0-alpha.3`, targeting
 the verified commit. Download them again and compare all hashes before publishing.
 Scaffold an app from the downloaded bundle as the final acceptance check. Publishing
 a GitHub prerelease does not publish to npm or Cargo. Keep source tags and signed

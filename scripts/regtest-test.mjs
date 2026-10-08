@@ -7,7 +7,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 process.env.Z_STACK_REGTEST = "1";
 const r = spawnSync(
   "cargo",
-  ["test", "--release", "-p", "z-engine", "--test", "regtest", "--", "--ignored", "--nocapture", "--test-threads=1"],
+  ["test", "--release", "-p", "z-engine", "--test", "regtest", "--", "--ignored", "--nocapture", "--test-threads=1",
+    ...(process.env.Z_STACK_REGTEST_NU7 === undefined ? ["--skip", "nu7_shielded_roundtrip"] : [])],
   { cwd: root, stdio: "inherit", shell: true, env: process.env },
 );
 process.exit(r.status ?? 1);

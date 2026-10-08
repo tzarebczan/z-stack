@@ -42,5 +42,9 @@
   {
     "file": "pczt-librustzcash-LICENSE-MIT",
     "url": "https://raw.githubusercontent.com/zcash/librustzcash/34f2b1e810ac8d00e671f0d254c7af7048c8985c/LICENSE-MIT"
+  },
+  {
+    "file": "pir-enhance-types-LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/Apache-2.0.txt"
   }
 ]

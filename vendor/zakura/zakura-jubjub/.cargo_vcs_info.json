@@ -1,6 +1,6 @@
 {
   "git": {
-    "sha1": "50f712ee22ca95e2dd5230c6f331ce2e433d70ee"
+    "sha1": "b6cf4cefe38fdccc6d2b0dc868f7d6ef01683413"
   },
   "path_in_vcs": "crates/jubjub"
 }

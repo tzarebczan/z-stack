@@ -24,11 +24,13 @@ pub mod web;
 mod zip321;
 
 pub use birthday::{
-    catch_up_percent, catch_up_percent_from, date_from_height, display_catch_up_percent, fmt_secs,
-    height_from_date, historic_overlay_checks, historic_overlay_stage, historic_overlay_visible,
-    light_stall_warning, live_scan_eta_secs, parse_birthday_input, scan_rate_range, typical_tip,
-    ymd_days_ago, OverlayCheck, SyncEta, BLOCK_SECONDS, NEAR_TIP_BLOCKS, QUIET_BEHIND_BLOCKS,
-    STALL_QUIET_REMAINING, SYNC_STALL_SECS,
+    block_spacing_seconds, catch_up_percent, catch_up_percent_from, date_from_height,
+    date_from_height_for_network, display_catch_up_percent, fmt_secs, height_from_date,
+    height_from_date_for_network, historic_overlay_checks, historic_overlay_stage,
+    historic_overlay_visible, light_stall_warning, live_scan_eta_secs, parse_birthday_input,
+    parse_birthday_input_for_network, scan_rate_range, typical_tip, ymd_days_ago, OverlayCheck,
+    SyncEta, BLOCK_SECONDS, NEAR_TIP_BLOCKS, QUIET_BEHIND_BLOCKS, STALL_QUIET_REMAINING,
+    SYNC_STALL_SECS,
 };
 pub use scan::{compact_has_shielded, sync_tuning, SyncTuning, BATCH_LOCAL, MAX_SYNC_BLOCKS};
 pub use zip321::{
@@ -47,7 +49,7 @@ pub mod params;
 pub enum Network {
     Mainnet,
     Testnet,
-    /// Local Zebra/Zaino compose. NU6.2 at height 2; NU6.3 at [`regtest_nu6_3_height`].
+    /// Local fixture. NU6.3 and optional NU7 must match the validator schedule.
     Regtest,
 }
 
@@ -122,6 +124,7 @@ impl Parameters for Network {
                 | NetworkUpgrade::Nu6_1
                 | NetworkUpgrade::Nu6_2 => Some(BlockHeight::from_u32(2)),
                 NetworkUpgrade::Nu6_3 => Some(BlockHeight::from_u32(regtest_nu6_3_height())),
+                NetworkUpgrade::Nu7 => regtest_nu7_height().map(BlockHeight::from_u32),
             },
         }
     }
@@ -156,6 +159,28 @@ pub fn regtest_nu6_3_height() -> u32 {
 /// Set the regtest NU6.3 height before opening a regtest wallet (NU6.2 is at 2).
 pub fn set_regtest_nu6_3_height(height: u32) {
     REGTEST_NU6_3.store(height.max(2), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Optional regtest NU7 activation. Unscheduled unless explicitly configured.
+static REGTEST_NU7: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn regtest_nu7_height() -> Option<u32> {
+    let height = REGTEST_NU7.load(std::sync::atomic::Ordering::Relaxed);
+    let configured = if height != 0 {
+        Some(height)
+    } else {
+        std::env::var("Z_STACK_REGTEST_NU7")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+    };
+    // Invalid ordering must never expose NU7 before the preceding upgrade,
+    // whether supplied by a native environment or an explicit WASM setter.
+    configured.filter(|h| *h > regtest_nu6_3_height())
+}
+
+/// Configure before opening any wallet; match the validator's activation schedule.
+pub fn set_regtest_nu7_height(height: u32) {
+    REGTEST_NU7.store(height.max(3), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Where compact blocks / tips come from.
@@ -738,6 +763,90 @@ pub fn crypto_smoke() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nu7_public_schedule_matches_common() {
+        use zcash_protocol::consensus::BranchId;
+        assert_eq!(
+            Network::Testnet.activation_height(NetworkUpgrade::Nu7),
+            Some(BlockHeight::from_u32(4_465_026))
+        );
+        assert_eq!(
+            Network::Mainnet.activation_height(NetworkUpgrade::Nu7),
+            None
+        );
+        assert_eq!(
+            BranchId::for_height(&Network::Testnet, BlockHeight::from_u32(4_465_025)),
+            BranchId::Nu6_3
+        );
+        assert_eq!(
+            BranchId::for_height(&Network::Testnet, BlockHeight::from_u32(4_465_026)),
+            BranchId::Nu7
+        );
+        assert_eq!(u32::from(BranchId::Nu7), 0x7719_0ad9);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn nu7_regtest_schedule_rejects_invalid_ordering() {
+        const CASE: &str = "Z_STACK_TEST_NU7_SCHEDULE_CASE";
+        if let Ok(case) = std::env::var(CASE) {
+            let expected = match case.as_str() {
+                "valid-env" => Some(250),
+                "valid-default" => Some(REGTEST_NU6_3_DEFAULT + 1),
+                "setters" => {
+                    set_regtest_nu6_3_height(150);
+                    set_regtest_nu7_height(250);
+                    assert_eq!(regtest_nu7_height(), Some(250));
+                    set_regtest_nu6_3_height(300);
+                    assert_eq!(regtest_nu7_height(), None);
+                    set_regtest_nu7_height(400);
+                    Some(400)
+                }
+                _ => None,
+            };
+            assert_eq!(regtest_nu7_height(), expected, "case: {case}");
+            assert_eq!(
+                Network::Regtest.activation_height(NetworkUpgrade::Nu7),
+                expected.map(BlockHeight::from_u32),
+            );
+            return;
+        }
+        // Separate processes keep cached activation settings isolated from
+        // parallel wallet tests and exercise the actual native env path.
+        for (case, nu63, nu7) in [
+            ("missing", None, None),
+            ("nu7-only", None, Some("250")),
+            ("equal", Some("150"), Some("150")),
+            ("earlier", Some("150"), Some("149")),
+            ("malformed", Some("150"), Some("4294967296")),
+            ("valid-env", Some("150"), Some("250")),
+            ("valid-default", None, Some("1000001")),
+            ("setters", None, None),
+        ] {
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.args([
+                "--exact",
+                "tests::nu7_regtest_schedule_rejects_invalid_ordering",
+            ])
+            .env(CASE, case)
+            .env_remove("Z_STACK_REGTEST_NU6_3")
+            .env_remove("Z_STACK_REGTEST_NU7");
+            if let Some(height) = nu63 {
+                cmd.env("Z_STACK_REGTEST_NU6_3", height);
+            }
+            if let Some(height) = nu7 {
+                cmd.env("Z_STACK_REGTEST_NU7", height);
+            }
+            let output = cmd.output().unwrap();
+            assert!(
+                output.status.success(),
+                "case {case}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
 
     #[test]
     fn local_zaino_url() {

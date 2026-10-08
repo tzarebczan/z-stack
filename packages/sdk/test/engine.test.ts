@@ -610,3 +610,17 @@ test("native creation rejects browser recovery preparation before any request", 
   }), /creation preparation requires the browser engine/);
   assert.equal(requests, 0);
 });
+
+
+test("native date birthdays reach the bridge unchanged for live-tip resolution", async () => {
+  const captured: unknown[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    captured.push(JSON.parse(String(init?.body)));
+    return jsonOk({ ok:true });
+  }) as typeof fetch;
+  const engine = createEngineClient("http://127.0.0.1:8787");
+  await engine.restore("fixture", "testnet", "2026-10-07");
+  await engine.restoreUfvk("fixture", "testnet", "2026-10-07");
+  await engine.create("testnet", "2026-10-07");
+  for (const body of captured) assert.equal((body as {birthday:unknown}).birthday, "2026-10-07");
+});

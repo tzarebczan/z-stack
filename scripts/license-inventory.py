@@ -50,6 +50,7 @@ fallbacks = {
     "equihash": "librustzcash-",
     "tonic-prost-build": "tonic-",
     "zakura-pczt": "pczt-librustzcash-",
+    "zakura-pir-enhance-types": "pir-enhance-types-",
     "zcash_script": "zcash_script-",
 }
 records = []
@@ -76,10 +77,12 @@ for package in packages:
     # Preserve the published declaration when its own legal files are absent.
     if upstream:
         record["licenseTextOrigin"] = "retained upstream texts; published archive omits legal files"
+        if name == "zakura-pir-enhance-types":
+            record["note"] = "The published crate declares MIT OR Apache-2.0 and omits legal files. Retained standard Apache-2.0 text is used under that license option, without inventing a copyright notice. Source: zakura-core/wallet-libraries at d60d1442526afce96a40bfbea0f35c63f116d2af, zakura/pir-enhance-types."
         if name == "zakura-pczt":
             record["note"] = "The crate declares MIT OR Apache-2.0 in Cargo.toml and README. PCZT originates in zcash/librustzcash. Texts are retained from its root at 34f2b1e810ac8d00e671f0d254c7af7048c8985c, the source revision vendored by Zakura for this release; pczt's README links to absent legal files. Upstream packaging fix: https://github.com/zakura-core/wallet-libraries/pull/109."
         text.append("Published Cargo license declaration: " + package["license"] + "\n")
-        if name == "zakura-pczt":
+        if name in {"zakura-pczt", "zakura-pir-enhance-types"}:
             text.append(record["note"] + "\n" + (directory / "README.md").read_text() + "\n")
     for file in files:
         data = file.read_bytes()

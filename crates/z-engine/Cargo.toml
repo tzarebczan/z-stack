@@ -105,16 +105,16 @@ zcash_keys = { workspace = true, default-features = false, features = [
     "transparent-inputs",
 ] }
 zcash_primitives = { workspace = true, default-features = false, features = ["std"] }
-zcash_protocol = { version = "=0.10.6", default-features = false, features = ["std"] }
-zcash_address = { version = "=0.13.0", default-features = false, features = ["std"] }
+zcash_protocol = { package = "zakura-protocol", version = "=2.2.0", default-features = false, features = ["std"] }
+zcash_address = { package = "zakura-address", version = "=2.2.0", default-features = false, features = ["std"] }
 zip32 = { version = "=0.2.1", default-features = false }
 rand = { version = "0.10", default-features = false, features = ["std", "sys_rng"] }
 secrecy = "0.8"
-sapling = { version = "=1.2.0", package = "zakura-sapling-crypto", default-features = false, features = ["circuit"] }
+sapling = { version = "=2.2.0", package = "zakura-sapling-crypto", default-features = false, features = ["circuit"] }
 incrementalmerkletree = { version = "0.8.2", default-features = false }
 shardtree = "0.7.1"
-jubjub = { version = "=1.2.0", package = "zakura-jubjub", default-features = false }
-bls12_381 = { version = "=1.2.0", package = "zakura-bls12-381", default-features = false }
+jubjub = { version = "=2.2.0", package = "zakura-jubjub", default-features = false }
+bls12_381 = { version = "=2.2.0", package = "zakura-bls12-381", default-features = false }
 rand_core = { version = "0.10", default-features = false }
 bip39 = "2"
 getrandom = "0.2"
@@ -152,7 +152,7 @@ pczt = { workspace = true, optional = true, default-features = false, features =
     "tx-extractor",
 ] }
 zcash_client_sqlite = { workspace = true, optional = true }
-transparent = { version = "0.10", package = "zcash_transparent", optional = true, default-features = false, features = ["transparent-inputs"] }
+transparent = { version = "=2.2.0", package = "zakura-transparent", optional = true, default-features = false, features = ["transparent-inputs"] }
 zcash_script = { version = "0.4", optional = true }
 ff = { version = "0.14", optional = true, default-features = false }
 blake2b_simd = { version = "1", optional = true }

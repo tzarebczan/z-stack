@@ -190,23 +190,28 @@ fn unit_times(unit: usize, mut a: i32, mut b: i32) -> (i32, i32) {
     (a, b)
 }
 
-/// The exact maximum number of radix-$2^c$ digit positions needed to recode
-/// a GLV half pair. Digit coefficients are bounded by
+/// A sufficient number of radix-$2^c$ positions for coefficients bounded by
+/// `magnitude`. Digit coefficients are bounded by
 /// $D = \lfloor(2B - 1)/3\rfloor$ (the wedge maximizes its `a` coordinate at
 /// $\lfloor(2B-1)/3\rfloor$, and unit rotations of $a + b\omega$ have
 /// coefficients in $\pm\{a, b, a - b\}$), so coefficient magnitudes obey
-/// $|a'| \le \lfloor(|a| + D)/B\rfloor$; iterating that from the component
-/// bound $2^{127} - 1$ until zero counts the positions. The bound is tight
-/// (the `window_count_is_exact` test exhibits inputs that attain it).
-pub(super) const fn window_count(window_bits: usize) -> usize {
+/// $|a'| \le \lfloor(|a| + D)/B\rfloor$. Iterating that bound until zero
+/// proves the returned row length is sufficient.
+const fn window_count_from_bound(window_bits: usize, mut magnitude: u128) -> usize {
     let d_max = ((2u128 << window_bits) - 1) / 3;
-    let mut magnitude = (1u128 << GLV_COMPONENT_BITS) - 1;
     let mut count = 0;
     while magnitude > 0 {
         magnitude = (magnitude + d_max) >> window_bits;
         count += 1;
     }
     count
+}
+
+/// The exact maximum number of positions needed to recode a GLV half pair.
+/// This specializes [`window_count_from_bound`] to $2^{127} - 1$; the
+/// `window_count_is_exact` test exhibits inputs that attain the bound.
+pub(super) const fn window_count(window_bits: usize) -> usize {
+    window_count_from_bound(window_bits, (1u128 << GLV_COMPONENT_BITS) - 1)
 }
 
 impl OrbitParams {
@@ -314,6 +319,13 @@ impl OrbitParams {
         self.window_count
     }
 
+    /// A sufficient row stride when both component magnitudes are at most
+    /// `bound`, derived by the same contraction as [`window_count`].
+    #[inline]
+    pub(super) const fn window_stride_for_bound(&self, bound: u128) -> usize {
+        window_count_from_bound(self.window_bits, bound)
+    }
+
     /// The window width $c$ these parameters were built for.
     #[cfg(feature = "multicore")]
     pub(super) fn width(&self) -> usize {
@@ -361,8 +373,8 @@ fn rotated_bases<C: GlvParams>(
 /// used position always holds a nonzero digit: a zero digit means the value
 /// was a nonzero multiple of the radix, so the quotient is nonzero and the
 /// recoding continues). See the module docs for the exactness and overflow
-/// arguments; the row length is [`OrbitParams::window_count`], which the
-/// descent bound proves sufficient for any in-range pair.
+/// arguments. Full-width callers use [`OrbitParams::window_count`] slots;
+/// callers with a tighter proven component bound may use a shorter row.
 pub(super) fn recode_row(
     params: &OrbitParams,
     first: SignedMagnitude,
@@ -389,7 +401,7 @@ pub(super) fn recode_row(
         a = (a >> params.window_bits) + i128::from(digit.da < 0);
         b = (b >> params.window_bits) + i128::from(digit.db < 0);
     }
-    debug_assert!(a == 0 && b == 0, "recoding must fit the window bound");
+    assert!(a == 0 && b == 0, "recoding must fit the row stride");
     row.len()
 }
 
@@ -446,7 +458,10 @@ fn window_points<F: Field>(
     window: usize,
     rotated: &[RotatedBase<F>],
 ) -> (Vec<AffinePoint<F>>, Vec<usize>) {
-    let width = params.window_count;
+    debug_assert!(!rotated.is_empty());
+    debug_assert_eq!(digits.len() % rotated.len(), 0);
+    let width = digits.len() / rotated.len();
+    debug_assert!(window < width);
     let mut counts = alloc::vec![0usize; params.bucket_count()];
     for row in digits.chunks_exact(width) {
         let code = row[window];
@@ -474,6 +489,59 @@ fn window_points<F: Field>(
         if code == 0 {
             continue;
         }
+        let (orbit, unit) = ((code - 1) / 6, (code - 1) % 6);
+        let position = positions[orbit];
+        points[position] = AffinePoint {
+            x: base.xs[unit >> 1],
+            y: if unit & 1 == 1 { -base.y } else { base.y },
+        };
+        positions[orbit] = position + 1;
+    }
+
+    (points, offsets)
+}
+
+/// The [`window_points`] counterpart for compact digit rows that retain
+/// their original positions in a larger prepared-base array.
+fn window_points_indexed<F: Field>(
+    params: &OrbitParams,
+    digits: &[u16],
+    window: usize,
+    rotated: &[RotatedBase<F>],
+    base_indices: &[usize],
+) -> (Vec<AffinePoint<F>>, Vec<usize>) {
+    debug_assert!(!base_indices.is_empty());
+    debug_assert_eq!(digits.len() % base_indices.len(), 0);
+    let width = digits.len() / base_indices.len();
+    debug_assert!(window < width);
+    let mut counts = alloc::vec![0usize; params.bucket_count()];
+    for row in digits.chunks_exact(width) {
+        let code = row[window];
+        if code != 0 {
+            counts[usize::from(code - 1) / 6] += 1;
+        }
+    }
+
+    let mut offsets = Vec::with_capacity(counts.len() + 1);
+    offsets.push(0);
+    for count in counts {
+        offsets.push(offsets.last().copied().unwrap() + count);
+    }
+
+    let mut positions = offsets[..offsets.len() - 1].to_vec();
+    let mut points = alloc::vec![
+        AffinePoint {
+            x: F::ZERO,
+            y: F::ZERO,
+        };
+        *offsets.last().unwrap()
+    ];
+    for (base_index, row) in digits.chunks_exact(width).enumerate() {
+        let code = usize::from(row[window]);
+        if code == 0 {
+            continue;
+        }
+        let base = &rotated[base_indices[base_index]];
         let (orbit, unit) = ((code - 1) / 6, (code - 1) % 6);
         let position = positions[orbit];
         points[position] = AffinePoint {
@@ -534,6 +602,10 @@ pub(super) fn windows_sum<C: GlvParams>(
     rotated: &[RotatedBase<C::Base>],
     range: core::ops::Range<usize>,
 ) -> Option<C> {
+    if rotated.is_empty() {
+        debug_assert!(digits.is_empty());
+        return Some(C::identity());
+    }
     let mut acc = C::identity();
     for window in range.clone().rev() {
         if window + 1 != range.end {
@@ -542,6 +614,34 @@ pub(super) fn windows_sum<C: GlvParams>(
             }
         }
         let (points, offsets) = window_points(params, digits, window, rotated);
+        let buckets = reduce_affine_buckets(points, offsets)?;
+        acc += reduce_hex_weighted::<C>(params, &buckets);
+    }
+    Some(acc)
+}
+
+/// The [`windows_sum`] counterpart for compact digit rows that retain their
+/// original positions in a larger prepared-base array.
+pub(super) fn windows_sum_indexed<C: GlvParams>(
+    params: &OrbitParams,
+    digits: &[u16],
+    rotated: &[RotatedBase<C::Base>],
+    base_indices: &[usize],
+    range: core::ops::Range<usize>,
+) -> Option<C> {
+    if base_indices.is_empty() {
+        debug_assert!(digits.is_empty());
+        return Some(C::identity());
+    }
+    let mut acc = C::identity();
+    for window in range.clone().rev() {
+        if window + 1 != range.end {
+            for _ in 0..params.window_bits {
+                acc = acc.double();
+            }
+        }
+        let (points, offsets) =
+            window_points_indexed(params, digits, window, rotated, base_indices);
         let buckets = reduce_affine_buckets(points, offsets)?;
         acc += reduce_hex_weighted::<C>(params, &buckets);
     }

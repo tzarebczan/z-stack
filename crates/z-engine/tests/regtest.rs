@@ -72,7 +72,39 @@ fn require_regtest_chain(info: &serde_json::Value) -> anyhow::Result<()> {
             && at("NU6.3", u64::from(z_engine::regtest_nu6_3_height())),
         "validator does not match the repository regtest activation schedule"
     );
+    let configured = z_engine::regtest_nu7_height();
+    let scheduled = upgrades
+        .values()
+        .find(|u| u["name"].as_str() == Some("NU7"))
+        .and_then(|u| u["activationheight"].as_u64());
+    anyhow::ensure!(
+        configured.map(u64::from) == scheduled,
+        "validator NU7 schedule does not match the client"
+    );
     Ok(())
+}
+
+#[test]
+fn mining_guard_requires_exact_nu7_schedule_even_before_activation() {
+    let mut info = serde_json::json!({
+        "chain": "regtest", "blocks": 1,
+        "upgrades": {
+            "nu5": { "name": "NU5", "activationheight": 2 },
+            "nu62": { "name": "NU6.2", "activationheight": 2 },
+            "nu63": { "name": "NU6.3", "activationheight": z_engine::regtest_nu6_3_height() }
+        }
+    });
+    let configured = z_engine::regtest_nu7_height().map(u64::from);
+    if let Some(height) = configured {
+        info["upgrades"]["nu7"] = serde_json::json!({"name":"NU7", "activationheight":height});
+    }
+    assert!(require_regtest_chain(&info).is_ok());
+    for height in [2_000_000, 2_000_001] {
+        if Some(height) != configured {
+            info["upgrades"]["nu7"] = serde_json::json!({"name":"NU7", "activationheight":height});
+            assert!(require_regtest_chain(&info).is_err());
+        }
+    }
 }
 
 async fn wait_zaino_height(min: u32) -> anyhow::Result<u32> {
@@ -706,6 +738,24 @@ async fn frontier_replay_restore_wipe_spend() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs regtest with early NU6.3 (pnpm regtest:native:up)"]
 async fn ironwood_turnstile_shield_send() -> anyhow::Result<()> {
+    exercise_ironwood_roundtrip().await
+}
+
+/// Exercise the same funded receive/spend/reload path after crossing NU7.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs isolated NU7 regtest; configure Z_STACK_REGTEST_NU7"]
+async fn nu7_shielded_roundtrip() -> anyhow::Result<()> {
+    anyhow::ensure!(enabled(), "set Z_STACK_REGTEST=1");
+    let nu7 = z_engine::regtest_nu7_height().context("set Z_STACK_REGTEST_NU7")?;
+    anyhow::ensure!(nu7 <= 10_000, "fixture NU7 must activate early");
+    let info = zebra_rpc("getblockchaininfo", serde_json::json!([]))?;
+    require_regtest_chain(&info)?;
+    let mut height = u32::try_from(info["blocks"].as_u64().context("missing height")?)?;
+    mine_through(&mut height, nu7 + 1).await?;
+    exercise_ironwood_roundtrip().await
+}
+
+async fn exercise_ironwood_roundtrip() -> anyhow::Result<()> {
     anyhow::ensure!(enabled(), "set Z_STACK_REGTEST=1");
     let nu63 = z_engine::regtest_nu6_3_height();
     anyhow::ensure!(

@@ -472,6 +472,8 @@ export {
   heightFromDate,
   lightStallWarning,
   liveScanEtaSecs,
+  blockSpacingSeconds,
+  type BirthdayNetwork,
   parseBirthdayInput,
   validateBirthdayInput,
   scanRateRange,

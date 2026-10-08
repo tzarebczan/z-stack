@@ -144,6 +144,26 @@ impl CodebookMode {
         }
     }
 
+    /// Whether this mode uses the compact residue-table representation.
+    const fn uses_compact_entries(&self) -> bool {
+        matches!(
+            self,
+            CodebookMode::Subgroup {
+                window_bits: 5..=7,
+                beta_power: None
+            }
+        )
+    }
+
+    /// Bytes per stored residue entry, shared by planning and construction.
+    pub(crate) const fn entry_bytes(&self) -> usize {
+        if self.uses_compact_entries() {
+            core::mem::size_of::<CompactCodeEntry>()
+        } else {
+            core::mem::size_of::<CodeEntry>()
+        }
+    }
+
     /// The radix width $c$ of this mode.
     pub const fn window_bits(&self) -> usize {
         match self {
@@ -229,11 +249,98 @@ impl Eis {
 /// through the carries alone: $z' = (z - d)/B$ per coefficient is
 /// `(a >> c) + carry_a`, where `carry_a` $= (r_a - d_a)/B$ is an exact
 /// small integer because $d_a \equiv r_a \pmod B$.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CodeEntry {
     packed: u32,
     carry_a: i16,
     carry_b: i16,
+}
+
+/// Alpha-5/6/7 use at most 64 buckets and variants, six units, and
+/// signed-byte carries. Keep their lookup payload in one word while leaving
+/// the online code format unchanged for the bucket consumers.
+#[derive(Clone, Copy, Debug)]
+struct CompactCodeEntry(u32);
+
+impl CompactCodeEntry {
+    const CLASS_BITS: u32 = 6;
+    const CLASS_MASK: u32 = (1 << Self::CLASS_BITS) - 1;
+    const UNIT_SHIFT: u32 = Self::CLASS_BITS * 2;
+    const FLAG: u32 = 1 << 15;
+    const CARRY_A_SHIFT: u32 = 16;
+    const CARRY_B_SHIFT: u32 = 24;
+
+    fn new(entry: CodeEntry) -> Self {
+        let a = i8::try_from(entry.carry_a).expect("compact carry_a fits i8");
+        let b = i8::try_from(entry.carry_b).expect("compact carry_b fits i8");
+        let code = if entry.packed == 0 {
+            assert_eq!((a, b), (0, 0), "zero entry has no carry");
+            0
+        } else {
+            let (bucket, variant, unit) = unpack_code(entry.packed);
+            assert!(bucket <= Self::CLASS_MASK as usize);
+            assert!(variant <= Self::CLASS_MASK as usize);
+            Self::FLAG
+                | bucket as u32
+                | ((variant as u32) << Self::CLASS_BITS)
+                | ((unit as u32) << Self::UNIT_SHIFT)
+        };
+        let compact = Self(
+            code | ((a as u8 as u32) << Self::CARRY_A_SHIFT)
+                | ((b as u8 as u32) << Self::CARRY_B_SHIFT),
+        );
+        #[cfg(any(test, debug_assertions))]
+        assert_eq!(CodeEntry::from(compact), entry);
+        compact
+    }
+}
+
+impl From<CompactCodeEntry> for CodeEntry {
+    #[inline(always)]
+    fn from(entry: CompactCodeEntry) -> Self {
+        let word = entry.0;
+        // The zero entry is all zero, so no per-lookup branch is needed.
+        let packed = ((word & CompactCodeEntry::FLAG) << 16)
+            | (word & CompactCodeEntry::CLASS_MASK)
+            | (((word >> CompactCodeEntry::CLASS_BITS) & CompactCodeEntry::CLASS_MASK) << 10)
+            | (((word >> CompactCodeEntry::UNIT_SHIFT) & 7) << 20);
+        Self {
+            packed,
+            carry_a: (word >> CompactCodeEntry::CARRY_A_SHIFT) as u8 as i8 as i16,
+            carry_b: (word >> CompactCodeEntry::CARRY_B_SHIFT) as u8 as i8 as i16,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum CodeEntries {
+    General(Vec<CodeEntry>),
+    Compact(Vec<CompactCodeEntry>),
+}
+
+impl CodeEntries {
+    fn bytes(&self) -> usize {
+        match self {
+            Self::General(entries) => entries.len() * core::mem::size_of::<CodeEntry>(),
+            Self::Compact(entries) => entries.len() * core::mem::size_of::<CompactCodeEntry>(),
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        match self {
+            Self::General(entries) => entries.len(),
+            Self::Compact(entries) => entries.len(),
+        }
+    }
+
+    #[cfg(test)]
+    fn get(&self, index: usize) -> CodeEntry {
+        match self {
+            Self::General(entries) => entries[index],
+            Self::Compact(entries) => entries[index].into(),
+        }
+    }
 }
 
 const CODE_FLAG: u32 = 1 << 31;
@@ -292,7 +399,7 @@ pub(crate) struct Codebook {
     /// Exact bucket coefficients $\delta_j$, indexed by `bucket`.
     coefficients: Vec<Eis>,
     /// The $B^2$-entry residue table, indexed by `(a mod B) << c | (b mod B)`.
-    entries: Vec<CodeEntry>,
+    entries: CodeEntries,
     /// The static coefficient-integration program, position-major
     /// (ascending binary position).
     program: Vec<Vec<CoeffAdd>>,
@@ -764,6 +871,12 @@ impl Codebook {
 
         let (program, program_cost) = coefficient_program(&coefficients, &unit_weights);
 
+        let entries = if mode.uses_compact_entries() {
+            CodeEntries::Compact(entries.into_iter().map(CompactCodeEntry::new).collect())
+        } else {
+            CodeEntries::General(entries)
+        };
+
         Codebook {
             mode,
             main_windows,
@@ -832,7 +945,7 @@ impl Codebook {
 
     /// Bytes of the residue table plus lift vectors (planning/reporting).
     pub(crate) fn table_bytes(&self) -> usize {
-        self.entries.len() * core::mem::size_of::<CodeEntry>()
+        self.entries.bytes()
             + (self.variants.len() + self.coefficients.len()) * core::mem::size_of::<Eis>()
     }
 
@@ -840,7 +953,22 @@ impl Codebook {
     /// by the caller), returning one past the highest nonzero window and
     /// the residual `t` with `z = Σ B^j d_j + B^L t`. The residual is
     /// asserted against [`Self::tail_bound`].
-    fn recode_pair(&self, mut a: i128, mut b: i128, row: &mut [u32]) -> (usize, (i64, i64)) {
+    fn recode_pair(&self, a: i128, b: i128, row: &mut [u32]) -> (usize, (i64, i64)) {
+        // Dispatch once per scalar; each loop specializes to its entry type.
+        match &self.entries {
+            CodeEntries::General(entries) => self.recode_pair_with(a, b, row, entries),
+            CodeEntries::Compact(entries) => self.recode_pair_with(a, b, row, entries),
+        }
+    }
+
+    #[inline]
+    fn recode_pair_with<E: Copy + Into<CodeEntry>>(
+        &self,
+        mut a: i128,
+        mut b: i128,
+        row: &mut [u32],
+        entries: &[E],
+    ) -> (usize, (i64, i64)) {
         debug_assert_eq!(row.len(), self.main_windows);
         let c = self.mode.window_bits();
         let mask = (1i128 << c) - 1;
@@ -850,7 +978,7 @@ impl Codebook {
                 return (top, (0, 0));
             }
             let index = (((a & mask) as usize) << c) | ((b & mask) as usize);
-            let entry = self.entries[index];
+            let entry: CodeEntry = entries[index].into();
             *slot = entry.packed;
             if entry.packed != 0 {
                 top = window + 1;
@@ -879,6 +1007,10 @@ pub(crate) struct Recoded {
     pub(crate) counts: Vec<u32>,
     /// The number of recoded scalars (one code column per window).
     pub(crate) terms: usize,
+    /// Original prepared-base indices when zero scalar rows were compacted
+    /// before recoding. `None` means code column `i` still belongs to base
+    /// `i`.
+    pub(super) base_indices: Option<Vec<usize>>,
     /// Residuals as signed-magnitude component pairs, ready for the
     /// unprepared tail backend. Rows recoded to zero (including all rows
     /// the caller zeroed) have zero residuals.
@@ -970,6 +1102,7 @@ pub(super) fn try_recode_with(
             codes,
             counts,
             terms,
+            base_indices: None,
             residuals,
             active_windows,
         });
@@ -997,6 +1130,7 @@ pub(super) fn try_recode_with(
         codes,
         counts,
         terms,
+        base_indices: None,
         residuals,
         active_windows,
     })
@@ -1244,6 +1378,40 @@ mod tests {
     }
 
     #[test]
+    fn compact_and_general_recoding_are_identical() {
+        for c in 5..=7 {
+            let codebook = Codebook::new(CodebookMode::alpha_only(c));
+            let CodeEntries::Compact(compact) = &codebook.entries else {
+                panic!("small alpha-only modes must use compact entries");
+            };
+            assert_eq!(codebook.entries.bytes(), (1 << (2 * c)) * 4);
+            let general: Vec<CodeEntry> = compact.iter().copied().map(Into::into).collect();
+            let mut inputs = vec![
+                (0, 0),
+                (1, -1),
+                (i128::MAX, -i128::MAX),
+                (i64::MAX as i128, i64::MIN as i128),
+            ];
+            // Sweep every residue with signed high bits, then additional
+            // deterministic full-width pairs. Whole rows and tails must agree.
+            for index in 0..compact.len() {
+                inputs.push((
+                    ((index >> c) as i128) - (1i128 << 100),
+                    (index as i128 & ((1 << c) - 1)) + (1i128 << 110),
+                ));
+            }
+            for (a, b) in inputs {
+                let mut actual = vec![0; codebook.main_windows];
+                let mut expected = actual.clone();
+                let actual_tail = codebook.recode_pair(a, b, &mut actual);
+                let expected_tail = codebook.recode_pair_with(a, b, &mut expected, &general);
+                assert_eq!(actual, expected);
+                assert_eq!(actual_tail, expected_tail);
+            }
+        }
+    }
+
+    #[test]
     fn callback_recoding_handles_serial_rows_and_declines() {
         let codebook = Codebook::new(CodebookMode::alpha_only(7));
         let zero = SignedMagnitude {
@@ -1278,7 +1446,8 @@ mod tests {
             let c = mode.window_bits();
             let radix = 1i64 << c;
             let mut max_digit = 0i64;
-            for (index, entry) in codebook.entries.iter().enumerate() {
+            for index in 0..codebook.entries.len() {
+                let entry = codebook.entries.get(index);
                 if index == 0 {
                     assert_eq!(entry.packed, 0);
                     continue;

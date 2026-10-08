@@ -213,6 +213,18 @@ function loadBridgeToken(proxyUrl: string): string {
 
 export function App() {
   const [boot] = useState(readBoot);
+  const [runtimeOptions] = useState(() => {
+    const params = new URLSearchParams(location.search);
+    const height = (name: string) => {
+      const value = params.get(name);
+      return value === null ? undefined : Number(value);
+    };
+    return {
+      threads: Number(params.get("threads")) || undefined,
+      regtestNu63Height: height("regtestNu63"),
+      regtestNu7Height: height("regtestNu7"),
+    };
+  });
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [network, setNetwork] = useState<Network>(boot.network);
@@ -329,9 +341,10 @@ export function App() {
   const liveTip = tip > 0 ? tip : typicalTip(network);
   const birthdayPreview = useMemo(() => {
     const etaOpts = { grpcWeb, lwdPipe };
+    const birthdayNetwork = { network, regtestNu7Height: runtimeOptions.regtestNu7Height };
     try {
       if (birthdayDate.trim()) {
-        const h = parseBirthdayInput(birthdayDate.trim(), liveTip);
+        const h = parseBirthdayInput(birthdayDate.trim(), liveTip, birthdayNetwork);
         return {
           height: h,
           date: birthdayDate.trim(),
@@ -342,20 +355,20 @@ export function App() {
         const h = Number(birthday);
         return {
           height: h,
-          date: dateFromHeight(h, liveTip),
+          date: dateFromHeight(h, liveTip, birthdayNetwork),
           eta: syncEta(h, liveTip, localLight, etaOpts).human,
         };
       }
       const h = Math.max(1, liveTip - 100);
       return {
         height: h,
-        date: dateFromHeight(h, liveTip),
+        date: dateFromHeight(h, liveTip, birthdayNetwork),
         eta: syncEta(h, liveTip, localLight, etaOpts).human,
       };
     } catch (e) {
       return { error: (e as Error).message };
     }
-  }, [birthday, birthdayDate, liveTip, localLight, grpcWeb, lwdPipe]);
+  }, [birthday, birthdayDate, liveTip, network, runtimeOptions, localLight, grpcWeb, lwdPipe]);
 
   const birthdayRef = useRef(birthday);
   birthdayRef.current = birthday;
@@ -390,11 +403,8 @@ export function App() {
       percent: 1,
     });
     // `?threads=N` sizes the scan pool for bench runs; the SDK default otherwise.
-    // `?regtestNu63=150` matches a regtest validator that activates Ironwood early.
-    const params = new URLSearchParams(location.search);
-    const threads = Number(params.get("threads")) || undefined;
-    const regtestNu63Height = Number(params.get("regtestNu63")) || undefined;
-    initialize({ preferMulticore: true, prewarmProvingKey: false, prewarmProveWorker: true, threads, regtestNu63Height })
+    // `?regtestNu63=150&regtestNu7=250` matches the optional NU7 fixture.
+    initialize({ preferMulticore: true, prewarmProvingKey: false, prewarmProveWorker: true, ...runtimeOptions })
       .then((rt) => {
         if (cancelled) return;
         setRuntime(rt);
@@ -410,7 +420,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [runtimeOptions]);
 
   useEffect(() => {
     if (!ready) return;
@@ -2070,7 +2080,7 @@ export function App() {
                 <div className="err">{birthdayPreview.error}</div>
               ) : (
                 <div className="status ok">
-                  Scan from {birthdayPreview.height} · ~{birthdayPreview.date} (75s/block est.) ·{" "}
+                  Scan from {birthdayPreview.height} · ~{birthdayPreview.date} (date estimate) ·{" "}
                   {birthdayPreview.eta}
                 </div>
               )}

@@ -10,7 +10,7 @@ members = [
 exclude = ["vendor/zakura"]
 
 [workspace.package]
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 edition = "2021"
 rust-version = "1.91"
 license = "Apache-2.0"
@@ -19,16 +19,16 @@ authors = ["tzarebczan"]
 
 [workspace.dependencies]
 # --- Zakura Common (crypto) — keep use-paths upstream-shaped via package rename ---
-# Pin to 1.2.0 to match zakura-client-backend 0.1.0-rc5 (=1.2.0 orchard/keys/…).
-orchard = { version = "=1.2.0", package = "zakura-orchard", default-features = false }
-zcash_keys = { version = "=1.2.0", package = "zakura-keys", default-features = false }
-zcash_primitives = { version = "=1.2.0", package = "zakura-primitives", default-features = false }
-zcash_proofs = { version = "=1.2.0", package = "zakura-proofs", default-features = false }
+# Use one published Common release across the native and browser engines.
+orchard = { version = "=2.2.0", package = "zakura-orchard", default-features = false }
+zcash_keys = { version = "=2.2.0", package = "zakura-keys", default-features = false }
+zcash_primitives = { version = "=2.2.0", package = "zakura-primitives", default-features = false }
+zcash_proofs = { version = "=2.2.0", package = "zakura-proofs", default-features = false }
 
 # --- Zakura wallet-libraries ---
-zcash_client_backend = { version = "0.1.0-rc5", package = "zakura-client-backend", default-features = false }
-zcash_client_sqlite = { version = "0.1.0-rc5", package = "zakura-client-sqlite", default-features = false }
-pczt = { version = "0.1.0-rc3", package = "zakura-pczt", default-features = false }
+zcash_client_backend = { version = "=0.1.0-rc7", package = "zakura-client-backend", default-features = false }
+zcash_client_sqlite = { version = "=0.1.0-rc7", package = "zakura-client-sqlite", default-features = false }
+pczt = { version = "=0.1.0-rc4", package = "zakura-pczt", default-features = false }
 
 # --- Workspace crates ---
 z-engine = { path = "crates/z-engine", default-features = false }

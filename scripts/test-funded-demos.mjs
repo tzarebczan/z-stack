@@ -26,6 +26,7 @@ const faucetWords = 'abandon '.repeat(11) + 'about';
 const recipientWords = 'abandon '.repeat(23) + 'art';
 const info = await zebraRpc('getblockchaininfo'); assertLocalRegtestChain(info, ZEBRA_RPC);
 const nu63 = info.upgrades?.['37a5165b']?.activationheight || 1_000_000;
+const nu7 = Object.values(info.upgrades ?? {}).find(u => u.name === 'NU7')?.activationheight;
 const run = (command, args, cwd) => {
   const result = spawnSync(command, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32',
     env: { ...process.env, NEXT_TELEMETRY_DISABLED: '1' } });
@@ -57,7 +58,7 @@ const extraOrigins = ['http://localhost:5189', 'http://127.0.0.1:5189', 'http://
 const gateway = await regtestBrowserGateway([viteOrigin, nextOrigin, ...extraOrigins]);
 const connection = `import { grpcWebTransport, type WalletOptions } from '@z-stack/sdk';
 export const connection: WalletOptions = {network:'regtest', server:grpcWebTransport(${JSON.stringify(gateway.url)}, {transparent:true}),
-regtestNu63Height:${nu63}, transparent:true, transparentScan:'compact', prewarmProvingKey:false};\n`;
+regtestNu63Height:${nu63}, ${nu7 === undefined ? "" : `regtestNu7Height:${nu7},`} transparent:true, transparentScan:'compact', prewarmProvingKey:false};\n`;
 writeFileSync(join(vite, 'src/connection.ts'), connection); writeFileSync(join(next, 'lib/connection.ts'), connection);
 const originalIndex = readFileSync(join(vite, 'index.html'));
 writeFileSync(join(vite, 'src/bootstrap.ts'), `import {createWallet, deriveAccount} from '@z-stack/sdk'; import {connection} from './connection';
@@ -186,7 +187,7 @@ try {
     assert.equal(errors.length,0,errors.join('\n')); await context.close();
     console.log(`Funded ${kind}: ${baseOnly ? "shared-wallet restore/sync/Base/reload/mobile" : "Zcash review/prove/pending/confirmed + Base/reload/mobile"} passed`);
   }
-  writeFileSync(join(scratch,'ACCEPTANCE.json'),JSON.stringify({sdkRevision:process.env.Z_STACK_REVISION||'working-tree',browser:browserName,baseTransfers:baseFixture?.hashes,nu63,gateway:gateway.url,fixtureRecipient:recipient,fixtureFundingTxid:funding.txid},null,2));
+  writeFileSync(join(scratch,'ACCEPTANCE.json'),JSON.stringify({sdkRevision:process.env.Z_STACK_REVISION||'working-tree',browser:browserName,baseTransfers:baseFixture?.hashes,nu63,nu7:nu7??null,gateway:gateway.url,fixtureRecipient:recipient,fixtureFundingTxid:funding.txid},null,2));
   console.log(`Funded demo evidence: ${scratch}`);
   if(process.argv.includes('--keep-gateway')) {
     console.log(`Regtest fixture gateway stays available: ${gateway.url}`);

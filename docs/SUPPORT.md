@@ -22,14 +22,13 @@ security findings; the contact is documented there.
 | iOS / Android / constrained-memory devices | Not fully tested for this candidate | Background/resume, eviction, memory and proving limits need device testing |
 | Custom assets / hosting / non-Vite framework | Documented deployment requirements; integrity/asset tests | Custom threaded paths and deployment targets beyond the tested Vite/Next webpack builds need separate acceptance |
 
-The pinned consensus schedule supports through NU6.3. This build does not enable
-the dependencies' experimental NU7 configuration or its activation height.
-Public testnet spending after the
-[scheduled NU7 activation](https://forum.zcashcommunity.com/t/nu7-timeline/57655)
-at block 4,465,026 is unsupported in this alpha. A matching, reachable light server
-and empty-wallet sync do not establish spending compatibility. Protocol upgrades
-need fresh funded acceptance before they become supported; use isolated regtest
-for the reproducible funded walkthrough.
+The engine uses Zakura Common 2.2.0's NU7 schedule: testnet activation is
+**4,465,026**; mainnet activation remains unset. Transaction construction,
+proof circuit selection and date-based birthdays follow that schedule.
+See [consensus and dependency details](UPSTREAM.md#nu7-consensus).
+A reachable server or empty-wallet sync does not establish funded compatibility.
+Use an isolated NU7-enabled regtest for reproducible acceptance; a public faucet
+and light server must follow the same chain before testing a funded round trip.
 
 The repository's CI checks installed archives with real WASM engines and runs
 controlled browser and provider fixtures. These checks do not certify a live

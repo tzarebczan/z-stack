@@ -120,7 +120,117 @@ pub(crate) mod subset;
 
 pub use codebook::CodebookMode;
 use codebook::{Codebook, CoeffAdd, Recoded, unpack_code};
-use prepared::{VariantTable, unit_coords};
+use prepared::{PreparedPoint, VariantTable, unit_coords};
+
+const PREPARED_PREFETCH_DISTANCE: usize = 16;
+const PREPARED_PREFETCH_RECORD_BYTES: usize = 96;
+const PREPARED_PREFETCH_SECOND_LINE: usize = 64;
+const PREFETCH_XSAVE_OSXSAVE_AVX: u32 = (1 << 26) | (1 << 27) | (1 << 28);
+const PREFETCH_REQUIRED_XCR0: u64 = (1 << 1) | (1 << 2) | (1 << 5) | (1 << 6) | (1 << 7);
+const PREFETCH_AVX512_F_IFMA_VL: u32 = (1 << 16) | (1 << 21) | (1 << 31);
+
+fn prepared_prefetch_field_supported<F: 'static>() -> bool {
+    use core::any::TypeId;
+
+    TypeId::of::<F>() == TypeId::of::<crate::Fp>() || TypeId::of::<F>() == TypeId::of::<crate::Fq>()
+}
+
+fn prepared_prefetch_flags_supported(leaf1_ecx: u32, leaf7_ebx: u32, xcr0: u64) -> bool {
+    leaf1_ecx & PREFETCH_XSAVE_OSXSAVE_AVX == PREFETCH_XSAVE_OSXSAVE_AVX
+        && leaf7_ebx & PREFETCH_AVX512_F_IFMA_VL == PREFETCH_AVX512_F_IFMA_VL
+        && xcr0 & PREFETCH_REQUIRED_XCR0 == PREFETCH_REQUIRED_XCR0
+}
+
+/// Keeps prefetching within the measured CPU and operating-system policy.
+///
+/// The hint itself only requires baseline x86-64 SSE support. This stricter
+/// gate is a performance policy, not an instruction-safety requirement: the
+/// prepared-table measurements cover AVX-512F/IFMA/VL hosts with OS support
+/// for the corresponding register state. Detection also works without `std`.
+#[allow(unsafe_code)]
+fn prepared_prefetch_cpu_available() -> bool {
+    #[cfg(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    {
+        use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
+        use core::sync::atomic::{AtomicU8, Ordering};
+
+        static AVAILABLE: AtomicU8 = AtomicU8::new(0);
+        let cached = AVAILABLE.load(Ordering::Relaxed);
+        if cached != 0 {
+            return cached == 2;
+        }
+
+        // SAFETY: CPUID is available on x86-64. XGETBV is executed only
+        // after CPUID confirms that the OS has enabled XSAVE support.
+        let available = unsafe {
+            let max_leaf = __cpuid(0).eax;
+            let leaf1 = __cpuid(1);
+            if max_leaf < 7 || leaf1.ecx & PREFETCH_XSAVE_OSXSAVE_AVX != PREFETCH_XSAVE_OSXSAVE_AVX
+            {
+                false
+            } else {
+                let leaf7 = __cpuid_count(7, 0);
+                prepared_prefetch_flags_supported(leaf1.ecx, leaf7.ebx, _xgetbv(0))
+            }
+        };
+        AVAILABLE.store(if available { 2 } else { 1 }, Ordering::Relaxed);
+        available
+    }
+    #[cfg(not(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )))]
+    {
+        // Other targets have none of the measured x86 feature state.
+        prepared_prefetch_flags_supported(0, 0, 0)
+    }
+}
+
+fn prepared_prefetch_enabled<F: Field>() -> bool {
+    core::mem::size_of::<PreparedPoint<F>>() == PREPARED_PREFETCH_RECORD_BYTES
+        && prepared_prefetch_field_supported::<F>()
+        && prepared_prefetch_cpu_available()
+}
+
+/// Hints the cache lines at the start and offset 64 of a borrowed record.
+#[allow(unsafe_code)]
+fn prefetch_prepared_point<F>(point: &PreparedPoint<F>) {
+    if core::mem::size_of::<PreparedPoint<F>>() != PREPARED_PREFETCH_RECORD_BYTES
+        || PREPARED_PREFETCH_SECOND_LINE >= PREPARED_PREFETCH_RECORD_BYTES
+    {
+        return;
+    }
+    #[cfg(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    {
+        let address = core::ptr::from_ref(point).cast::<u8>();
+        // SAFETY: the checked record size is 96 bytes, so both addresses
+        // remain inside the live borrowed record. Prefetch does not read a
+        // field representation or mutate memory. SSE prefetch is available
+        // on every x86-64 target; callers gate its use for performance.
+        unsafe {
+            core::arch::x86_64::_mm_prefetch(address.cast(), core::arch::x86_64::_MM_HINT_T0);
+            core::arch::x86_64::_mm_prefetch(
+                address.add(PREPARED_PREFETCH_SECOND_LINE).cast(),
+                core::arch::x86_64::_MM_HINT_T0,
+            );
+        }
+    }
+    #[cfg(not(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )))]
+    let _ = point;
+}
 
 /// Widths the tail MSM chooses between. Only the residuals ride the tail
 /// (extra terms run as their own MSM), and residuals are tiny, so the
@@ -155,6 +265,40 @@ const U10_TABLE_PREFIX_TERMS: usize = U10_TABLE_TERMS - U10_TABLE_SUFFIX_TERMS;
 /// mode for an Orchard-sized SRS; its two prover tables account for about
 /// 24.8 MiB in total, plus small metadata and allocator overhead.
 const DEFAULT_TABLE_FOOTPRINT_BUDGET: usize = 13 << 20;
+
+/// Evenly spaced scalar rows checked before the sparse-row census. Finding
+/// every sample live is only a performance hint that retains the dense path;
+/// it does not affect MSM correctness.
+const DENSE_CENSUS_SAMPLE_POINTS: usize = 16;
+
+/// Returns the live-row count when an input is worth compacting.
+///
+/// The preflight may conservatively retain the dense path for a sparse input;
+/// that only forgoes an optimization. Every result still evaluates the same
+/// exact MSM.
+fn compact_live_scalar_count(terms: usize, live_at: impl Fn(usize) -> bool) -> Option<usize> {
+    let sample_stride = terms / DENSE_CENSUS_SAMPLE_POINTS;
+    if sample_stride != 0
+        && (0..DENSE_CENSUS_SAMPLE_POINTS).all(|sample| {
+            // Stagger the within-stratum offset so periodic zero patterns do
+            // not alias one fixed sample position.
+            let index = sample * sample_stride + sample % sample_stride;
+            live_at(index)
+        })
+    {
+        return None;
+    }
+
+    let compact_limit = terms / 2;
+    let mut live = 0;
+    for index in 0..terms {
+        live += usize::from(live_at(index));
+        if live > compact_limit {
+            return None;
+        }
+    }
+    Some(live)
+}
 
 #[derive(Clone, Copy)]
 enum MainWindowFold {
@@ -507,6 +651,41 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     ) -> C {
         let num_threads = current_num_threads();
 
+        // Extras with zero scalars or identity points contribute nothing.
+        let extras: Vec<(C::ScalarExt, C::AffineExt)> = extra
+            .iter()
+            .filter(|(scalar, point)| {
+                !bool::from(point.is_identity()) && !bool::from(scalar.is_zero())
+            })
+            .copied()
+            .collect();
+
+        // A prepared MSM normally recodes one row per prepared base, even
+        // when a caller supplies many exact zeros. Preserve the prepared
+        // point table while compacting sufficiently sparse inputs: code
+        // matrices, transposes, and per-window scans then cover only live
+        // scalar rows. Stop the census as soon as a compact representation
+        // cannot halve the row count, keeping dense inputs on their existing
+        // path after a small preflight or partial zero scan, without
+        // allocating.
+        let live_scalars = compact_live_scalar_count(terms, |index| {
+            self.live[index] && !scalar_at(index).is_zero_vartime()
+        });
+        // Exact-zero density is deliberately observable, as permitted by
+        // this API's existing variable-time contract. Avoid constructing an
+        // empty code matrix while preserving any independent extra terms.
+        if live_scalars == Some(0) {
+            return self
+                .extras_sum(&extras)
+                .unwrap_or_else(|| self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra));
+        }
+        let base_indices = live_scalars.map(|_| {
+            (0..terms)
+                .filter(|&index| self.live[index] && !scalar_at(index).is_zero_vartime())
+                .collect::<Vec<_>>()
+        });
+        let recoded_terms = base_indices.as_ref().map_or(terms, Vec::len);
+
         // Dead rows (identity bases, merge sources) contribute nothing;
         // force their recoding rows and residuals to zero. A decomposition
         // half out of bound is unreachable (`decompose` guarantees the
@@ -514,7 +693,85 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         // whole check degrades to the exact naive evaluation, matching
         // `try_multiexp`'s posture toward the same guard.
         let decompose_checked = |index: usize| {
-            if !self.live[index] {
+            let prepared_index = base_indices
+                .as_ref()
+                .map_or(index, |indices| indices[index]);
+            if !self.live[prepared_index] {
+                let zero = SignedMagnitude {
+                    negative: false,
+                    magnitude: 0,
+                };
+                return Some((zero, zero));
+            }
+            let scalar = scalar_at(prepared_index);
+            // Recoding and bucket staging are already variable-time in scalar
+            // digits. Avoid canonicalizing and decomposing an exact zero before
+            // those existing zero paths omit it.
+            if scalar.is_zero_vartime() {
+                let zero = SignedMagnitude {
+                    negative: false,
+                    magnitude: 0,
+                };
+                return Some((zero, zero));
+            }
+            checked_signed_magnitudes(decompose::<C>(scalar))
+        };
+        let Some(mut recoded) = codebook::try_recode_with(
+            &self.codebook,
+            recoded_terms,
+            num_threads,
+            decompose_checked,
+        ) else {
+            return self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra);
+        };
+        recoded.base_indices = base_indices;
+        match self.evaluate(&recoded, &extras, num_threads, main_window_fold) {
+            Some(sum) => sum,
+            // Unreachable for valid curve points (the batched-affine
+            // reduction's inversions cannot actually hit zero), but never
+            // trust that with the result's correctness: fall back to a
+            // naive exact evaluation.
+            None => self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra),
+        }
+    }
+
+    /// Evaluates scalars paired with one contiguous prepared-base range.
+    fn multiexp_with_scalar_range_at<'a>(
+        &self,
+        base_offset: usize,
+        terms: usize,
+        scalar_at: impl Fn(usize) -> &'a C::ScalarExt + Sync,
+        extra: &[(C::ScalarExt, C::AffineExt)],
+        main_window_fold: MainWindowFold,
+    ) -> C {
+        let range_end = base_offset
+            .checked_add(terms)
+            .expect("prepared base range overflow");
+        assert!(
+            range_end <= self.live.len(),
+            "prepared base range in bounds"
+        );
+        if terms == 0 {
+            return self.naive_multiexp_with_scalar_range_at(base_offset, terms, &scalar_at, extra);
+        }
+        if !self.merges.is_empty() {
+            let mut scalars = alloc::vec![C::ScalarExt::ZERO; self.live.len()];
+            for index in 0..terms {
+                scalars[base_offset + index] = *scalar_at(index);
+            }
+            return self.multiexp_with_scalar_slices_using(&scalars, &[], extra, main_window_fold);
+        }
+        let num_threads = current_num_threads();
+
+        // Dead rows (identity bases, merge sources) contribute nothing;
+        // force their recoding rows and residuals to zero. A decomposition
+        // half out of bound is unreachable (`decompose` guarantees the
+        // strict 2^127 bound), but rather than trust that with a panic the
+        // whole check degrades to the exact naive evaluation, matching
+        // `try_multiexp`'s posture toward the same guard.
+        let decompose_checked = |index: usize| {
+            let prepared_index = base_offset + index;
+            if !self.live[prepared_index] {
                 let zero = SignedMagnitude {
                     negative: false,
                     magnitude: 0,
@@ -537,7 +794,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let Some(recoded) =
             codebook::try_recode_with(&self.codebook, terms, num_threads, decompose_checked)
         else {
-            return self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra);
+            return self.naive_multiexp_with_scalar_range_at(base_offset, terms, &scalar_at, extra);
         };
         // Extras with zero scalars or identity points contribute nothing.
         let extras: Vec<(C::ScalarExt, C::AffineExt)> = extra
@@ -547,13 +804,19 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             })
             .copied()
             .collect();
-        match self.evaluate(&recoded, &extras, num_threads, main_window_fold) {
+        match self.evaluate_range(
+            &recoded,
+            base_offset,
+            &extras,
+            num_threads,
+            main_window_fold,
+        ) {
             Some(sum) => sum,
             // Unreachable for valid curve points (the batched-affine
             // reduction's inversions cannot actually hit zero), but never
             // trust that with the result's correctness: fall back to a
             // naive exact evaluation.
-            None => self.naive_multiexp_with_scalar_at(terms, &scalar_at, extra),
+            None => self.naive_multiexp_with_scalar_range_at(base_offset, terms, &scalar_at, extra),
         }
     }
 
@@ -651,7 +914,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
                             })
                         }
                     },
-                    || self.tail_sum(&recoded.residuals, num_threads),
+                    || self.tail_sum(recoded, num_threads),
                 )
             };
             let (extras_part, (windows_part, tail)) = if extras.is_empty() {
@@ -669,7 +932,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             return Some(windows_part + tail + extras_part?);
         }
 
-        let mut acc = self.tail_sum(&recoded.residuals, num_threads)?;
+        let mut acc = self.tail_sum(recoded, num_threads)?;
         if !bool::from(acc.is_identity()) {
             for _ in 0..window_bits * (main_windows - active) {
                 acc = acc.double();
@@ -709,6 +972,7 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         let bucket_count = self.codebook.bucket_count();
         let counts = &recoded.counts[window * bucket_count..][..bucket_count];
         let codes = &recoded.codes[window * terms..][..terms];
+        let prefetch_enabled = prepared_prefetch_enabled::<C::Base>();
 
         let mut offsets = Vec::with_capacity(bucket_count + 1);
         offsets.push(0usize);
@@ -725,11 +989,161 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
             *offsets.last().unwrap()
         ];
         for (base, &code) in codes.iter().enumerate() {
+            if prefetch_enabled
+                && let Some(future) = base.checked_add(PREPARED_PREFETCH_DISTANCE)
+                && let Some(&future_code) = codes.get(future)
+                && future_code != 0
+            {
+                let (_, variant, _) = unpack_code(future_code);
+                let prepared_base = recoded
+                    .base_indices
+                    .as_ref()
+                    .map_or(future, |indices| indices[future]);
+                prefetch_prepared_point(self.table.get(variant, prepared_base));
+            }
             if code == 0 {
                 continue;
             }
             let (bucket, variant, unit) = unpack_code(code);
-            let (x, y) = unit_coords(self.table.get(variant, base), unit);
+            let prepared_base = recoded
+                .base_indices
+                .as_ref()
+                .map_or(base, |indices| indices[base]);
+            let (x, y) = unit_coords(self.table.get(variant, prepared_base), unit);
+            let position = positions[bucket];
+            points[position] = AffinePoint { x, y };
+            positions[bucket] = position + 1;
+        }
+
+        (points, offsets)
+    }
+
+    /// The range counterpart of [`Self::evaluate`].
+    fn evaluate_range(
+        &self,
+        recoded: &Recoded,
+        base_offset: usize,
+        extras: &[(C::ScalarExt, C::AffineExt)],
+        num_threads: usize,
+        main_window_fold: MainWindowFold,
+    ) -> Option<C> {
+        let window_bits = self.codebook.window_bits();
+        let main_windows = self.codebook.main_windows();
+        let active = recoded.active_windows;
+
+        #[cfg(not(feature = "multicore"))]
+        let _ = (num_threads, main_window_fold);
+        #[cfg(feature = "multicore")]
+        if num_threads > 1 {
+            // Point-returning MSMs reduce the main windows independently
+            // and combine them with one Horner fold. Zero checks retain the
+            // paired schedule tuned for an isolated MSM. The residual tail
+            // and extras MSM run concurrently with the main windows.
+            let main = || {
+                maybe_rayon::join(
+                    || match main_window_fold {
+                        MainWindowFold::Paired => {
+                            super::paired_windows_sum::<C>(active, window_bits, |window| {
+                                self.window_sum_range(recoded, base_offset, window)
+                            })
+                        }
+                        MainWindowFold::Horner => {
+                            super::parallel_windows_sum::<C>(active, window_bits, |window| {
+                                self.window_sum_range(recoded, base_offset, window)
+                            })
+                        }
+                    },
+                    || self.tail_sum_range(&recoded.residuals, base_offset, num_threads),
+                )
+            };
+            let (extras_part, (windows_part, tail)) = if extras.is_empty() {
+                (Some(C::identity()), main())
+            } else {
+                maybe_rayon::join(|| self.extras_sum(extras), main)
+            };
+            let windows_part = windows_part?;
+            let mut tail = tail?;
+            if !bool::from(tail.is_identity()) {
+                for _ in 0..window_bits * main_windows {
+                    tail = tail.double();
+                }
+            }
+            return Some(windows_part + tail + extras_part?);
+        }
+
+        let mut acc = self.tail_sum_range(&recoded.residuals, base_offset, num_threads)?;
+        if !bool::from(acc.is_identity()) {
+            for _ in 0..window_bits * (main_windows - active) {
+                acc = acc.double();
+            }
+        }
+        for window in (0..active).rev() {
+            for _ in 0..window_bits {
+                acc = acc.double();
+            }
+            acc += self.window_sum_range(recoded, base_offset, window)?;
+        }
+        Some(acc + self.extras_sum(extras)?)
+    }
+
+    /// One main window: stage the unit-rotated prepared points by bucket,
+    /// reduce each bucket batch-affine, and run the static coefficient
+    /// program over the bucket sums.
+    fn window_sum_range(&self, recoded: &Recoded, base_offset: usize, window: usize) -> Option<C> {
+        let (points, offsets) = self.stage_window_range(recoded, base_offset, window);
+        let buckets = reduce_affine_buckets_in_place(points, offsets).or_else(|| {
+            let (points, offsets) = self.stage_window_range(recoded, base_offset, window);
+            reduce_affine_buckets(points, offsets)
+        })?;
+        integrate_coefficients::<C>(self.codebook.program(), &buckets)
+    }
+
+    /// Places one window's nonzero digits into per-bucket point ranges,
+    /// fetching each digit's prepared point and applying its unit. The
+    /// bucket histogram was produced during recoding and the codes are
+    /// window-major, so this is a single contiguous pass.
+    fn stage_window_range(
+        &self,
+        recoded: &Recoded,
+        base_offset: usize,
+        window: usize,
+    ) -> (Vec<AffinePoint<C::Base>>, Vec<usize>) {
+        let terms = recoded.terms;
+        let bucket_count = self.codebook.bucket_count();
+        let counts = &recoded.counts[window * bucket_count..][..bucket_count];
+        let codes = &recoded.codes[window * terms..][..terms];
+        let prefetch_enabled = prepared_prefetch_enabled::<C::Base>();
+
+        let mut offsets = Vec::with_capacity(bucket_count + 1);
+        offsets.push(0usize);
+        for &count in counts {
+            offsets.push(offsets.last().copied().unwrap() + count as usize);
+        }
+
+        let mut positions = offsets[..bucket_count].to_vec();
+        let mut points = alloc::vec![
+            AffinePoint {
+                x: C::Base::ZERO,
+                y: C::Base::ZERO,
+            };
+            *offsets.last().unwrap()
+        ];
+        for (base, &code) in codes.iter().enumerate() {
+            if prefetch_enabled
+                && let Some(future) = base.checked_add(PREPARED_PREFETCH_DISTANCE)
+                && let Some(&future_code) = codes.get(future)
+                && future_code != 0
+            {
+                let (_, variant, _) = unpack_code(future_code);
+                let prepared_base = base_offset + future;
+                prefetch_prepared_point(self.table.get(variant, prepared_base));
+            }
+            if code == 0 {
+                continue;
+            }
+            let (bucket, variant, unit) = unpack_code(code);
+            let prepared_base = base_offset + base;
+            let (x, y) = unit_coords(self.table.get(variant, prepared_base), unit);
             let position = positions[bucket];
             points[position] = AffinePoint { x, y };
             positions[bucket] = position + 1;
@@ -741,13 +1155,34 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
     /// The tail MSM $T = \sum_i \[\tau_i\] P_i$ over the (tiny) residuals,
     /// via the unprepared orbit machinery at the width fixed at
     /// preparation.
-    fn tail_sum(
+    #[inline(never)]
+    fn tail_sum(&self, recoded: &Recoded, num_threads: usize) -> Option<C> {
+        let params = &self.tail_params[self.tail_width];
+        let stride =
+            params.window_stride_for_bound(u128::from(self.codebook.tail_bound().unsigned_abs()));
+        tail_multiexp::<C>(
+            params,
+            &recoded.residuals,
+            &self.tail_bases,
+            recoded.base_indices.as_deref(),
+            stride,
+            num_threads,
+        )
+    }
+
+    /// The range counterpart of [`Self::tail_sum`].
+    fn tail_sum_range(
         &self,
         residuals: &[(SignedMagnitude, SignedMagnitude)],
+        base_offset: usize,
         num_threads: usize,
     ) -> Option<C> {
         let params = &self.tail_params[self.tail_width];
-        tail_multiexp::<C>(params, residuals, &self.tail_bases, num_threads)
+        let range_end = base_offset.checked_add(residuals.len())?;
+        let bases = self.tail_bases.get(base_offset..range_end)?;
+        let stride =
+            params.window_stride_for_bound(u128::from(self.codebook.tail_bound().unsigned_abs()));
+        tail_multiexp::<C>(params, residuals, bases, None, stride, num_threads)
     }
 
     /// $E = \sum_j \[s_j\] Q_j$ over the per-check extra terms (already
@@ -832,6 +1267,42 @@ impl<C: GlvParams> PreparedZeroMsm<C> {
         }
         acc
     }
+
+    /// The range counterpart of [`Self::naive_multiexp_with_scalar_at`].
+    fn naive_multiexp_with_scalar_range_at<'a>(
+        &self,
+        base_offset: usize,
+        terms: usize,
+        scalar_at: &(impl Fn(usize) -> &'a C::ScalarExt + Sync),
+        extra: &[(C::ScalarExt, C::AffineExt)],
+    ) -> C {
+        let range_end = base_offset
+            .checked_add(terms)
+            .expect("prepared base range overflow");
+        assert!(
+            range_end <= self.live.len(),
+            "prepared base range in bounds"
+        );
+        let mut acc = C::identity();
+        for index in 0..terms {
+            let prepared_index = base_offset + index;
+            let scalar = scalar_at(index);
+            if !self.live[prepared_index] || bool::from(scalar.is_zero()) {
+                continue;
+            }
+            let base = &self.tail_bases[prepared_index];
+            let point = C::from(C::affine_unchecked(
+                base.xs[0],
+                base.y,
+                private::CrateToken(()),
+            ));
+            acc += point * scalar;
+        }
+        for (scalar, point) in extra {
+            acc += C::from(*point) * scalar;
+        }
+        acc
+    }
 }
 
 /// The object-safe surface [`crate::arithmetic::CurveExt::try_prepare_zero_check`]
@@ -867,6 +1338,21 @@ impl<C: GlvParams> crate::arithmetic::PreparedZeroCheck<C> for PreparedZeroMsm<C
     ) -> C {
         self.multiexp_with_scalar_slices(prefix, suffix, extra)
     }
+
+    fn multiexp_with_base_offset_vartime(
+        &self,
+        base_offset: usize,
+        scalars: &[C::ScalarExt],
+        extra: &[(C::ScalarExt, C::AffineExt)],
+    ) -> C {
+        self.multiexp_with_scalar_range_at(
+            base_offset,
+            scalars.len(),
+            |index| &scalars[index],
+            extra,
+            MainWindowFold::Horner,
+        )
+    }
 }
 
 /// Picks the residual tail's orbit width: residuals are `tail_bound`-sized,
@@ -894,32 +1380,54 @@ fn tail_multiexp<C: GlvParams>(
     params: &orbit::OrbitParams,
     components: &[(SignedMagnitude, SignedMagnitude)],
     rotated: &[orbit::RotatedBase<C::Base>],
+    base_indices: Option<&[usize]>,
+    stride: usize,
     num_threads: usize,
 ) -> Option<C> {
-    debug_assert_eq!(components.len(), rotated.len());
-    let width = params.window_stride();
-    let mut digits = alloc::vec![0u16; components.len() * width];
+    debug_assert_eq!(
+        components.len(),
+        base_indices.map_or(rotated.len(), <[usize]>::len)
+    );
+    debug_assert!(stride <= params.window_stride());
+    if stride == 0 {
+        return Some(C::identity());
+    }
+    let mut digits = alloc::vec![0u16; components.len() * stride];
 
     #[cfg(not(feature = "multicore"))]
     let _ = num_threads;
     #[cfg(feature = "multicore")]
     if num_threads > 1 {
         let active = digits
-            .par_chunks_mut(width)
+            .par_chunks_mut(stride)
             .zip(components.par_iter())
             .map(|(row, &(first, second))| orbit::recode_row(params, first, second, row))
             .max()
             .unwrap_or(0);
         return super::paired_windows_sum::<C>(active, params.width(), |window| {
-            orbit::windows_sum::<C>(params, &digits, rotated, window..window + 1)
+            if let Some(base_indices) = base_indices {
+                orbit::windows_sum_indexed::<C>(
+                    params,
+                    &digits,
+                    rotated,
+                    base_indices,
+                    window..window + 1,
+                )
+            } else {
+                orbit::windows_sum::<C>(params, &digits, rotated, window..window + 1)
+            }
         });
     }
 
     let mut active = 0;
-    for (row, &(first, second)) in digits.chunks_exact_mut(width).zip(components) {
+    for (row, &(first, second)) in digits.chunks_exact_mut(stride).zip(components) {
         active = active.max(orbit::recode_row(params, first, second, row));
     }
-    orbit::windows_sum::<C>(params, &digits, rotated, 0..active)
+    if let Some(base_indices) = base_indices {
+        orbit::windows_sum_indexed::<C>(params, &digits, rotated, base_indices, 0..active)
+    } else {
+        orbit::windows_sum::<C>(params, &digits, rotated, 0..active)
+    }
 }
 
 /// Scans the fixed bases for exact relations $P_j = \[\mu\] P_i$ with
@@ -1228,7 +1736,7 @@ fn plan_mode<C: GlvParams>(
         .find(|candidate| {
             estimated_table_footprint::<C>(
                 terms,
-                candidate.mode.window_bits(),
+                candidate.mode,
                 candidate.variants,
                 candidate.buckets,
             )
@@ -1241,7 +1749,7 @@ fn plan_mode<C: GlvParams>(
 /// [`PreparedZeroMsm::prepared_bytes`] without first building the table.
 fn estimated_table_footprint<C: GlvParams>(
     terms: usize,
-    window_bits: usize,
+    mode: CodebookMode,
     variants: usize,
     buckets: usize,
 ) -> Option<usize> {
@@ -1249,8 +1757,7 @@ fn estimated_table_footprint<C: GlvParams>(
         .checked_mul(variants)?
         .checked_mul(core::mem::size_of::<prepared::PreparedPoint<C::Base>>())?;
     let tail_bases = terms.checked_mul(core::mem::size_of::<orbit::RotatedBase<C::Base>>())?;
-    let residue_entries =
-        (1usize << (2 * window_bits)).checked_mul(core::mem::size_of::<codebook::CodeEntry>())?;
+    let residue_entries = (1usize << (2 * mode.window_bits())).checked_mul(mode.entry_bytes())?;
     let lifts = variants
         .checked_add(buckets)?
         .checked_mul(core::mem::size_of::<codebook::Eis>())?;
@@ -1353,6 +1860,309 @@ mod tests {
     use super::*;
     use crate::{pallas, vesta};
 
+    fn reference_staging<C: GlvParams>(
+        prepared: &PreparedZeroMsm<C>,
+        recoded: &Recoded,
+        base_offset: Option<usize>,
+        window: usize,
+    ) -> (Vec<AffinePoint<C::Base>>, Vec<usize>, u32) {
+        let mut buckets = vec![Vec::new(); prepared.codebook.bucket_count()];
+        let mut units = 0;
+        for (row, &code) in recoded.codes[window * recoded.terms..][..recoded.terms]
+            .iter()
+            .enumerate()
+        {
+            if code == 0 {
+                continue;
+            }
+            let (bucket, variant, unit) = unpack_code(code);
+            let base = base_offset.map_or_else(
+                || {
+                    recoded
+                        .base_indices
+                        .as_ref()
+                        .map_or(row, |indices| indices[row])
+                },
+                |offset| offset + row,
+            );
+            let (x, y) = unit_coords(prepared.table.get(variant, base), unit);
+            buckets[bucket].push(AffinePoint { x, y });
+            units |= 1 << unit;
+        }
+        let mut offsets = vec![0];
+        for bucket in &buckets {
+            offsets.push(offsets.last().unwrap() + bucket.len());
+        }
+        (buckets.into_iter().flatten().collect(), offsets, units)
+    }
+
+    fn assert_staging_matches<C: GlvParams>(
+        prepared: &PreparedZeroMsm<C>,
+        recoded: &Recoded,
+        base_offset: Option<usize>,
+    ) -> u32 {
+        let mut units = 0;
+        for window in 0..prepared.codebook.main_windows() {
+            let (expected, offsets, window_units) =
+                reference_staging(prepared, recoded, base_offset, window);
+            let (actual, actual_offsets) = base_offset.map_or_else(
+                || prepared.stage_window(recoded, window),
+                |offset| prepared.stage_window_range(recoded, offset, window),
+            );
+            assert_eq!(actual_offsets, offsets);
+            assert_eq!(actual.len(), expected.len());
+            for (actual, expected) in actual.iter().zip(expected) {
+                assert_eq!(actual.x, expected.x);
+                assert_eq!(actual.y, expected.y);
+            }
+            units |= window_units;
+        }
+        units
+    }
+
+    fn prefetch_staging_matches_unhinted_reference<C: GlvParams>() {
+        const TERMS: usize = 256;
+        let generator = C::generator();
+        let projective = super::super::testutil::scalars::<C::ScalarExt>(TERMS as u64)
+            .map(|scalar| generator * scalar)
+            .collect::<Vec<_>>();
+        let mut bases = vec![C::AffineExt::identity(); TERMS];
+        C::batch_normalize(&projective, &mut bases);
+        let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, CodebookMode::alpha_only(5));
+        assert!(prepared.merges.is_empty());
+        let mut scalars =
+            super::super::testutil::scalars::<C::ScalarExt>(TERMS as u64).collect::<Vec<_>>();
+        for index in (0..TERMS).step_by(7) {
+            scalars[index] = C::ScalarExt::ZERO;
+        }
+        let recode = |prepared: &PreparedZeroMsm<C>, indices: &[usize], all_zero: bool| {
+            codebook::try_recode_with(&prepared.codebook, indices.len(), 1, |row| {
+                let base = indices[row];
+                let scalar = if all_zero || !prepared.live[base] {
+                    C::ScalarExt::ZERO
+                } else {
+                    scalars[base]
+                };
+                checked_signed_magnitudes(decompose::<C>(&scalar))
+            })
+            .expect("valid public scalars recode")
+        };
+
+        let mut units = 0;
+        for terms in [0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, TERMS] {
+            let indices = (0..terms).collect::<Vec<_>>();
+            let recoded = recode(&prepared, &indices, false);
+            units |= assert_staging_matches(&prepared, &recoded, None);
+            let zeros = recode(&prepared, &indices, true);
+            assert_eq!(assert_staging_matches(&prepared, &zeros, None), 0);
+        }
+        assert_eq!(units, 0b11_1111, "all rotations and negations are staged");
+
+        let indices = (0..TERMS)
+            .filter(|index| index % 3 == 1)
+            .rev()
+            .collect::<Vec<_>>();
+        assert!(indices.len() > PREPARED_PREFETCH_DISTANCE);
+        let mut sparse = recode(&prepared, &indices, false);
+        sparse.base_indices = Some(indices);
+        assert_eq!(assert_staging_matches(&prepared, &sparse, None), 0b11_1111);
+
+        let base_offset = 13;
+        let range_len = 75;
+        let indices = (base_offset..base_offset + range_len).collect::<Vec<_>>();
+        let range = recode(&prepared, &indices, false);
+        assert_eq!(
+            assert_staging_matches(&prepared, &range, Some(base_offset)),
+            0b11_1111,
+        );
+        let expected = scalars[base_offset..base_offset + range_len]
+            .iter()
+            .zip(&bases[base_offset..base_offset + range_len])
+            .fold(C::identity(), |sum, (&scalar, &base)| {
+                sum + C::from(base) * scalar
+            });
+        assert_eq!(
+            crate::arithmetic::PreparedZeroCheck::multiexp_with_base_offset_vartime(
+                &prepared,
+                base_offset,
+                &scalars[base_offset..base_offset + range_len],
+                &[],
+            ),
+            expected,
+        );
+
+        // Dead rows never request prepared records. Related bases also retain
+        // the existing scalar-folding behavior in complete MSM evaluation.
+        bases[0] = C::AffineExt::identity();
+        bases[1] = generator.to_affine();
+        bases[2] = bases[1];
+        bases[3] = (-generator).to_affine();
+        let related = PreparedZeroMsm::<C>::prepare_with_mode(&bases, CodebookMode::alpha_only(5));
+        assert!(!related.merges.is_empty());
+        let indices = (0..TERMS).collect::<Vec<_>>();
+        let recoded = recode(&related, &indices, false);
+        assert_eq!(assert_staging_matches(&related, &recoded, None), 0b11_1111);
+        let expected = scalars
+            .iter()
+            .zip(&bases)
+            .fold(C::identity(), |sum, (&scalar, &base)| {
+                sum + C::from(base) * scalar
+            });
+        assert_eq!(related.multiexp_with_terms_vartime(&scalars, &[]), expected);
+    }
+
+    #[test]
+    fn pallas_prefetch_staging_matches_unhinted_reference() {
+        prefetch_staging_matches_unhinted_reference::<pallas::Point>();
+    }
+
+    #[test]
+    fn vesta_prefetch_staging_matches_unhinted_reference() {
+        prefetch_staging_matches_unhinted_reference::<vesta::Point>();
+    }
+
+    #[test]
+    fn prefetch_record_guard_and_unsupported_fallback() {
+        assert_eq!(
+            core::mem::size_of::<PreparedPoint<crate::Fp>>(),
+            PREPARED_PREFETCH_RECORD_BYTES,
+        );
+        assert_eq!(
+            core::mem::size_of::<PreparedPoint<crate::Fq>>(),
+            PREPARED_PREFETCH_RECORD_BYTES,
+        );
+        assert!(PREPARED_PREFETCH_SECOND_LINE < PREPARED_PREFETCH_RECORD_BYTES);
+        let small = PreparedPoint {
+            x: 1_u8,
+            zeta_x: 2_u8,
+            y: 3_u8,
+        };
+        // This record is too short for offset 64; the helper must return
+        // before it forms any interior pointer at that offset.
+        prefetch_prepared_point(&small);
+        assert_eq!((small.x, small.zeta_x, small.y), (1, 2, 3));
+        assert_eq!(
+            prepared_prefetch_enabled::<crate::Fp>(),
+            prepared_prefetch_cpu_available(),
+        );
+        assert_eq!(
+            prepared_prefetch_enabled::<crate::Fq>(),
+            prepared_prefetch_cpu_available(),
+        );
+        assert!(prepared_prefetch_field_supported::<crate::Fp>());
+        assert!(prepared_prefetch_field_supported::<crate::Fq>());
+        assert!(!prepared_prefetch_field_supported::<u8>());
+        #[cfg(not(all(
+            feature = "x86_64-asm",
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        )))]
+        {
+            assert!(!prepared_prefetch_enabled::<crate::Fp>());
+            assert!(!prepared_prefetch_enabled::<crate::Fq>());
+        }
+    }
+
+    #[test]
+    fn prefetch_detection_requires_every_cpu_and_os_feature() {
+        assert!(prepared_prefetch_flags_supported(
+            PREFETCH_XSAVE_OSXSAVE_AVX,
+            PREFETCH_AVX512_F_IFMA_VL,
+            PREFETCH_REQUIRED_XCR0,
+        ));
+        for bit in [26, 27, 28] {
+            assert!(!prepared_prefetch_flags_supported(
+                PREFETCH_XSAVE_OSXSAVE_AVX & !(1 << bit),
+                PREFETCH_AVX512_F_IFMA_VL,
+                PREFETCH_REQUIRED_XCR0,
+            ));
+        }
+        for bit in [16, 21, 31] {
+            assert!(!prepared_prefetch_flags_supported(
+                PREFETCH_XSAVE_OSXSAVE_AVX,
+                PREFETCH_AVX512_F_IFMA_VL & !(1 << bit),
+                PREFETCH_REQUIRED_XCR0,
+            ));
+        }
+        for bit in [1, 2, 5, 6, 7] {
+            assert!(!prepared_prefetch_flags_supported(
+                PREFETCH_XSAVE_OSXSAVE_AVX,
+                PREFETCH_AVX512_F_IFMA_VL,
+                PREFETCH_REQUIRED_XCR0 & !(1 << bit),
+            ));
+        }
+    }
+
+    #[cfg(all(
+        feature = "x86_64-asm",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    #[test]
+    fn prefetch_detection_matches_standard_library() {
+        std::println!(
+            "prepared prefetch enabled={}",
+            prepared_prefetch_enabled::<crate::Fp>(),
+        );
+        assert_eq!(
+            prepared_prefetch_cpu_available(),
+            std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512ifma")
+                && std::arch::is_x86_feature_detected!("avx512vl"),
+        );
+    }
+
+    #[test]
+    fn alpha_seven_tail_stride_is_exactly_three() {
+        let codebook = Codebook::new(CodebookMode::alpha_only(7));
+        let bound = codebook.tail_bound();
+        let width_index = tail_width_index(2_048, bound);
+        let params = &TAIL_WIDTHS.map(orbit::OrbitParams::new)[width_index];
+        assert_eq!(TAIL_WIDTHS[width_index], 3);
+        assert_eq!(params.window_stride(), 43);
+        assert_eq!(
+            params.window_stride_for_bound(u128::from(bound.unsigned_abs())),
+            3
+        );
+
+        let component = |value: i64| SignedMagnitude {
+            negative: value < 0,
+            magnitude: value.unsigned_abs() as u128,
+        };
+        let mut row = alloc::vec![0; params.window_stride()];
+        let mut exact_stride = 0;
+        for first in -bound..=bound {
+            for second in -bound..=bound {
+                exact_stride = exact_stride.max(orbit::recode_row(
+                    params,
+                    component(first),
+                    component(second),
+                    &mut row,
+                ));
+            }
+        }
+        assert_eq!(exact_stride, 3);
+    }
+
+    #[test]
+    fn dense_preflight_preserves_sparse_census() {
+        const TERMS: usize = 128;
+
+        assert_eq!(compact_live_scalar_count(TERMS, |_| true), None);
+        assert_eq!(
+            compact_live_scalar_count(TERMS, |index| index < TERMS / 2),
+            Some(TERMS / 2),
+        );
+        assert_eq!(
+            compact_live_scalar_count(TERMS, |index| index % 2 == 0),
+            Some(TERMS / 2),
+        );
+        assert_eq!(
+            compact_live_scalar_count(TERMS, |index| index <= TERMS / 2),
+            None,
+        );
+    }
+
     fn modes_under_test() -> Vec<CodebookMode> {
         vec![
             CodebookMode::alpha_only(6),
@@ -1409,9 +2219,9 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct DefaultPrefixAndSuffix<'a, C: GlvParams>(&'a PreparedZeroMsm<C>);
+    struct DefaultPreparedMethods<'a, C: GlvParams>(&'a PreparedZeroMsm<C>);
 
-    impl<C: GlvParams> crate::arithmetic::PreparedZeroCheck<C> for DefaultPrefixAndSuffix<'_, C> {
+    impl<C: GlvParams> crate::arithmetic::PreparedZeroCheck<C> for DefaultPreparedMethods<'_, C> {
         fn terms(&self) -> usize {
             self.0.terms()
         }
@@ -1485,7 +2295,7 @@ mod tests {
                 "prefix/suffix evaluation with extras differs at split {split}"
             );
         }
-        let default_prefix_and_suffix = DefaultPrefixAndSuffix(&prepared);
+        let default_prefix_and_suffix = DefaultPreparedMethods(&prepared);
         let split = scalars.len() - 2;
         assert_eq!(
             crate::arithmetic::PreparedZeroCheck::multiexp_with_prefix_and_suffix(
@@ -1506,6 +2316,157 @@ mod tests {
             prepared.multiexp_with_terms_vartime(&scalars, &[extra_term]),
             expected_with_extra
         );
+    }
+
+    /// Compact recoding preserves the original base pairing at its exact
+    /// threshold and on either side, including folded dead rows and extras.
+    #[cfg(feature = "multicore")]
+    fn compact_rows_match_generic_msm<C: GlvParams>() {
+        const TERMS: usize = 128;
+        const MAX_TEST_WORKERS: usize = 10;
+
+        let generator = C::generator();
+        let projective = super::super::testutil::scalars::<C::ScalarExt>(TERMS as u64)
+            .map(|scalar| generator * scalar)
+            .collect::<Vec<_>>();
+        let mut independent_bases = vec![C::AffineExt::identity(); TERMS];
+        C::batch_normalize(&projective, &mut independent_bases);
+        let independent = PreparedZeroMsm::<C>::prepare_with_mode(
+            &independent_bases,
+            CodebookMode::alpha_only(6),
+        );
+        assert!(independent.merges.is_empty());
+
+        let dense =
+            super::super::testutil::scalars::<C::ScalarExt>(TERMS as u64).collect::<Vec<_>>();
+        let identity = C::identity().to_affine();
+        let extras = [
+            (C::ScalarExt::from(41), generator.to_affine()),
+            (C::ScalarExt::ZERO, generator.to_affine()),
+            (C::ScalarExt::from(73), identity),
+        ];
+        let extra_sum = generator * C::ScalarExt::from(41);
+
+        let check = |prepared: &PreparedZeroMsm<C>, bases: &[C::AffineExt], live: usize| {
+            let mut scalars = vec![C::ScalarExt::ZERO; TERMS];
+            for slot in 0..live {
+                // 37 is coprime to 128, so every selected row is distinct
+                // and the live rows are interleaved across the whole table.
+                let index = slot * 37 % TERMS;
+                scalars[index] = dense[index];
+            }
+            let expected = scalars
+                .iter()
+                .zip(bases)
+                .fold(C::identity(), |sum, (&scalar, &base)| {
+                    sum + C::from(base) * scalar
+                })
+                + extra_sum;
+            for workers in [1, MAX_TEST_WORKERS] {
+                maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+                    .expect("test thread pool must build")
+                    .install(|| {
+                        assert_eq!(
+                            prepared.multiexp_with_terms_vartime(&scalars, &extras),
+                            expected,
+                            "{live} live rows at {workers} workers"
+                        );
+                        let split = TERMS / 3;
+                        assert_eq!(
+                            crate::arithmetic::PreparedZeroCheck::multiexp_with_prefix_and_suffix(
+                                prepared,
+                                &scalars[..split],
+                                &scalars[split..],
+                                &extras,
+                            ),
+                            expected,
+                            "split input with {live} live rows at {workers} workers"
+                        );
+                    });
+            }
+        };
+
+        for live in [0, 1, TERMS / 2, TERMS / 2 + 1] {
+            check(&independent, &independent_bases, live);
+        }
+
+        let (_, related_bases, _) = super::super::testutil::verifier_multiexp_inputs::<C>(TERMS);
+        let related =
+            PreparedZeroMsm::<C>::prepare_with_mode(&related_bases, CodebookMode::alpha_only(6));
+        assert!(!related.merges.is_empty());
+        assert!(related.live.iter().any(|live| !live));
+        check(&related, &related_bases, TERMS / 3);
+    }
+
+    /// A live scalar range evaluates only its matching contiguous bases.
+    fn base_offset_range_matches_full_msm<C: GlvParams>() {
+        const HALF: usize = 64;
+        const TERMS: usize = 2 * HALF;
+
+        let generator = C::generator();
+        let projective = super::super::testutil::scalars::<C::ScalarExt>(TERMS as u64)
+            .map(|scalar| generator * scalar)
+            .collect::<Vec<_>>();
+        let mut bases = vec![C::AffineExt::identity(); TERMS];
+        C::batch_normalize(&projective, &mut bases);
+        let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, CodebookMode::alpha_only(6));
+        assert!(prepared.merges.is_empty());
+
+        let mut scalars =
+            super::super::testutil::scalars::<C::ScalarExt>(HALF as u64).collect::<Vec<_>>();
+        scalars[HALF / 2] = C::ScalarExt::ZERO;
+        let extra = (C::ScalarExt::from(41), generator.to_affine());
+
+        for base_offset in [0, HALF] {
+            let mut full = vec![C::ScalarExt::ZERO; TERMS];
+            full[base_offset..base_offset + HALF].copy_from_slice(&scalars);
+            let expected =
+                prepared.naive_multiexp_with_scalar_at(TERMS, &|index| &full[index], &[extra]);
+            assert_eq!(
+                crate::arithmetic::PreparedZeroCheck::multiexp_with_base_offset_vartime(
+                    &prepared,
+                    base_offset,
+                    &scalars,
+                    &[extra],
+                ),
+                expected,
+            );
+            let default_range = DefaultPreparedMethods(&prepared);
+            assert_eq!(
+                crate::arithmetic::PreparedZeroCheck::multiexp_with_base_offset_vartime(
+                    &default_range,
+                    base_offset,
+                    &scalars,
+                    &[extra],
+                ),
+                expected,
+            );
+        }
+
+        for base_offset in [0, TERMS] {
+            let expected = generator * extra.0;
+            assert_eq!(
+                crate::arithmetic::PreparedZeroCheck::multiexp_with_base_offset_vartime(
+                    &prepared,
+                    base_offset,
+                    &[],
+                    &[extra],
+                ),
+                expected,
+            );
+            let default_range = DefaultPreparedMethods(&prepared);
+            assert_eq!(
+                crate::arithmetic::PreparedZeroCheck::multiexp_with_base_offset_vartime(
+                    &default_range,
+                    base_offset,
+                    &[],
+                    &[extra],
+                ),
+                expected,
+            );
+        }
     }
 
     /// Canonical 10-bit range-check values bypass decomposition; out-of-range
@@ -1763,6 +2724,19 @@ mod tests {
             )
             .is_identity()
         ));
+        let mut source_only = vec![C::ScalarExt::ZERO; prepared.terms()];
+        source_only[source] = perturbed[source];
+        let expected = prepared.multiexp_with_terms_vartime(&source_only, &[]);
+        assert_eq!(
+            crate::arithmetic::PreparedZeroCheck::multiexp_with_base_offset_vartime(
+                &prepared,
+                source,
+                &source_only[source..=source],
+                &[],
+            ),
+            expected,
+            "a ranged merged source must fold into its surviving target"
+        );
     }
 
     /// The default planner produces a working preparation.
@@ -1773,12 +2747,55 @@ mod tests {
         assert!(prepared.is_zero_vartime(&scalars));
         let estimate = estimated_table_footprint::<C>(
             bases.len(),
-            prepared.mode().window_bits(),
+            prepared.mode(),
             prepared.codebook.variants().len(),
             prepared.codebook.bucket_count(),
         )
         .expect("the table-footprint estimate fits usize");
         assert_eq!(estimate, prepared.prepared_bytes());
+    }
+
+    /// Estimates agree with actual allocations for compact and general modes,
+    /// and compact modes become eligible at their exact footprint budget.
+    fn table_footprint_matches_preparation<C: GlvParams>() {
+        let (_, bases) = testutil::zero_relation::<C>(32, 11);
+        let modes = [
+            ALPHA_FIVE.mode,
+            ALPHA_SIX.mode,
+            ALPHA_SEVEN.mode,
+            CodebookMode::alpha_only(8),
+            CodebookMode::Subgroup {
+                window_bits: 5,
+                beta_power: Some(4),
+            },
+            BETA_SIX_POWER_FOUR.mode,
+            BETA_SEVEN_POWER_EIGHT.mode,
+            CodebookMode::ExponentBox {
+                window_bits: 6,
+                alpha_extent: 8,
+                beta_extent: 8,
+            },
+        ];
+        for mode in modes {
+            let prepared = PreparedZeroMsm::<C>::prepare_with_mode(&bases, mode);
+            let bytes = prepared.prepared_bytes();
+            assert_eq!(
+                estimated_table_footprint::<C>(
+                    bases.len(),
+                    mode,
+                    prepared.codebook.variants().len(),
+                    prepared.codebook.bucket_count(),
+                ),
+                Some(bytes),
+                "footprint estimate differs for {mode:?}"
+            );
+            if [ALPHA_FIVE.mode, ALPHA_SIX.mode, ALPHA_SEVEN.mode].contains(&mode) {
+                for threads in [1, 32] {
+                    assert_eq!(plan_mode::<C>(bases.len(), threads, bytes), Some(mode));
+                    assert_ne!(plan_mode::<C>(bases.len(), threads, bytes - 1), Some(mode));
+                }
+            }
+        }
     }
 
     /// The default mode planner stays within its table-footprint budget and
@@ -1790,7 +2807,7 @@ mod tests {
             assert_eq!(mode, Some(CodebookMode::alpha_only(7)));
             let bytes = estimated_table_footprint::<pallas::Point>(
                 2_050,
-                ALPHA_SEVEN.mode.window_bits(),
+                ALPHA_SEVEN.mode,
                 ALPHA_SEVEN.variants,
                 ALPHA_SEVEN.buckets,
             )
@@ -1799,14 +2816,14 @@ mod tests {
 
             let fixed = estimated_table_footprint::<pallas::Point>(
                 0,
-                ALPHA_FIVE.mode.window_bits(),
+                ALPHA_FIVE.mode,
                 ALPHA_FIVE.variants,
                 ALPHA_FIVE.buckets,
             )
             .unwrap();
             let one = estimated_table_footprint::<pallas::Point>(
                 1,
-                ALPHA_FIVE.mode.window_bits(),
+                ALPHA_FIVE.mode,
                 ALPHA_FIVE.variants,
                 ALPHA_FIVE.buckets,
             )
@@ -1925,6 +2942,15 @@ mod tests {
                 fn generic_agreement() {
                     matches_generic_msm::<$curve>();
                 }
+                #[cfg(feature = "multicore")]
+                #[test]
+                fn compact_rows() {
+                    compact_rows_match_generic_msm::<$curve>();
+                }
+                #[test]
+                fn base_offset_range() {
+                    base_offset_range_matches_full_msm::<$curve>();
+                }
                 #[cfg(all(feature = "multicore", not(feature = "orbits")))]
                 #[test]
                 fn u10_prefix_slices() {
@@ -1949,6 +2975,10 @@ mod tests {
                 #[test]
                 fn planned_mode() {
                     planned_mode_works::<$curve>();
+                }
+                #[test]
+                fn table_footprint() {
+                    table_footprint_matches_preparation::<$curve>();
                 }
                 #[test]
                 fn coefficient_program() {
@@ -2046,9 +3076,7 @@ mod tests {
                         );
                         lap(&mut phases[4]); // coefficient integration
                     }
-                    let tail = prepared
-                        .tail_sum(&recoded.residuals, 1)
-                        .expect("valid points");
+                    let tail = prepared.tail_sum(&recoded, 1).expect("valid points");
                     lap(&mut phases[5]); // tail MSM
                     let window_bits = prepared.codebook.window_bits();
                     let main_windows = prepared.codebook.main_windows();
@@ -2198,9 +3226,7 @@ mod tests {
                             })
                             .expect("valid points");
                         wall += start.elapsed().as_secs_f64() * 1e3;
-                        let mut tail = prepared
-                            .tail_sum(&recoded.residuals, threads)
-                            .expect("valid points");
+                        let mut tail = prepared.tail_sum(&recoded, threads).expect("valid points");
                         if !bool::from(tail.is_identity()) {
                             for _ in 0..window_bits * prepared.codebook.main_windows() {
                                 tail = tail.double();

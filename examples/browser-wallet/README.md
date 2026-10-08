@@ -9,9 +9,9 @@ Copy this directory outside the z-stack workspace, then install the archives:
 
 ```sh
 cd /path/to/copied/browser-wallet
-npm install /path/to/z-stack/artifacts/z-stack-core-0.1.0-alpha.2.tgz \
-  /path/to/z-stack/artifacts/z-stack-passkey-0.1.0-alpha.2.tgz \
-  /path/to/z-stack/artifacts/z-stack-sdk-0.1.0-alpha.2.tgz
+npm install /path/to/z-stack/artifacts/z-stack-core-0.1.0-alpha.3.tgz \
+  /path/to/z-stack/artifacts/z-stack-passkey-0.1.0-alpha.3.tgz \
+  /path/to/z-stack/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
 npm run dev
 ```
 

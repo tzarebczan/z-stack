@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.91"
 name = "zakura-bls12-381"
-version = "1.2.0"
+version = "2.2.0"
 authors = [
     "Dev Ojha <ValarDragon@users.noreply.github.com>",
     "Sean Bowe <ewillbefull@gmail.com>",
@@ -115,7 +115,7 @@ optional = true
 default-features = false
 
 [dependencies.pairing]
-version = "1.2.0"
+version = "2.2.0"
 optional = true
 default-features = false
 package = "zakura-pairing"

@@ -62,7 +62,7 @@ struct SendBody {
 #[derive(Debug, Deserialize, Default)]
 struct CreateBody {
     network: Option<String>,
-    birthday: Option<u32>,
+    birthday: Option<serde_json::Value>,
     server: Option<String>,
     #[serde(rename = "validatorRpc")]
     validator_rpc: Option<String>,
@@ -648,6 +648,13 @@ impl Bridge {
                     let dir = self.wallet.clone();
                     let remembered = Arc::clone(&self.auth);
                     self.locked(async move {
+                        let birthday = match birthday {
+                            Some(input) => Some(
+                                resolve_birthday(input, network, NativeWallet::fetch_tip(&server))
+                                    .await?,
+                            ),
+                            None => None,
+                        };
                         let (mut w, created) =
                             NativeWallet::create(&dir, network, Some(server), birthday, auth, 0)
                                 .await?;
@@ -672,6 +679,9 @@ impl Bridge {
                     let dir = self.wallet.clone();
                     let remembered = Arc::clone(&self.auth);
                     self.locked(async move {
+                        let birthday =
+                            resolve_birthday(birthday, network, NativeWallet::fetch_tip(&server))
+                                .await?;
                         if let Some(ufvk) = ufvk {
                             let (mut w, _) = NativeWallet::restore_ufvk(
                                 &dir,
@@ -792,7 +802,7 @@ fn parse_create(
 ) -> std::result::Result<
     (
         Network,
-        Option<u32>,
+        Option<BridgeBirthday>,
         LightServer,
         Option<String>,
         Option<String>,
@@ -808,35 +818,64 @@ fn parse_create(
     let server = parse_light(b.server.as_deref(), network, true);
     Ok((
         network,
-        b.birthday,
+        b.birthday
+            .as_ref()
+            .map(|raw| parse_birthday_value(Some(raw), network))
+            .transpose()?,
         server,
         b.validator_rpc,
         optional_pass(b.passphrase),
     ))
 }
 
+#[derive(Debug, PartialEq)]
+enum BridgeBirthday {
+    Height(u32),
+    Estimate(String),
+}
+
 fn parse_birthday_value(
     raw: Option<&serde_json::Value>,
     network: Network,
-) -> std::result::Result<u32, String> {
-    let tip = crate::typical_tip(network);
+) -> std::result::Result<BridgeBirthday, String> {
+    let invalid = || "birthday must be a block height or YYYY-MM-DD".to_string();
     match raw {
-        None if network == Network::Regtest => Ok(1),
-        None => Err("birthday must be a block height or YYYY-MM-DD".into()),
-        Some(serde_json::Value::Number(n)) => {
-            let h = n.as_u64().unwrap_or(0) as u32;
-            if h == 0 && network == Network::Regtest {
-                Ok(1)
-            } else if h == 0 {
-                Err("birthday must be a block height or YYYY-MM-DD".into())
-            } else {
-                Ok(h)
-            }
-        }
+        None if network == Network::Regtest => Ok(BridgeBirthday::Height(1)),
+        Some(serde_json::Value::Number(n)) => n
+            .as_u64()
+            .and_then(|h| u32::try_from(h).ok())
+            .filter(|h| *h > 0)
+            .map(BridgeBirthday::Height)
+            .ok_or_else(invalid),
         Some(serde_json::Value::String(s)) => {
-            crate::parse_birthday_input(s, tip).map_err(|e| e.to_string())
+            let s = s.trim();
+            if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+                return s
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|h| *h > 0)
+                    .map(BridgeBirthday::Height)
+                    .ok_or_else(invalid);
+            }
+            // Validate syntax only. Resolve the estimate later against the live
+            // server tip, before creating files or saving a seed.
+            crate::parse_birthday_input_for_network(s, 1, network).map_err(|e| e.to_string())?;
+            Ok(BridgeBirthday::Estimate(s.to_string()))
         }
-        _ => Err("birthday must be a block height or YYYY-MM-DD".into()),
+        _ => Err(invalid()),
+    }
+}
+
+async fn resolve_birthday(
+    input: BridgeBirthday,
+    network: Network,
+    live_tip: impl std::future::Future<Output = Result<u32>>,
+) -> Result<u32> {
+    match input {
+        BridgeBirthday::Height(height) => Ok(height),
+        BridgeBirthday::Estimate(raw) => {
+            crate::parse_birthday_input_for_network(&raw, live_tip.await?, network)
+        }
     }
 }
 
@@ -846,7 +885,7 @@ fn parse_restore(
     (
         String,
         Option<String>,
-        u32,
+        BridgeBirthday,
         Network,
         LightServer,
         Option<String>,
@@ -1344,6 +1383,58 @@ mod tests {
         assert!(parse_loopback_bind("192.168.1.4:8787").is_err());
     }
 
+    #[tokio::test]
+    async fn date_bodies_resolve_against_live_tip_for_create_and_both_restore_keys() {
+        // A future date clips to the live tip, avoiding wall-clock rounding races.
+        let date = "9999-12-31".to_string();
+        let create = json!({"network":"testnet", "birthday": date});
+        let (_, input, _, _, _) = parse_create(create.to_string().as_bytes()).unwrap();
+        let input = input.unwrap();
+        assert_eq!(input, BridgeBirthday::Estimate(date.clone()));
+        let first = resolve_birthday(input, Network::Testnet, async { Ok(4_500_000) })
+            .await
+            .unwrap();
+        let expected =
+            crate::parse_birthday_input_for_network(&date, 4_500_000, Network::Testnet).unwrap();
+        assert_eq!(first, expected);
+        for key in [
+            json!({"mnemonic":crate::keys::REGTEST_FAUCET_MNEMONIC}),
+            json!({"ufvk":"uview1fixture"}),
+        ] {
+            let mut body = key;
+            body["network"] = json!("testnet");
+            body["birthday"] = json!(date);
+            let (_, _, input, _, _, _, _, _) = parse_restore(body.to_string().as_bytes()).unwrap();
+            let second = resolve_birthday(input, Network::Testnet, async { Ok(4_501_000) })
+                .await
+                .unwrap();
+            assert_eq!(
+                second - first,
+                1_000,
+                "live tips must move the estimated birthday"
+            );
+        }
+        let exact = parse_birthday_value(Some(&json!(12345)), Network::Testnet).unwrap();
+        assert_eq!(
+            resolve_birthday(exact, Network::Testnet, async {
+                panic!("exact heights must not fetch a tip")
+            })
+            .await
+            .unwrap(),
+            12345
+        );
+        assert!(parse_create(br#"{"birthday":4294967297}"#).is_err());
+        assert!(parse_create(br#"{"birthday":0}"#).is_err());
+        assert!(parse_restore(br#"{"ufvk":"uview1fixture","birthday":"2026-13-40"}"#).is_err());
+        assert!(
+            resolve_birthday(BridgeBirthday::Estimate(date), Network::Testnet, async {
+                Err(EngineError::Transport("unavailable".into()))
+            })
+            .await
+            .is_err()
+        );
+    }
+
     #[test]
     fn create_restore_remember_passphrase() {
         let auth = StdMutex::new(SeedAuth::windows_credential());
@@ -1455,7 +1546,7 @@ mod tests {
         assert!(policy.is_none());
         assert_eq!(m, words);
         assert!(ufvk.is_none());
-        assert_eq!(h, 1);
+        assert_eq!(h, BridgeBirthday::Height(1));
         assert_eq!(n, Network::Regtest);
         assert!(parse_restore(br#"{"mnemonic":"too short"}"#).is_err());
         let (_, u, _, _, _, _, _, _) =
@@ -1464,7 +1555,6 @@ mod tests {
         let (_, _, date_h, _, _, _, _, _) =
             parse_restore(br#"{"ufvk":"uview1xyz","network":"testnet","birthday":"2022-05-31"}"#)
                 .unwrap();
-        assert!(date_h > 1);
-        assert!(date_h < crate::typical_tip(Network::Testnet));
+        assert_eq!(date_h, BridgeBirthday::Estimate("2022-05-31".into()));
     }
 }

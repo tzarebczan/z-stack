@@ -363,10 +363,11 @@ export async function resolveBirthday(
   raw: BirthdayInput | undefined,
   tip: number,
   fallback: number,
+  network: import("@z-stack/core").BirthdayNetwork = "mainnet",
 ): Promise<number> {
   if (raw == null || raw === "") return fallback;
   validateBirthdayInput(raw);
-  return typeof raw === "number" ? raw : parseBirthdayInput(raw, tip);
+  return typeof raw === "number" ? raw : parseBirthdayInput(raw, tip, network);
 }
 
 export type WasmClientOpts = {

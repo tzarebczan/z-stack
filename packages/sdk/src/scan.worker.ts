@@ -10,6 +10,7 @@ type InitMod = {
   warmOrchardProvingKey?: () => boolean;
   orchardProvingKeyReady?: () => boolean;
   setRegtestNu63Height?: (height: number) => void;
+  setRegtestNu7Height?: (height: number) => void;
   WasmWallet: {
     create: (network: string, mnemonic: string, birthday: number, accountIndex: number) => Wallet;
     fromSnapshot: (bytes: Uint8Array) => Wallet;
@@ -95,6 +96,7 @@ type Req = {
   kind?: "send" | "sendTransparent" | "shield";
   thresholdZat?: number;
   regtestNu63Height?: number;
+  regtestNu7Height?: number;
   device?: string;
   seedFingerprint?: string;
   action?: HardwareAction;
@@ -188,6 +190,7 @@ async function handle(msg: Req): Promise<void> {
       case "init": {
         wasm = await loadWasm(!!msg.preferMulticore, msg.threads ?? 8, msg.wasmBasePath);
         if (msg.regtestNu63Height) wasm.setRegtestNu63Height?.(msg.regtestNu63Height);
+        if (msg.regtestNu7Height) wasm.setRegtestNu7Height?.(msg.regtestNu7Height);
         const caps = JSON.parse(needWasm().WasmWallet.capabilities()) as {
           simd?: boolean;
           orchardCircuit?: boolean;

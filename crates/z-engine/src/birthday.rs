@@ -1,14 +1,15 @@
 //! Birthday height from a civil date (YYYY-MM-DD) or the reverse.
 //!
-//! Zcash targets 75-second blocks. We estimate from *tip* and the system clock
+//! Target spacing changes at Blossom and NU7. We estimate from *tip* and the system clock
 //! so a restore dated "first used this wallet" lands near the right height
 //! without a block-index lookup.
 
 use crate::error::{EngineError, Result};
 use crate::{Network, SyncStage};
 use std::time::{SystemTime, UNIX_EPOCH};
+use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
 
-/// Consensus target spacing (seconds).
+/// Post-Blossom, pre-NU7 target spacing (seconds).
 pub const BLOCK_SECONDS: u32 = 75;
 
 /// Extra blocks subtracted when birthday is an approximate date, not an exact height.
@@ -258,26 +259,97 @@ pub fn fmt_secs(secs: u32) -> String {
     }
 }
 
-/// YYYY-MM-DD → estimated birthday height given the current tip.
-pub fn height_from_date(ymd: &str, tip_height: u32) -> Result<u32> {
-    let date_unix = ymd_to_unix(ymd.trim())?;
-    let now = now_unix();
-    if date_unix >= now {
-        return Ok(tip_height.max(1));
+/// Consensus spacing at a height. Mainnet NU7 remains unscheduled upstream.
+pub fn block_spacing_seconds(network: Network, height: u32) -> u32 {
+    let active = |nu| {
+        network
+            .activation_height(nu)
+            .is_some_and(|h| height >= u32::from(h))
+    };
+    if active(NetworkUpgrade::Nu7) {
+        25
+    } else if active(NetworkUpgrade::Blossom) {
+        75
+    } else {
+        150
     }
-    let ago_blocks = ((now - date_unix) as u64) / u64::from(BLOCK_SECONDS);
-    let h = tip_height.saturating_sub(ago_blocks.min(u64::from(u32::MAX)) as u32);
-    Ok(h.max(1))
 }
 
-/// Height → civil date, using the same 75s model from *now* and tip.
+fn spacing_eras(network: Network) -> Vec<(u32, u32)> {
+    let mut eras = vec![(1, 150)];
+    for (nu, seconds) in [(NetworkUpgrade::Blossom, 75), (NetworkUpgrade::Nu7, 25)] {
+        if let Some(h) = network.activation_height(nu) {
+            eras.push((u32::from(h).max(1), seconds));
+        }
+    }
+    eras.sort_by_key(|(h, _)| *h);
+    eras
+}
+
+fn height_before_seconds(network: Network, tip: u32, mut seconds: u64) -> u32 {
+    let mut height = tip.max(1);
+    for (start, spacing) in spacing_eras(network).into_iter().rev() {
+        if height < start {
+            continue;
+        }
+        let blocks = u64::from(height - start + 1);
+        let span = blocks * u64::from(spacing);
+        if seconds < span {
+            return height
+                .saturating_sub((seconds / u64::from(spacing)) as u32)
+                .max(1);
+        }
+        seconds -= span;
+        height = start.saturating_sub(1);
+    }
+    1
+}
+
+fn seconds_between_heights(network: Network, height: u32, tip: u32) -> u64 {
+    let mut cursor = tip;
+    let mut seconds = 0;
+    for (start, spacing) in spacing_eras(network).into_iter().rev() {
+        if cursor < start || cursor <= height {
+            continue;
+        }
+        let lower = height.max(start.saturating_sub(1));
+        seconds += u64::from(cursor - lower) * u64::from(spacing);
+        cursor = lower;
+    }
+    seconds
+}
+
+/// Mainnet estimate. Use [`height_from_date_for_network`] for other networks.
+pub fn height_from_date(ymd: &str, tip_height: u32) -> Result<u32> {
+    height_from_date_for_network(ymd, tip_height, Network::Mainnet)
+}
+
+/// Approximate date-to-height conversion, using every intervening spacing era.
+/// A live tip and exact birthday height are preferable to this wall-clock estimate.
+pub fn height_from_date_for_network(ymd: &str, tip_height: u32, network: Network) -> Result<u32> {
+    let date_unix = ymd_to_unix(ymd.trim())?;
+    let seconds = now_unix().saturating_sub(date_unix).max(0) as u64;
+    Ok(height_before_seconds(network, tip_height, seconds))
+}
+
 pub fn date_from_height(height: u32, tip_height: u32) -> String {
-    let behind = tip_height.saturating_sub(height);
-    let unix = now_unix().saturating_sub(i64::from(behind) * i64::from(BLOCK_SECONDS));
-    unix_to_ymd(unix)
+    date_from_height_for_network(height, tip_height, Network::Mainnet)
+}
+
+pub fn date_from_height_for_network(height: u32, tip_height: u32, network: Network) -> String {
+    let seconds = seconds_between_heights(network, height, tip_height);
+    unix_to_ymd(now_unix().saturating_sub(seconds as i64))
 }
 
 pub fn parse_birthday_input(raw: &str, tip_height: u32) -> Result<u32> {
+    parse_birthday_input_for_network(raw, tip_height, Network::Mainnet)
+}
+
+pub fn parse_birthday_input_for_network(
+    raw: &str,
+    tip_height: u32,
+    network: Network,
+) -> Result<u32> {
     let s = raw.trim();
     if s.is_empty() || s.eq_ignore_ascii_case("auto") {
         return Ok(tip_height.saturating_sub(100).max(1));
@@ -288,15 +360,20 @@ pub fn parse_birthday_input(raw: &str, tip_height: u32) -> Result<u32> {
             .map_err(|_| EngineError::Message("birthday height is not a number".into()))
             .map(|h| h.max(1));
     }
-    let h = height_from_date(s, tip_height)?;
-    Ok(h.saturating_sub(DATE_SAFETY_BLOCKS).max(1))
+    let h = height_from_date_for_network(s, tip_height, network)?;
+    // Keep the same time margin across spacing changes (200 × 75 seconds).
+    Ok(height_before_seconds(
+        network,
+        h,
+        u64::from(DATE_SAFETY_BLOCKS * BLOCK_SECONDS),
+    ))
 }
 
 /// Fallback tip when Probe has not run yet (used for ETA / date↔height).
 pub fn typical_tip(network: Network) -> u32 {
     match network {
         Network::Mainnet => 3_470_000,
-        Network::Testnet => 4_320_000,
+        Network::Testnet => 4_470_000,
         Network::Regtest => 200,
     }
 }
@@ -388,6 +465,36 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nu7_spacing_and_boundary_estimates() {
+        let activation = 4_465_026;
+        assert_eq!(block_spacing_seconds(Network::Testnet, activation - 1), 75);
+        assert_eq!(block_spacing_seconds(Network::Testnet, activation), 25);
+        assert_eq!(block_spacing_seconds(Network::Mainnet, u32::MAX), 75);
+        assert_eq!(
+            seconds_between_heights(Network::Testnet, activation - 2, activation + 2),
+            150
+        );
+        assert_eq!(
+            height_before_seconds(Network::Testnet, activation + 2, 150),
+            activation - 2
+        );
+        assert_eq!(
+            height_before_seconds(Network::Testnet, activation + 2, 74),
+            activation
+        );
+        assert_eq!(
+            height_before_seconds(Network::Testnet, activation + 2, 75),
+            activation - 1
+        );
+        assert_eq!(
+            height_before_seconds(Network::Testnet, activation + 1_000, 15_000),
+            activation + 400
+        );
+        assert_eq!(height_before_seconds(Network::Testnet, 10, u64::MAX), 1);
+        assert_eq!(seconds_between_heights(Network::Testnet, 100, 90), 0);
+    }
 
     #[test]
     fn ymd_roundtrip() {

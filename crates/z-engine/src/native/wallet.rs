@@ -24,14 +24,16 @@ use tracing::{info, warn};
 use zcash_address::ZcashAddress;
 use zcash_client_backend::{
     data_api::{
+        enhance_pir::{EnhancePirRead, EnhancementMode, TransactionEnhancementWork},
+        status::{TransactionStatusMode, TransactionStatusRead, TransactionStatusWork},
         wallet::decrypt_and_store_transaction,
         wallet::{
             create_proposed_transactions,
             input_selection::{GreedyInputSelector, SpendPolicy},
             propose_shielding, propose_transfer, ConfirmationsPolicy, SpendingKeys,
         },
-        Account, AccountBirthday, AccountPurpose, CoinbaseFilter, TransactionDataRequest,
-        TransactionStatus, WalletRead, WalletWrite,
+        Account, AccountBirthday, AccountPurpose, CoinbaseFilter, TransactionStatus, WalletRead,
+        WalletWrite,
     },
     fees::{standard::SingleOutputChangeStrategy, DustOutputPolicy, StandardFeeRule},
     proto::service::{
@@ -394,12 +396,11 @@ fn open_wallet_db(path: &Path, network: ZNetwork) -> Result<Db> {
     rusqlite::vtab::array::load_module(&conn)
         .map_err(|e| EngineError::WalletDb(format!("array module: {e}")))?;
     apply_wallet_pragmas(&conn);
-    Ok(WalletDb::from_connection(
-        conn,
-        network,
-        SystemClock,
-        new_rng(),
-    ))
+    Ok(
+        WalletDb::from_connection(conn, network, SystemClock, new_rng())
+            .with_enhancement_mode(EnhancementMode::Standard)
+            .with_status_mode(TransactionStatusMode::Public),
+    )
 }
 
 /// Highest height of the last *filled* contiguous `blocks` island.
@@ -1585,7 +1586,7 @@ impl NativeWallet {
     async fn enhance_memos(&self, db: &mut Db) -> Result<u32> {
         const MAX: usize = 24;
         let reqs = db
-            .transaction_data_requests()
+            .transaction_enhancement_work()
             .map_err(|e| EngineError::WalletDb(format!("tx data requests: {e}")))?;
         let height = db
             .chain_height()
@@ -1595,15 +1596,16 @@ impl NativeWallet {
         // work goes first so status polling cannot crowd it out.
         let mut wanted = std::collections::BTreeMap::<TxId, bool>::new();
         for req in reqs {
-            match req {
-                TransactionDataRequest::Enhancement(id) => {
-                    wanted.insert(id, true);
-                }
-                TransactionDataRequest::GetStatus(id) => {
-                    wanted.entry(id).or_insert(false);
-                }
-                #[allow(unreachable_patterns)]
-                _ => {}
+            if let TransactionEnhancementWork::Public(request) = req {
+                wanted.insert(request.txid(), true);
+            }
+        }
+        for req in db
+            .transaction_status_work()
+            .map_err(|e| EngineError::WalletDb(format!("tx status requests: {e}")))?
+        {
+            if let TransactionStatusWork::Public(request) = req {
+                wanted.entry(request.txid()).or_insert(false);
             }
         }
         let mut wanted: Vec<(TxId, bool)> = wanted.into_iter().collect();
@@ -1625,6 +1627,12 @@ impl NativeWallet {
                 let (raw, mined_at) = match lookup {
                     TxLookup::Found(raw, mined_at) => (raw, mined_at),
                     TxLookup::Unknown => {
+                        if full {
+                            // A completed payload lookup, independent of status scheduling.
+                            if db.notify_transaction_enhancement_not_found(txid).is_err() {
+                                tracing::debug!("transaction enhancement not recorded");
+                            }
+                        }
                         if let Err(_e) =
                             db.set_transaction_status(txid, TransactionStatus::TxidNotRecognized)
                         {

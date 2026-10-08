@@ -56,7 +56,7 @@ export type BlockTransport = {
     time?: number;
   }>;
   /** CompactTxStreamer `GetLightdInfo` (chain name / vendor). */
-  info?: () => Promise<{ chain: string; blockHeight?: number; vendor?: string; version?: string; protocolVersion?: string; transparentCompact?: boolean }>;
+  info?: () => Promise<{ chain: string; blockHeight?: number; vendor?: string; version?: string; consensusBranchId?: string; protocolVersion?: string; transparentCompact?: boolean }>;
   /**
    * Complete shard roots (`GetSubtreeRoots`) from shard `startIndex`, at most
    * `maxEntries` of them (0 = all). A pipe older than `maxEntries` returns
@@ -949,6 +949,7 @@ export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}
         version: protoString(msgs[0], 1),
         vendor: protoString(msgs[0], 2),
         chain: protoString(msgs[0], 4) ?? "",
+        consensusBranchId: protoString(msgs[0], 6),
         blockHeight: protoVarint(msgs[0], 7),
       };
     },

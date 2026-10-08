@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-bls12-381"
-version = "1.2.0"
+version = "2.2.0"
 dependencies = [
  "criterion",
  "csv",
@@ -876,9 +876,9 @@ dependencies = [
 
 [[package]]
 name = "zakura-pairing"
-version = "1.2.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bb93e2fa3d808aee507f0ce5167b2819f692d9c915b2d543eab820050deef73"
+checksum = "115bdf8a6867f1f7b150be712f6261c799d5d0799a7317d787f50894144d939c"
 dependencies = [
  "group",
 ]
