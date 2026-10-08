@@ -1,8 +1,7 @@
 # Package builds and verification
 
-The current source version is `0.1.0-alpha.3`; its downloadable prerelease is not
-published yet. Build from source for NU7 support. [Earlier archives](https://github.com/tzarebczan/z-stack/releases)
-predate NU7. Packages are not published to npm or Cargo. The browser SDK includes
+The current preview is [`0.1.0-alpha.3`](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.3),
+with NU7 support and downloadable archives. Earlier previews predate NU7. Packages are not published to npm or Cargo. The browser SDK includes
 production WASM engines, so an app consuming built packages does not need Rust. See the
 [walkthrough](GETTING-STARTED.md) and [support limits](SUPPORT.md).
 

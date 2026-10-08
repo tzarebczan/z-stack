@@ -2,6 +2,11 @@
 
 ## 0.1.0-alpha.3
 
+- Self-contained SDK archive with matching core/passkey helpers; no registry lookup for unpublished packages.
+- First-scan payment readiness, restore-input retention on failure, explicit phrase/address copy controls and safe error diagnostics.
+- Generated example instructions retain setup links and use vendored archives; documentation fragments are validated.
+- Next.js tracing stays inside the generated app; recovery and address copy feedback remain separate.
+
 - NU7-capable Common 2.2.0, wallet backend/SQLite rc7 and PCZT rc4; protocol, address and transparent dependencies now use matching Zakura aliases.
 - Testnet NU7 activation at 4,465,026; mainnet activation remains unset upstream.
 - Network-aware birthday estimates span Blossom and NU7 spacing changes while preserving the date safety margin in seconds.

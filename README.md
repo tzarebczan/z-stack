@@ -7,9 +7,8 @@ their UI, authentication, and backup service.
 **Alpha.** The packages are not published to npm. Original code is Apache-2.0;
 see [licensing](docs/LICENSING.md) and
 [release status](docs/RELEASE.md).
-NU7 support is available in the alpha.3 source build. Prebuilt alpha.3 archives
-have not been published; [earlier releases](https://github.com/tzarebczan/z-stack/releases)
-predate NU7.
+The [alpha.3 preview](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.3)
+includes NU7 support and prebuilt browser SDK archives. Earlier previews predate NU7.
 
 ## Start here
 
@@ -32,17 +31,18 @@ predate NU7.
 
 ## Run the published preview
 
-The available prebuilt preview is **alpha.2**. It predates NU7: use it for local
-setup and UI exploration, not post-NU7 public-testnet payments. For NU7, build
-alpha.3 from source below. Node 22.18+ is required.
+The current prebuilt preview is **alpha.3**, with NU7 support. Public-testnet
+funding remains unverified because providers disagree after activation; check
+[the funding limitation](docs/GETTING-STARTED.md#4-create-or-restore-then-sync)
+before requesting test coins. Node 22.18+ is required.
 
 Download the published bundle, verify both checksum layers, then generate an app:
 
 ```sh
-gh release download v0.1.0-alpha.2 --repo tzarebczan/z-stack --dir sdk-alpha
+gh release download v0.1.0-alpha.3 --repo tzarebczan/z-stack --dir sdk-alpha
 cd sdk-alpha
-sha256sum -c SHA256SUMS-alpha.2
-tar -xzf z-stack-preview-0.1.0-alpha.2-*.tgz
+sha256sum -c SHA256SUMS-alpha.3
+tar -xzf z-stack-preview-0.1.0-alpha.3-*.tgz
 cd z-stack-preview
 sha256sum -c SHA256SUMS
 node scripts/create-example.mjs browser-wallet ../my-wallet --install
