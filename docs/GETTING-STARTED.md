@@ -6,19 +6,15 @@ application services; they are not needed for this walkthrough.
 
 ## 1. Get matching archives
 
-Alpha.3 supports NU7 and is currently available **from source**. Follow
-[the build instructions](../README.md#build-from-source) through `pnpm pack:sdk`.
-Run the scaffolder from that checkout; its default archive directory is `artifacts/`.
-
-For a prebuilt local setup, the published preview is **alpha.2**, which predates
-NU7 and is unsuitable for post-NU7 public-testnet payments. Use Node 22.18+ and npm;
-an npm account is not needed. Download and verify both checksum layers:
+The published **alpha.3** preview includes NU7 support. Use Node 22.18+ and npm;
+no Rust toolchain or npm account is needed for these built archives. Download and
+verify both checksum layers:
 
 ```sh
-gh release download v0.1.0-alpha.2 --repo tzarebczan/z-stack --dir sdk-alpha
+gh release download v0.1.0-alpha.3 --repo tzarebczan/z-stack --dir sdk-alpha
 cd sdk-alpha
-sha256sum -c SHA256SUMS-alpha.2 # macOS: shasum -a 256 -c SHA256SUMS-alpha.2
-tar -xzf z-stack-preview-0.1.0-alpha.2-*.tgz
+sha256sum -c SHA256SUMS-alpha.3 # macOS: shasum -a 256 -c SHA256SUMS-alpha.3
+tar -xzf z-stack-preview-0.1.0-alpha.3-*.tgz
 cd z-stack-preview
 sha256sum -c SHA256SUMS # macOS: shasum -a 256 -c SHA256SUMS
 ```
@@ -26,7 +22,8 @@ sha256sum -c SHA256SUMS # macOS: shasum -a 256 -c SHA256SUMS
 Continue from **inside the extracted bundle**, using its scripts and matching
 archives. Do not mix its packages with the current source scaffolder. Checksums
 detect changed bytes; authenticate the GitHub release and source revision separately.
-No prebuilt alpha.3 release is available yet.
+For a source build, follow [the build instructions](../README.md#build-from-source)
+through `pnpm pack:sdk`, then use that checkout’s scaffolder and archives.
 
 ## 2. Generate an app outside the checkout
 
