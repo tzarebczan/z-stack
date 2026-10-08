@@ -25,7 +25,9 @@ The optional browser gate verifies real engine startup, recovery-before-commit,
 unconfirmed page teardown and locked reload with only a disposable app-owned
 chain fixture. It does not certify a physical passkey provider.
 
-Copy this directory outside the workspace after following the [build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md), then run:
+Follow the [build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md).
+
+Copy this directory outside the workspace, then run:
 
 ```sh
 npm install /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz

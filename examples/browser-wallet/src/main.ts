@@ -119,7 +119,7 @@ async function start() {
     try {
       await navigator.clipboard.writeText(text);
       output.textContent = secret ? "Phrase copied. Your clipboard now contains your recovery words." : "Address copied.";
-    } catch { output.textContent = "Could not copy. Select the text instead."; }
+    } catch { output.textContent = secret ? "Could not copy. Save the numbered words in order." : "Could not copy. Select the address instead."; }
   }
   copyAddress.addEventListener("click", () => { if (identity) void copy(identity, element("copy-status")); });
   copyPhrase.addEventListener("click", () => { if (recoveryPhrase) void copy(recoveryPhrase, element("phrase-copy-status"), true); });
@@ -273,7 +273,7 @@ async function start() {
         status.textContent = "A wallet is already saved here. Use another browser profile to try recovery.";
         return;
       }
-      words.value = ""; // Only clear after the saved-wallet guard accepts this attempt.
+      // Keep the input available if validation, transport or persistence fails.
       const restored = await wallet.restore(mnemonic, { birthday: restoreBirthday });
       clearPhrase();
       await render(restored);

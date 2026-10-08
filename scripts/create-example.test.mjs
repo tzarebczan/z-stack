@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { markdownAnchors } from './doc-anchors.mjs';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { copyTemplate, createExample, inspectArchives, archiveMembers, generatedReadme } from './create-example.mjs';
@@ -46,4 +46,15 @@ test('heading anchors reject stale quickstart links and ignore fenced headings',
   assert.ok(ids.has('build-from-source-1'));
   assert.ok(ids.has('z-stacksdk--api'));
   assert.ok(!ids.has('build-preview-packages'));
+});
+
+test('generated wallet guides retain setup links from the actual templates', () => {
+  for (const name of ['browser-wallet', 'next-wallet', 'react-wallet', 'local-passkey']) {
+    const source = readFileSync(new URL(`../examples/${name}/README.md`, import.meta.url), 'utf8');
+    const generated = generatedReadme(source);
+    for (const link of source.matchAll(/https:\/\/github.com\/tzarebczan\/z-stack[^)]+/g)) {
+      assert.ok(generated.includes(link[0]), `${name}: missing ${link[0]}`);
+    }
+    assert.doesNotMatch(generated, /Copy this directory|\/path\/to\//);
+  }
 });

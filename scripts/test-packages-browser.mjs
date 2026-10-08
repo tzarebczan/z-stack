@@ -228,6 +228,12 @@ async function verifyExampleRecovery(app, chromium) {
     await page.waitForFunction(() => document.getElementById("status").textContent === "Create a wallet or restore one.");
     assert.equal(await page.locator("#sync").isDisabled(), true);
     assert.equal(await page.locator("#lock").isDisabled(), true);
+    await page.locator("#words").fill("not a valid recovery phrase");
+    await page.locator("#birthday").fill("1");
+    await page.locator("#restore").click();
+    await page.locator("#status").filter({hasText:"Something went wrong."}).waitFor();
+    assert.equal(await page.locator("#words").inputValue(), "not a valid recovery phrase", "invalid restore erased its input");
+    await page.locator("#clear-words").click();
     await page.locator("#create").click();
     await page.locator("#phrase").waitFor({state:"visible"});
     assert.equal(await page.locator("#restore-form").isVisible(), false);
@@ -237,6 +243,10 @@ async function verifyExampleRecovery(app, chromium) {
     await page.locator("#copy-phrase").click();
     assert.equal(await page.evaluate(() => window.copiedValue), phrase.trim());
     await page.locator("#phrase-copy-status").filter({hasText:"clipboard"}).waitFor();
+    await page.evaluate(() => { window.rejectCopy = true; });
+    await page.locator("#copy-phrase").click();
+    await page.locator("#phrase-copy-status").filter({hasText:"Save the numbered words in order"}).waitFor();
+    await page.evaluate(() => { window.rejectCopy = false; });
     assert.equal(await page.locator("#create").isDisabled(), true);
     assert.equal(await page.locator("#clear-words").isDisabled(), true);
     page.once("dialog", dialog => dialog.accept());

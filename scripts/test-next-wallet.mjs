@@ -163,6 +163,12 @@ async function flows(origin, engine, name, isolated) {
       const response = await page.request.get(`${origin}/fixture?action=configure&${new URLSearchParams(options)}`);
       assert.equal(response.status(), 200);
     };
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", {configurable:true, value:{writeText:async value => {
+        if (window.rejectCopy) throw new Error("clipboard denied");
+        window.copiedValue = value;
+      }}});
+    });
     await configure({tip:"1"});
     await page.goto(origin);
     await status("Ready to create or restore.").waitFor({timeout:90_000});
@@ -179,6 +185,14 @@ async function flows(origin, engine, name, isolated) {
     assert.equal(phrase.split(" ").length, 24);
     const address = await page.locator("#address").textContent();
     assert.ok(address);
+    assert.equal(await page.getByRole("button", {name:"Copy address",exact:true}).count(), 0);
+    await page.getByRole("button", {name:"Copy recovery phrase",exact:true}).click();
+    await status("Phrase copied. Your clipboard contains your recovery words.").waitFor();
+    assert.equal(await page.evaluate(() => window.copiedValue), phrase);
+    await page.evaluate(() => { window.rejectCopy = true; });
+    await page.getByRole("button", {name:"Copy recovery phrase",exact:true}).click();
+    await status("Could not copy. Save the numbered words in order.").waitFor();
+    await page.evaluate(() => { window.rejectCopy = false; });
     assert.equal(await page.getByRole("button", {name:"Sync wallet",exact:true}).isDisabled(), true);
     await page.getByRole("link", {name:"How it works",exact:true}).click();
     await status("Save your recovery phrase before leaving.").waitFor();
@@ -186,6 +200,10 @@ async function flows(origin, engine, name, isolated) {
     await page.getByLabel("I saved my recovery phrase").check();
     await page.getByRole("button", {name:"Done, hide phrase"}).click();
     console.log(`Next.js ${name}: create and backup validated`);
+    await page.getByRole("button", {name:"Copy address",exact:true}).click();
+    await status("Address copied.").waitFor();
+    assert.equal(await page.evaluate(() => window.copiedValue), address);
+    assert.equal(await status("Phrase copied.").count(), 0);
     assert.equal(await page.getByRole("button", {name:"Review payment",exact:true}).isDisabled(), true);
     await page.getByRole("button", {name:"Sync wallet",exact:true}).click();
     await status("Scanned through block 1.").waitFor({timeout:90_000});

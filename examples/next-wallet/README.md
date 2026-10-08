@@ -10,8 +10,9 @@ The Next CLI wrapper disables its telemetry during dev/build/start.
 ## Run
 
 Use [the setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md), or follow the
-[SDK build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md), then copy this directory
-outside the SDK checkout. From your copy:
+[SDK build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md).
+
+Copy this directory outside the SDK checkout. From your copy:
 
 ```sh
 npm install /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
