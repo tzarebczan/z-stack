@@ -220,8 +220,8 @@ if (scheduled !== nu63) {
   process.exit(1);
 }
 const scheduledNu7 = Object.values(info.upgrades ?? {}).find((u) => u.name === "NU7")?.activationheight;
-if (nu7 !== undefined && scheduledNu7 !== nu7) {
-  throw new Error(`validator reports NU7 at ${scheduledNu7}, expected ${nu7}; use a NU7-capable validator`);
+if (scheduledNu7 !== nu7) {
+  throw new Error(`validator reports NU7 at ${scheduledNu7}, expected ${nu7 ?? "unscheduled"}; match the client and validator schedules`);
 }
 if ((Number(info.blocks) || 0) < 2) await generate(2 - (Number(info.blocks) || 0));
 if (!running("zaino")) start("zaino", zainod, ["start", "--config", join(dir, "zaino.toml")]);
