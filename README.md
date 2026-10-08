@@ -7,8 +7,9 @@ their UI, authentication, and backup service.
 **Alpha.** The packages are not published to npm. Original code is Apache-2.0;
 see [licensing](docs/LICENSING.md) and
 [release status](docs/RELEASE.md).
-Download matching [alpha archives](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.3)
-and run an example without a Rust toolchain.
+NU7 support is available in the alpha.3 source build. Prebuilt alpha.3 archives
+have not been published; [earlier releases](https://github.com/tzarebczan/z-stack/releases)
+predate NU7.
 
 ## Start here
 
@@ -31,9 +32,10 @@ and run an example without a Rust toolchain.
 
 ## Run a prebuilt example
 
-Download the preview bundle and checksums from the
-[alpha release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.3).
-Or use GitHub CLI to download the complete matching set:
+Build from source for alpha.3 today. Once its prerelease is published on the
+[releases page](https://github.com/tzarebczan/z-stack/releases), download the preview
+bundle and matching checksums to run an example without Rust:
+
 
 ```sh
 gh release download v0.1.0-alpha.3 --repo tzarebczan/z-stack --dir sdk-alpha

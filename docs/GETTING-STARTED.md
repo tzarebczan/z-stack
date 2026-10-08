@@ -6,10 +6,13 @@ application services; they are not needed for this walkthrough.
 
 ## 1. Get matching archives
 
-Download the preview bundle and `SHA256SUMS-alpha.3` from the
-[alpha release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.3).
-Use Node 22.18+ and npm; Rust and an npm account are not needed.
-With GitHub CLI, download all six assets and verify them before extracting:
+Alpha.3 is currently available from source. Follow [the build instructions](../README.md#build-from-source),
+then run `pnpm bundle:preview` to generate its matching preview bundle.
+
+After the alpha.3 prerelease is published on the [releases page](https://github.com/tzarebczan/z-stack/releases),
+you can download the preview bundle and `SHA256SUMS-alpha.3` without building Rust.
+Use Node 22.18+ and npm; an npm account is not needed. Download all six assets and
+verify them before extracting:
 
 ```sh
 gh release download v0.1.0-alpha.3 --repo tzarebczan/z-stack --dir sdk-alpha
