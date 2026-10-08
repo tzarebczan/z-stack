@@ -548,6 +548,7 @@ export async function attachScanWorker(
     preferMulticore: boolean;
     wasmBasePath?: string;
     regtestNu63Height?: number;
+    regtestNu7Height?: number;
   },
   spawn?: () => Worker,
 ): Promise<(ScanRuntime & { scanWorker: true }) | null> {
@@ -583,6 +584,7 @@ async function attachScanWorkerInner(
     preferMulticore: boolean;
     wasmBasePath?: string;
     regtestNu63Height?: number;
+    regtestNu7Height?: number;
   },
 ): Promise<(ScanRuntime & { scanWorker: true }) | null> {
   worker = spawned;
@@ -606,6 +608,7 @@ async function attachScanWorkerInner(
         threads: opts.threads,
         wasmBasePath: opts.wasmBasePath,
         ...(opts.regtestNu63Height ? { regtestNu63Height: opts.regtestNu63Height } : {}),
+        ...(opts.regtestNu7Height ? { regtestNu7Height: opts.regtestNu7Height } : {}),
       },
       undefined,
       90_000,

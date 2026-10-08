@@ -65,6 +65,10 @@ client's `Z_STACK_REGTEST_NU6_3` to the actual fixture. Chain data and logs use
 `--fresh` deletes that fixture chain; use it only for disposable test data.
 Stop it with `pnpm regtest:native:down`.
 
+NU7 requires a compatible validator and light server; the compose fixture above
+does not support it. See the optional [NU7 fixture](../infra/nu7/README.md) and
+[acceptance steps](RELEASE.md#nu7-acceptance).
+
 SDK/browser fixtures share `Z_STACK_REGTEST_LWD_PORT` (default 28137). An explicit
 `Z_STACK_REGTEST_LWD` URL takes precedence. Never run competing funded tests
 against the same faucet. See [package verification](RELEASE.md).

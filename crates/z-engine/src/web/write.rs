@@ -1458,6 +1458,11 @@ impl WalletWrite for WebWallet {
             .map_err(|e| RewindError::DataSource(e.to_string()))
     }
 
+    // Snapshot enhancement is owned by the SDK's durable memo queue, not WalletRead.
+    fn notify_transaction_enhancement_not_found(&mut self, _txid: TxId) -> Result<(), String> {
+        Ok(())
+    }
+
     fn set_transaction_status(
         &mut self,
         _txid: TxId,

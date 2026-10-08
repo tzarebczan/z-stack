@@ -14,9 +14,9 @@ install all three matching `.tgz` files in your app. No registry package is
 currently published. Keep SDK, core, and passkey at the same version.
 
 ```sh
-npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.2.tgz \
-  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.2.tgz \
-  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.2.tgz
+npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.3.tgz \
+  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.3.tgz \
+  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
 ```
 
 Use the [runnable Vite example](../examples/browser-wallet/README.md) as a starting

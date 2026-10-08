@@ -18,7 +18,11 @@ export type ProveWorkerSession = {
 
 export const proveWorkerSessions = new WeakMap<Worker, ProveWorkerSession>();
 
-/** Regtest NU6.3 height for the proving worker's WASM instance (see `initialize`). */
+/** Optional regtest NU7 height shared by worker instances (see `initialize`). */
+export function configureRegtestNu7Height(height?: number): void {
+  runtimeState.workerRegtestNu7 = height;
+}
+
 export function configureRegtestNu63Height(height?: number): void {
   runtimeState.workerRegtestNu63 = height;
 }
@@ -93,6 +97,7 @@ export async function startScanWorker(opts: {
   preferMulticore: boolean;
   wasmBasePath?: string;
   regtestNu63Height?: number;
+  regtestNu7Height?: number;
 }): Promise<Awaited<ReturnType<typeof attachScanWorker>>> {
   if (!canUseScanWorker()) return null;
   try {
@@ -127,7 +132,10 @@ export function workerCall(payload: Record<string, unknown>, transfer?: Transfer
     w.addEventListener("message", onMsg);
     session.pending.add(fail);
     try {
-      const regtest = runtimeState.workerRegtestNu63 ? { regtestNu63Height: runtimeState.workerRegtestNu63 } : {};
+      const regtest = {
+        ...(runtimeState.workerRegtestNu63 ? { regtestNu63Height: runtimeState.workerRegtestNu63 } : {}),
+        ...(runtimeState.workerRegtestNu7 ? { regtestNu7Height: runtimeState.workerRegtestNu7 } : {}),
+      };
       w.postMessage({ id, wasmBasePath: runtimeState.workerWasmBasePath, ...regtest, ...payload }, transfer ?? []);
     } catch (e) {
       session.fail(e);

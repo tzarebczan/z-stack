@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, wri
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { generate, waitForZebra, ZEBRA_RPC } from "./regtest-rpc.mjs";
+import { generate, waitForZebra, zebraRpc, ZEBRA_RPC } from "./regtest-rpc.mjs";
 
 const cmd = process.argv[2];
 const rpcPort = Number(new URL(ZEBRA_RPC).port || 80);
@@ -30,6 +30,7 @@ if (!Number.isInteger(lwdPort) || lwdPort < 1 || lwdPort > 65535) throw new Erro
 const fresh = process.argv.includes("--fresh");
 const dir = process.env.Z_STACK_REGTEST_DIR || join(homedir(), ".local", "share", "z-stack", "regtest");
 const nu63 = Number(process.env.Z_STACK_REGTEST_NU6_3 || 150);
+const nu7 = process.env.Z_STACK_REGTEST_NU7 === undefined ? undefined : Number(process.env.Z_STACK_REGTEST_NU7);
 const binDir = join(homedir(), ".local", "share", "z-stack", "mainnet", "bin");
 const FAUCET_TADDR = "tmV1zYhR2xisn6VWdCNKHpeD4S7L1U1nPH6"; // keys::REGTEST_FAUCET_TRANSPARENT
 
@@ -106,6 +107,7 @@ NU6 = 2
 "NU6.1" = 2
 "NU6.2" = 2
 "NU6.3" = ${nu63}
+${nu7 === undefined ? "" : `NU7 = ${nu7}`}
 
 # Zakura requires a lockbox disbursement in the NU6.1 activation block. The
 # regtest lockbox is empty (NU6 and NU6.1 share height 2), so disburse zero.
@@ -176,35 +178,55 @@ if (!Number.isInteger(nu63) || nu63 < 3) {
   console.error("Z_STACK_REGTEST_NU6_3 must be an integer >= 3");
   process.exit(1);
 }
+if (nu7 !== undefined && (!Number.isInteger(nu7) || nu7 <= nu63 || nu7 > 0xffff_ffff)) {
+  throw new Error("Z_STACK_REGTEST_NU7 must be an integer after NU6.3 and within uint32");
+}
 if (fresh) {
   stop("zaino");
   stop("zakura");
   await new Promise((r) => setTimeout(r, 1000));
   for (const d of ["zakura", "zaino", "peer"]) rmSync(join(dir, d), { recursive: true, force: true });
   rmSync(join(dir, "nu63"), { force: true });
+  rmSync(join(dir, "nu7"), { force: true });
 }
 const recorded = existsSync(join(dir, "nu63")) ? Number(readFileSync(join(dir, "nu63"), "utf8")) : undefined;
 if (recorded !== undefined && recorded !== nu63) {
   console.error(`this chain has NU6.3 at ${recorded}; use Z_STACK_REGTEST_NU6_3=${recorded} or --fresh`);
   process.exit(1);
 }
+const recordedNu7 = existsSync(join(dir, "nu7")) ? readFileSync(join(dir, "nu7"), "utf8") : "unscheduled";
+if (recorded !== undefined && recordedNu7 !== String(nu7 ?? "unscheduled")) {
+  throw new Error("this chain has a different NU7 schedule; restore its setting or use --fresh");
+}
 for (const d of ["zakura", "zaino", "peer", "logs"]) mkdirSync(join(dir, d), { recursive: true });
 mkdirSync(join(dir, "identity"), { recursive: true, mode: 0o700 });
 writeFileSync(join(dir, "zakura.toml"), zakuraConfig());
 writeFileSync(join(dir, "zaino.toml"), zainoConfig());
 writeFileSync(join(dir, "nu63"), String(nu63));
+writeFileSync(join(dir, "nu7"), String(nu7 ?? "unscheduled"));
 
 if (!running("zakura")) start("zakura", zakurad, ["-c", join(dir, "zakura.toml"), "start"]);
-const info = await waitForZebra();
+let info = await waitForZebra();
+// New validators can expose RPC just before genesis reaches durable state.
+const genesisDeadline = Date.now() + 30_000;
+while (!info.bestblockhash || /^0+$/.test(info.bestblockhash)) {
+  if (Date.now() >= genesisDeadline) throw new Error("validator genesis not ready");
+  await new Promise(resolve => setTimeout(resolve, 250));
+  info = await zebraRpc("getblockchaininfo");
+}
 const scheduled = Object.values(info.upgrades ?? {}).find((u) => u.name === "NU6.3")?.activationheight;
 if (scheduled !== nu63) {
   console.error(`validator reports NU6.3 at ${scheduled}, expected ${nu63}; run down, then up --fresh`);
   process.exit(1);
 }
+const scheduledNu7 = Object.values(info.upgrades ?? {}).find((u) => u.name === "NU7")?.activationheight;
+if (nu7 !== undefined && scheduledNu7 !== nu7) {
+  throw new Error(`validator reports NU7 at ${scheduledNu7}, expected ${nu7}; use a NU7-capable validator`);
+}
 if ((Number(info.blocks) || 0) < 2) await generate(2 - (Number(info.blocks) || 0));
 if (!running("zaino")) start("zaino", zainod, ["start", "--config", join(dir, "zaino.toml")]);
 await waitPort(lwdPort);
 const after = await waitForZebra();
-console.log(`ready: height=${after.blocks}, NU6.3 (Ironwood) at ${nu63}`);
+console.log(`ready: height=${after.blocks}, NU6.3 at ${nu63}, NU7 ${nu7 ?? "unscheduled"}`);
 console.log(`  validator RPC http://127.0.0.1:${rpcPort}   Zaino gRPC http://127.0.0.1:${lwdPort}`);
-console.log(`  export Z_STACK_REGTEST_NU6_3=${nu63}   logs: ${join(dir, "logs")}`);
+console.log(`  export Z_STACK_REGTEST_NU6_3=${nu63}${nu7 === undefined ? "" : ` Z_STACK_REGTEST_NU7=${nu7}`}   logs: ${join(dir, "logs")}`);

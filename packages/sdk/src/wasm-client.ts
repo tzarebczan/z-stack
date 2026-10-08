@@ -32,7 +32,7 @@ import * as runtime from './wasm-client-runtime';
 import { createSpendingController } from './wasm-client-spending';
 import { createStorageController } from './wasm-client-storage';
 import { createSyncController } from './wasm-client-sync';
-export { attachWasmBindings, cancelWasmSync, configureRegtestNu63Height, configureWasmWorkerBasePath, forgetWasmWallet, isDuplicateBroadcastError, orchardProvingKeyReady, peekSnapshotBytes, peekWasmWallet, prewarmOrchardProvingKey, prewarmProveWorker, reorgRestartFrom, setWasmSpendingSeed, startScanWorker, submitVerdict, wasmCapabilities } from './wasm-client-runtime';
+export { attachWasmBindings, cancelWasmSync, configureRegtestNu63Height, configureRegtestNu7Height, configureWasmWorkerBasePath, forgetWasmWallet, isDuplicateBroadcastError, orchardProvingKeyReady, peekSnapshotBytes, peekWasmWallet, prewarmOrchardProvingKey, prewarmProveWorker, reorgRestartFrom, setWasmSpendingSeed, startScanWorker, submitVerdict, wasmCapabilities } from './wasm-client-runtime';
 export type { WasmClient, WasmClientOpts, WasmProgress } from './wasm-client-runtime';
 export function createWasmClient(
   opts: runtime.WasmClientOpts,
@@ -597,7 +597,7 @@ export function createWasmClient(
           tip = birthday;
         }
         operation.assertCurrent();
-        const bday = await runtime.resolveBirthday(birthday, tip, Math.max(1, tip - 100));
+        const bday = await runtime.resolveBirthday(birthday, tip, Math.max(1, tip - 100), { network: net, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
         operation.assertCurrent();
         if (createOpts?.beforeCommit) {
           await operation.ready();
@@ -682,7 +682,7 @@ export function createWasmClient(
             `light server tip failed (${transport.label}): ${e instanceof Error ? e.message : e}`,
           );
         }
-        const bday = await runtime.resolveBirthday(birthday, tip, net === "regtest" ? 1 : 1);
+        const bday = await runtime.resolveBirthday(birthday, tip, net === "regtest" ? 1 : 1, { network: net, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
         if (bday > tip) throw new Error(`birthday ${bday} is above tip ${tip}`);
         operation.assertCurrent();
         claimed = await replaceWallet(
@@ -742,7 +742,7 @@ export function createWasmClient(
             `light server tip failed (${transport.label}): ${e instanceof Error ? e.message : e}`,
           );
         }
-        const bday = await runtime.resolveBirthday(birthday, tip, net === "regtest" ? 1 : 1);
+        const bday = await runtime.resolveBirthday(birthday, tip, net === "regtest" ? 1 : 1, { network: net, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
         if (bday > tip) throw new Error(`birthday ${bday} is above tip ${tip}`);
         operation.assertCurrent();
         claimed = await replaceWallet(
@@ -804,7 +804,7 @@ export function createWasmClient(
           `light server tip failed (${transport.label}): ${e instanceof Error ? e.message : e}`,
         );
       }
-      const bday = await runtime.resolveBirthday(birthday, tip, 1);
+      const bday = await runtime.resolveBirthday(birthday, tip, 1, { network, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
       if (bday > tip) throw new Error(`birthday ${bday} is above tip ${tip}`);
       operation.assertCurrent();
       const input = {
@@ -990,7 +990,7 @@ export function createWasmClient(
             await refreshIfStale(source, operation);
             assertSource(operation, source);
             const tip = await transport.tip(operation.signal);
-            const height = await runtime.resolveBirthday(birthday, tip, 1);
+            const height = await runtime.resolveBirthday(birthday, tip, 1, { network, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
             assertSource(operation, source);
             if (height > tip) throw new WalletError("birthday_above_tip", "birthday is above chain tip");
             if (height > await source.birthday()) throw new WalletError("rescan_later_birthday", "rescan later birthday");

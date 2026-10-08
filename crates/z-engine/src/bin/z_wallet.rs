@@ -336,10 +336,12 @@ async fn main() -> anyhow::Result<()> {
             let network = parse_network(&network)?;
             let server = parse_server(server, network);
             let _ = MAX_MEM_SYNC_BLOCKS;
-            let tip = NativeWallet::fetch_tip(&server).await.unwrap_or(1);
             let birthday = match (birthday, date.as_deref()) {
                 (Some(h), _) => h,
-                (None, Some(d)) => z_engine::height_from_date(d, tip)?,
+                (None, Some(d)) => {
+                    let tip = NativeWallet::fetch_tip(&server).await?;
+                    z_engine::parse_birthday_input_for_network(d, tip, network)?
+                }
                 (None, None) => {
                     anyhow::bail!("restore needs --birthday HEIGHT or --date YYYY-MM-DD")
                 }

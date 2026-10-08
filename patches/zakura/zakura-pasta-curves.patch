@@ -72,7 +72,7 @@ index 847a72f..721fa97 100644
 +    }
  }
 diff --git a/zakura-pasta-curves/src/fields.rs b/zakura-pasta-curves/src/fields.rs
-index ed9ffdb..cb12a9c 100644
+index c07a838..66c7896 100644
 --- a/zakura-pasta-curves/src/fields.rs
 +++ b/zakura-pasta-curves/src/fields.rs
 @@ -5,6 +5,8 @@ mod fp;
@@ -85,10 +85,10 @@ index ed9ffdb..cb12a9c 100644
  use crate::arithmetic::mac;
  
 diff --git a/zakura-pasta-curves/src/fields/fp.rs b/zakura-pasta-curves/src/fields/fp.rs
-index 1c31f23..6dbea9b 100644
+index 867a52a..42c97c1 100644
 --- a/zakura-pasta-curves/src/fields/fp.rs
 +++ b/zakura-pasta-curves/src/fields/fp.rs
-@@ -364,7 +364,12 @@ impl Fp {
+@@ -401,7 +401,12 @@ impl Fp {
              Fp(portable::square(&self.0, &MODULUS.0, INV))
          }
  
@@ -102,7 +102,7 @@ index 1c31f23..6dbea9b 100644
          {
              let u = self.square_unreduced();
              Fp::montgomery_reduce(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7])
-@@ -422,8 +427,16 @@ impl Fp {
+@@ -459,8 +464,16 @@ impl Fp {
      /// Multiplies `rhs` by `self`, returning the result.
      #[cfg_attr(not(feature = "uninline-portable"), inline)]
      pub const fn mul(&self, rhs: &Self) -> Self {
@@ -121,10 +121,10 @@ index 1c31f23..6dbea9b 100644
      }
  
      /// Multiplies `self` by `2^-exponent`.
-@@ -512,8 +525,17 @@ impl Fp {
-             target_endian = "little"
-         )))]
+@@ -583,6 +596,15 @@ impl Fp {
          {
+             // Leave the accumulator unreduced between squarings. The closing
+             // multiplication canonicalizes its result.
 +            #[cfg(target_arch = "wasm32")]
 +            {
 +                let mut acc = *self;
@@ -133,13 +133,11 @@ index 1c31f23..6dbea9b 100644
 +                }
 +                acc.mul(by)
 +            }
-             // Leave the accumulator unreduced between squarings. The closing
-             // multiplication canonicalizes its result.
 +            #[cfg(not(target_arch = "wasm32"))]
-             Fp(portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV)).mul(by)
+             Fp(portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV)).mul_runtime(by)
          }
      }
-@@ -552,6 +574,15 @@ impl Fp {
+@@ -621,6 +643,15 @@ impl Fp {
              target_endian = "little"
          )))]
          {
@@ -155,7 +153,7 @@ index 1c31f23..6dbea9b 100644
              Fp(portable::canonicalize(
                  &portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV),
                  &MODULUS.0,
-@@ -610,6 +641,7 @@ impl Fp {
+@@ -679,6 +710,7 @@ impl Fp {
  
      /// Multiplies `rhs` by `self`, returning the unreduced 512-bit product.
      #[cfg_attr(not(feature = "uninline-portable"), inline)]
@@ -164,10 +162,10 @@ index 1c31f23..6dbea9b 100644
          // Schoolbook multiplication
  
 diff --git a/zakura-pasta-curves/src/fields/fq.rs b/zakura-pasta-curves/src/fields/fq.rs
-index 96f606f..2ba12eb 100644
+index bd3eca3..1964887 100644
 --- a/zakura-pasta-curves/src/fields/fq.rs
 +++ b/zakura-pasta-curves/src/fields/fq.rs
-@@ -364,7 +364,12 @@ impl Fq {
+@@ -401,7 +401,12 @@ impl Fq {
              Fq(portable::square(&self.0, &MODULUS.0, INV))
          }
  
@@ -181,7 +179,7 @@ index 96f606f..2ba12eb 100644
          {
              let u = self.square_unreduced();
              Fq::montgomery_reduce(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7])
-@@ -422,8 +427,16 @@ impl Fq {
+@@ -459,8 +464,16 @@ impl Fq {
      /// Multiplies `rhs` by `self`, returning the result.
      #[cfg_attr(not(feature = "uninline-portable"), inline)]
      pub const fn mul(&self, rhs: &Self) -> Self {
@@ -200,10 +198,10 @@ index 96f606f..2ba12eb 100644
      }
  
      /// Multiplies `self` by `2^-exponent`.
-@@ -512,8 +525,17 @@ impl Fq {
-             target_endian = "little"
-         )))]
+@@ -583,6 +596,15 @@ impl Fq {
          {
+             // Leave the accumulator unreduced between squarings. The closing
+             // multiplication canonicalizes its result.
 +            #[cfg(target_arch = "wasm32")]
 +            {
 +                let mut acc = *self;
@@ -212,13 +210,11 @@ index 96f606f..2ba12eb 100644
 +                }
 +                acc.mul(by)
 +            }
-             // Leave the accumulator unreduced between squarings. The closing
-             // multiplication canonicalizes its result.
 +            #[cfg(not(target_arch = "wasm32"))]
-             Fq(portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV)).mul(by)
+             Fq(portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV)).mul_runtime(by)
          }
      }
-@@ -552,6 +574,15 @@ impl Fq {
+@@ -621,6 +643,15 @@ impl Fq {
              target_endian = "little"
          )))]
          {
@@ -234,7 +230,7 @@ index 96f606f..2ba12eb 100644
              Fq(portable::canonicalize(
                  &portable::sqr_n_lazy(&self.0, n, &MODULUS.0, INV),
                  &MODULUS.0,
-@@ -610,6 +641,7 @@ impl Fq {
+@@ -679,6 +710,7 @@ impl Fq {
  
      /// Multiplies `rhs` by `self`, returning the unreduced 512-bit product.
      #[cfg_attr(not(feature = "uninline-portable"), inline)]

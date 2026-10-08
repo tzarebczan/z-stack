@@ -62,7 +62,7 @@ export async function verifyFundedBrowser(app, browsers) {
         return (await response.json()).txid;
       };
       const wallet = await createWallet({ network: 'regtest', server: transport,
-        regtestNu63Height: ${height}, threads: 2, transparent: true, transparentScan: 'compact', autoShield: false,
+        regtestNu63Height: ${height}, ${process.env.Z_STACK_REGTEST_NU7 === undefined ? "" : `regtestNu7Height:${Number(process.env.Z_STACK_REGTEST_NU7)},`} threads: 2, transparent: true, transparentScan: 'compact', autoShield: false,
         memoFetch: 'on-demand', prewarmProvingKey: false });
       const saved = await wallet.load();
       if (!saved) await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 1 });
@@ -105,7 +105,11 @@ export async function verifyFundedBrowser(app, browsers) {
       const wallet = window.fundedWallet;
       const { unifiedAddress } = await wallet.nextAddress();
       await wallet.unlock(window.fundedSeed);
-      return wallet.send(unifiedAddress, '0.0005', 'packaged-sdk-regtest');
+      const balance = (await wallet.getWallet()).balance;
+      const shieldedBefore = balance.saplingAvailable + balance.orchardAvailable + balance.ironwoodAvailable;
+      const fee = await wallet.estimateFee(unifiedAddress, '0.0005', 'packaged-sdk-regtest');
+      const receipt = await wallet.send(unifiedAddress, '0.0005', 'packaged-sdk-regtest');
+      return { ...receipt, shieldedBefore, quotedFeeZat: fee.feeZat };
     });
     assert.ok(sent.txid, "send did not return a receipt");
     assert.ok(await page.evaluate(async txid => (await window.fundedWallet.pending()).some(tx => tx.txid === txid), sent.txid));
@@ -114,6 +118,12 @@ export async function verifyFundedBrowser(app, browsers) {
     await page.evaluate(() => window.fundedWallet.fetchMemos());
     const received = await page.evaluate(txid => window.fundedWallet.transaction(txid), sent.txid);
     assert.equal(received?.status, "mined");
+    const shieldedAfter = await page.evaluate(async () => {
+      const b = (await window.fundedWallet.getWallet()).balance;
+      return b.saplingAvailable + b.orchardAvailable + b.ironwoodAvailable;
+    });
+    assert.equal(sent.shieldedBefore - shieldedAfter, sent.quotedFeeZat,
+      "A mined self-payment must debit only the quoted fee, including after NU7/NSM");
     assert.ok(received.memos?.includes("packaged-sdk-regtest"), "memo was not recovered");
     assert.equal(await page.evaluate(async txid => (await window.fundedWallet.pending()).some(tx => tx.txid === txid), sent.txid), false);
     assert.equal(await page.evaluate(() => window.fundedWallet.runtime.mode), "multi-thread");

@@ -15,6 +15,7 @@ type Req = {
   pczt?: ArrayBuffer;
   wasmBasePath?: string;
   regtestNu63Height?: number;
+  regtestNu7Height?: number;
   snapshot?: ArrayBuffer;
   mnemonic?: string;
   to?: string;
@@ -26,11 +27,15 @@ type Req = {
 
 let ready = false;
 let loadedBase: string | undefined;
+let loadedNu63Height: number | undefined;
+let loadedNu7Height: number | undefined;
 
-async function ensure(wasmBasePath?: string, regtestNu63Height?: number): Promise<void> {
+async function ensure(wasmBasePath?: string, regtestNu63Height?: number, regtestNu7Height?: number): Promise<void> {
   const base = wasmBasePath?.replace(/\/+$/, "");
   if (ready) {
     if (base !== loadedBase) throw new Error("prove worker already initialized with another wasmBasePath");
+    if (regtestNu63Height !== undefined && regtestNu63Height !== loadedNu63Height) throw new Error("prove worker already initialized with another regtestNu63Height");
+    if (regtestNu7Height !== undefined && regtestNu7Height !== loadedNu7Height) throw new Error("prove worker already initialized with another regtestNu7Height");
     return;
   }
   const wasmUrl = base ? `${base}/z_wasm_bg.wasm` : new URL("./generated/z_wasm_bg.wasm", import.meta.url).href;
@@ -40,13 +45,18 @@ async function ensure(wasmBasePath?: string, regtestNu63Height?: number): Promis
   if (regtestNu63Height) {
     (glue as { setRegtestNu63Height?: (height: number) => void }).setRegtestNu63Height?.(regtestNu63Height);
   }
+  if (regtestNu7Height) {
+    (glue as { setRegtestNu7Height?: (height: number) => void }).setRegtestNu7Height?.(regtestNu7Height);
+  }
   loadedBase = base;
+  loadedNu63Height = regtestNu63Height;
+  loadedNu7Height = regtestNu7Height;
   ready = true;
 }
 
 async function handle(msg: Req): Promise<void> {
   try {
-    await ensure(msg.wasmBasePath, msg.regtestNu63Height);
+    await ensure(msg.wasmBasePath, msg.regtestNu63Height, msg.regtestNu7Height);
     if (msg.kind === "init" || msg.kind === "ready") {
       self.postMessage({ id: msg.id, ready: orchardProvingKeyReady() });
       return;

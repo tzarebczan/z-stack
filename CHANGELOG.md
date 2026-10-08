@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-alpha.3
+
+- NU7-capable Common 2.2.0, wallet backend/SQLite rc7 and PCZT rc4; protocol, address and transparent dependencies now use matching Zakura aliases.
+- Testnet NU7 activation at 4,465,026; mainnet activation remains unset upstream.
+- Network-aware birthday estimates span Blossom and NU7 spacing changes while preserving the date safety margin in seconds.
+- Native HTTP date birthdays resolve against the selected server’s live tip; CLI date restores use the same safety margin.
+- Optional regtest NU7 scheduling reaches page, scan and proving instances; incompatible runtime configurations are rejected.
+- NU7 hardware PCZTs select the post-NU6.3 proof circuit.
+- Native memo and status queues use the wallet libraries' separate APIs without public fallback for private-routed work.
+- Optional pinned NU7 light-server fixture for reproducible native and browser acceptance.
+- Rebases of the three WASM performance patches onto verified 2.2.0 archives, with refreshed dependency/legal inventories.
+
 ## 0.1.0-alpha.2
 
 - Prebuilt downloadable archives and a Rust-free example quickstart; npm and Cargo publication remain deferred.

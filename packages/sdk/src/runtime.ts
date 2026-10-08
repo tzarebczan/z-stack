@@ -7,7 +7,7 @@ import { canUseScanWorker, scanWorkerFailed, scanWorkerPresent, scanWorkerRuntim
  */
 
 /** Keep lockstep with `packages/sdk/package.json`. */
-export const SDK_VERSION = "0.1.0-alpha.2";
+export const SDK_VERSION = "0.1.0-alpha.3";
 
 export const LOCAL_ZAINO_GRPC = "http://127.0.0.1:8137";
 /** Development mainnet Zaino convention; configure your own endpoint explicitly. */
@@ -101,6 +101,8 @@ export interface SdkInitOptions {
    * 1,000,000, matching the compose Zebra chain.
    */
   regtestNu63Height?: number;
+  /** Regtest only: optional NU7 height, strictly after NU6.3. Unscheduled by default. */
+  regtestNu7Height?: number;
 }
 
 /** Hard cap on `initThreadPool` size (wasm linear memory / stack). */
@@ -196,6 +198,7 @@ type WasmBindings = {
   warmOrchardProvingKey?: () => boolean;
   orchardProvingKeyReady?: () => boolean;
   setRegtestNu63Height?: (height: number) => void;
+  setRegtestNu7Height?: (height: number) => void;
 };
 
 let wasm: WasmBindings | null = null;
@@ -261,6 +264,7 @@ async function loadBindings(): Promise<WasmBindings> {
   }
   wasmPromise = loadBindingsInner().then((mod) => {
     if (initOpts.regtestNu63Height) mod.setRegtestNu63Height?.(initOpts.regtestNu63Height);
+    if (initOpts.regtestNu7Height) mod.setRegtestNu7Height?.(initOpts.regtestNu7Height);
     return mod;
   });
   try {
@@ -272,9 +276,10 @@ async function loadBindings(): Promise<WasmBindings> {
 }
 
 async function loadBindingsInner(): Promise<WasmBindings> {
-  const { configureWasmWorkerBasePath, configureRegtestNu63Height } = await import("./wasm-client");
+  const { configureWasmWorkerBasePath, configureRegtestNu63Height, configureRegtestNu7Height } = await import("./wasm-client");
   configureWasmWorkerBasePath(initOpts.wasmBasePath);
   configureRegtestNu63Height(initOpts.regtestNu63Height);
+  configureRegtestNu7Height(initOpts.regtestNu7Height);
   const wantMt = initOpts.preferMulticore !== false && !initOpts.wasmModule && !initOpts.wasmBasePath && sabAvailable();
   const threads = resolveThreadCount();
   try {
@@ -290,6 +295,7 @@ async function loadBindingsInner(): Promise<WasmBindings> {
           preferMulticore: wantMt,
           wasmBasePath: initOpts.wasmBasePath,
           regtestNu63Height: initOpts.regtestNu63Height,
+          regtestNu7Height: initOpts.regtestNu7Height,
         });
         const st = await loadSingleThread();
         wasm = st;
@@ -377,6 +383,16 @@ function requireWasm(): WasmBindings {
  */
 export async function initialize(opts: SdkInitOptions = {}): Promise<WasmRuntime> {
   const requested = { ...opts };
+  for (const key of ["regtestNu63Height", "regtestNu7Height"] as const) {
+    const height = requested[key];
+    if (height !== undefined && (!Number.isInteger(height) || height < (key === "regtestNu63Height" ? 2 : 3) || height > 0xffff_ffff)) {
+      throw new WalletError("invalid_birthday", `Invalid ${key}.`);
+    }
+  }
+  const nu63Height = requested.regtestNu63Height ?? ((wasm || wasmPromise) ? initOpts.regtestNu63Height : undefined) ?? 1_000_000;
+  if (requested.regtestNu7Height !== undefined && requested.regtestNu7Height <= nu63Height) {
+    throw new WalletError("invalid_birthday", "Regtest NU7 must activate after NU6.3.");
+  }
   const effective = (options: SdkInitOptions, key: keyof SdkInitOptions) =>
     key === "threads" ? resolveThreadCount(options) :
     key === "preferMulticore" ? options.preferMulticore !== false :
@@ -384,7 +400,7 @@ export async function initialize(opts: SdkInitOptions = {}): Promise<WasmRuntime
   if (requested.wasmBasePath) requested.wasmBasePath = new URL(requested.wasmBasePath,
     typeof document !== "undefined" ? document.baseURI : "http://localhost/").href.replace(/\/+$/, "");
   if (wasm || wasmPromise) {
-    for (const key of ["wasmBasePath", "wasmModule", "threads", "preferMulticore", "regtestNu63Height"] as const) {
+    for (const key of ["wasmBasePath", "wasmModule", "threads", "preferMulticore", "regtestNu63Height", "regtestNu7Height"] as const) {
       const same = key === "wasmModule" && requested.wasmModule && initOpts.wasmModule
         ? sameModuleBytes(requested.wasmModule, initOpts.wasmModule) : effective(requested, key) === effective(initOpts, key);
       if (requested[key] !== undefined && !same) {
@@ -411,7 +427,7 @@ export async function initialize(opts: SdkInitOptions = {}): Promise<WasmRuntime
   if (!initOpts.wasmModule && canUseScanWorker() && !scanWorkerPresent() && !scanWorkerFailed()) {
     void startScanWorker({ threads: resolveThreadCount(),
       preferMulticore: initOpts.preferMulticore !== false && !initOpts.wasmBasePath && sabAvailable(),
-      wasmBasePath: initOpts.wasmBasePath, regtestNu63Height: initOpts.regtestNu63Height });
+      wasmBasePath: initOpts.wasmBasePath, regtestNu63Height: initOpts.regtestNu63Height, regtestNu7Height: initOpts.regtestNu7Height });
   }
   // Node tests pass `wasmModule` and have no Worker; skip so initialize stays milliseconds.
   if (initOpts.prewarmProveWorker !== false && !initOpts.wasmModule) {

@@ -14,9 +14,9 @@ Use [the setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETT
 outside the SDK checkout. From your copy:
 
 ```sh
-npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.2.tgz \
-  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.2.tgz \
-  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.2.tgz
+npm install /path/to/artifacts/z-stack-core-0.1.0-alpha.3.tgz \
+  /path/to/artifacts/z-stack-passkey-0.1.0-alpha.3.tgz \
+  /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
 npm run build
 npm run start
 ```

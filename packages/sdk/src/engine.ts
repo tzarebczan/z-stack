@@ -7,9 +7,7 @@
  */
 
 import {
-  parseBirthdayInput,
   parseZip321,
-  typicalTip,
   WalletError,
   type HistoryEntry,
   type HistoryQuery,
@@ -282,17 +280,15 @@ async function afterWallet(
   }
 }
 
-function birthdayJson(birthday: BirthdayInput | undefined, network: string): number | string | undefined {
+function birthdayJson(birthday: BirthdayInput | undefined): number | string | undefined {
   if (birthday == null || birthday === "") return undefined;
   if (typeof birthday === "number") return birthday;
   const s = birthday.trim();
   if (!s) return undefined;
   if (/^\d+$/.test(s)) return Number(s);
-  try {
-    return parseBirthdayInput(s, typicalTip(network));
-  } catch {
-    return s;
-  }
+  // The bridge resolves dates against its live tip and actual network schedule.
+  // A typical-tip estimate can omit receipts on a faster or lagging chain.
+  return s;
 }
 
 /** Native loopback JSON client. Alias: `createNativeClient`. Does not load WASM. */
@@ -370,7 +366,7 @@ export function createEngineClient(baseUrl: string, opts?: EngineClientOpts): En
         method: "POST",
         body: JSON.stringify({
           network,
-          birthday: birthdayJson(birthday, network),
+          birthday: birthdayJson(birthday),
           server: createOpts?.server,
           validatorRpc: createOpts?.validatorRpc,
           passphrase: createOpts?.passphrase?.trim() || undefined,
@@ -384,7 +380,7 @@ export function createEngineClient(baseUrl: string, opts?: EngineClientOpts): En
         body: JSON.stringify({
           mnemonic,
           network,
-          birthday: birthdayJson(birthday, network),
+          birthday: birthdayJson(birthday),
           unlockPolicy: restoreOpts?.unlockPolicy,
           server: restoreOpts?.server,
           validatorRpc: restoreOpts?.validatorRpc,
@@ -401,7 +397,7 @@ export function createEngineClient(baseUrl: string, opts?: EngineClientOpts): En
         body: JSON.stringify({
           ufvk: ufvk.trim(),
           network,
-          birthday: birthdayJson(birthday, network),
+          birthday: birthdayJson(birthday),
           unlockPolicy: restoreOpts?.unlockPolicy,
           server: restoreOpts?.server,
           validatorRpc: restoreOpts?.validatorRpc,

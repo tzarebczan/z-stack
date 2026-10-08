@@ -84,6 +84,8 @@ export {
   parseZip321,
   zip321Uri,
   zip321UriMany,
+  blockSpacingSeconds,
+  type BirthdayNetwork,
   parseBirthdayInput,
   dateFromHeight,
   heightFromDate,

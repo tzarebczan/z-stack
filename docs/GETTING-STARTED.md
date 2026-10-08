@@ -6,16 +6,16 @@ application services; they are not needed for this walkthrough.
 
 ## 1. Get matching archives
 
-Download the preview bundle and `SHA256SUMS-alpha.2` from the
-[alpha release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.2).
+Download the preview bundle and `SHA256SUMS-alpha.3` from the
+[alpha release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.3).
 Use Node 22.18+ and npm; Rust and an npm account are not needed.
 With GitHub CLI, download all six assets and verify them before extracting:
 
 ```sh
-gh release download v0.1.0-alpha.2 --repo tzarebczan/z-stack --dir sdk-alpha
+gh release download v0.1.0-alpha.3 --repo tzarebczan/z-stack --dir sdk-alpha
 cd sdk-alpha
-sha256sum -c SHA256SUMS-alpha.2 # macOS: shasum -a 256 -c SHA256SUMS-alpha.2
-tar -xzf z-stack-preview-0.1.0-alpha.2-*.tgz
+sha256sum -c SHA256SUMS-alpha.3 # macOS: shasum -a 256 -c SHA256SUMS-alpha.3
+tar -xzf z-stack-preview-0.1.0-alpha.3-*.tgz
 cd z-stack-preview
 sha256sum -c SHA256SUMS # macOS: shasum -a 256 -c SHA256SUMS
 ```
@@ -87,11 +87,10 @@ interpret an empty wallet as a lost deposit or keep requesting replacements.
 No public faucet/server pair is certified for this alpha; use isolated regtest
 for the reproducible receive/send walkthrough below.
 
-This build also uses the pinned NU6.3 consensus schedule. NU7 is not enabled in
-its protocol dependencies. Public testnet spending after the
-[scheduled NU7 activation](https://forum.zcashcommunity.com/t/nu7-timeline/57655)
-at block 4,465,026 requires a protocol upgrade and fresh funded acceptance;
-switching servers alone is insufficient. Empty-wallet sync does not verify spending.
+The engine supports the pinned NU7 testnet schedule at block **4,465,026**.
+Mainnet's NU7 height is not set upstream. Updating the engine does not reconcile
+providers following different chains. Empty-wallet sync does not verify spending;
+use the [NU7 regtest recipe](RELEASE.md#nu7-acceptance) for a funded walkthrough.
 
 To investigate a missing payment:
 

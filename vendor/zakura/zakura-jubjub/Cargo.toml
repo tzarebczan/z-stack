@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.91"
 name = "zakura-jubjub"
-version = "1.2.0"
+version = "2.2.0"
 authors = [
     "Dev Ojha <ValarDragon@users.noreply.github.com>",
     "Sean Bowe <ewillbefull@gmail.com>",
@@ -90,7 +90,7 @@ version = "1"
 default-features = false
 
 [dependencies.bls12_381]
-version = "1.2.0"
+version = "2.2.0"
 default-features = false
 package = "zakura-bls12-381"
 

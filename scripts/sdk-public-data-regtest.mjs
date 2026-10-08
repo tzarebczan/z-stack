@@ -35,7 +35,8 @@ globalThis.fetch = (input, init) => {
 };
 try {
   await initialize({ wasmModule: readFileSync(new URL("../packages/sdk/src/generated/z_wasm_bg.wasm", import.meta.url)),
-    regtestNu63Height: Number(process.env.Z_STACK_REGTEST_NU6_3 || 150), prewarmProvingKey: false, prewarmProveWorker: false });
+    regtestNu63Height: Number(process.env.Z_STACK_REGTEST_NU6_3 || 150),
+    regtestNu7Height: process.env.Z_STACK_REGTEST_NU7 === undefined ? undefined : Number(process.env.Z_STACK_REGTEST_NU7), prewarmProvingKey: false, prewarmProveWorker: false });
   const transport = grpcWebTransport(url, { sharedMemos: true });
   const wallet = createWasmClient({ network: "regtest", transport, memoFetch, transparentScan: "compact", autoShield: false });
   let state = await wallet.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);

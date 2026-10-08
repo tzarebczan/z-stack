@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  blockSpacingSeconds,
+  dateFromHeight,
   canSend,
   canSendReason,
   canShield,
@@ -440,4 +442,32 @@ test("birthday validation rejects malformed dates and unsafe heights before netw
   }
   for (const value of [1, "4468500", "2024-02-29", "auto", ""]) validateBirthdayInput(value);
   assert.equal(parseBirthdayInput("4468500", 4476000), 4468500);
+});
+
+
+test("NU7 spacing and date estimates cross activation without changing mainnet", () => {
+  const originalNow = Date.now;
+  const midnight = Date.parse("2026-10-07T00:00:00Z");
+  Date.now = () => midnight + 150_000;
+  try {
+    const activation = 4_465_026;
+    assert.equal(blockSpacingSeconds("testnet", activation - 1), 75);
+    assert.equal(blockSpacingSeconds("testnet", activation), 25);
+    assert.equal(blockSpacingSeconds("mainnet", 0xffff_ffff), 75);
+    assert.equal(blockSpacingSeconds("mainnet", 653_599), 150);
+    assert.equal(blockSpacingSeconds("mainnet", 653_600), 75);
+    assert.equal(blockSpacingSeconds({network:"regtest", regtestNu7Height:250}, 250), 25);
+    assert.equal(blockSpacingSeconds("regtest", 250), 75);
+    assert.equal(heightFromDate("2026-10-07", activation + 2, "testnet"), activation - 2);
+    assert.equal(heightFromDate("2026-10-07", 3_500_000, "mainnet"), 3_499_998);
+    assert.equal(dateFromHeight(activation - 2, activation + 2, "testnet"), "2026-10-07");
+    Date.now = () => midnight + 74_000;
+    assert.equal(heightFromDate("2026-10-07", activation + 2, "testnet"), activation);
+    Date.now = () => midnight + 75_000;
+    assert.equal(heightFromDate("2026-10-07", activation + 2, "testnet"), activation - 1);
+    Date.now = () => midnight;
+    assert.equal(parseBirthdayInput("2026-10-07", activation + 1_000, "testnet"), activation + 400);
+    assert.equal(parseBirthdayInput("100", activation + 1_000, "testnet"), 100);
+    assert.throws(() => blockSpacingSeconds({network:"regtest", regtestNu7Height:2}, 10));
+  } finally { Date.now = originalNow; }
 });

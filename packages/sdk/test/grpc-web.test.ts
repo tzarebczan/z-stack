@@ -442,6 +442,7 @@ test("gRPC-Web and the loopback bridge both report the node's refusal as a Broad
 test("capability negotiation reads multibyte protobuf tags before requesting all pools", async () => {
   const calls = mockFetch((method, body) => {
     if (method === "GetLightdInfo") return reply(new Uint8Array([
+      0x32, 8, ...new TextEncoder().encode("77190ad9"), // field 6, NU7 branch
       0x88, 0x01, 0x96, 0x01, // field 17, upgrade height 150
       0x92, 0x01, 6, ...new TextEncoder().encode("v0.5.0"), // field 18
     ]));
@@ -450,7 +451,9 @@ test("capability negotiation reads multibyte protobuf tags before requesting all
     return reply(new Uint8Array([16, 1]));
   });
   const transport = grpcWebTransport("https://lwd.example");
-  assert.equal((await transport.info!()).protocolVersion, "v0.5.0");
+  const info = await transport.info!();
+  assert.equal(info.protocolVersion, "v0.5.0");
+  assert.equal(info.consensusBranchId, "77190ad9");
   assert.equal((await transport.transparentBlocks!(1, 1)).length, 6);
   assert.deepEqual(calls.map(x => x.method), ["GetLightdInfo", "GetBlockRange"]);
 });

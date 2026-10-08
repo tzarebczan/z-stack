@@ -61,7 +61,10 @@ test("wasm keys: mnemonic, derive, parse, zip321", async (t) => {
 test("initialize accepts explicit effective defaults and rejects real configuration changes", async t => {
   if (!existsSync(gen)) { t.skip("run pnpm build:wasm first"); return; }
   const options = { wasmModule: readFileSync(gen), prewarmProvingKey: false, prewarmProveWorker: false };
+  await assert.rejects(initialize({ ...options, regtestNu63Height:150, regtestNu7Height:149 }), /after NU6.3/);
+  await assert.rejects(initialize({ ...options, regtestNu7Height:NaN }), /Invalid regtestNu7Height/);
   await initialize(options);
+  await assert.rejects(initialize({ ...options, regtestNu7Height:1_000_001 }), /different regtestNu7Height/);
   await initialize({ ...options, preferMulticore: true, threads: defaultThreadCount(), regtestNu63Height: 1_000_000 });
   await assert.rejects(initialize({ ...options, preferMulticore: false }), /different preferMulticore/);
   await assert.rejects(initialize({ ...options, threads: defaultThreadCount() + 1 }), /different threads/);

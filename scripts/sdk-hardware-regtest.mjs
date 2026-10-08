@@ -42,6 +42,7 @@ await sdk.initialize({
   prewarmProvingKey: false,
   prewarmProveWorker: false,
   regtestNu63Height: NU63,
+  regtestNu7Height: process.env.Z_STACK_REGTEST_NU7 === undefined ? undefined : Number(process.env.Z_STACK_REGTEST_NU7),
 });
 
 const transport = grpcWebTransport(LIGHT, { transparent: true });

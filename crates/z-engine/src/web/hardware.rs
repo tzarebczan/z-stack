@@ -109,7 +109,10 @@ fn serialize(pczt: Pczt) -> Result<Vec<u8>> {
 /// (ZIP 229), not the transaction version: a post-NU6.3 v5 transaction still
 /// needs the post-NU6.3 circuit.
 fn circuit_for_branch(branch: u32) -> OrchardCircuitVersion {
-    if matches!(BranchId::try_from(branch), Ok(BranchId::Nu6_3)) {
+    if matches!(
+        BranchId::try_from(branch),
+        Ok(BranchId::Nu6_3 | BranchId::Nu7)
+    ) {
         OrchardCircuitVersion::PostNu6_3
     } else {
         OrchardCircuitVersion::FixedPostNu6_2

@@ -45,7 +45,9 @@ test("custom relative artifacts propagate to UI and both workers with integrity 
   set("Worker", FixtureWorker);
   set("crossOriginIsolated", true);
   const sdk = await import("../src/lab.ts");
-  await sdk.initialize({ wasmBasePath: "./custom/", preferMulticore: true, prewarmProvingKey: false });
+  await sdk.initialize({ wasmBasePath: "./custom/", preferMulticore: true, prewarmProvingKey: false, regtestNu63Height:150, regtestNu7Height:250 });
+  await sdk.initialize({ regtestNu7Height:250 });
+  await assert.rejects(sdk.initialize({ regtestNu7Height:251 }), /different regtestNu7Height/);
   await turn();
   assert.deepEqual(requests.splice(0), urls, "UI resolves the custom location against the document");
   assert.equal(sdk.wasmRuntime()?.mode, "single-thread");
@@ -53,10 +55,13 @@ test("custom relative artifacts propagate to UI and both workers with integrity 
   const scan = workers.find((worker) => worker.url.href.includes("scan.worker"))!;
   const prove = workers.find((worker) => worker.url.href.includes("prove.worker"))!;
   assert.equal(scan.messages[0].wasmBasePath, base);
+  assert.equal(scan.messages[0].regtestNu7Height, 250);
+  assert.equal(prove.messages[0].regtestNu7Height, 250);
   assert.equal(scan.messages[0].preferMulticore, false, "custom ST artifact never guesses an MT companion");
   assert.equal(prove.messages[0].wasmBasePath, base);
   const { restartScanWorker } = await import("../src/scan-host.ts");
   await restartScanWorker();
+  assert.equal(workers.at(-1)!.messages[0].regtestNu7Height,250,"scan restarts retain NU7 scheduling");
   assert.equal(workers.at(-1)!.messages[0].wasmBasePath, base, "scan restarts retain the same artifact source");
 
   // Exercise the actual worker entry points, not just the host's message shape.
@@ -102,6 +107,7 @@ test("custom relative artifacts propagate to UI and both workers with integrity 
   assert.equal((await proveScope.request({ ...prove.messages[0], id: 5 })).ready, false);
   assert.deepEqual(requests.splice(0), urls);
   assert.equal((await proveScope.request({ id: 6, kind: "ready", wasmBasePath: base })).ready, false);
+  assert.match(String((await proveScope.request({ id: 8, kind: "ready", wasmBasePath: base, regtestNu7Height: 251 })).error), /another regtestNu7Height/);
   assert.deepEqual(requests.splice(0), [], "prove worker reuses its verified initialization");
   assert.match(String((await proveScope.request({ id: 7, kind: "init", wasmBasePath: `${base}-other` })).error), /another wasmBasePath/);
   assert.deepEqual(requests, [], "an initialized proving worker cannot silently switch artifacts");

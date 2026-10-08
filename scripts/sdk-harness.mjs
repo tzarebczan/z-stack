@@ -17,7 +17,12 @@ export function assertLocalRegtestChain(info, rpcUrl) {
   const expected = { Overwinter: 1, Sapling: 1, Blossom: 1, Heartwood: 1, Canopy: 1,
     NU5: 2, NU6: 2, "NU6.1": 2, "NU6.2": 2,
     "NU6.3": Number(process.env.Z_STACK_REGTEST_NU6_3 || 1_000_000) };
+  if (process.env.Z_STACK_REGTEST_NU7 !== undefined) expected.NU7 = Number(process.env.Z_STACK_REGTEST_NU7);
   const upgrades = Object.values(info.upgrades ?? {});
+  const nu7 = upgrades.find(u => u.name === "NU7")?.activationheight;
+  if (process.env.Z_STACK_REGTEST_NU7 === undefined && nu7 !== undefined && nu7 <= info.blocks) {
+    throw new Error("validator has active NU7; configure Z_STACK_REGTEST_NU7 for every client");
+  }
   for (const [name, height] of Object.entries(expected)) {
     if (!upgrades.some((upgrade) => upgrade.name === name && upgrade.activationheight === height)) {
       throw new Error(`validator does not match regtest activation schedule: ${name} at ${height}`);

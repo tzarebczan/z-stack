@@ -15,6 +15,7 @@ export const runtimeState = {
   workerWasmBasePath: undefined as string | undefined,
   proveWorkerStarted: false as boolean,
   workerRegtestNu63: undefined as number | undefined,
+  workerRegtestNu7: undefined as number | undefined,
   provePrewarm: null as Promise<unknown> | null,
   workerProvingKeyReady: false as boolean,
   wasmSyncEpoch: 0 as number,

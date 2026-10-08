@@ -393,3 +393,24 @@ beyond the default scan limit unless the client permits deep syncing (`deepSync`
 It does not unlock the seed or enable automatic shielding. Use the older
 `resetScan()` only for same-birthday repair with a deliberately reviewed workflow.
 A rescan cannot recover a transaction absent from the configured server’s chain.
+
+
+## Network-aware date estimates
+
+Wallet create/restore/rescan operations resolve date birthdays using their own
+network. Standalone helpers default to mainnet; pass the network explicitly for
+another chain:
+
+<!-- sdk-example: network-birthday -->
+```ts
+import { blockSpacingSeconds, heightFromDate } from '@z-stack/sdk';
+declare const tipHeight: number;
+const seconds = blockSpacingSeconds('testnet', tipHeight);
+const birthday = heightFromDate('2026-09-20', tipHeight, 'testnet');
+```
+
+The estimate spans historic spacing changes, including NU7's 25-second blocks.
+An exact birthday height remains preferable. Regtest helpers accept
+`{ network: 'regtest', regtestNu7Height: 250 }` for a matching custom schedule.
+Wallet runtime options use `regtestNu63Height` and optional `regtestNu7Height`;
+NU7 must activate after NU6.3. Set these before opening a wallet.

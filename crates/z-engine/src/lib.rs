@@ -24,11 +24,13 @@ pub mod web;
 mod zip321;
 
 pub use birthday::{
-    catch_up_percent, catch_up_percent_from, date_from_height, display_catch_up_percent, fmt_secs,
-    height_from_date, historic_overlay_checks, historic_overlay_stage, historic_overlay_visible,
-    light_stall_warning, live_scan_eta_secs, parse_birthday_input, scan_rate_range, typical_tip,
-    ymd_days_ago, OverlayCheck, SyncEta, BLOCK_SECONDS, NEAR_TIP_BLOCKS, QUIET_BEHIND_BLOCKS,
-    STALL_QUIET_REMAINING, SYNC_STALL_SECS,
+    block_spacing_seconds, catch_up_percent, catch_up_percent_from, date_from_height,
+    date_from_height_for_network, display_catch_up_percent, fmt_secs, height_from_date,
+    height_from_date_for_network, historic_overlay_checks, historic_overlay_stage,
+    historic_overlay_visible, light_stall_warning, live_scan_eta_secs, parse_birthday_input,
+    parse_birthday_input_for_network, scan_rate_range, typical_tip, ymd_days_ago, OverlayCheck,
+    SyncEta, BLOCK_SECONDS, NEAR_TIP_BLOCKS, QUIET_BEHIND_BLOCKS, STALL_QUIET_REMAINING,
+    SYNC_STALL_SECS,
 };
 pub use scan::{compact_has_shielded, sync_tuning, SyncTuning, BATCH_LOCAL, MAX_SYNC_BLOCKS};
 pub use zip321::{
@@ -47,7 +49,7 @@ pub mod params;
 pub enum Network {
     Mainnet,
     Testnet,
-    /// Local Zebra/Zaino compose. NU6.2 at height 2; NU6.3 at [`regtest_nu6_3_height`].
+    /// Local fixture. NU6.3 and optional NU7 must match the validator schedule.
     Regtest,
 }
 
@@ -122,6 +124,7 @@ impl Parameters for Network {
                 | NetworkUpgrade::Nu6_1
                 | NetworkUpgrade::Nu6_2 => Some(BlockHeight::from_u32(2)),
                 NetworkUpgrade::Nu6_3 => Some(BlockHeight::from_u32(regtest_nu6_3_height())),
+                NetworkUpgrade::Nu7 => regtest_nu7_height().map(BlockHeight::from_u32),
             },
         }
     }
@@ -156,6 +159,25 @@ pub fn regtest_nu6_3_height() -> u32 {
 /// Set the regtest NU6.3 height before opening a regtest wallet (NU6.2 is at 2).
 pub fn set_regtest_nu6_3_height(height: u32) {
     REGTEST_NU6_3.store(height.max(2), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Optional regtest NU7 activation. Unscheduled unless explicitly configured.
+static REGTEST_NU7: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn regtest_nu7_height() -> Option<u32> {
+    let height = REGTEST_NU7.load(std::sync::atomic::Ordering::Relaxed);
+    if height != 0 {
+        return Some(height);
+    }
+    std::env::var("Z_STACK_REGTEST_NU7")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|h| *h >= 3)
+}
+
+/// Configure before opening any wallet; match the validator's activation schedule.
+pub fn set_regtest_nu7_height(height: u32) {
+    REGTEST_NU7.store(height.max(3), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Where compact blocks / tips come from.
@@ -738,6 +760,28 @@ pub fn crypto_smoke() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nu7_public_schedule_matches_common() {
+        use zcash_protocol::consensus::BranchId;
+        assert_eq!(
+            Network::Testnet.activation_height(NetworkUpgrade::Nu7),
+            Some(BlockHeight::from_u32(4_465_026))
+        );
+        assert_eq!(
+            Network::Mainnet.activation_height(NetworkUpgrade::Nu7),
+            None
+        );
+        assert_eq!(
+            BranchId::for_height(&Network::Testnet, BlockHeight::from_u32(4_465_025)),
+            BranchId::Nu6_3
+        );
+        assert_eq!(
+            BranchId::for_height(&Network::Testnet, BlockHeight::from_u32(4_465_026)),
+            BranchId::Nu7
+        );
+        assert_eq!(u32::from(BranchId::Nu7), 0x7719_0ad9);
+    }
 
     #[test]
     fn local_zaino_url() {

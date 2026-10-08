@@ -827,6 +827,12 @@ pub fn set_regtest_nu6_3_height(height: u32) {
     z_engine::set_regtest_nu6_3_height(height);
 }
 
+/// Optional regtest NU7 activation; call before opening any regtest wallet.
+#[wasm_bindgen(js_name = setRegtestNu7Height)]
+pub fn set_regtest_nu7_height(height: u32) {
+    z_engine::set_regtest_nu7_height(height);
+}
+
 /// Process-wide Orchard proving-key warm (no wallet required).
 #[wasm_bindgen(js_name = warmOrchardProvingKey)]
 pub fn warm_orchard_proving_key() -> bool {

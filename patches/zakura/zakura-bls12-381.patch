@@ -1,8 +1,8 @@
 diff --git a/zakura-bls12-381/src/lib.rs b/zakura-bls12-381/src/lib.rs
-index c3e28d7..6712fdd 100644
+index 339c7a2..05d02f6 100644
 --- a/zakura-bls12-381/src/lib.rs
 +++ b/zakura-bls12-381/src/lib.rs
-@@ -36,6 +36,8 @@ mod tests;
+@@ -38,6 +38,8 @@ mod tests;
  
  #[macro_use]
  mod util;

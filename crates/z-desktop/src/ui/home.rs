@@ -14,11 +14,11 @@ use z_engine::native::{
     pick_local_validator, probe_validator, Bridge, NativeWallet, SeedAuth, SeedStore, UnlockPolicy,
 };
 use z_engine::{
-    date_from_height, describe_light_url, display_anyhow, display_catch_up_percent, fmt_secs,
-    format_zatoshis, historic_overlay_checks, historic_overlay_visible, is_loopback_light_url,
-    parse_birthday_input, parse_zec_to_zatoshis, parse_zip321, typical_tip, uses_fast_sync,
-    ymd_days_ago, zip321_uri, LightServer, Network, OverlayCheck, SyncEta, SyncProgress, SyncStage,
-    NEAR_TIP_BLOCKS, QUIET_BEHIND_BLOCKS, SHIELD_THRESHOLD_ZAT,
+    date_from_height_for_network, describe_light_url, display_anyhow, display_catch_up_percent,
+    fmt_secs, format_zatoshis, historic_overlay_checks, historic_overlay_visible,
+    is_loopback_light_url, parse_birthday_input_for_network, parse_zec_to_zatoshis, parse_zip321,
+    typical_tip, uses_fast_sync, ymd_days_ago, zip321_uri, LightServer, Network, OverlayCheck,
+    SyncEta, SyncProgress, SyncStage, NEAR_TIP_BLOCKS, QUIET_BEHIND_BLOCKS, SHIELD_THRESHOLD_ZAT,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -777,8 +777,8 @@ impl HomeView {
         let date_raw = self.field_text(&self.birthday_date, cx);
         if height_raw != self.last_bday_h {
             self.last_bday_h = height_raw.clone();
-            if let Ok(h) = parse_birthday_input(&height_raw, tip) {
-                let date = date_from_height(h, tip);
+            if let Ok(h) = parse_birthday_input_for_network(&height_raw, tip, self.network) {
+                let date = date_from_height_for_network(h, tip, self.network);
                 if date != date_raw {
                     self.last_bday_d = date.clone();
                     Self::set_field(&self.birthday_date, date, cx);
@@ -789,7 +789,7 @@ impl HomeView {
             if date_raw.trim().is_empty() {
                 return;
             }
-            if let Ok(h) = parse_birthday_input(&date_raw, tip) {
+            if let Ok(h) = parse_birthday_input_for_network(&date_raw, tip, self.network) {
                 let hs = h.to_string();
                 if hs != height_raw {
                     self.last_bday_h = hs.clone();
@@ -1311,7 +1311,7 @@ impl HomeView {
             };
             match raw.trim() {
                 "" | "auto" => None,
-                s => parse_birthday_input(s, self.eta_tip()).ok(),
+                s => parse_birthday_input_for_network(s, self.eta_tip(), network).ok(),
             }
         };
         self.begin_work(WorkKind::Sync, cx);
@@ -1409,9 +1409,9 @@ impl HomeView {
                 rt.block_on(async {
                     let tip_now = NativeWallet::fetch_tip(&server).await.unwrap_or(1);
                     let birthday = if !date_raw.trim().is_empty() {
-                        parse_birthday_input(&date_raw, tip_now)?
+                        parse_birthday_input_for_network(&date_raw, tip_now, network)?
                     } else if !height_raw.trim().is_empty() {
-                        parse_birthday_input(&height_raw, tip_now)?
+                        parse_birthday_input_for_network(&height_raw, tip_now, network)?
                     } else {
                         anyhow::bail!("Set birthday height or first-used date (YYYY-MM-DD).");
                     };
@@ -3577,7 +3577,7 @@ impl HomeView {
         } else {
             date_raw.clone()
         };
-        let parsed = parse_birthday_input(&raw, tip).ok();
+        let parsed = parse_birthday_input_for_network(&raw, tip, self.network).ok();
         let eta = parsed.map(|b| {
             let fast = uses_fast_sync(&self.field_text(&self.light, cx));
             SyncEta::from_span(b, tip, fast)
