@@ -39,7 +39,7 @@ export function WalletScreen() {
             <span>{unit}</span></p>
           {confirming > 0n && <div className="pending-balance">
             <p id="pending-balance" role="status">Confirming · {formatZatoshis(confirming)} {unit}</p>
-            <p className="hint">Confirming funds cannot be spent yet.{wallet.snapshot?.confirmations && ` Incoming shielded funds need ${wallet.snapshot.confirmations.untrusted} confirmations.`} Sync to update.</p>
+            <p className="hint">Confirming funds cannot be spent yet.{wallet.snapshot?.confirmations && ` Incoming shielded funds need ${wallet.snapshot.confirmations.untrusted} ${wallet.snapshot.confirmations.untrusted === 1 ? "confirmation" : "confirmations"}.`} Sync to update.</p>
           </div>}
           <div className="wallet-state"><span>{wallet.spending ? "Spending unlocked" : "Spending locked"}</span>
             <span>{wallet.runtime}</span></div>

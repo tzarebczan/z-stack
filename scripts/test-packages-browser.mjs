@@ -343,7 +343,7 @@ export async function verifyExampleRecovery(app, chromium) {
       assert.equal(await page.locator("#balance").textContent(), "0.00000000 TAZ");
       assert.equal(await page.locator("#pending-balance").textContent(), "Confirming · 0.12500000 TAZ");
       assert.match(await page.locator("#history").innerText(), /Received · \+0.12500000 TAZ/);
-      assert.match(await page.locator("#history").innerText(), height < 102 ? new RegExp(`Confirming · ${height-99}/3 confirmations`) : /Confirmed · 3 confirmations/);
+      assert.match(await page.locator("#history").innerText(), height < 102 ? new RegExp(`Confirming · ${height-99}/3 confirmations`) : /Mined · 3 confirmations/);
       assert.match(await page.locator("#send-confirming").innerText(), /Only available funds can be spent/);
     }
     await page.evaluate(() => { delete window.fixtureFundingHeight; });

@@ -119,7 +119,8 @@ The generated app displays the SDK version and, for a verified preview, its sour
 `sdk-build.json` and `SDK-ARCHIVES.json` record the matching archive identity.
 The receive QR uses the app-owned MIT-licensed [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator),
 encodes only the public address and makes no remote request. Copy address remains available.
-From an installed generated app, `npm run check:chain -- --height 4465026` compares public provider hashes;
+From an installed generated app, `npm run check:chain` checks the published NU7 activation hash;
+use `--compare-explorer --height 4465026` to compare public provider hashes;
 a disagreement is diagnostic evidence, not proof that funding or spending is impossible.
 
 ## Available and confirming funds

@@ -66,6 +66,7 @@ async function start() {
   let busy = false;
   let identity: string | undefined;
   let hasScanned = false;
+  let incomingConfirmations: number | undefined;
   let pendingPayment = false;
   let recoveryPhrase = "";
   const sendWords = element<HTMLTextAreaElement>("send-words");
@@ -98,18 +99,20 @@ async function start() {
   function showBalance(available: bigint, pending: bigint, required?: number) {
     balance.textContent = `${formatZatoshis(available)} ${unit}`;
     element("pending-balance").hidden = pending === 0n;
-    element("pending-balance").textContent = `Confirming · ${formatZatoshis(pending)} ${unit}`;
+    const pendingText = `Confirming · ${formatZatoshis(pending)} ${unit}`;
+    if (element("pending-balance").textContent !== pendingText) element("pending-balance").textContent = pendingText;
     element("pending-help").hidden = pending === 0n;
     element("pending-help").textContent = required === undefined ? "Confirming funds cannot be spent yet. Sync to update."
       : `Incoming shielded funds need ${required} ${required === 1 ? "confirmation" : "confirmations"}. Sync to update.`;
     element("send-confirming").hidden = pending === 0n;
     element("send-confirming").textContent = `${formatZatoshis(pending)} ${unit} is still confirming. Only available funds can be spent.`;
   }
-  wallet.on("balance", value => showBalance(BigInt(value.availableZat), BigInt(value.pendingZat ?? 0)));
+  wallet.on("balance", value => showBalance(BigInt(value.availableZat), BigInt(value.pendingZat ?? 0), incomingConfirmations));
 
 
   async function render(snapshot: WalletSnapshot) {
     identity = snapshot.unifiedAddress;
+    incomingConfirmations = snapshot.confirmations?.untrusted;
     pendingPayment = (await wallet.pending(1)).length > 0;
     showRuntime();
     element("receive-panel").hidden = false;

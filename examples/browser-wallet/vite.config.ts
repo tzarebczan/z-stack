@@ -14,6 +14,8 @@ const previewCache: Plugin = {
     server.middlewares.use((request, response, next) => {
       const path = new URL((request as { url?: string }).url ?? "/", "http://localhost").pathname;
       const hashedAsset = assets.has(path.slice("/assets/".length)) && /^\/assets\/[^/]+-[A-Za-z0-9_-]{8,}\.(?:wasm|js|css)$/.test(path);
+      // Encoded asset variants must remain distinct in shared caches.
+      if (hashedAsset) response.appendHeader("Vary", "Accept-Encoding");
       const writeHead = response.writeHead;
       response.writeHead = function(this: typeof response, code: number, ...args: unknown[]) {
         // sirv supplies headers directly to writeHead for HEAD responses.
@@ -35,8 +37,8 @@ const previewCache: Plugin = {
     });
     // Vite's default compressor excludes application/wasm. Keep negotiation,
     // streaming and no-transform handling in the maintained Node middleware.
-    const compress = compression({ filter: (request, response) =>
-      /^application\/wasm(?:;|$)/.test(String(response.getHeader("Content-Type") ?? "")) || compression.filter(request, response) });
+    const compress = compression({ filter: (_request, response) =>
+      /^application\/wasm(?:;|$)/.test(String(response.getHeader("Content-Type") ?? "")) });
     server.middlewares.use((request, response, next) =>
       compress(request as Parameters<typeof compress>[0], response as Parameters<typeof compress>[1], next));
   },

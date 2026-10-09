@@ -191,8 +191,8 @@ To investigate a missing payment:
 1. Record its receipt’s transaction ID and mined height. Querying a public explorer
    can link that transaction to your IP; do not submit your phrase or viewing key.
 2. Check whether the receipt’s transaction is available on your light server.
-   Compare public block hashes with `npm run check:chain -- --height 4465026`
-   from the generated app. Heights alone do not identify a chain, and an explorer
+   Check the published NU7 anchor with `npm run check:chain` from the generated
+   app. Use `--compare-explorer --height 4465026` to compare public providers. Heights alone do not identify a chain, and an explorer
    disagreement does not identify the faucet’s node. If the payment is confirmed
    on a different chain, use an aligned server or funding source; changing the
    birthday cannot repair that.

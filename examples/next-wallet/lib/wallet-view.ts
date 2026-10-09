@@ -10,12 +10,12 @@ export function confirmationLabel(entry: HistoryEntry, snapshot: WalletSnapshot)
   if (entry.status !== "mined") return "Pending";
   const count = entry.confirmations ?? (entry.minedHeight !== null && snapshot.scannedHeight !== undefined
     ? Math.max(0, snapshot.scannedHeight - entry.minedHeight + 1) : null);
-  if (count === null) return "Confirmed · confirmation count unavailable";
+  if (count === null) return "Mined · confirmation count unavailable";
   const needed = snapshot.confirmations?.untrusted;
   if (classifyHistory(entry).action === "received" && needed !== undefined && count < needed) {
     return `Confirming · ${count}/${needed} confirmations`;
   }
-  return `Confirmed · ${count} ${count === 1 ? "confirmation" : "confirmations"}`;
+  return `Mined · ${count} ${count === 1 ? "confirmation" : "confirmations"}`;
 }
 
 export function loadedWalletStatus(snapshot: WalletSnapshot): string {

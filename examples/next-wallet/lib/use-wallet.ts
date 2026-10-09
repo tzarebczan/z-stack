@@ -106,7 +106,7 @@ export function useWallet() {
     try { return await action(wallet); }
     catch (error) {
       const safe = WalletError.fromUnknown(error);
-      if (owner.current === wallet) setStatus(safe.userMessage());
+      if (!propagate && owner.current === wallet) setStatus(safe.userMessage());
       if (propagate) throw safe;
     }
     finally {

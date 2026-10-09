@@ -238,7 +238,7 @@ async function flows(origin, engine, name, isolated) {
     await page.getByText("Unlock with your recovery phrase", {exact:true}).click();
     await page.locator("#unlock-words").fill("not a valid recovery phrase");
     await page.getByRole("button", {name:"Unlock spending",exact:true}).click();
-    await status("Those words are not a valid recovery phrase.").waitFor();
+    await page.locator("#unlock-error").filter({hasText:"Those words are not a valid recovery phrase."}).waitFor();
     assert.equal(await page.locator("#unlock-words").inputValue(), "", "failed unlock retained entered words");
     assert.equal(await page.locator("#address").textContent(), address, "failed unlock replaced the saved wallet");
     await page.locator("#unlock-words").fill(phrase);

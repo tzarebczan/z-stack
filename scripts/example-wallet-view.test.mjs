@@ -30,7 +30,7 @@ for (const [name, view] of views) {
     snapshot.scannedHeight++;
     assert.equal(view.confirmationLabel(mined,snapshot),'Confirming · 2/3 confirmations');
     snapshot.scannedHeight++;
-    assert.equal(view.confirmationLabel(mined,snapshot),'Confirmed · 3 confirmations');
+    assert.equal(view.confirmationLabel(mined,snapshot),'Mined · 3 confirmations');
     assert.equal(view.confirmationLabel({...mined,confirmations:2},snapshot),'Confirming · 2/3 confirmations');
     // Counts describe history, never override the authoritative balance.
     assert.equal(view.pendingFunds({...snapshot,balance:{totalPending:0,pendingZec:'0.12500000'}}),0n);
@@ -38,10 +38,10 @@ for (const [name, view] of views) {
   });
   test(`${name}: unknown, unmined and expired activity does not invent confirmations`, () => {
     const snapshot={birthdayHeight:100,balance:{},confirmations:{untrusted:3}};
-    assert.equal(view.confirmationLabel(mined,snapshot),'Confirmed · confirmation count unavailable');
+    assert.equal(view.confirmationLabel(mined,snapshot),'Mined · confirmation count unavailable');
     assert.equal(view.confirmationLabel({...mined,status:'pending',minedHeight:null},snapshot),'Pending');
     assert.equal(view.confirmationLabel({...mined,status:'expired'},snapshot),'Expired');
-    assert.equal(view.confirmationLabel({...mined,confirmations:1,accountDeltaZat:-12500000,receivedZat:0,spentZat:12500000,sentNoteCount:1},snapshot),'Confirmed · 1 confirmation');
+    assert.equal(view.confirmationLabel({...mined,confirmations:1,accountDeltaZat:-12500000,receivedZat:0,spentZat:12500000,sentNoteCount:1},snapshot),'Mined · 1 confirmation');
     assert.equal(view.loadedWalletStatus(snapshot),'Wallet opened · not scanned yet. Sync to find activity.');
     assert.match(view.loadedWalletStatus({...snapshot,scannedHeight:105}),/scanned through block 105/);
   });
