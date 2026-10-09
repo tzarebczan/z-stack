@@ -9,22 +9,33 @@ local archives. The steps below cover adapting your own application.
 
 ## Install
 
-Build the preview archives as described in the [README](../README.md), then
-install the SDK `.tgz` in your app. Archives produced by `pnpm pack:sdk` bundle
-the matching core and passkey helpers. No registry package is
-currently published. Import helpers through SDK re-exports in wallet apps to
+Download the SDK archive from the
+[alpha.3 release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.3)
+and [verify its checksum](GETTING-STARTED.md#1-get-matching-archives), then install
+the `.tgz` in your app. It includes both single-threaded and threaded WASM
+engines, JavaScript bindings, workers, integrity manifests, and matching core
+and passkey helpers. No Rust toolchain or engine compilation is required.
+
+[Building from source](../README.md#build-from-source) is an optional alternative
+for engine changes or custom WASM builds. No registry package is currently
+published. Import helpers through SDK re-exports in wallet apps to
 share the same error classes. Standalone core/passkey archives are for apps
 using those packages directly. Node 22.18+ is required for setup tools; npm’s
 `engines` check is advisory, so an install warning does not certify older Node.
 
 ```sh
-npm install /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
+npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.3.tgz
 ```
 
 Use the [runnable Vite example](../examples/browser-wallet/README.md) as a starting
 point. Its TypeScript imports use the built distribution with no source aliases.
 The SDK is ESM-only. Browser wallet initialization belongs in client code;
 `@z-stack/core` helpers can also be used in server code.
+
+Configure a compatible hosted gRPC-Web provider for browser sync. Running a
+validator or light server is optional; the separate
+[NU7 container fixture](../infra/nu7/README.md) is for local testing and is not
+needed to use the prebuilt WASM.
 
 ## Configure Vite
 

@@ -7,8 +7,11 @@ application services; they are not needed for this walkthrough.
 ## 1. Get matching archives
 
 The published **alpha.3** preview includes NU7 support. Use Node 22.18+ and npm;
-no Rust toolchain or npm account is needed for these built archives. Download and
-verify both checksum layers:
+no Rust toolchain or npm account is needed for these built archives. The SDK
+archive includes compiled single-threaded and threaded WASM engines, bindings,
+workers, integrity manifests, and bundled core and passkey helpers. Building
+the engine yourself is optional.
+Download and verify both checksum layers:
 
 ```sh
 gh release download v0.1.0-alpha.3 --repo tzarebczan/z-stack --dir sdk-alpha
@@ -167,7 +170,8 @@ that API and any account or fiat services stay outside z-stack.
 
 ## 7. Prepare a reviewable preview
 
-From a clean SDK source revision:
+This optional step is for SDK maintainers preparing a custom bundle. Skip it
+when using the published archives. From a clean SDK source revision:
 
 ```sh
 pnpm release:check

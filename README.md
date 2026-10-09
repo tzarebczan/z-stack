@@ -8,7 +8,9 @@ their UI, authentication, and backup service.
 see [licensing](docs/LICENSING.md) and
 [release status](docs/RELEASE.md).
 The [alpha.3 preview](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.3)
-includes NU7 support and prebuilt browser SDK archives. Earlier previews predate NU7.
+includes NU7 support and prebuilt browser SDK archives, with both single-threaded
+and threaded WASM engines. No Rust toolchain is needed to use these archives.
+Earlier previews predate NU7.
 
 ## Start here
 
@@ -36,7 +38,10 @@ funding remains unverified because providers disagree after activation; check
 [the funding limitation](docs/GETTING-STARTED.md#4-create-or-restore-then-sync)
 before requesting test coins. Node 22.18+ is required.
 
-Download the published bundle, verify both checksum layers, then generate an app:
+Use the prebuilt WASM to avoid compiling the wallet engine. The SDK archive in
+the bundle contains both WASM engines, their bindings, workers, integrity
+manifests, and bundled core and passkey helpers. Download the bundle, verify
+both checksum layers, then generate an app:
 
 ```sh
 gh release download v0.1.0-alpha.3 --repo tzarebczan/z-stack --dir sdk-alpha
@@ -55,6 +60,9 @@ bundle**; a scaffolder from a different source version expects different archive
 See [the walkthrough](docs/GETTING-STARTED.md) for Next.js and funding limitations.
 
 ## Build from source
+
+Building the engine is optional. Use this path when changing Rust code or
+producing your own WASM builds; otherwise use the published preview above.
 
 Install Node.js 22.18+, pnpm 12.6.0, Rust 1.91, wasm-pack 0.15.0 and `tar`.
 The checked-in Rust toolchain file installs the stable WASM target. The threaded
