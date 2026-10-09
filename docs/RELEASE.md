@@ -31,7 +31,11 @@ Stub engines are rejected by the packing checks.
 
 The preview bundle adds runnable templates, the setup helper, offline API docs,
 license provenance, `PREVIEW.json` and an internal `SHA256SUMS` inventory. Build it
-from a clean committed revision. `--allow-dirty` produces a marked local rehearsal,
+from a clean committed revision. Bundle assembly rebuilds TypeScript packages,
+refreshes the API reference and repacks all archives before recording the revision.
+The packing gate verifies both WASM source fingerprints; changed Rust inputs need
+fresh single-threaded and threaded builds first. Ignored same-version archives
+cannot establish provenance on their own. `--allow-dirty` produces a marked local rehearsal,
 which must not be treated as a release artifact. After unpacking a bundle, run
 `sha256sum --quiet -c SHA256SUMS` inside `z-stack-preview/`, then scaffold and build an app
 outside the SDK checkout. None of these commands publishes to a registry.

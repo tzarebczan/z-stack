@@ -15,7 +15,19 @@ const revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encodin
 const changes = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { cwd: root, encoding: 'utf8' })
   .trimEnd().split('\n').filter(line => line && !line.slice(3).startsWith('coord/'));
 assert.ok(changes.length === 0 || process.argv.includes('--allow-dirty'), 'Commit the SDK changes before bundling, or use --allow-dirty for a local rehearsal');
-assert.ok(existsSync(join(root, 'docs/api/index.html')), 'Generate the offline API reference first: pnpm docs:api');
+// Ignored dist/ and archives can come from an older same-version commit.
+// Build from the current sources, then repack before associating them with HEAD.
+// The pack gate checks both WASM source fingerprints; stale Rust builds fail.
+for (const command of ['build:packages', 'docs:api', 'pack:sdk', 'pack:base']) {
+  const result = spawnSync('pnpm', [command], {cwd: root, stdio: 'inherit', shell: process.platform === 'win32'});
+  assert.equal(result.status, 0, `${command} failed; no preview source receipt was issued`);
+}
+assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], {cwd: root, encoding:'utf8'}).trim(), revision,
+  'Source revision changed while rebuilding preview artifacts');
+const currentChanges = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], {cwd: root, encoding:'utf8'})
+  .trimEnd().split('\n').filter(line => line && !line.slice(3).startsWith('coord/'));
+assert.deepEqual(currentChanges, changes, 'Source worktree changed while rebuilding preview artifacts');
+assert.ok(existsSync(join(root, 'docs/api/index.html')), 'Missing rebuilt offline API reference');
 const packages = inspectArchives(join(root, 'artifacts'), undefined, ['core', 'passkey', 'sdk', 'base']);
 assert.ok([...packages.values()].every(pkg => pkg.version === version), 'Archive versions must match the bundle release version');
 const output = join(root, 'artifacts', `z-stack-preview-${version}${changes.length ? '-dirty' : ''}.tgz`);
