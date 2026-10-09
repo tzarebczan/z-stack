@@ -30,6 +30,8 @@ cd z-stack-preview
 sha256sum --quiet -c SHA256SUMS # macOS: shasum -q -a 256 -c SHA256SUMS
 ```
 
+`gh release download` fetches every file named in `SHA256SUMS-alpha.4`. Downloading only the preview archive makes that first check fail. Without the GitHub CLI, download those named files from the release page into one directory and run the same checks.
+
 Continue from **inside the extracted bundle**, using its scripts and matching
 archives. Do not mix its packages with the current source scaffolder. Checksums
 detect changed bytes; authenticate the GitHub release and source revision separately.

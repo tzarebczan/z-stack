@@ -111,7 +111,9 @@ async function start() {
   sync.addEventListener("click", () => void run(async () => { await render(await wallet.sync()); }));
   window.addEventListener("pagehide", () => {
     closed = true; abort.abort(); off(); clearPhrase();
-    void wallet.close().catch(() => {});
+    // Do not close() here. The SDK saves the snapshot on pagehide, and close()
+    // interrupts the scan worker before that save starts.
+    wallet.lock();
   }, { once: true });
   await run(async () => {
     const current = await wallet.load();

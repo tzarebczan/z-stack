@@ -55,7 +55,7 @@ cd ../my-wallet
 npm run dev
 ```
 
-On macOS, replace `sha256sum` with `shasum -a 256`. Use the scripts **inside that
+On macOS, replace `sha256sum --quiet -c` with `shasum -q -a 256 -c`. `gh release download` fetches every file named in `SHA256SUMS-alpha.4`; a partial manual download fails that check. Use the scripts **inside that
 bundle**; a scaffolder from a different source version expects different archives.
 See [the walkthrough](docs/GETTING-STARTED.md) for Next.js and funding limitations.
 

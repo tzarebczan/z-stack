@@ -46,10 +46,27 @@ async function start() {
   element("chain-warning").hidden = connection.network !== "testnet";
   function showRuntime() {
     const runtime = wallet.runtime;
-    element("runtime").textContent = runtime.mode === "multi-thread"
-      ? `Threaded scanner · ${runtime.threads} threads` : "Single-thread engine";
+    // The key bindings report single-thread until the background scan worker
+    // finishes loading. Reading `mode` before `scanWorker` looks like a fallback.
+    element("runtime").textContent = runtime.scanWorker
+      ? runtime.mode === "multi-thread"
+        ? `Threaded scanner · ${runtime.threads} threads`
+        : "Single-thread engine"
+      : "Starting scanner…";
   }
   showRuntime();
+  const stopRuntimeWatch = () => {
+    window.clearInterval(runtimeWatch);
+    window.clearTimeout(runtimeWatchStop);
+  };
+  const runtimeWatch = window.setInterval(() => {
+    showRuntime();
+    if (wallet.runtime.scanWorker) stopRuntimeWatch();
+  }, 200);
+  const runtimeWatchStop = window.setTimeout(() => {
+    stopRuntimeWatch();
+    if (!wallet.runtime.scanWorker) element("runtime").textContent = "Single-thread engine";
+  }, 20_000);
   let review: SendReview | undefined;
   let receipt: SendReceipt | undefined;
   let sending: AbortController | undefined;
@@ -412,7 +429,12 @@ async function start() {
     offBalance();
     offBroadcast();
     sending?.abort();
-    void wallet.close().catch(() => {});
+    stopRuntimeWatch();
+    // The SDK flushes its snapshot on pagehide, on a microtask. close() interrupts
+    // the scan worker first, so that flush fails and a reload logs
+    // "snapshot save on hide failed". Lock drops a cached seed; the document
+    // unload releases the engine. Await close() when this page stays alive.
+    wallet.lock();
   }, { once: true });
 
   await run(async () => {

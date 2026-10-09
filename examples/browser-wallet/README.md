@@ -59,7 +59,7 @@ private data and are not printed.
 
 ## Loading and funding limits
 
-The demo shows `wallet.runtime` beside the balance. Default isolated startup
+The demo shows `wallet.runtime` beside the balance. It stays on "Starting scanner…" until `scanWorker` is set, because the threaded worker loads after the key bindings and the first read is otherwise single-thread. Default isolated startup
 uses roughly 30 MB of uncompressed WASM across its two engine variants. Set
 `VITE_ZSTACK_MULTICORE=false` before starting Vite to download only the roughly
 10.9 MB single-thread engine; scanning then uses one thread. Both modes keep

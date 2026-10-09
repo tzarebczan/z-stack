@@ -230,7 +230,8 @@ application policy; do not replace an existing policy with this partial list.
 | Worker URL points at `node_modules` or a `.ts` file in production | Use `/vite`, rebuild packages, and import distribution exports |
 | WASM fetch returns HTML or 404 | Host routing, asset base URL, missing deployment assets |
 | Integrity mismatch | Engine binary and manifest came from different builds |
-| Runtime stays single-threaded | HTTPS/localhost, isolation headers, iframe permissions, worker console errors |
+| Runtime stays single-threaded | HTTPS/localhost, isolation headers, iframe permissions, worker console errors. Read `wallet.runtime` after `scanWorker` is set; the first value is the key-binding engine |
+| Reload logs `snapshot save on hide failed` | Do not call `close()` inside `pagehide`. The SDK flushes the snapshot on that event, and `close()` interrupts the scan worker before the flush starts. Await `close()` when the page stays alive |
 | CORS failure | gRPC-Web and CORS support at the selected server; isolation does not grant CORS |
 | `/zstack/memos` returns 404 | Server does not support shared ranges; do not set `sharedMemos: true` |
 | Old restore rejected | Supply a real birthday and explicitly opt into deep sync |

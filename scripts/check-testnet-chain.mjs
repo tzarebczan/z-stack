@@ -26,7 +26,11 @@ try {
     transport.treeState(height, AbortSignal.timeout(20_000)),
     fetch(new URL(`/api/v1/testnet/blocks/${height}`, explorer), { signal: AbortSignal.timeout(20_000), credentials: 'omit', redirect: 'error' }),
   ]);
-  if (!response.ok) throw new Error();
+  if (!response.ok) {
+    throw new Error(response.status === 404
+      ? `Explorer has no block at height ${height}. Compare a height both sides publish; a missing tip often means a different chain.`
+      : `Explorer request failed (${response.status}).`);
+  }
   const result = await response.json();
   const block = result?.data?.summary;
   const valid = hash => typeof hash === 'string' && /^[0-9a-f]{64}$/i.test(hash);
@@ -39,7 +43,10 @@ try {
     serverHash: state.hash, explorerHash: block.block_hash, match, reversedMatch }, null, 2));
   if (reversedMatch) { console.error("Hashes match in reversed byte order. Normalize provider encoding before diagnosing a fork."); process.exitCode = 2; }
   else if (!match) process.exitCode = 1;
-} catch {
-  console.error('Could not compare public block data. Check the height, endpoint availability, and gRPC-Web support.');
+} catch (error) {
+  const message = error instanceof Error ? error.message : "";
+  console.error(message.startsWith("Explorer ")
+    ? message
+    : "Could not compare public block data. Check the height, endpoint availability, and gRPC-Web support.");
   process.exitCode = 2;
 }
