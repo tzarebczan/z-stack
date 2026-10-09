@@ -140,6 +140,15 @@ try {
     await ui.getByRole('button',{name:'Review payment',exact:true}).click();
     await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).waitFor({timeout:60_000});
     assert.ok((await ui.getByRole('region',{name:'Review payment',exact:true}).count()) || kind==='next');
+    let staleRemoval;
+    if (kind === 'vite' && !uncertain) {
+      staleRemoval = await context.newPage();
+      await staleRemoval.goto(origin);
+      await staleRemoval.getByText('Wallet opened. Sync when ready.',{exact:true}).waitFor({timeout:120_000});
+      await staleRemoval.getByText('Remove local wallet',{exact:true}).click();
+      await staleRemoval.getByLabel('I saved my recovery phrase and payment receipts',{exact:true}).check();
+      assert.equal(await staleRemoval.getByRole('button',{name:'Remove from this browser',exact:true}).isEnabled(),true);
+    }
     if (!uncertain) {
       await ui.getByLabel('Recovery phrase for this payment',{exact:true}).fill('not a phrase');
       await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).click();
@@ -158,6 +167,15 @@ try {
       console.log('Receipt state',kind,await ui.locator(kind==='vite'?'#receipt-state':'.receipt [role=status]').innerText());
       await ui.getByText(/Submission not confirmed/).waitFor({timeout:30_000});
       assert.equal(await ui.getByRole('button',{name:'Review payment',exact:true}).isVisible().catch(()=>false),false, 'Unknown submission must block a second payment');
+    }
+    if (staleRemoval) {
+      try {
+        await staleRemoval.getByRole('button',{name:'Remove from this browser',exact:true}).click();
+        await staleRemoval.locator('#remove-status').getByText('Sync to confirm or expire pending payments before removing this wallet.',{exact:true}).waitFor();
+        assert.equal(await staleRemoval.getByRole('button',{name:'Remove from this browser',exact:true}).isEnabled(),false,'Stale tab must adopt the durable pending reservation and refuse deletion');
+        assert.equal(await staleRemoval.locator('#address').innerText(),address,'Rejected removal must preserve identity');
+        await staleRemoval.locator('#history').getByText(txid,{exact:false}).waitFor();
+      } finally { await staleRemoval.close(); }
     }
     if (kind === 'vite') {
       await ui.getByText('Remove local wallet',{exact:true}).click();

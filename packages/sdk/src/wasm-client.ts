@@ -407,6 +407,30 @@ export function createWasmClient(
       bind: "wasm",
       mode: "wasm-snapshot",
     }),
+    forgetSavedWallet: (forgetOpts) => {
+      if (forgetOpts?.pending !== undefined && forgetOpts.pending !== "reject") {
+        return Promise.reject(new WalletError("unknown", "Invalid pending-payment removal policy."));
+      }
+      if (forgetOpts?.pending !== "reject") return runtime.forgetWasmWallet(forgetOpts);
+      return runtime.withOriginSpendLock(async () => {
+        if (disposing || syncLock || memoLock || rescanning) throw new WalletError("busy", "wallet work is in progress");
+        if (!currentSession() && !(await loadIfNeeded())) {
+          const generation = await readWalletGeneration();
+          return runtime.forgetWasmWallet({ ...forgetOpts, expected: { generation, key: null } });
+        }
+        const source = session!;
+        const operation = sessionOperation!;
+        await operation.ready();
+        await refreshIfStale(source, operation);
+        assertSource(operation, source);
+        if ((await source.pendingRawTxs()).length) throw new WalletError("forget_pending", "pending payment prevents local removal");
+        // Legacy bytes have no revision token. Migrate via the existing guarded save first.
+        if (!savedKeySeen) await persist();
+        assertSource(operation, source);
+        if (!savedKeySeen || storageGeneration === undefined) throw new WalletError("wallet_db", "wallet revision unavailable for removal");
+        return runtime.forgetWasmWallet({ ...forgetOpts, expected: { generation: storageGeneration, key: savedKeySeen } });
+      });
+    },
     loadSavedWallet: () => runtime.withOriginSpendLock(async () => {
       const operation = captureWalletOperation();
       await operation.ready();

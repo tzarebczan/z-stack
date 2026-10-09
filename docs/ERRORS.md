@@ -83,3 +83,8 @@ different saved wallet uses `seed_mismatch`. Neither display string includes the
 words or the engine's parsing detail. `unknown` remains generic. Shared display
 copy is browser-safe; native applications can add their own setup instructions
 based on the code rather than parsing `message`.
+
+`wallet.forget({ pending: "reject" })` rejects with `forget_pending` while outgoing
+reservations are unresolved. It checks the latest durable wallet under the spend
+lock; a competing save before deletion returns `wallet_changed` and leaves all
+stored records intact. Reload and inspect the wallet before trying again.

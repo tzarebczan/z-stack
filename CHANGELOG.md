@@ -3,6 +3,7 @@
 ## 0.1.0-alpha.4
 
 - Stable `invalid_recovery_phrase` errors for restore and payment unlock, with fixed display copy; shared errors no longer prescribe native CLI commands or wiping wallet data.
+- Optional `wallet.forget({ pending: "reject" })` preserves unresolved outgoing reservations across tabs and atomically refuses deletion if the inspected snapshot changes.
 - Numeric-birthday wallet creation skips the tip request entirely; automatic-tip failures use the stable `transport` code.
 - Vite demo creation with an explicit offline birthday, a visible runtime and funding warning, receive/scan context, confirmed local removal guarded while payments remain pending, hidden restore after creation, and payment errors beside the form.
 - Documented engine download costs and the optional single-thread setting.

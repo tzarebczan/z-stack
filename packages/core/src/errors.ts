@@ -24,6 +24,7 @@ export type WalletErrorCode =
   | "birthday_above_tip"
   | "invalid_birthday"
   | "invalid_recovery_phrase"
+  | "forget_pending"
   | "rescan_pending"
   | "rescan_later_birthday"
   | "unsupported_payment_uri"
@@ -69,6 +70,7 @@ export const WALLET_ERROR_MESSAGES: Record<WalletErrorCode, string> = {
   deep_sync_rejected: "Birthday is too far below tip for a default sync.",
   invalid_recovery_phrase: "Those words are not a valid recovery phrase.",
   invalid_birthday: "Enter a positive block height or a valid date in YYYY-MM-DD format.",
+  forget_pending: "Sync to confirm or expire pending payments before removing this wallet.",
   rescan_pending: "Sync to confirm or expire your pending payment before rescanning.",
   rescan_later_birthday: "Choose a height or date at or before the wallet’s current birthday.",
   unsupported_payment_uri: "Paste the recipient address itself. This form does not accept zcash: payment links.",

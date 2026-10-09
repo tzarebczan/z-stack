@@ -356,31 +356,43 @@ async function start() {
       await render(await wallet.sync());
     });
   });
+  function clearLocalWalletView() {
+    identity = undefined; hasScanned = false; pendingPayment = false; review = undefined; receipt = undefined;
+    disposeBase(); disposeBase = attachBase(wallet, perform, () => identity);
+    clearPhrase(); restoreForm.reset(); birthday.setCustomValidity("");
+    createBirthday.value = ""; createBirthday.setCustomValidity("");
+    sendForm.reset(); reviewPanel.hidden = true; receiptPanel.hidden = true; sendForm.hidden = false;
+    sendStatus.textContent = ""; element("copy-status").textContent = "";
+    element("remove-status").textContent = ""; removeConfirm.checked = false;
+    address.textContent = ""; balance.textContent = `— ${unit}`; history.replaceChildren();
+    for (const id of ["receive-panel", "scan-panel", "send-panel"]) element(id).hidden = true;
+    element("history-empty").hidden = false;
+    element("history-empty").textContent = "Create or restore a wallet to see activity.";
+    element<HTMLDetailsElement>("remove-panel").open = false;
+    status.textContent = "Local wallet removed. You can create or restore.";
+  }
   removeConfirm.addEventListener("change", updateControls);
   element<HTMLFormElement>("remove-form").addEventListener("submit", event => {
     event.preventDefault();
     if (!identity || !removeConfirm.checked) return;
     void run(async () => {
-      // Check persisted history again: reloads and another tab can change pending state.
+      // Fast UI check; the SDK below checks durable reservations and conditionally deletes.
       if ((await wallet.pending(1)).length || receipt?.state === "pending" || receipt?.state === "unknown") {
         pendingPayment = true;
         element("remove-status").textContent = "Sync to confirm or expire pending payments before removing this wallet.";
         return;
       }
-      await wallet.forget({ passkey: true });
-      identity = undefined; hasScanned = false; pendingPayment = false; review = undefined; receipt = undefined;
-      disposeBase(); disposeBase = attachBase(wallet, perform, () => identity);
-      clearPhrase(); restoreForm.reset(); birthday.setCustomValidity("");
-      createBirthday.value = ""; createBirthday.setCustomValidity("");
-      sendForm.reset(); reviewPanel.hidden = true; receiptPanel.hidden = true; sendForm.hidden = false;
-      sendStatus.textContent = ""; element("copy-status").textContent = "";
-      element("remove-status").textContent = ""; removeConfirm.checked = false;
-      address.textContent = ""; balance.textContent = `— ${unit}`; history.replaceChildren();
-      for (const id of ["receive-panel", "scan-panel", "send-panel"]) element(id).hidden = true;
-      element("history-empty").hidden = false;
-      element("history-empty").textContent = "Create or restore a wallet to see activity.";
-      element<HTMLDetailsElement>("remove-panel").open = false;
-      status.textContent = "Local wallet removed. You can create or restore.";
+      try { await wallet.forget({ passkey: true, pending: "reject" }); }
+      catch (error) {
+        const safe = WalletError.fromUnknown(error);
+        if (safe.code === "wallet_changed" || safe.code === "forget_pending") {
+          const saved = await wallet.load();
+          if (saved) await render(saved);
+          else { clearLocalWalletView(); return; }
+        }
+        throw error;
+      }
+      clearLocalWalletView();
     }, element("remove-status"));
   });
   lock.addEventListener("click", () => {

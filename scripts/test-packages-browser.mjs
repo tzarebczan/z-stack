@@ -77,6 +77,12 @@ if (savedAgain?.unifiedAddress !== current!.unifiedAddress) throw new Error('new
 if ((await reopened.history()).length !== 0) throw new Error('reopened empty chain invented history');
 if (reopened.hasSpendingSeed()) throw new Error('new owner retained spending seed');
 const reopenedMode = reopened.runtime.mode;
+// Exercise optional pending-aware removal in every browser/runtime, then recover identity.
+await reopened.forget({ pending: 'reject' });
+if (await reopened.load()) throw new Error('guarded empty-wallet deletion retained a saved wallet');
+await reopened.restoreUfvk(savedAgain!.ufvk!, { birthday: 1 });
+tip = 1; await reopened.sync(); tip = 2; await reopened.sync();
+if ((await reopened.getWallet()).unifiedAddress !== current!.unifiedAddress) throw new Error('guarded deletion/recovery changed identity');
 await reopened.close();
 Object.assign(window, { packageCheck: { ...checked, reopened: reopenedMode === checked.mode } });
 Object.assign(window, { packageReplace: async () => {
@@ -164,7 +170,7 @@ export async function verifyBrowserPackages(app, browsers, browserName = "chromi
   }
 }
 
-async function verifyExampleRecovery(app, chromium) {
+export async function verifyExampleRecovery(app, chromium) {
   const mainPath = join(app, "src", "main.ts");
   const main = readFileSync(mainPath, "utf8");
   // Preserve the example's UI code. Only its SDK factory is wrapped in this
@@ -173,7 +179,7 @@ async function verifyExampleRecovery(app, chromium) {
   writeFileSync(join(app, "src", "recovery-fixture.ts"), `
     import { createWallet as realCreateWallet, type BlockTransport } from '@z-stack/sdk';
     export * from '@z-stack/sdk';
-    declare global { interface Window { fixtureTipRequests?: number; fixtureTipUnavailable?: boolean; } }
+    declare global { interface Window { fixtureTipRequests?: number; fixtureTipUnavailable?: boolean; fixtureForgetWallet?: () => Promise<void>; } }
     export async function createWallet(options: Parameters<typeof realCreateWallet>[0]) {
       const transport: BlockTransport = {
         kind: 'recovery-test', label: 'Offline recovery fixture', tip: async () => {
@@ -189,6 +195,7 @@ async function verifyExampleRecovery(app, chromium) {
         },
       };
       const wallet = await realCreateWallet({ ...options, network: "regtest", server: transport, prewarmProvingKey: false });
+      Object.assign(window, {fixtureForgetWallet: () => wallet.forget({passkey:true})});
       let failHistory = true;
       return new Proxy(wallet, {
         get(target, key) {
@@ -215,7 +222,8 @@ async function verifyExampleRecovery(app, chromium) {
   let browser;
   try {
     browser = await launchBrowser(chromium, { headless: true });
-    const page = await browser.newPage();
+    const context = await browser.newContext();
+    const page = await context.newPage();
     const errors = [], diagnostics = [];
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => diagnostics.push(message.text()));
@@ -354,6 +362,21 @@ async function verifyExampleRecovery(app, chromium) {
     assert.equal(await page.locator("#address").textContent(), originalAddress, "restore recovered a different identity");
     assert.ok(diagnostics.every(message => !message.includes("SYNTHETIC_PRIVATE_PROVIDER_CONTEXT")), "provider context leaked");
     assert.ok(diagnostics.every(message => !message.includes("injected activity read failure")), "raw provider error reached the console");
+    // A competing realm removes the wallet after this page rendered it.
+    const other = await page.context().newPage();
+    try {
+      await other.goto(page.url());
+      await other.waitForFunction(() => !document.getElementById("sync").disabled);
+      await other.evaluate(() => window.fixtureForgetWallet());
+      await page.locator("#remove-panel summary").click();
+      await page.locator("#remove-confirm").check(); await page.locator("#remove").click();
+      await page.locator("#status").filter({hasText:"Local wallet removed."}).waitFor();
+      assert.equal(await page.locator("#address").textContent(), "", "competing deletion left a stale receive address");
+      assert.equal(await page.locator("#send-panel").isVisible(), false);
+      assert.equal(await page.locator("#restore-form").isVisible(), true);
+      assert.equal(await page.locator("#history li").count(), 0);
+      assert.equal(await page.locator("#sync").isDisabled(), true);
+    } finally { await other.close(); }
     assert.deepEqual(errors, [], "example recovery failure escaped its UI handler");
     console.log("Installed example: confirmation precedes persistence; unconfirmed reload cancels; confirmed wallet survives activity-read failure/retry/reload");
   } finally {

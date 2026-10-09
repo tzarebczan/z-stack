@@ -1110,3 +1110,24 @@ test("public unlock reports malformed words without granting spending access", a
   await wallet.unlock(words);
   assert.equal(wallet.hasSpendingSeed(), true);
 });
+
+
+test("pending-aware forget adopts another tab's reservation before checking deletion", async t => {
+  const f = fixture(t);
+  const wallet = await f.open(); await wallet.create({ birthday: 1 });
+  const baseline = await readSavedSnapshotRecord(); assert.ok(baseline);
+  assert.equal("forgetSavedWallet" in wallet, false, "internal deletion helper must not leak into the root facade");
+  await assert.rejects(wallet.forget({ pending: "typo" } as never), code("unknown"));
+  assert.deepEqual(await readSavedSnapshotRecord(), baseline, "invalid policy must not silently perform explicit deletion");
+  // Another realm commits a pending send. This client's history is deliberately stale.
+  const state = decode(baseline.bytes); state.pending = true;
+  await saveWalletSnapshot(encode(state), await wallet.getWallet(), () => true, baseline.generation);
+  const committed = await readSavedSnapshotRecord();
+  assert.equal((await wallet.pending()).length, 0);
+  await assert.rejects(wallet.forget({ passkey: true, pending: "reject" }), code("forget_pending"));
+  assert.deepEqual(await readSavedSnapshotRecord(), committed);
+  assert.equal((await wallet.pending()).length, 1, "guard must adopt the durable pending send");
+  // Explicit deletion remains application-controlled when the pending policy is omitted.
+  await wallet.forget({ passkey: true });
+  assert.equal(await readSavedSnapshotRecord(), null);
+});

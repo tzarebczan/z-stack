@@ -100,7 +100,9 @@ the input; a successful restore clears it. Restore is hidden when a saved wallet
 exists. **Remove local wallet** has its own backup confirmation; it deletes
 this browser's viewing data and local vault, not on-chain funds. Save any payment
 receipts too. The Vite demo blocks removal until pending payments confirm or
-expire, including after a reload. Reopening loads viewing data with spending locked. No phrase is
+expire, including after a reload or another tab’s send. It uses
+`wallet.forget({ passkey: true, pending: "reject" })`; the SDK policy is optional
+for other applications. Reopening loads viewing data with spending locked. No phrase is
 posted to Next or a backend.
 
 ## Funded testing
