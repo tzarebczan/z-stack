@@ -13,7 +13,7 @@ downloaded archive. A fresh clone has no `artifacts/` directory; plain
 
 ```sh
 cd /path/to/copied/browser-wallet
-npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.6.tgz
+npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.7.tgz
 npm run dev
 ```
 
@@ -66,9 +66,9 @@ uses roughly 30 MB of uncompressed WASM across its two engine variants
 integrity checks and run scanning in a worker.
 
 The funding warning is visible before Create and Send. Empty testnet sync
-verifies only the selected light server. Funded receive/send has not yet been
-verified on public testnet. Use the [Valar faucet](https://faucet.testnet.valargroup.dev/)
-for test coins; daily limits apply. The latest documented claim reached its daily payout cap.
+verifies only the selected light server. An external alpha.6 run reported a Valar-funded receive; public outgoing sending
+has not yet been verified. Use the [Valar faucet](https://faucet.testnet.valargroup.dev/)
+for test coins; daily limits apply. A previous claim reached its daily payout cap.
 [Funded testing](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing)
 explains the chain check and the separate source-checkout regtest runner. Payment
 errors stay beside the payment form; engine details are not display copy.
@@ -82,7 +82,17 @@ The generated app displays the SDK version and, for a verified preview, its sour
 `sdk-build.json` and `SDK-ARCHIVES.json` record the matching archive identity.
 The receive QR uses the app-owned MIT-licensed [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator),
 encodes only the public address and makes no remote request. Copy address remains available.
-From an installed generated app, `npm run check:chain -- --height 4465026` compares public provider hashes;
-a disagreement is diagnostic evidence, not proof that funding or spending is impossible.
+From an installed generated app, `npm run check:chain` checks the published NU7 activation hash.
+Use `--compare-explorer --height 4465026` for an explicit provider comparison; a
+disagreement is diagnostic evidence, not proof that funding or spending is impossible.
 
-`npm run preview` caches hashed JS/CSS/WASM for one year with `immutable`; HTML keeps its normal revalidation policy. This is an example policy; configure your production host separately. Default WASM is about 30 MB uncompressed, or 4.3 MB + 4.7 MB with gzip; disabling multicore avoids the threaded download.
+`npm run preview` compresses WASM when the client accepts gzip or Brotli and caches hashed JS/CSS/WASM for one year with `immutable`; HTML keeps its normal revalidation policy. This is an example policy; configure your production host separately. Default WASM is about 30 MB uncompressed, or 4.3 MB + 4.7 MB with gzip; disabling multicore avoids the threaded download.
+
+## Available and confirming funds
+
+The balance separates spendable funds from funds waiting for confirmations.
+Incoming testnet funds need three confirmations by default. Activity shows the
+amount and confirmation count; the send form explains waiting funds. These views
+use the SDK balance and confirmation policy without changing spending rules.
+New wallets generate 24 words. Restore accepts valid BIP39 phrases of 12, 15, 18,
+21 or 24 words; a valid shorter phrase is not a validation failure.

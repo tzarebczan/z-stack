@@ -94,15 +94,16 @@ export function copyTemplate(template, destination) {
   }
 }
 
-export function generatedReadme(text) {
+export function generatedReadme(text, installed = false) {
   const match = /```sh\n([\s\S]*?)\n```/.exec(text);
   if (!match) return text.replace(/From the repository,[\s\S]*?In the generated directory, run `npm run dev`\./,
-    'Matching archives are already in `vendor/`. Run `npm install --ignore-scripts` if you did not use `--install`, then `npm run dev` in this directory.');
+    installed ? 'Dependencies are installed. Run `npm run dev` in this directory.' : 'Matching archives are already in `vendor/`. Run `npm install --ignore-scripts`, then `npm run dev` in this directory.');
   const start = text.slice(0, match.index).trimEnd().lastIndexOf('\n\n');
   const commands = match[1].replace(/(?:cd [^\n]+\n)?npm install [^\n]*(?:\n +[^\n]*)*/,
-    'npm install --ignore-scripts');
+    installed ? '' : 'npm install --ignore-scripts').trim();
   return text.slice(0, start < 0 ? match.index : start) +
-    '\n\nMatching SDK archives are already in `vendor/`; package.json uses local file dependencies. If you used `--install`, skip the install command. Run from this app directory:\n\n```sh\n' +
+    '\n\nMatching SDK archives are already in `vendor/`; package.json uses local file dependencies. ' +
+    (installed ? 'Dependencies were installed by `--install`. Run from this app directory:' : 'Install the dependencies once, then run from this app directory:') + '\n\n```sh\n' +
     commands + '\n```' + text.slice(match.index + match[0].length);
 }
 
@@ -194,6 +195,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       const result = spawnSync('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'], {
         cwd: target, stdio: 'inherit', shell: process.platform === 'win32' });
       assert.equal(result.status, 0, 'Install failed; the generated app is preserved. Retry npm install there.');
+      const readme = join(target, 'README.md');
+      writeFileSync(readme, generatedReadme(readFileSync(readme, 'utf8'), true));
     }
     console.log(`Next: open that directory, ${install ? 'run npm run dev' : 'run npm install --ignore-scripts, then npm run dev'}. Use test funds only.`);
   } catch (error) { console.error(error.message); process.exitCode = 1; }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0-alpha.7
+
+- Separate available and confirming balances in Vite and Next demos; show activity amounts and confirmation counts.
+- Retain restore words on failed Next attempts and identify invalid recovery inputs accessibly in both demos.
+- Compress WASM in Vite preview and apply immutable caching consistently to GET, HEAD and 304 responses.
+- Default the public chain checker to the published NU7 activation hash; make explorer comparisons explicit.
+- Clarify successful public receive evidence, remaining public-send verification and generated setup instructions.
+
 ## 0.1.0-alpha.6
 
 - Show SDK version/source identity in generated Vite and Next apps; generate receive QR locally.

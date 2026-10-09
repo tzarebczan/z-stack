@@ -1,4 +1,5 @@
 "use client";
+import { loadedWalletStatus } from "./wallet-view";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createWallet, WalletError, walletErrorMessage, type HistoryEntry,
   type Wallet, type WalletSnapshot } from "@z-stack/sdk";
@@ -87,7 +88,7 @@ export function useWallet() {
       if (disposed) return;
       updateRuntime(wallet);
       setStatus(saved ? pendingRecovery.snapshot()?.address === saved.unifiedAddress
-        ? "Save your recovery phrase." : "Wallet opened. Spending is locked." : "Ready to create or restore.");
+        ? "Save your recovery phrase." : loadedWalletStatus(saved) : "Ready to create or restore.");
       setReady(true);
       if (saved) await refresh(wallet, saved);
     }).catch(error => { if (!disposed) setStatus(safeError(error)); });
@@ -98,12 +99,16 @@ export function useWallet() {
     };
   }, []);
 
-  async function run<T>(label: string, action: (wallet: Wallet) => Promise<T>): Promise<T | undefined> {
+  async function run<T>(label: string, action: (wallet: Wallet) => Promise<T>, propagate = false): Promise<T | undefined> {
     const wallet = owner.current;
     if (!wallet || !ready || running.current) return;
     running.current = true; setBusy(label);
     try { return await action(wallet); }
-    catch (error) { if (owner.current === wallet) setStatus(safeError(error)); }
+    catch (error) {
+      const safe = WalletError.fromUnknown(error);
+      if (!propagate && owner.current === wallet) setStatus(safe.userMessage());
+      if (propagate) throw safe;
+    }
     finally {
       running.current = false;
       if (owner.current === wallet) { updateRuntime(wallet); setBusy(""); setProgress(undefined); }
@@ -125,7 +130,7 @@ export function useWallet() {
   }
   return { ready, busy, status, snapshot, history, phrase, spending, runtime, progress, receipt, canCancelPayment, baseAction,
     clearReceipt: () => { setReceipt(undefined); },
-    clearStatus: () => { if (!running.current) setStatus(""); },
+    clearStatus: (expected?: string) => { if (!running.current && (expected === undefined || expected === status)) setStatus(""); },
     reviewPayment: (draft: SendDraft) => run("Reviewing", wallet => reviewSend(wallet, draft)),
     sendPayment: (review: SendReview, words: string) => run("Sending", async wallet => {
       const operation = new AbortController(); sendOperation.current = operation; setCanCancelPayment(true);
@@ -179,13 +184,14 @@ export function useWallet() {
       }
     }),
     restore: (words: string, birthday: string) => run("Restoring", async wallet => {
-      if (await wallet.load()) { setStatus("Remove the saved wallet before restoring another."); return; }
+      if (await wallet.load()) { setStatus("Remove the saved wallet before restoring another."); return false; }
       const value = await wallet.restore(words, { birthday });
-      if (owner.current !== wallet) return;
+      if (owner.current !== wallet) return false;
       pendingRecovery.acknowledge(value.unifiedAddress);
       setStatus("Wallet restored. Sync to recover activity.");
       await refresh(wallet, value);
-    }),
+      return true;
+    }, true),
     sync: () => run("Syncing", async wallet => {
       await refresh(wallet, await wallet.sync());
       if (receipt) {
@@ -213,7 +219,7 @@ export function useWallet() {
     unlock: (words: string) => run("Unlocking", async wallet => {
       await refresh(wallet, await wallet.unlock(words));
       if (owner.current === wallet) setStatus("Spending unlocked. Lock when done.");
-    }),
+    }, true),
     lock: () => { owner.current?.lock(); setSpending(false); setStatus("Spending locked. Viewing data stays available."); },
     forget: () => run("Removing", async wallet => {
       await wallet.forget({ passkey: true });

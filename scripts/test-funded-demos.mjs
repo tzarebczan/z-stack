@@ -146,7 +146,7 @@ try {
     if (kind === 'vite' && !uncertain) {
       staleRemoval = await context.newPage();
       await staleRemoval.goto(origin);
-      await staleRemoval.getByText('Wallet opened. Sync when ready.',{exact:true}).waitFor({timeout:120_000});
+      await staleRemoval.getByText(/Wallet opened · scanned through block/).waitFor({timeout:120_000});
       await staleRemoval.getByText('Remove local wallet',{exact:true}).click();
       await staleRemoval.getByLabel('I saved my recovery phrase and payment receipts',{exact:true}).check();
       assert.equal(await staleRemoval.getByRole('button',{name:'Remove from this browser',exact:true}).isEnabled(),true);
@@ -186,7 +186,7 @@ try {
       const reopened = await context.newPage();
       try {
         await reopened.goto(origin);
-        await reopened.getByText('Wallet opened. Sync when ready.',{exact:true}).waitFor({timeout:120_000});
+        await reopened.getByText(/Wallet opened · scanned through block/).waitFor({timeout:120_000});
         await reopened.getByText('Remove local wallet',{exact:true}).click();
         await reopened.getByLabel('I saved my recovery phrase and payment receipts',{exact:true}).check();
         assert.equal(await reopened.getByRole('button',{name:'Remove from this browser',exact:true}).isEnabled(),false,'Persisted pending payment must block removal after reopen');

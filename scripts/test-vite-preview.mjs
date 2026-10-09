@@ -3,7 +3,9 @@ import {spawn} from 'node:child_process';
 import {createRequire} from 'node:module';
 import {createServer} from 'node:net';
 import {dirname, join} from 'node:path';
-import {readdirSync} from 'node:fs';
+import {readdirSync, readFileSync, statSync} from 'node:fs';
+import {get as httpGet} from 'node:http';
+import {gunzipSync} from 'node:zlib';
 
 export async function verifyVitePreview(app) {
   const reservation = createServer();
@@ -30,14 +32,40 @@ export async function verifyVitePreview(app) {
     assert.ok(!html.headers.get('cache-control') || /(?:no-cache|no-store|max-age=0)(?:[,\s]|$)/.test(html.headers.get('cache-control')),
       'HTML must remain uncached or require revalidation');
     const files = readdirSync(join(app, 'dist/assets'));
-    for (const extension of ['wasm', 'js', 'css']) {
-      const asset = files.find(file => file.endsWith('.' + extension));
+    for (const [extension, asset] of [...files.filter(file => file.endsWith('.wasm')).map(file => ['wasm',file]),
+      ...['js','css'].map(extension => [extension,files.find(file => file.endsWith('.'+extension) && (extension !== 'js' || statSync(join(app,'dist/assets',file)).size > 1024))])]) {
       assert.ok(asset, `Missing ${extension} build asset`);
       const response = await get('/assets/' + asset);
       assert.equal(response.status, 200);
       assert.equal(response.headers.get('cache-control'), 'public, max-age=31536000, immutable');
       if (extension === 'wasm') assert.match(response.headers.get('content-type'), /application\/wasm/);
       await response.arrayBuffer();
+      const head = await fetch(origin + '/assets/' + asset, {method:'HEAD', signal:AbortSignal.timeout(5000)});
+      assert.equal(head.status, 200);
+      assert.equal(head.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+      if (extension === 'wasm' || extension === 'js') {
+        const raw = headers => new Promise((resolve, reject) => {
+          const request = httpGet(origin + '/assets/' + asset, {headers}, response => {
+            const chunks = [];
+            response.on('data', chunk => chunks.push(chunk));
+            response.on('end', () => resolve({headers:response.headers, bytes:Buffer.concat(chunks)}));
+            response.on('error', reject);
+          });
+          request.setTimeout(5000, () => request.destroy(new Error('preview request timed out')));
+          request.on('error', reject);
+        });
+        const original = readFileSync(join(app, 'dist/assets', asset));
+        const compressed = await raw({'Accept-Encoding':'gzip'});
+        assert.equal(compressed.headers['content-encoding'], 'gzip');
+        assert.match(compressed.headers.vary, /Accept-Encoding/i);
+        assert.deepEqual(gunzipSync(compressed.bytes), original, `compressed ${extension} changed original bytes`);
+        assert.ok(compressed.bytes.length < original.length / (extension === 'wasm' ? 2 : 1), `${extension} was not compressed on the wire`);
+        for (const encoding of extension === 'wasm' ? ['identity', 'gzip;q=0, identity'] : []) {
+          const plain = await raw({'Accept-Encoding':encoding});
+          assert.equal(plain.headers['content-encoding'], undefined);
+          assert.deepEqual(plain.bytes, original);
+        }
+      }
       const etag = response.headers.get('etag');
       if (etag) {
         const cached = await fetch(origin + '/assets/' + asset,
@@ -49,7 +77,14 @@ export async function verifyVitePreview(app) {
     const missing = await get('/assets/missing-AbCd1234.js');
     assert.doesNotMatch(missing.headers.get('cache-control') ?? '', /immutable/,
       'Missing assets or their HTML fallback must not be cached as immutable');
-    console.log('Vite production preview: isolation, immutable hashed assets, fresh HTML and missing paths verified');
+    const fallbackEtag = missing.headers.get('etag');
+    if (fallbackEtag) {
+      const conditionalMissing = await fetch(origin + '/assets/missing-AbCd1234.js',
+        {headers:{'If-None-Match':fallbackEtag}, signal:AbortSignal.timeout(5000)});
+      assert.doesNotMatch(conditionalMissing.headers.get('cache-control') ?? '', /immutable/,
+        'A conditional HTML fallback must not become immutable');
+    }
+    console.log('Vite production preview: isolation, WASM/JS gzip byte integrity, WASM identity negotiation, GET/HEAD/304 cache, fresh HTML and missing paths verified');
   } finally {
     if (child.exitCode === null) await new Promise(resolve => {
       child.once('exit', resolve); child.kill('SIGTERM');

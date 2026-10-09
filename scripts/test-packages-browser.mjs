@@ -181,7 +181,7 @@ export async function verifyExampleRecovery(app, chromium) {
   writeFileSync(join(app, "src", "recovery-fixture.ts"), `
     import { createWallet as realCreateWallet, type BlockTransport } from '@z-stack/sdk';
     export * from '@z-stack/sdk';
-    declare global { interface Window { fixtureTipRequests?: number; fixtureTipUnavailable?: boolean; fixtureForgetWallet?: () => Promise<void>; } }
+    declare global { interface Window { fixtureTipRequests?: number; fixtureTipUnavailable?: boolean; fixtureForgetWallet?: () => Promise<void>; fixtureFundingHeight?: number; } }
     export async function createWallet(options: Parameters<typeof realCreateWallet>[0]) {
       const transport: BlockTransport = {
         kind: 'recovery-test', label: 'Offline recovery fixture', tip: async () => {
@@ -201,7 +201,19 @@ export async function verifyExampleRecovery(app, chromium) {
       let failHistory = true;
       return new Proxy(wallet, {
         get(target, key) {
-          if (key === 'history') return async (...args: Parameters<typeof target.history>) => { if (failHistory) { failHistory=false; throw new Error('injected activity read failure'); } return target.history(...args); };
+          if (key === 'sync') return async (...args: Parameters<typeof target.sync>) => {
+            const snapshot = await target.sync(...args);
+            return window.fixtureFundingHeight === undefined ? snapshot : {...snapshot,
+              scannedHeight:window.fixtureFundingHeight, confirmations:{trusted:1,untrusted:3,zeroConfShield:false},
+              balance:{...snapshot.balance,totalAvailable:0,totalPending:12500000,pendingZec:'0.12500000'}};
+          };
+          if (key === 'history') return async (...args: Parameters<typeof target.history>) => {
+            if (failHistory) { failHistory=false; throw new Error('injected activity read failure'); }
+            if (window.fixtureFundingHeight !== undefined) return [{txid:'a'.repeat(64),status:'mined',minedHeight:100,
+              expiryHeight:null,accountDeltaZat:12500000,spentZat:0,receivedZat:12500000,feeZat:null,
+              sentNoteCount:0,receivedNoteCount:1,memoCount:0,hasChange:false,isShielding:false,expiredUnmined:false}];
+            return target.history(...args);
+          };
           const value = Reflect.get(target, key, target);
           return typeof value === 'function' ? value.bind(target) : value;
         },
@@ -253,6 +265,7 @@ export async function verifyExampleRecovery(app, chromium) {
     await page.locator("#restore").click();
     await page.locator("#status").filter({hasText:"Those words are not a valid recovery phrase."}).waitFor();
     assert.equal(await page.locator("#words").inputValue(), "not a valid recovery phrase", "invalid restore erased its input");
+    assert.equal(await page.locator("#words").getAttribute("aria-invalid"), "true");
     await page.locator("#clear-words").click();
     assert.equal(await page.locator('#status').innerText(), '', 'Clear phrase retained the old restore error');
     await page.locator('#words').fill('not a valid recovery phrase');
@@ -321,6 +334,22 @@ export async function verifyExampleRecovery(app, chromium) {
     await page.locator("#send-amount").fill("0.1");
     await page.locator("#review-send").click();
     await page.locator("#send-status").filter({hasText:"Not enough shielded funds"}).waitFor();
+    // The real empty-wallet engine remains untouched. Inject an observed balance
+    // and history at the application boundary to check public-testnet UI policy.
+    for (const height of [100,101,102]) {
+      await page.evaluate(height => { window.fixtureFundingHeight=height; },height);
+      await page.locator("#sync").click();
+      await page.waitForFunction(() => !document.getElementById("sync").disabled);
+      assert.equal(await page.locator("#balance").textContent(), "0.00000000 TAZ");
+      assert.equal(await page.locator("#pending-balance").textContent(), "Confirming · 0.12500000 TAZ");
+      assert.match(await page.locator("#history").innerText(), /Received · \+0.12500000 TAZ/);
+      assert.match(await page.locator("#history").innerText(), height < 102 ? new RegExp(`Confirming · ${height-99}/3 confirmations`) : /Mined · 3 confirmations/);
+      assert.match(await page.locator("#send-confirming").innerText(), /Only available funds can be spent/);
+    }
+    await page.evaluate(() => { delete window.fixtureFundingHeight; });
+    await page.locator("#sync").click();
+    await page.waitForFunction(() => !document.getElementById("sync").disabled);
+    assert.equal(await page.locator("#pending-balance").isVisible(), false);
     const savedAddress = await page.locator("#address").textContent();
     for (let reload = 0; reload < 3; reload++) {
       await page.reload();

@@ -85,3 +85,8 @@ footer { color: var(--muted); padding: 30px 0; font-size: 12px; }
 
 .receive-qr { display: block; max-width: 100%; height: auto; image-rendering: pixelated; background: white; margin-block: 16px; }
 .sdk-build { font-size: .8rem; color: #4e665d; overflow-wrap: anywhere; }
+
+.pending-balance { margin-block: 12px; }
+#pending-balance { font-weight: 600; }
+.activity li > span { color: var(--muted); font-size: 14px; }
+[aria-invalid="true"] { border-color: #a32929; }

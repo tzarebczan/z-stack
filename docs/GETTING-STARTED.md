@@ -6,12 +6,12 @@ application services; they are not needed for this walkthrough.
 
 The preview supports NU7 testnet create, restore and sync. Payment review is
 verified on the isolated regtest fixture.
-Public funded receive/send has not yet been verified. [Funded testing](#funded-testing)
-explains the current faucet results and the reproducible regtest alternative.
+An external alpha.6 run reported a Valar-funded public receive; outgoing public
+spending remains unverified. [Funded testing](#funded-testing) explains the current faucet results and the reproducible regtest alternative.
 
 ## 1. Get matching archives
 
-The published **alpha.6** preview includes NU7 support. Use Node 22.18+ and npm;
+The published **alpha.7** preview includes NU7 support. Use Node 22.18+ and npm;
 no Rust toolchain or npm account is needed for these built archives. The SDK
 archive includes compiled single-threaded and threaded WASM engines, bindings,
 workers, integrity manifests, and bundled core and passkey helpers. Building
@@ -21,20 +21,20 @@ per-file lines (including the offline API files); a zero exit status means the
 check passed. Mismatches still print an error:
 
 ```sh
-gh release download v0.1.0-alpha.6 --repo tzarebczan/z-stack --dir sdk-alpha \
-  --pattern 'z-stack-preview-0.1.0-alpha.6.tgz*'
+gh release download v0.1.0-alpha.7 --repo tzarebczan/z-stack --dir sdk-alpha \
+  --pattern 'z-stack-preview-0.1.0-alpha.7.tgz*'
 cd sdk-alpha
-sha256sum --quiet -c z-stack-preview-0.1.0-alpha.6.tgz.sha256 # macOS: shasum -q -a 256 -c z-stack-preview-0.1.0-alpha.6.tgz.sha256
-tar -xzf z-stack-preview-0.1.0-alpha.6.tgz
+sha256sum --quiet -c z-stack-preview-0.1.0-alpha.7.tgz.sha256 # macOS: shasum -q -a 256 -c z-stack-preview-0.1.0-alpha.7.tgz.sha256
+tar -xzf z-stack-preview-0.1.0-alpha.7.tgz
 cd z-stack-preview
 sha256sum --quiet -c SHA256SUMS # macOS: shasum -q -a 256 -c SHA256SUMS
 ```
 
 The bundle's `.sha256` file checks only the preview download. The separate
-`SHA256SUMS-alpha.6` asset covers all five archives if you download the full set.
+`SHA256SUMS-alpha.7` asset covers all five archives if you download the full set.
 
-Without GitHub CLI, open the [release downloads](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.6),
-choose `z-stack-preview-0.1.0-alpha.6.tgz` and its `.sha256` file, and verify both checksum layers as above.
+Without GitHub CLI, open the [release downloads](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.7),
+choose `z-stack-preview-0.1.0-alpha.7.tgz` and its `.sha256` file, and verify both checksum layers as above.
 The [README](../README.md#run-the-published-preview) also provides curl commands.
 
 Continue from **inside the extracted bundle**, using its scripts and matching
@@ -117,9 +117,13 @@ posted to Next or a backend.
 ### Public testnet status
 
 SDK NU7 support is implemented; public testnet activated at block **4,465,026**.
-The missing acceptance check is a faucet-funded receive, outgoing send and mined
-confirmation through the selected light server. This is not an established SDK
-send failure.
+An external alpha.6 integration reported a **0.125 TAZ receive** from the Valar
+faucet at block **4,482,837** through ChainSafe. Its transaction ID was
+`bf822338ef93a10be7494b465d541010613f40a5b2452ebb3a5b0548f9d62a03`.
+The selected light server also returned that transaction during our follow-up.
+The integrator discarded the recovery phrase, so this did not exercise an outgoing
+public payment. Public proving, broadcast and mined send confirmation remain
+unverified; this is not an established SDK send failure.
 
 Checked on **2026-10-09**: ChainSafe and [Zecblock](https://testnet.zecblock.com/block/4465026)
 report activation hash `000089ba27100beede16d64b34e3d1b626b428cb7ee9fe6dcfdc217ce24e78af`;
@@ -131,8 +135,8 @@ Use the [Valar testnet faucet](https://faucet.testnet.valargroup.dev/). It sends
 from a shielded wallet to Zakura nodes and provides a transaction receipt. Check
 its availability and daily limits before requesting coins. On **2026-10-09**, its
 status reported a synced wallet, but our disposable-wallet claim returned HTTP 429:
-“The faucet has reached its daily payout cap.” No coins were sent, so public
-receive/send remains unverified. Respect the retry time; do not resubmit to bypass
+“The faucet has reached its daily payout cap.” That earlier claim sent no coins. The later external integration above received
+funds, but did not test sending. Respect the retry time; do not resubmit to bypass
 limits. Do not reuse a mainnet phrase for this test.
 
 ### Try a funded public walkthrough
@@ -140,12 +144,14 @@ limits. Do not reuse a mainnet phrase for this test.
 1. Scaffold and install the preview, then check the light server from the generated app:
 
    ```sh
-   npm run check:chain -- --height 4465026 --expected-hash 000089ba27100beede16d64b34e3d1b626b428cb7ee9fe6dcfdc217ce24e78af
+   npm run check:chain
    ```
 
    This reads one public block; it is not full consensus validation and does not
-   verify the faucet. Without `--expected-hash`, the checker compares Zexplorer
-   and the light server and reports a disagreement separately from availability errors.
+   verify the faucet. By default it checks the published NU7 activation hash at
+   4,465,026. Use `--compare-explorer --height <height>` for a separate provider
+   comparison; disagreement exits 1, lookup or usage errors exit 2. A different
+   height needs that explicit comparison or `--expected-hash <hash>`.
    `--server <HTTPS gRPC-Web URL>` selects your server. The checker ships in generated
    wallets; a built source checkout can also run `node scripts/check-testnet-chain.mjs`.
 2. Create a disposable wallet, save its phrase privately, and copy or scan its
@@ -158,7 +164,12 @@ limits. Do not reuse a mainnet phrase for this test.
    unavailable faucet, a pending receipt, an absent transaction and a wrong-chain
    payment are different outcomes. Stop and record that outcome if funding fails;
    do not treat an empty balance as a successful receive test.
-4. After shielded funds become spendable, follow [payment review and sending](#5-review-and-send)
+4. Incoming testnet funds require three confirmations by default. **Confirming**
+   shows funds still waiting; **Available** is the spendable balance. At the mined
+   block plus one the receive has 2/3 confirmations; scan the next block for 3/3.
+   Activity shows amounts and confirmation counts. The SDK exposes this policy in
+   `snapshot.confirmations` and waiting funds in `balance.totalPending`. After
+   shielded funds become spendable, follow [payment review and sending](#5-review-and-send)
    with a small amount. Keep the outgoing receipt and sync until confirmation.
    A self-send to the same disposable wallet is sufficient to exercise local proving
    and broadcast without giving another party funds. Reload and check identity/history.
@@ -180,8 +191,8 @@ To investigate a missing payment:
 1. Record its receipt’s transaction ID and mined height. Querying a public explorer
    can link that transaction to your IP; do not submit your phrase or viewing key.
 2. Check whether the receipt’s transaction is available on your light server.
-   Compare public block hashes with `npm run check:chain -- --height 4465026`
-   from the generated app. Heights alone do not identify a chain, and an explorer
+   Check the published NU7 anchor with `npm run check:chain` from the generated
+   app. Use `--compare-explorer --height 4465026` to compare public providers. Heights alone do not identify a chain, and an explorer
    disagreement does not identify the faucet’s node. If the payment is confirmed
    on a different chain, use an aligned server or funding source; changing the
    birthday cannot repair that.
@@ -211,7 +222,7 @@ Use a separate origin/profile or [your own namespace](STORAGE.md).
 ## 5. Review and send
 
 Continue only after the chain/funding check above, or in the isolated regtest
-fixture. The public faucet-funded path remains unverified; the source regtest fixture verifies this step.
+fixture. The public outgoing-send path remains unverified; the source regtest fixture verifies this step.
 
 Enter a shielded recipient address, a positive test-coin amount and an optional memo.
 Review the exact recipient, amount, memo and estimated fee. The demo freezes this
