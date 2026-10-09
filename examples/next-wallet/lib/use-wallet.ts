@@ -47,7 +47,7 @@ export function useWallet() {
   }, [phrase, busy]);
 
   function updateRuntime(wallet: Wallet) {
-    setRuntime(wallet.runtime.scanWorker ? (wallet.runtime.mode === "multi-thread" ? `${wallet.runtime.threads} threads` : "Single thread") : "Scan engine starts on sync");
+    setRuntime(wallet.runtime.scanner === "starting" ? "Starting scanner…" : wallet.runtime.mode === "multi-thread" ? `${wallet.runtime.threads} threads` : "Single thread");
     setSpending(wallet.hasSpendingSeed());
   }
   async function refresh(wallet: Wallet, value: WalletSnapshot) {
@@ -63,6 +63,7 @@ export function useWallet() {
     let disposed = false;
     let off: (() => void) | undefined;
     let offBroadcast: (() => void) | undefined;
+    let offRuntime: (() => void) | undefined;
     const onHide = () => {
       setPageVisible(false);
       sendOperation.current?.abort();
@@ -75,6 +76,7 @@ export function useWallet() {
     void lease.ready.then(async wallet => {
       if (disposed || !wallet) return;
       owner.current = wallet;
+      offRuntime = wallet.on("runtime", () => { if (!disposed) updateRuntime(wallet); });
       off = wallet.on("sync", value => {
         if (!disposed) setProgress(value.stage === "synced" ? 100 : value.percent);
       });
@@ -90,7 +92,7 @@ export function useWallet() {
       if (saved) await refresh(wallet, saved);
     }).catch(error => { if (!disposed) setStatus(safeError(error)); });
     return () => {
-      disposed = true; sendOperation.current?.abort(); owner.current = undefined; off?.(); offBroadcast?.();
+      disposed = true; sendOperation.current?.abort(); owner.current = undefined; off?.(); offBroadcast?.(); offRuntime?.();
       window.removeEventListener("pagehide", onHide);
       window.removeEventListener("pageshow", onShow); lease.release();
     };

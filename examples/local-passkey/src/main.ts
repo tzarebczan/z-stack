@@ -22,6 +22,7 @@ let saved = false;
 let protectedHere = false;
 let creating = false;
 let confirmCreation: (() => void) | undefined;
+let cancelCreation: (() => void) | undefined;
 
 function controls() {
   create.disabled = busy || saved || protectedHere;
@@ -72,9 +73,10 @@ async function start() {
         phrase.textContent = seed; phrase.hidden = false;
         status.textContent = "Save these words, then finish creating your wallet.";
         return new Promise<void>((resolve, reject) => {
-          const cleanup = () => { confirmCreation = undefined; preparation.signal.removeEventListener("abort", cancel); controls(); };
+          const cleanup = () => { confirmCreation = undefined; cancelCreation = undefined; preparation.signal.removeEventListener("abort", cancel); controls(); };
           const cancel = () => { cleanup(); clearPhrase(); reject(new DOMException("Creation cancelled", "AbortError")); };
           confirmCreation = () => { cleanup(); status.textContent = "Saving wallet…"; resolve(); };
+          cancelCreation = cancel;
           preparation.signal.addEventListener("abort", cancel, { once: true });
           controls();
           if (preparation.signal.aborted) cancel();
@@ -110,9 +112,9 @@ async function start() {
   window.addEventListener("beforeunload", event => { if (creating) { event.preventDefault(); event.returnValue = ""; } });
   sync.addEventListener("click", () => void run(async () => { await render(await wallet.sync()); }));
   window.addEventListener("pagehide", () => {
-    closed = true; abort.abort(); off(); clearPhrase();
-    void wallet.close().catch(() => {});
-  }, { once: true });
+    closed = true; abort.abort(); cancelCreation?.(); wallet.lock(); off(); clearPhrase();
+    // Do not interrupt the SDK's snapshot save by closing on pagehide.
+  });
   await run(async () => {
     const current = await wallet.load();
     protectedHere = await vault.exists(abort.signal);
@@ -122,5 +124,6 @@ async function start() {
       protectedHere ? "Only the local vault remains. Restore with your phrase in the browser example." : "Create a testnet wallet.";
   });
 }
-window.addEventListener("pagehide", () => { closed = true; abort.abort(); clearPhrase(); }, { once: true });
+window.addEventListener("pagehide", () => { closed = true; abort.abort(); cancelCreation?.(); clearPhrase(); });
+window.addEventListener("pageshow", event => { if (event.persisted) location.reload(); });
 void start().catch(() => { if (!closed) status.textContent = "Could not open wallet. Reload to try again."; });

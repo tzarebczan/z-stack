@@ -10,8 +10,9 @@ const acquire = walletLifetime(() => createWallet({ network: "testnet",
 export function WalletPanel() {
   const owner = useRef<Wallet>();
   const running = useRef(false);
+  const hasWallet = useRef(false);
   const confirmRecovery = useRef<(() => void) | undefined>();
-  const [pageEpoch, setPageEpoch] = useState(0);
+  const cancelRecovery = useRef<(() => void) | undefined>();
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Opening wallet…");
@@ -20,6 +21,7 @@ export function WalletPanel() {
   const [phrase, setPhrase] = useState("");
 
   useEffect(() => {
+    hasWallet.current = false;
     setReady(false); setBusy(false); setSnapshot(undefined); setIds([]); setPhrase(""); setStatus("Opening wallet…");
     const lease = acquire();
     let disposed = false;
@@ -33,6 +35,7 @@ export function WalletPanel() {
       const saved = await wallet.load();
       if (disposed) return;
       if (saved) {
+        hasWallet.current = true;
         setSnapshot(saved);
         const entries = await wallet.history(20);
         if (disposed) return;
@@ -48,15 +51,18 @@ export function WalletPanel() {
       disposed = true; owner.current = undefined;
       unsubscribe.forEach(off => off()); lease.release();
     };
-    const onHide = () => { setPhrase(""); setReady(false); release(); };
-    const onShow = (event: PageTransitionEvent) => { if (event.persisted) setPageEpoch(value => value + 1); };
+    const onHide = () => { cancelRecovery.current?.(); owner.current?.lock(); setPhrase(""); };
+    const onShow = (event: PageTransitionEvent) => {
+      if (event.persisted && !disposed && owner.current) setStatus(hasWallet.current
+        ? "Wallet opened. Spending is locked." : "Create a testnet wallet.");
+    };
     window.addEventListener("pagehide", onHide);
     window.addEventListener("pageshow", onShow);
     return () => {
       window.removeEventListener("pagehide", onHide);
       window.removeEventListener("pageshow", onShow); release();
     };
-  }, [pageEpoch]);
+  }, []);
 
   useEffect(() => {
     if (!phrase) return;
@@ -73,6 +79,7 @@ export function WalletPanel() {
     try {
       const next = await action(wallet);
       if (owner.current !== wallet) return;
+      hasWallet.current = true;
       setSnapshot(next);
       const entries = await wallet.history(20);
       if (owner.current === wallet) setIds(entries.map(entry => entry.txid));
@@ -97,12 +104,14 @@ export function WalletPanel() {
           return new Promise<void>((resolve, reject) => {
             const cleanup = () => {
               if (confirmRecovery.current === confirm) confirmRecovery.current = undefined;
+              if (cancelRecovery.current === cancel) cancelRecovery.current = undefined;
               preparation.signal.removeEventListener("abort", cancel);
               if (owner.current === wallet) setPhrase("");
             };
             const cancel = () => { cleanup(); reject(new DOMException("Creation cancelled", "AbortError")); };
             const confirm = () => { cleanup(); setStatus("Saving wallet…"); resolve(); };
             confirmRecovery.current = confirm;
+            cancelRecovery.current = cancel;
             preparation.signal.addEventListener("abort", cancel, { once: true });
             if (preparation.signal.aborted) cancel();
           });

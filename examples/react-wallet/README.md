@@ -13,7 +13,9 @@ cleanup; inspect the reopened wallet before attempting another spend.
 Creation displays recovery through optional SDK preparation and waits for explicit
 confirmation before committing. Unmount or pagehide before confirmation cancels
 creation; acknowledged wallets reopen locked. A page restored from the back/forward
-cache acquires a fresh owner. The sample asks for an offline copy; production apps
+cache keeps its locked owner. Pagehide locks and cancels unacknowledged creation;
+it does not close the worker during the SDK's best-effort snapshot flush. Unmount
+still releases the owner through the lifetime queue. The sample asks for an offline copy; production apps
 can implement verified encrypted backup in the same optional hook.
 This sample creates wallets; use the plain TypeScript example to try restore.
 
@@ -29,7 +31,7 @@ Follow the [build instructions](https://github.com/tzarebczan/z-stack/blob/main/
 Copy this directory outside the workspace, then run:
 
 ```sh
-npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.4.tgz
+npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.5.tgz
 npm run dev
 ```
 

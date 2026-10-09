@@ -76,7 +76,7 @@ test("custom relative artifacts propagate to UI and both workers with integrity 
       request(msg: Record<string, unknown>): Promise<Record<string, unknown>> {
         return new Promise((accept, reject) => {
           const timer = setTimeout(() => reject(new Error("worker fixture did not reply")), 5000);
-          onReply = (value) => { clearTimeout(timer); accept(value); };
+          onReply = (value) => { if (value.progress) return; clearTimeout(timer); accept(value); };
           scope.onmessage!(new MessageEvent("message", { data: msg }));
         });
       },

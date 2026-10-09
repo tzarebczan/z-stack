@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0-alpha.5
+
+- Add scanner runtime events and local engine download/verification/startup progress.
+- Lock on pagehide in wallet examples; preserve the worker for best-effort snapshot saves and back/forward-cache returns.
+- Clarify local diagnostic setup, faucet chain checks, missing explorer blocks and portable archive verification.
+
 ## 0.1.0-alpha.4
 
 - Stable `invalid_recovery_phrase` errors for restore and payment unlock, with fixed display copy; shared errors no longer prescribe native CLI commands or wiping wallet data.

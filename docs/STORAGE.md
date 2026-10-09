@@ -23,6 +23,13 @@ does not open storage, start a worker or initialize WASM. Start a wallet only in
 browser code after client mounting. `memoryWalletStorage()` is available for
 tests and disposable wallets; it is not a durable recovery backup.
 
+The SDK saves during wallet operations and attempts an additional snapshot flush
+on visibility hide/pagehide. That last flush is best-effort, not an unload-time
+durability guarantee. Lock on hide and clear recovery inputs; closing the client
+there can terminate the worker needed to serialize its snapshot. Use `close()`
+for an awaited teardown while the document is active. Back/forward-cache returns
+can keep the locked owner or reload; do not create a second owner in the same realm.
+
 ## Custom adapter contract
 
 Implement `WalletStorage.transaction(mode, body, options)` using the exported

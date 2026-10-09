@@ -7,6 +7,7 @@ import { WalletError, type UnlockPolicy, type WalletSnapshot } from "@z-stack/co
 import type { CreationPreparation, EngineClient } from "./engine";
 import { grpcWebTransport, httpLwdTransport, isLoopbackUrl, looksLikeLwdPipe, type BlockTransport } from "./lwd";
 import { initialize, wasmRuntime, type Network, type SdkInitOptions, type WasmRuntime } from "./runtime";
+import { observeEngineProgress, type EngineLoadProgress } from "./engine-progress";
 import { cancelWasmSync, createWasmClient, forgetWasmWallet, peekWasmWallet, type WasmClient, type WasmProgress } from "./wasm-client";
 import { useWalletStorage, abortable, walletStorageAvailable } from "./wallet-storage";
 import { type WalletStorage } from "./storage";
@@ -88,6 +89,8 @@ export type WalletOptions = {
   unlockPolicy?: Exclude<UnlockPolicy, "always">;
   /** Detailed scan progress (percent, ETA, stage), in addition to `wallet.on("sync")`. */
   onProgress?: (progress: WasmProgress) => void;
+  /** Local WASM download/verification/startup, including the background scanner. Released on close or failed creation. */
+  onLoadProgress?: (progress: EngineLoadProgress) => void;
   /**
    * Keep up with new blocks: check the tip every `intervalMs` (default 20 s)
    * while the page is visible, sync when behind, and catch up when the tab
@@ -112,7 +115,8 @@ export type Wallet = Omit<WasmClient, "baseUrl" | "health" | "probeSetup" | "sav
   /**
    * How the engine runs here: multi-threaded (cross-origin isolated) or
    * single-threaded. Live: the multicore scan worker comes up in the
-   * background, so read it after the first sync for the final answer.
+   * background. Subscribe to `on("runtime", handler)` for readiness and fallback;
+   * that subscription immediately supplies the current runtime, without polling.
    */
   readonly runtime: WasmRuntime;
   /** The wallet saved on this device, or null. Reads the configured local store only (no network). */
@@ -173,9 +177,12 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
   const claimed = claimWalletOwner();
   if (!claimed) throw new WalletError("busy", "Only one browser wallet client can own the engine. Close it before creating another.");
   const lease = claimed;
-  useWalletStorage(opts.storage);
-  let client: WasmClient;
+  let offLoadProgress = () => {};
+  let createdClient: WasmClient | undefined;
   try {
+    useWalletStorage(opts.storage);
+    const onLoadProgress = opts.onLoadProgress;
+    if (onLoadProgress) offLoadProgress = observeEngineProgress(onLoadProgress);
     if (!walletStorageAvailable()) throw new WalletError("wallet_db", "Local storage is unavailable. Supply a WalletStorage adapter before creating a browser wallet.");
     const runtime = await initialize({
       network: opts.network,
@@ -196,7 +203,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
     // `close` drops this. The wasm client keeps the function it was given, so
     // the in-flight sync must call through a binding we can clear.
     let reportProgress = opts.onProgress;
-    client = createWasmClient(
+    const client = createWasmClient(
       {
         requireExplicitReplacement: true,
         network: opts.network,
@@ -212,6 +219,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
       },
       (progress) => reportProgress?.(progress),
     );
+    createdClient = client;
     Object.defineProperty(client, "runtime", { get: () => wasmRuntime() ?? runtime, enumerable: true });
 
     let timer: ReturnType<typeof setInterval> | null = null;
@@ -277,6 +285,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
       closed = true;
       lock();
       reportProgress = undefined;
+      offLoadProgress();
       stopAutoSync();
       closing = client.dispose().finally(() => {
         if (releaseWalletOwner(lease)) useWalletStorage();
@@ -379,7 +388,10 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
     }) as unknown as Wallet;
     return wallet;
   } catch (error) {
-    if (releaseWalletOwner(lease)) useWalletStorage();
+    offLoadProgress();
+    try { await createdClient?.dispose(); }
+    catch { console.warn("wallet initialization cleanup failed"); }
+    finally { if (releaseWalletOwner(lease)) useWalletStorage(); }
     throw WalletError.fromUnknown(error);
   }
 }

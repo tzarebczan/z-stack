@@ -1,5 +1,6 @@
 import { WalletError, type InspectedAddress, type UaReceiverSet } from "@z-stack/core";
-import { canUseScanWorker, scanWorkerFailed, scanWorkerPresent, scanWorkerRuntime } from "./scan-host";
+import { canUseScanWorker, observeScanRuntime, scanWorkerFailed, scanWorkerPresent, scanWorkerRuntime } from "./scan-host";
+import { reportEngineProgress } from "./engine-progress";
 
 /**
  * WASM loading and key/address helpers. `index.ts` is the public surface;
@@ -7,7 +8,7 @@ import { canUseScanWorker, scanWorkerFailed, scanWorkerPresent, scanWorkerRuntim
  */
 
 /** Keep lockstep with `packages/sdk/package.json`. */
-export const SDK_VERSION = "0.1.0-alpha.4";
+export const SDK_VERSION = "0.1.0-alpha.5";
 
 export const LOCAL_ZAINO_GRPC = "http://127.0.0.1:8137";
 /** Development mainnet Zaino convention; configure your own endpoint explicitly. */
@@ -140,6 +141,8 @@ export type WasmRuntime = {
   simd: boolean;
   /** Compact-block apply runs in a dedicated Worker (UI thread stays free). */
   scanWorker?: boolean;
+  /** Background scanner startup; mode describes key bindings until it is ready. */
+  scanner?: "starting" | "ready" | "main-thread";
 };
 
 export interface Account {
@@ -205,6 +208,19 @@ let wasm: WasmBindings | null = null;
 let wasmPromise: Promise<WasmBindings> | null = null;
 let initOpts: SdkInitOptions = {};
 let runtime: WasmRuntime | null = null;
+const runtimeListeners = new Set<(runtime: WasmRuntime) => void>();
+export function observeWasmRuntime(handler: (runtime: WasmRuntime) => void): () => void {
+  runtimeListeners.add(handler);
+  return () => { runtimeListeners.delete(handler); };
+}
+function runtimeChanged(): void {
+  const current = wasmRuntime();
+  if (!current) return;
+  for (const handler of runtimeListeners) {
+    try { handler({ ...current }); } catch { console.warn("runtime event handler"); }
+  }
+}
+observeScanRuntime(runtimeChanged);
 
 function sabAvailable(): boolean {
   return (
@@ -229,8 +245,10 @@ async function loadSingleThread(): Promise<WasmBindings> {
     const base = initOpts.wasmBasePath?.replace(/\/+$/, "");
     const wasmUrl = base ? `${base}/z_wasm_bg.wasm` : new URL("./generated/z_wasm_bg.wasm", import.meta.url).href;
     const integrityUrl = base ? `${base}/integrity.json` : new URL("./generated/integrity.json", import.meta.url).href;
-    source = (await verifyWasmAt(wasmUrl, integrityUrl, { allowMissing: allowMissingBuiltWasm(!!base) })) ?? wasmUrl;
+    source = (await verifyWasmAt(wasmUrl, integrityUrl, { allowMissing: allowMissingBuiltWasm(!!base),
+      onProgress: progress => reportEngineProgress({ component: "keys", ...progress }) })) ?? wasmUrl;
   }
+  reportEngineProgress({ component: "keys", phase: "initialize" });
   await mod.default({ module_or_path: source });
   return mod;
 }
@@ -242,7 +260,9 @@ async function loadMultiThread(threads: number): Promise<WasmBindings | null> {
     const url = new URL("./generated-mt/z_wasm_bg.wasm", import.meta.url);
     const bytes = await verifyWasmAt(url.href, new URL("./generated-mt/integrity.json", import.meta.url).href, {
       allowMissing: allowMissingBuiltWasm(false),
+      onProgress: progress => reportEngineProgress({ component: "keys", ...progress }),
     });
+    reportEngineProgress({ component: "keys", phase: "initialize" });
     await mod.default({ module_or_path: bytes ?? url });
     if (typeof mod.initThreadPool !== "function") {
       return null;
@@ -251,6 +271,7 @@ async function loadMultiThread(threads: number): Promise<WasmBindings | null> {
     return mod;
   } catch {
     console.warn("multicore z-wasm failed; using single-thread");
+    reportEngineProgress({ component: "keys", phase: "fallback" });
     return null;
   }
 }
@@ -419,12 +440,16 @@ export async function initialize(opts: SdkInitOptions = {}): Promise<WasmRuntime
     }
   }
   await loadBindings();
+  reportEngineProgress({ component: "keys", phase: "ready" });
+  runtimeChanged();
+  const startScanner = !initOpts.wasmModule && canUseScanWorker() && !scanWorkerPresent() && !scanWorkerFailed();
+  if (!scanWorkerPresent() && !startScanner) reportEngineProgress({ component: "scanner", phase: "ready" });
   const { prewarmProveWorker, prewarmOrchardProvingKey, startScanWorker } = await import("./wasm-client");
   // close() retires the scanner, while the verified page bindings remain cached.
   // A new owner needs a fresh scanner to hydrate its saved wallet. Reuse an
   // attached/starting worker; a failed generation still requires explicit load
   // recovery rather than replaying the operation that observed its failure.
-  if (!initOpts.wasmModule && canUseScanWorker() && !scanWorkerPresent() && !scanWorkerFailed()) {
+  if (startScanner) {
     void startScanWorker({ threads: resolveThreadCount(),
       preferMulticore: initOpts.preferMulticore !== false && !initOpts.wasmBasePath && sabAvailable(),
       wasmBasePath: initOpts.wasmBasePath, regtestNu63Height: initOpts.regtestNu63Height, regtestNu7Height: initOpts.regtestNu7Height });
@@ -469,7 +494,9 @@ function simdFromCaps(mod: WasmBindings): boolean {
 export function wasmRuntime(): WasmRuntime | null {
   // Restore can replace a still-starting worker. Report the current generation
   // rather than retaining the initial worker's eventual result.
-  return scanWorkerRuntime() ?? runtime;
+  const scanner = scanWorkerRuntime();
+  if (scanner) return { ...scanner, scanner: "ready" };
+  return runtime ? { ...runtime, scanner: scanWorkerPresent() ? "starting" : "main-thread" } : null;
 }
 
 export function generateMnemonic(): string {

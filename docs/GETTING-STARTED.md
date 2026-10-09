@@ -12,7 +12,7 @@ check and the separate source-checkout regtest path.
 
 ## 1. Get matching archives
 
-The published **alpha.4** preview includes NU7 support. Use Node 22.18+ and npm;
+The published **alpha.5** preview includes NU7 support. Use Node 22.18+ and npm;
 no Rust toolchain or npm account is needed for these built archives. The SDK
 archive includes compiled single-threaded and threaded WASM engines, bindings,
 workers, integrity manifests, and bundled core and passkey helpers. Building
@@ -22,13 +22,17 @@ per-file lines (including the offline API files); a zero exit status means the
 check passed. Mismatches still print an error:
 
 ```sh
-gh release download v0.1.0-alpha.4 --repo tzarebczan/z-stack --dir sdk-alpha
+gh release download v0.1.0-alpha.5 --repo tzarebczan/z-stack --dir sdk-alpha
 cd sdk-alpha
-sha256sum --quiet -c SHA256SUMS-alpha.4 # macOS: shasum -q -a 256 -c SHA256SUMS-alpha.4
-tar -xzf z-stack-preview-0.1.0-alpha.4-*.tgz
+sha256sum --quiet -c SHA256SUMS-alpha.5 # macOS: shasum -q -a 256 -c SHA256SUMS-alpha.5
+tar -xzf z-stack-preview-0.1.0-alpha.5-*.tgz
 cd z-stack-preview
 sha256sum --quiet -c SHA256SUMS # macOS: shasum -q -a 256 -c SHA256SUMS
 ```
+
+The outer checksum list covers all five release archives. `gh release download`
+fetches the whole set; for manual downloads, save every named archive in one
+directory before checking it. A partial download reports missing files.
 
 Continue from **inside the extracted bundle**, using its scripts and matching
 archives. Do not mix its packages with the current source scaffolder. Checksums
@@ -78,8 +82,8 @@ about 10.9 MB for key/UI bindings and the single-thread fallback, plus 19.2 MB
 for the threaded scanner. Transfers depend on host compression and cache headers.
 These are two engine variants. Each initialization reuses its integrity-verified
 bytes; workers can request the same cached asset. The Vite demo
-shows `wallet.runtime`; its final scanner mode is available after loading a wallet
-or syncing. Set `VITE_ZSTACK_MULTICORE=false` before startup to use only the
+shows engine download/startup progress and subscribes to `wallet.on("runtime")`
+so scanner readiness updates without a click or polling. Set `VITE_ZSTACK_MULTICORE=false` before startup to use only the
 single-thread engine, reducing download size at the cost of parallel scanning.
 Applications can use the SDK's `preferMulticore: false` option. See
 [engine loading](INTEGRATION.md#engine-loading). See [the browser matrix](SUPPORT.md)

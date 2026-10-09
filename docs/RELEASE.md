@@ -1,6 +1,6 @@
 # Package builds and verification
 
-The current preview is [`0.1.0-alpha.4`](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.4),
+The current preview is [`0.1.0-alpha.5`](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.5),
 with NU7 support and downloadable archives. Alpha.1 and alpha.2 predate NU7. Packages are not published to npm or Cargo. The browser SDK includes
 production WASM engines, so an app consuming built packages does not need Rust. See the
 [walkthrough](GETTING-STARTED.md) and [support limits](SUPPORT.md).
@@ -154,15 +154,15 @@ pnpm pack:sdk
 pnpm pack:base
 pnpm bundle:preview
 cd artifacts
-sha256sum z-stack-core-0.1.0-alpha.4.tgz z-stack-passkey-0.1.0-alpha.4.tgz \
-  z-stack-sdk-0.1.0-alpha.4.tgz z-stack-base-0.1.0-alpha.4.tgz \
-  z-stack-preview-0.1.0-alpha.4-*.tgz > SHA256SUMS-alpha.4
-sha256sum --quiet -c SHA256SUMS-alpha.4
-# macOS: use shasum -a 256 in place of sha256sum for both commands.
+sha256sum z-stack-core-0.1.0-alpha.5.tgz z-stack-passkey-0.1.0-alpha.5.tgz \
+  z-stack-sdk-0.1.0-alpha.5.tgz z-stack-base-0.1.0-alpha.5.tgz \
+  z-stack-preview-0.1.0-alpha.5-*.tgz > SHA256SUMS-alpha.5
+sha256sum --quiet -c SHA256SUMS-alpha.5
+# macOS: generate with shasum -a 256; verify with shasum -q -a 256 -c SHA256SUMS-alpha.5.
 ```
 
 Use a directory with exactly one preview bundle for this version. Upload these
-five archives and the checksums to the prerelease tagged `v0.1.0-alpha.4`, targeting
+five archives and the checksums to the prerelease tagged `v0.1.0-alpha.5`, targeting
 the verified commit. Download them again and compare all hashes before publishing.
 Scaffold an app from the downloaded bundle as the final acceptance check. Publishing
 a GitHub prerelease does not publish to npm or Cargo. Keep source tags and signed

@@ -24,6 +24,7 @@
 export { indexedDbWalletStorage, memoryWalletStorage, type WalletStorage, type WalletStorageTransaction } from "./storage";
 
 export { createWallet, forgetWallet, lightServer, type Wallet, type WalletOptions, type WalletImportOptions, type WalletCreation, type WalletCreationPreparation, type WalletCreateOptions, type WalletUnlocker, type WalletUnlockRequest } from "./create-wallet";
+export type { EngineLoadProgress } from "./engine-progress";
 
 export {
   SDK_VERSION,

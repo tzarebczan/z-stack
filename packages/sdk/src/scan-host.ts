@@ -12,6 +12,7 @@ import {
   type HardwareWalletHandle,
 } from "./hardware-ops";
 import { trackScanRevision } from "./scan-revision";
+import { reportEngineProgress } from "./engine-progress";
 
 export type HardwareAccountInput = {
   device: "keystone" | "ledger";
@@ -352,6 +353,16 @@ let lastOpts: { threads: number; preferMulticore: boolean; wasmBasePath?: string
 let currentOp = "";
 let failedWorker = false;
 let removeWorkerListeners: (() => void) | null = null;
+const runtimeListeners = new Set<() => void>();
+export function observeScanRuntime(handler: () => void): () => void {
+  runtimeListeners.add(handler);
+  return () => { runtimeListeners.delete(handler); };
+}
+function runtimeChanged(): void {
+  for (const handler of runtimeListeners) {
+    try { handler(); } catch { console.warn("runtime event handler"); }
+  }
+}
 
 const RESTART_FOR = new Set(["applyBlob", "fromSnapshot", "create", "fromUfvk", "fromHardware"]);
 let attaching: Promise<(ScanRuntime & { scanWorker: true }) | null> | null = null;
@@ -487,6 +498,7 @@ function retireScanWorker(reason = "scan worker restarted", failed = false): voi
   attaching = null;
   attachTail = Promise.resolve(false);
   seq = 1;
+  runtimeChanged();
 }
 
 /** A failed generation can be recovered by a later explicit saved-wallet load. */
@@ -591,8 +603,16 @@ async function attachScanWorkerInner(
   failedWorker = false;
   const generation = rpcGen;
   const current = () => worker === spawned && generation === rpcGen;
+  const failCurrent = (reason: string) => {
+    if (!current()) return;
+    retireScanWorker(reason, true);
+    if (worker !== null) return;
+    reportEngineProgress({ component: "scanner", phase: "fallback" });
+    // An observer may start a successor; never announce readiness for it.
+    if (worker === null) reportEngineProgress({ component: "scanner", phase: "ready" });
+  };
   const onFailure = () => {
-    if (current()) retireScanWorker(`scan worker ${currentOp || "idle"} failed`, true);
+    failCurrent(`scan worker ${currentOp || "idle"} failed`);
   };
   spawned.addEventListener("error", onFailure);
   spawned.addEventListener("messageerror", onFailure);
@@ -600,6 +620,13 @@ async function attachScanWorkerInner(
     spawned.removeEventListener("error", onFailure);
     spawned.removeEventListener("messageerror", onFailure);
   };
+  // Publish attachTail before calling observers that can retire this generation.
+  await Promise.resolve();
+  if (!current()) return null;
+  runtimeChanged();
+  if (!current()) return null;
+  reportEngineProgress({ component: "scanner", phase: "initialize" });
+  if (!current()) return null;
   try {
     const data = await rpc(
       "init",
@@ -612,6 +639,14 @@ async function attachScanWorkerInner(
       },
       undefined,
       90_000,
+      (data) => {
+        if (!current()) return;
+        const phase = data.phase;
+        if (phase !== "download" && phase !== "verify" && phase !== "initialize" && phase !== "fallback") return;
+        reportEngineProgress({ component: "scanner", phase,
+          ...(typeof data.loadedBytes === "number" && Number.isSafeInteger(data.loadedBytes) && data.loadedBytes >= 0 ? { loadedBytes: data.loadedBytes } : {}),
+          ...(typeof data.totalBytes === "number" && Number.isSafeInteger(data.totalBytes) && data.totalBytes > 0 ? { totalBytes: data.totalBytes } : {}) });
+      },
     );
     if (!current()) return null;
     workerRuntime = {
@@ -623,10 +658,13 @@ async function attachScanWorkerInner(
       simd: !!data.simd,
       scanWorker: true,
     };
+    runtimeChanged();
+    if (!current()) return null;
+    reportEngineProgress({ component: "scanner", phase: "ready" });
     return { ...workerRuntime, scanWorker: true };
   } catch {
     if (current()) console.warn("scan worker failed; apply stays on this thread");
-    if (current()) retireScanWorker("scan worker init failed", true);
+    failCurrent("scan worker init failed");
     return null;
   }
 }

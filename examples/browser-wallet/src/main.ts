@@ -2,6 +2,7 @@ import { classifyHistory, createWallet, validateBirthdayInput, formatZatoshis, W
 import "./style.css";
 import { attachBase } from "./base";
 import { connection } from "./connection";
+import { engineLoading } from "./engine-loading";
 import { reviewSend, recheckReview, refreshReceipt, type SendReview, type SendReceipt } from "./send";
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -26,6 +27,7 @@ const removeConfirm = element<HTMLInputElement>("remove-confirm");
 const restoreForm = element<HTMLFormElement>("restore-form");
 
 async function start() {
+  const onLoadProgress = engineLoading(element("engine-progress"), element<HTMLProgressElement>("engine-progress-bar"));
   const wallet = await createWallet({
     ...connection,
     memoFetch: "on-demand",
@@ -34,6 +36,7 @@ async function start() {
     // An example makes network work explicit; production apps may enable autoSync.
     autoSync: false,
     threads: 2,
+    onLoadProgress,
   });
 
   const unit = connection.network === "testnet" ? "TAZ" : "ZEC";
@@ -46,10 +49,11 @@ async function start() {
   element("chain-warning").hidden = connection.network !== "testnet";
   function showRuntime() {
     const runtime = wallet.runtime;
-    element("runtime").textContent = runtime.mode === "multi-thread"
+    element("runtime").textContent = runtime.scanner === "starting" ? "Starting scanner…" : runtime.mode === "multi-thread"
       ? `Threaded scanner · ${runtime.threads} threads` : "Single-thread engine";
   }
   showRuntime();
+  wallet.on("runtime", () => showRuntime());
   let review: SendReview | undefined;
   let receipt: SendReceipt | undefined;
   let sending: AbortController | undefined;
@@ -64,18 +68,19 @@ async function start() {
   const reviewPanel = element("send-review");
   const receiptPanel = element("send-receipt");
   const cancelSend = element<HTMLButtonElement>("cancel-send");
-  const offBroadcast = wallet.on("broadcast", () => {
+  wallet.on("broadcast", () => {
     if (!sending) return;
     cancelSend.hidden = true;
     sendStatus.textContent = "Submitting payment…";
   });
   let creating = false;
   let confirmRecovery: (() => void) | undefined;
+  let cancelRecovery: (() => void) | undefined;
 
-  const offSync = wallet.on("sync", progress => {
+  wallet.on("sync", progress => {
     status.textContent = progress.stage === "synced" ? "Up to date" : `Syncing · ${Math.round(progress.percent ?? 0)}%`;
   });
-  const offBalance = wallet.on("balance", value => {
+  wallet.on("balance", value => {
     balance.textContent = `${formatZatoshis(BigInt(value.availableZat))} ${unit}`;
   });
 
@@ -299,9 +304,10 @@ async function start() {
           hidePhrase.hidden = false;
           status.textContent = "Save these words, then finish creating your wallet.";
           return new Promise<void>((resolve, reject) => {
-            const cleanup = () => { confirmRecovery = undefined; preparation.signal.removeEventListener("abort", cancel); clearPhrase(); };
+            const cleanup = () => { confirmRecovery = undefined; cancelRecovery = undefined; preparation.signal.removeEventListener("abort", cancel); clearPhrase(); };
             const cancel = () => { cleanup(); reject(new DOMException("Creation cancelled", "AbortError")); };
             confirmRecovery = () => { cleanup(); status.textContent = "Saving wallet…"; resolve(); };
+            cancelRecovery = cancel;
             preparation.signal.addEventListener("abort", cancel, { once: true });
             if (preparation.signal.aborted) cancel();
           });
@@ -405,15 +411,21 @@ async function start() {
   });
 
   window.addEventListener("pagehide", () => {
-    identity = undefined; disposeBase();
+    disposeBase(); cancelRecovery?.(); wallet.lock();
     clearPhrase();
     words.value = "";
-    offSync();
-    offBalance();
-    offBroadcast();
     sending?.abort();
-    void wallet.close().catch(() => {});
-  }, { once: true });
+    // Keep the scanner alive for the SDK's best-effort hide save and bfcache.
+    // close() belongs to an explicit app teardown while the document is alive.
+  });
+  window.addEventListener("pageshow", event => {
+    if (!event.persisted) return;
+    disposeBase = attachBase(wallet, perform, () => identity);
+    // The pending action owns the view refresh. Do not replace its status with
+    // a busy refusal on return from the back/forward cache.
+    if (busy) return;
+    void run(async () => { const saved = await wallet.load(); if (saved) await render(saved); else clearLocalWalletView(); });
+  });
 
   await run(async () => {
     const saved = await wallet.load();
