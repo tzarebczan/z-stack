@@ -58,11 +58,15 @@ do not substitute a newer crypto engine during routine packaging.
 ## NU7 acceptance
 
 Use [Zakura 1.6.0](https://github.com/zakura-core/zakura/releases/tag/v1.6.0)
-or a compatible later validator and a matching light server. The stock Zaino
-0.10.0 fixture cannot serve NU7; use the digest-pinned container or build the
-[NU7 light-server fixture](../infra/nu7/README.md) and set `ZAINOD` explicitly.
-For the container, set `Z_STACK_NU7_ZAINO_IMAGE` as documented there and omit `ZAINOD`. Verify downloaded binaries against their release
-checksums. Choose a separate local chain directory:
+or a compatible later validator and a matching light server. The official
+Zaino 0.10.1 image passed `ironwood_turnstile_shield_send` before NU7, but rejects
+the published NU7 branch ID on this fixture; see the
+[official release check](../infra/nu7/README.md#official-release-check).
+Use the digest-pinned [NU7 container](../infra/nu7/README.md#download-the-container)
+with `Z_STACK_NU7_ZAINO_IMAGE`, or build the adapted server and set `ZAINOD`.
+Verify downloaded binaries against their release checksums. A local server is
+optional for SDK integration and separate from the prebuilt wallet WASM.
+For a source-built server, choose a separate local chain directory and run:
 
 ```sh
 export ZAKURAD=/path/to/zakurad

@@ -57,7 +57,7 @@ separate from the SDK dependency graph and is not a production server release.
 `z-engine` defaults to native SQLite/networking. `z-wasm` disables those defaults
 and enables browser-safe scan, transaction, proving, and hardware features.
 Threaded WASM adds `multicore`; Sapling proving parameter files remain separate.
-The npm SDK includes prebuilt engines, so browser integrators do not need Cargo
+The SDK archive includes prebuilt engines, so browser integrators do not need Cargo
 or local patches. Direct Rust consumers are a separate integration path.
 
 Cargo reads `[patch.crates-io]` from the **top-level** workspace. Depending on

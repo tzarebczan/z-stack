@@ -1,16 +1,38 @@
 # NU7 light-server fixture
 
 This is optional local test infrastructure, not a wallet dependency or a
-production deployment. The stock Zaino 0.10.0 fixture rejects the NU7 branch ID.
-Zaino 0.10.1 still uses Zebra's placeholder branch ID; the adaptation here uses
-published Zakura node and Common crates instead. Use it with Zakura 1.6.0 to
-run the [NU7 acceptance checks](../../docs/RELEASE.md#nu7-acceptance).
+production deployment. The official Zaino 0.10.1 image passed the funded
+`ironwood_turnstile_shield_send` test before NU7 on Zakura 1.6.0, but its indexer
+rejects the published consensus branch ID after activation. The adaptation here
+uses published Zakura node and Common crates instead. Use it with Zakura 1.6.0 to run the
+[NU7 acceptance checks](../../docs/RELEASE.md#nu7-acceptance).
+
+The prebuilt wallet WASM is distributed in the
+[SDK release archives](../../docs/INTEGRATION.md#install). Browser apps using a
+compatible hosted gRPC-Web provider do not need this container or a local node.
 
 The patch pins Zaino source commit
 `3244a74bb09fa6a09a4b2deeb6be53bab0890747` (release `0.10.1`), switches dependency
 aliases, adapts RPC response types and retains the resulting Cargo lockfile.
 It changes no cryptographic or consensus implementation. The light server is
 built with local unencrypted traffic support; bind it only to loopback.
+
+## Official release check
+
+The [official 0.10.1 release](https://github.com/zingolabs/zaino/releases/tag/0.10.1)
+lists `zingodevops/zaino:0.10.1-no-tls`. We tested its Linux amd64 image at digest
+`sha256:c8428a39d510fd59a9182a5e19cf473d6af6a4b6a672aff8b1a690e9c23c17b9`
+against a fresh Zakura 1.6.0 regtest chain with NU6.3 at 150 and NU7 at 250.
+The image reports `zainod 0.10.1` and the source revision pinned above.
+
+Funded Orchard, Ironwood and turnstile transfers passed before NU7. After the
+validator mined through height 251, the official indexer reported
+`deserialize: parse error: invalid consensus branch id`; its wallet-facing tip
+remained at 155 and the NU7 acceptance test timed out. Switching to the patched
+image with a fresh indexer database on the same validator chain passed the funded
+NU7 shielded roundtrip. A running process or healthy container is not sufficient
+to establish chain compatibility. This result applies to that image and
+activation schedule; it does not claim every Zaino release or network is affected.
 
 ## Download the container
 
