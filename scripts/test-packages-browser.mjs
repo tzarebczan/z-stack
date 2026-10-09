@@ -77,6 +77,12 @@ if (savedAgain?.unifiedAddress !== current!.unifiedAddress) throw new Error('new
 if ((await reopened.history()).length !== 0) throw new Error('reopened empty chain invented history');
 if (reopened.hasSpendingSeed()) throw new Error('new owner retained spending seed');
 const reopenedMode = reopened.runtime.mode;
+// Exercise optional pending-aware removal in every browser/runtime, then recover identity.
+await reopened.forget({ pending: 'reject' });
+if (await reopened.load()) throw new Error('guarded empty-wallet deletion retained a saved wallet');
+await reopened.restoreUfvk(savedAgain!.ufvk!, { birthday: 1 });
+tip = 1; await reopened.sync(); tip = 2; await reopened.sync();
+if ((await reopened.getWallet()).unifiedAddress !== current!.unifiedAddress) throw new Error('guarded deletion/recovery changed identity');
 await reopened.close();
 Object.assign(window, { packageCheck: { ...checked, reopened: reopenedMode === checked.mode } });
 Object.assign(window, { packageReplace: async () => {
@@ -164,7 +170,7 @@ export async function verifyBrowserPackages(app, browsers, browserName = "chromi
   }
 }
 
-async function verifyExampleRecovery(app, chromium) {
+export async function verifyExampleRecovery(app, chromium) {
   const mainPath = join(app, "src", "main.ts");
   const main = readFileSync(mainPath, "utf8");
   // Preserve the example's UI code. Only its SDK factory is wrapped in this
@@ -173,9 +179,14 @@ async function verifyExampleRecovery(app, chromium) {
   writeFileSync(join(app, "src", "recovery-fixture.ts"), `
     import { createWallet as realCreateWallet, type BlockTransport } from '@z-stack/sdk';
     export * from '@z-stack/sdk';
+    declare global { interface Window { fixtureTipRequests?: number; fixtureTipUnavailable?: boolean; fixtureForgetWallet?: () => Promise<void>; } }
     export async function createWallet(options: Parameters<typeof realCreateWallet>[0]) {
       const transport: BlockTransport = {
-        kind: 'recovery-test', label: 'Offline recovery fixture', tip: async () => 1,
+        kind: 'recovery-test', label: 'Offline recovery fixture', tip: async () => {
+          Object.assign(window, {fixtureTipRequests: (window.fixtureTipRequests ?? 0) + 1});
+          if (window.fixtureTipUnavailable) throw new Error('grpc/transport SYNTHETIC_PRIVATE_PROVIDER_CONTEXT');
+          return 1;
+        },
         blocks: async (start, end) => {
           if (start !== 1 || end !== 1) throw new Error('unexpected fixture range');
           const metadata = [8,0,16,0,24,0];
@@ -184,6 +195,7 @@ async function verifyExampleRecovery(app, chromium) {
         },
       };
       const wallet = await realCreateWallet({ ...options, network: "regtest", server: transport, prewarmProvingKey: false });
+      Object.assign(window, {fixtureForgetWallet: () => wallet.forget({passkey:true})});
       let failHistory = true;
       return new Proxy(wallet, {
         get(target, key) {
@@ -210,7 +222,8 @@ async function verifyExampleRecovery(app, chromium) {
   let browser;
   try {
     browser = await launchBrowser(chromium, { headless: true });
-    const page = await browser.newPage();
+    const context = await browser.newContext();
+    const page = await context.newPage();
     const errors = [], diagnostics = [];
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => diagnostics.push(message.text()));
@@ -231,7 +244,7 @@ async function verifyExampleRecovery(app, chromium) {
     await page.locator("#words").fill("not a valid recovery phrase");
     await page.locator("#birthday").fill("1");
     await page.locator("#restore").click();
-    await page.locator("#status").filter({hasText:"Something went wrong."}).waitFor();
+    await page.locator("#status").filter({hasText:"Those words are not a valid recovery phrase."}).waitFor();
     assert.equal(await page.locator("#words").inputValue(), "not a valid recovery phrase", "invalid restore erased its input");
     await page.locator("#clear-words").click();
     await page.locator("#create").click();
@@ -255,10 +268,12 @@ async function verifyExampleRecovery(app, chromium) {
     assert.equal(await page.locator("#address").textContent(), "", "unconfirmed creation persisted on reload");
     await page.locator("#create").click();
     await page.locator("#phrase").waitFor({state:"visible"});
-    assert.equal((await page.locator("#phrase").textContent()).trim().split(/\s+/).length, 24);
+    const confirmedPhrase = (await page.locator("#phrase").textContent()).trim();
+    assert.equal(confirmedPhrase.split(/\s+/).length, 24);
     await page.locator("#hide-phrase").click();
     await page.waitForFunction(() => !document.getElementById("sync").disabled);
-    assert.ok(await page.locator("#address").textContent(), "confirmed wallet creation did not complete");
+    const originalAddress = await page.locator("#address").textContent();
+    assert.ok(originalAddress, "confirmed wallet creation did not complete");
     assert.equal(await page.locator("#phrase").textContent(), "");
     assert.equal(await page.locator("#phrase").isVisible(), false);
     assert.equal(await page.locator("#review-send").isDisabled(), true);
@@ -269,9 +284,15 @@ async function verifyExampleRecovery(app, chromium) {
     await page.locator("#copy-address").click();
     await page.locator("#copy-status").filter({hasText:"Could not copy"}).waitFor();
     assert.equal(await page.locator("#create").isDisabled(), true);
-    await page.locator("#words").fill(phrase.trim());
-    await page.locator("#birthday").fill("1");
-    await page.locator("#restore").click();
+    assert.equal(await page.locator("#restore-form").isVisible(), false, "restore stays hidden with a saved wallet");
+    assert.equal(await page.locator("#create-panel").isVisible(), false);
+    assert.equal(await page.locator("#remove-panel").isVisible(), true);
+    // The defensive refusal still protects programmatic or stale submissions.
+    await page.evaluate(phrase => {
+      document.querySelector("#words").value = phrase;
+      document.querySelector("#birthday").value = "1";
+      document.querySelector("#restore-form").dispatchEvent(new Event("submit", {bubbles:true,cancelable:true}));
+    }, phrase.trim());
     await page.waitForFunction(() => document.getElementById("status").textContent.includes("already saved"));
     assert.equal(await page.locator("#words").inputValue(), phrase.trim(), "refused restore erased the phrase");
     assert.equal(await page.locator("#birthday").inputValue(), "1");
@@ -280,15 +301,20 @@ async function verifyExampleRecovery(app, chromium) {
     await page.locator("#send-to").fill(await page.locator("#address").textContent());
     await page.locator("#send-amount").fill("0.1");
     await page.locator("#review-send").click();
-    await page.locator("#status").filter({hasText:"Not enough shielded funds"}).waitFor();
+    await page.locator("#send-status").filter({hasText:"Not enough shielded funds"}).waitFor();
     await page.locator("#send-amount").fill("invalid");
     await page.locator("#review-send").click();
-    await page.locator("#status").filter({hasText:"Enter a valid amount"}).waitFor();
-    assert.ok(!(await page.locator("#status").textContent()).includes("ZEC"));
+    await page.locator("#send-status").filter({hasText:"Enter a valid amount"}).waitFor();
+    assert.ok(!(await page.locator("#send-status").textContent()).includes("ZEC"));
+    await page.locator("#send-to").fill("not-an-address");
+    await page.locator("#send-amount").fill("0.01");
+    await page.locator("#review-send").click();
+    await page.locator("#send-status").filter({hasText:"not a valid Zcash destination"}).waitFor();
+    assert.equal(await page.locator("#status").textContent(), "");
     await page.locator("#send-to").fill("zcash:fixture");
     await page.locator("#send-amount").fill("0.1");
     await page.locator("#review-send").click();
-    await page.locator("#status").filter({hasText:"This form does not accept zcash:"}).waitFor();
+    await page.locator("#send-status").filter({hasText:"This form does not accept zcash:"}).waitFor();
     await page.locator("#send-to").fill("");
     await page.locator("#review-send").click();
     assert.equal(await page.locator("#status").textContent(), "");
@@ -298,7 +324,59 @@ async function verifyExampleRecovery(app, chromium) {
     assert.ok(await page.locator("#address").textContent(), "the created wallet did not persist through reload");
     await page.setViewportSize({width:390,height:844});
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "wallet example overflows mobile viewport");
+    // Local removal is explicit, clears all stale form/receipt state and survives reload.
+    await page.locator("#remove-panel summary").click();
+    assert.equal(await page.locator("#remove").isDisabled(), true);
+    await page.locator("#remove-confirm").check();
+    await page.locator("#remove").click();
+    await page.locator("#status").filter({hasText:"Local wallet removed."}).waitFor();
+    assert.equal(await page.locator("#words").inputValue(), "");
+    assert.equal(await page.locator("#birthday").inputValue(), "");
+    assert.equal(await page.locator("#send-to").inputValue(), "");
+    assert.equal(await page.locator("#address").textContent(), "");
+    assert.equal(await page.locator("#restore-form").isVisible(), true);
+    assert.equal(await page.locator("#send-panel").isVisible(), false);
+    await page.reload();
+    await page.locator("#status").filter({hasText:"Create a wallet or restore one."}).waitFor();
+    // Automatic creation needs a server; numeric creation does not.
+    await page.evaluate(() => { window.fixtureTipUnavailable = true; window.fixtureTipRequests = 0; });
+    await page.locator("#create").click();
+    await page.locator("#status").filter({hasText:"Automatic birthday needs the light server"}).waitFor();
+    assert.equal(await page.locator("#phrase").isVisible(), false);
+    assert.equal(await page.evaluate(() => window.fixtureTipRequests), 1);
+    await page.locator("#create-birthday").fill("0"); await page.locator("#create").click();
+    assert.equal(await page.locator("#create-birthday").evaluate(input => input.checkValidity()), false);
+    await page.locator("#create-birthday").fill("1");
+    await page.locator("#create").click(); await page.locator("#phrase").waitFor({state:"visible"});
+    assert.equal(await page.evaluate(() => window.fixtureTipRequests), 1, "explicit height fetched the tip");
+    await page.locator("#hide-phrase").click(); await page.waitForFunction(() => !document.getElementById("sync").disabled);
+    await page.reload(); await page.waitForFunction(() => !document.getElementById("sync").disabled);
+    assert.equal(await page.locator("#restore-form").isVisible(), false);
+    await page.locator("#remove-panel summary").click(); await page.locator("#remove-confirm").check(); await page.locator("#remove").click();
+    await page.locator("#status").filter({hasText:"Local wallet removed."}).waitFor();
+    await page.locator("#words").fill(confirmedPhrase); await page.locator("#birthday").fill("1"); await page.locator("#restore").click();
+    await page.locator("#status").filter({hasText:"Wallet restored."}).waitFor();
+    assert.equal(await page.locator("#words").inputValue(), "");
+    assert.equal(await page.locator("#restore-form").isVisible(), false);
+    await page.reload(); await page.waitForFunction(() => !document.getElementById("sync").disabled);
+    assert.equal(await page.locator("#address").textContent(), originalAddress, "restore recovered a different identity");
+    assert.ok(diagnostics.every(message => !message.includes("SYNTHETIC_PRIVATE_PROVIDER_CONTEXT")), "provider context leaked");
     assert.ok(diagnostics.every(message => !message.includes("injected activity read failure")), "raw provider error reached the console");
+    // A competing realm removes the wallet after this page rendered it.
+    const other = await page.context().newPage();
+    try {
+      await other.goto(page.url());
+      await other.waitForFunction(() => !document.getElementById("sync").disabled);
+      await other.evaluate(() => window.fixtureForgetWallet());
+      await page.locator("#remove-panel summary").click();
+      await page.locator("#remove-confirm").check(); await page.locator("#remove").click();
+      await page.locator("#status").filter({hasText:"Local wallet removed."}).waitFor();
+      assert.equal(await page.locator("#address").textContent(), "", "competing deletion left a stale receive address");
+      assert.equal(await page.locator("#send-panel").isVisible(), false);
+      assert.equal(await page.locator("#restore-form").isVisible(), true);
+      assert.equal(await page.locator("#history li").count(), 0);
+      assert.equal(await page.locator("#sync").isDisabled(), true);
+    } finally { await other.close(); }
     assert.deepEqual(errors, [], "example recovery failure escaped its UI handler");
     console.log("Installed example: confirmation precedes persistence; unconfirmed reload cancels; confirmed wallet survives activity-read failure/retry/reload");
   } finally {

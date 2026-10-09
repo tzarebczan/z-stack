@@ -98,7 +98,7 @@ export type WalletOptions = {
   prewarmProvingKey?: boolean;
 } & Pick<SdkInitOptions, "threads" | "preferMulticore" | "regtestNu63Height" | "regtestNu7Height" | "wasmBasePath">;
 
-export type Wallet = Omit<WasmClient, "baseUrl" | "health" | "probeSetup" | "saveSetup" | "dispose" | "create" | "restore" | "restoreUfvk" | "restoreHardware" | "attachSeed" | "setUnlockPolicy" | "unlockPolicy"> & {
+export type Wallet = Omit<WasmClient, "baseUrl" | "health" | "probeSetup" | "saveSetup" | "dispose" | "create" | "restore" | "restoreUfvk" | "restoreHardware" | "attachSeed" | "setUnlockPolicy" | "unlockPolicy" | "forgetSavedWallet"> & {
   /** The recovery phrase is separate from state/events and returned only here. */
   create(options?: WalletCreateOptions): Promise<WalletCreation>;
   restore(mnemonic: string, options?: { birthday?: Parameters<EngineClient["restore"]>[2]; replace?: boolean }): Promise<WalletSnapshot>;
@@ -121,8 +121,11 @@ export type Wallet = Omit<WasmClient, "baseUrl" | "health" | "probeSetup" | "sav
    * Delete this device's wallet: snapshot, cached seed and passphrase vault.
    * The passkey record stays unless `{ passkey: true }`. Auto-sync pauses
    * during deletion and resumes if still enabled; the client remains usable.
+   * `{ pending: "reject" }` checks durable outgoing reservations under the spend
+   * lock and deletes only that inspected revision. Rejects `forget_pending` or
+   * `wallet_changed` rather than deleting newer state. Default is explicit deletion.
    */
-  forget(opts?: { passkey?: boolean }): Promise<void>;
+  forget(opts?: { passkey?: boolean; pending?: "reject" }): Promise<void>;
   /** Stop a running sync (it resolves with the progress so far). */
   cancelSync(): void;
   /** Follow new blocks (see the `autoSync` option in {@link WalletOptions}). Idempotent. */
@@ -288,7 +291,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
     const restoreDevice = client.restoreHardware.bind(client);
 
     const surface = Object.fromEntries(Object.entries(client).filter(([key]) =>
-      !["baseUrl", "health", "probeSetup", "saveSetup", "dispose", "loadSavedWallet", "attachSeed"].includes(key)));
+      !["baseUrl", "health", "probeSetup", "saveSetup", "dispose", "loadSavedWallet", "attachSeed", "forgetSavedWallet"].includes(key)));
     const target = Object.assign(surface, {
       get runtime() { return wasmRuntime() ?? runtime; },
       network: opts.network,
@@ -333,12 +336,12 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
       },
       lock,
       load: () => client.loadSavedWallet(),
-      async forget(o?: { passkey?: boolean }) {
+      async forget(o?: { passkey?: boolean; pending?: "reject" }) {
         lock();
         forgetting++;
         pauseAutoSync();
         try {
-          await forgetWasmWallet(o);
+          await client.forgetSavedWallet(o);
         } finally {
           forgetting--;
           // The client remains usable after deletion. Preserve its current

@@ -37,7 +37,7 @@ export function archiveMembers(file) {
 
 export function inspectArchives(directory, version = JSON.parse(readFileSync(join(root, "package.json"))).version, names = ["core", "passkey", "sdk"]) {
   const candidates = names.map(name => `z-stack-${name}-${version}.tgz`);
-  for (const name of candidates) assert.ok(existsSync(join(directory, name)), `Missing ${name}; build and pack one matching set first`);
+  for (const name of candidates) assert.ok(existsSync(join(directory, name)), `Missing ${name}; use the extracted published preview bundle, or run pnpm build:sdk then pnpm pack:sdk in the source checkout (pnpm pack:base for Base)`);
   const packages = new Map();
   for (const filename of candidates) {
     const file = join(directory, filename);

@@ -358,16 +358,35 @@ function deleteSnapshotRecords(store: WalletRecordStore): void {
 }
 
 /** Forget is all-or-nothing and leaves a tombstone fencing other tabs' old sessions. */
-export async function clearSavedWallet(opts?: { passkey?: boolean }): Promise<void> {
+export type SnapshotForgetGuard = { generation: WalletGeneration; key: string | null };
+
+export async function clearSavedWallet(opts?: { passkey?: boolean; expected?: SnapshotForgetGuard }): Promise<void> {
   if (!walletStorageAvailable()) throw new WalletError("wallet_db", "Local storage is unavailable. This device’s saved wallet has not been deleted.");
   invalidateVaultOperations();
   await walletTransaction<void>("readwrite", tx => {
-    deleteSnapshotRecords(tx.store);
-    tx.store.delete("seed.enc");
-    if (opts?.passkey) {
-      tx.store.delete("passkey.v1");
-      tx.store.delete("passkey.vault.v1");
-    }
-    tx.store.put(crypto.randomUUID(), WALLET_GENERATION_KEY);
+    const remove = () => {
+      deleteSnapshotRecords(tx.store);
+      tx.store.delete("seed.enc");
+      if (opts?.passkey) {
+        tx.store.delete("passkey.v1");
+        tx.store.delete("passkey.vault.v1");
+      }
+      tx.store.put(crypto.randomUUID(), WALLET_GENERATION_KEY);
+    };
+    const expected = opts?.expected;
+    if (!expected) { remove(); return; }
+    // Validate the inspected revision in the same transaction as deletion.
+    // A competing save either wins before this check, or is fenced by its tombstone.
+    tx.request(tx.store.get(WALLET_GENERATION_KEY), value => {
+      if (generationValue(value) !== expected.generation) throw new WalletError("wallet_changed", "wallet changed before removal");
+      tx.request(tx.store.get(DEFAULT), saved => {
+        const ref = snapshotRef(saved);
+        if (saved != null && (!ref || ref.key !== expected.key || generationValue(ref.generation) !== expected.generation)
+            || saved == null && expected.key !== null) {
+          throw new WalletError("wallet_changed", "wallet saved before removal");
+        }
+        remove();
+      });
+    });
   });
 }

@@ -8,15 +8,39 @@
   </head>
   <body>
     <main>
-      <h1>Testnet wallet</h1>
+      <h1 id="title">Testnet wallet</h1>
       <p>A minimal SDK integration. Use test funds only.</p>
       <p id="status" role="status">Loading engine…</p>
+      <p id="runtime" class="hint">Preparing engine…</p>
+      <aside id="chain-warning" class="notice" aria-label="Testnet funding limitation">
+        <strong>Public testnet spending is not verified.</strong>
+        <p>The light server and explorer disagree after NU7. Only request funds after your faucet and wallet server agree on the chain. Empty-wallet sync does not test spending.</p>
+        <a href="https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing">Funded testing options</a>
+      </aside>
       <p id="balance">— TAZ</p>
+      <section id="scan-panel" hidden aria-label="Scan details">
+        <p id="scan-details"></p>
+        <p>Missing a deposit? Confirm it on this server’s chain. Deposits below the birthday need an earlier scan. Rescanning cannot find a payment on another chain.</p>
+        <details><summary>Scan an earlier range</summary><form id="rescan-form">
+          <label for="rescan-birthday">Earlier height or date</label>
+          <input id="rescan-birthday" required placeholder="Height or YYYY-MM-DD" />
+          <p>Keeps your wallet and address. Rebuilds activity and balance. Pending outgoing payments must confirm or expire first.</p>
+          <label class="checkbox"><input id="rescan-confirm" type="checkbox" required /> I want to rebuild scan history</label>
+          <button>Rescan wallet</button>
+        </form></details>
+      </section>
+      <section id="receive-panel" hidden aria-label="Receive"><h2>Receive ZEC</h2>
       <p id="address"></p>
       <button id="copy-address" type="button" hidden>Copy address</button>
       <p id="copy-status" role="status"></p>
-      <div class="actions">
+      </section>
+      <section id="create-panel" aria-label="Create wallet">
+        <label for="create-birthday">Birthday height (optional)</label>
+        <input id="create-birthday" inputmode="numeric" aria-describedby="create-help" placeholder="Automatic" />
+        <p id="create-help" class="hint">Automatic uses the light server’s latest height minus 100. Enter a known height to create offline. Sync still needs a server. For new wallets, use a height before the first deposit.</p>
         <button id="create" disabled>Create wallet</button>
+      </section>
+      <div class="actions">
         <button id="sync" disabled>Sync</button>
         <button id="lock" disabled>Lock</button>
         <button id="hide-phrase" hidden>I saved these words — finish</button>
@@ -24,7 +48,9 @@
       <ol id="phrase" hidden></ol>
       <button id="copy-phrase" type="button" hidden>Copy recovery phrase</button>
       <p id="phrase-copy-status" role="status" hidden></p>
-      <form id="restore-form">
+      <form id="restore-form" aria-describedby="restore-help">
+        <h2>Restore a wallet</h2>
+        <p id="restore-help" class="hint">Use a height or date before your first deposit.</p>
         <label for="words">Recovery phrase</label>
         <textarea id="words" autocomplete="off" autocapitalize="none" spellcheck="false" required></textarea>
         <button id="clear-words" type="button">Clear phrase</button>
@@ -36,11 +62,11 @@
         <h2>Send ZEC</h2>
         <form id="send-form">
           <label for="send-to">Recipient address</label>
-          <textarea id="send-to" name="recipient" required rows="2" autocomplete="off" autocapitalize="none" spellcheck="false"></textarea>
+          <textarea id="send-to" name="recipient" aria-describedby="send-status" required rows="2" autocomplete="off" autocapitalize="none" spellcheck="false"></textarea>
           <label for="send-amount">Amount (ZEC)</label>
-          <input id="send-amount" name="amount" required inputmode="decimal" autocomplete="off" />
+          <input id="send-amount" name="amount" aria-describedby="send-status" required inputmode="decimal" autocomplete="off" />
           <label for="send-memo">Memo (optional)</label>
-          <textarea id="send-memo" name="memo" rows="2" maxlength="512"></textarea>
+          <textarea id="send-memo" name="memo" aria-describedby="send-status" rows="2" maxlength="512"></textarea>
           <p id="send-readiness">Sync the wallet before reviewing a payment.</p>
           <button id="review-send" disabled>Review payment</button>
         </form>
@@ -50,7 +76,7 @@
           <p>Fee is estimated. The wallet checks it again before proving.</p>
           <form id="confirm-send-form">
             <label for="send-words">Recovery phrase for this payment</label>
-            <textarea id="send-words" name="phrase" required rows="3" autocomplete="off" autocapitalize="none" spellcheck="false"></textarea>
+            <textarea id="send-words" name="phrase" aria-describedby="send-status" required rows="3" autocomplete="off" autocapitalize="none" spellcheck="false"></textarea>
             <p>Used locally and cleared when you send.</p>
             <div class="actions"><button id="confirm-send">Send payment</button><button id="edit-send" type="button">Edit</button></div>
           </form>
@@ -59,17 +85,15 @@
         <button id="cancel-send" type="button" hidden>Cancel before submission</button>
         <section id="send-receipt" hidden aria-label="Payment receipt"><h3>Payment receipt</h3><p id="receipt-state" role="status"></p><code id="receipt-txid"></code><button id="another-send" type="button">New payment</button></section>
       </section>
-      <section id="scan-panel" hidden aria-label="Scan details">
-        <p id="scan-details"></p>
-        <p>Missing a deposit? Confirm it on this server’s chain. Deposits below the birthday need an earlier scan. Rescanning cannot find a payment on another chain.</p>
-        <details><summary>Scan an earlier range</summary><form id="rescan-form">
-          <label for="rescan-birthday">Earlier height or date</label>
-          <input id="rescan-birthday" required placeholder="Height or YYYY-MM-DD" />
-          <p>Keeps your wallet and address. Rebuilds activity and balance. Pending outgoing payments must confirm or expire first.</p>
-          <label><input id="rescan-confirm" type="checkbox" required /> I want to rebuild scan history</label>
-          <button>Rescan wallet</button>
-        </form></details>
-      </section>
+      <details id="remove-panel" hidden><summary>Remove local wallet</summary>
+        <p>Deletes this browser’s saved wallet and local backup. Your funds stay on-chain. Save your recovery phrase and any pending payment receipts first.</p>
+        <p id="remove-pending" role="status" hidden>Sync to confirm or expire pending payments before removing this wallet.</p>
+        <form id="remove-form">
+          <label class="checkbox"><input id="remove-confirm" type="checkbox" required /> I saved my recovery phrase and payment receipts</label>
+          <button id="remove" type="submit" disabled>Remove from this browser</button>
+          <p id="remove-status" role="status"></p>
+        </form>
+      </details>
       <h2>Activity</h2>
       <ul id="history"></ul>
       <p id="history-empty">Create or restore a wallet to see activity.</p>

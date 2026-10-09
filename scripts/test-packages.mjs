@@ -39,6 +39,7 @@ try {
     const lab = await import('@z-stack/sdk/lab');
     assert.equal(typeof sdk.createWallet, 'function');
     assert.equal(sdk.WalletError.fromMessage('propose_transfer: Must scan blocks first').code, 'sync_required');
+    assert.equal(sdk.WalletError.fromMessage('invalid recovery phrase: private detail').code, 'invalid_recovery_phrase');
     assert.equal(await services.memoryVaultStore().get('missing'), undefined);
     assert.equal(typeof lab.checkVaultStoreAdapter, 'function');
     console.log('SDK archive alone: root/services/lab import with no registry or cache');

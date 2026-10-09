@@ -1,7 +1,7 @@
 {
   "target": "wasm32-unknown-unknown",
   "edges": "normal,build",
-  "cargoLockSha256": "b809078ece4ed12d95852519fd513f93541fe4ec581b18aa628f2a2150f95fd8",
+  "cargoLockSha256": "a47dfff16b62552201f59db81dae72c3cdff50c9938c7d938d8e80cf092124c4",
   "dependencies": [
     {
       "name": "aead",

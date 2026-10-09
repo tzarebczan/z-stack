@@ -9,13 +9,14 @@ The Next CLI wrapper disables its telemetry during dev/build/start.
 
 ## Run
 
-Use [the setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md), or follow the
-[SDK build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md).
+Use [the setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md), or download the verified archives directly as it describes. Only custom engine
+builds need the [SDK build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md).
 
+For manual setup, download the SDK archive first; a fresh clone has no archives.
 Copy this directory outside the SDK checkout. From your copy:
 
 ```sh
-npm install /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
+npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.4.tgz
 npm run build
 npm run start
 ```
@@ -102,7 +103,7 @@ It is not funded payment, physical-device, hosting-platform or Turbopack certifi
 
 The demo displays the network, server, birthday and scanned height. Use **Scan an
 earlier range** for older deposits on the same chain; it retains the wallet and
-address. Check [the current public funding limitation](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#4-create-or-restore-then-sync)
+address. Check [the current public funding limitation](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing)
 before claiming test coins. On testnet, amounts are TAZ. The amount parser still
 uses Zcash’s eight-decimal units. `zcash:` links require a dedicated review UI;
 this example asks for the recipient address itself.

@@ -24,6 +24,7 @@ import {
   clearSavedWallet,
   peekSavedSnapshot,
   type SnapshotReplacement,
+  type SnapshotForgetGuard,
 } from "./snapshot-storage";
 import { invalidateVaultOperations } from "./vault-operation";
 import { runWalletForget, type WalletOperation } from "./wallet-lifecycle";
@@ -402,6 +403,8 @@ export type WasmClient = EngineClient & {
   rescan(options: { birthday: BirthdayInput }): Promise<WalletSnapshot>;
   /** Internal owner cleanup. Public applications use Wallet.close(). */
   dispose(): Promise<void>;
+  /** Internal pending-aware deletion. Public applications use Wallet.forget(). */
+  forgetSavedWallet(opts?: { passkey?: boolean; pending?: "reject" }): Promise<void>;
   /** Internal saved-state hydration. Public applications use Wallet.load(). */
   loadSavedWallet(): Promise<WalletSnapshot | null>;
   lock(): void;
@@ -456,7 +459,7 @@ export const retiredWorkerSessions = new WeakSet<ScanSession>();
  * Restore from passkey still works. The authenticator credential is never
  * deleted. Pass `{ passkey: true }` to also drop this origin's PRF copy.
  */
-export function forgetWasmWallet(opts?: { passkey?: boolean }): Promise<void> {
+export function forgetWasmWallet(opts?: { passkey?: boolean; expected?: SnapshotForgetGuard }): Promise<void> {
   return runWalletForget(async () => {
     runtimeState.moduleSpendingSeed = null;
     saveSessionSeed(null);

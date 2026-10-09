@@ -407,6 +407,30 @@ export function createWasmClient(
       bind: "wasm",
       mode: "wasm-snapshot",
     }),
+    forgetSavedWallet: (forgetOpts) => {
+      if (forgetOpts?.pending !== undefined && forgetOpts.pending !== "reject") {
+        return Promise.reject(new WalletError("unknown", "Invalid pending-payment removal policy."));
+      }
+      if (forgetOpts?.pending !== "reject") return runtime.forgetWasmWallet(forgetOpts);
+      return runtime.withOriginSpendLock(async () => {
+        if (disposing || syncLock || memoLock || rescanning) throw new WalletError("busy", "wallet work is in progress");
+        if (!currentSession() && !(await loadIfNeeded())) {
+          const generation = await readWalletGeneration();
+          return runtime.forgetWasmWallet({ ...forgetOpts, expected: { generation, key: null } });
+        }
+        const source = session!;
+        const operation = sessionOperation!;
+        await operation.ready();
+        await refreshIfStale(source, operation);
+        assertSource(operation, source);
+        if ((await source.pendingRawTxs()).length) throw new WalletError("forget_pending", "pending payment prevents local removal");
+        // Legacy bytes have no revision token. Migrate via the existing guarded save first.
+        if (!savedKeySeen) await persist();
+        assertSource(operation, source);
+        if (!savedKeySeen || storageGeneration === undefined) throw new WalletError("wallet_db", "wallet revision unavailable for removal");
+        return runtime.forgetWasmWallet({ ...forgetOpts, expected: { generation: storageGeneration, key: savedKeySeen } });
+      });
+    },
     loadSavedWallet: () => runtime.withOriginSpendLock(async () => {
       const operation = captureWalletOperation();
       await operation.ready();
@@ -584,17 +608,16 @@ export function createWasmClient(
         // Register before any other await so the click still counts as a WebAuthn user gesture.
         if (createOpts?.passkey) passkeyWrite = await runtime.persistPasskeyIfBrowser(mnemonic, operation);
         let tip: number;
-        try {
-          tip = await transport.tip();
-        } catch (e) {
-          // An explicit block height does not need the server. Anything else
-          // would become birthday 1 and then fail the next sync as too deep.
-          if (!(typeof birthday === "number" && birthday > 0)) {
-            throw new Error(
-              `light server tip failed (${transport.label}): ${e instanceof Error ? e.message : e}`,
-            );
-          }
+        if (typeof birthday === "number") {
+          // Already validated. An explicit creation height is fully local;
+          // sync checks the selected server later.
           tip = birthday;
+        } else {
+          try {
+            tip = await transport.tip();
+          } catch (e) {
+            throw new WalletError("transport", `light server tip failed (${transport.label})`, e);
+          }
         }
         operation.assertCurrent();
         const bday = await runtime.resolveBirthday(birthday, tip, Math.max(1, tip - 100), { network: net, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });

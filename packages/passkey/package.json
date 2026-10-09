@@ -1,6 +1,6 @@
 {
   "name": "@z-stack/passkey",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.4",
   "private": true,
   "description": "Protect a secret (e.g. a recovery phrase) with one or more passkeys: WebAuthn PRF, envelope encryption, no dependencies.",
   "type": "module",

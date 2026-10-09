@@ -42,8 +42,9 @@ source and patch, runs as a non-root user and retains dependency license notices
 It is tested on Linux x64. Docker Desktop, ARM64 and production deployments are
 not covered. The existing Compose fixture remains on its earlier activation schedule.
 
-From a current source checkout, download the digest receipt attached to the
-matching SDK release:
+From a current source checkout, download the verified digest receipt attached
+to **alpha.3**. This server image is separate from the wallet WASM and remains
+compatible with later SDK previews using the same activation schedule:
 
 ```sh
 gh release download v0.1.0-alpha.3 --repo tzarebczan/z-stack \

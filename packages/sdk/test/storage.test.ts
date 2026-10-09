@@ -1209,3 +1209,26 @@ for (const birthday of [1, 2]) test(`same-tip wallets retry roots without resett
   await client.sync();
   assert.equal(requested.length, 6, "replacement reusing a worker gets its own root refresh");
 });
+
+
+test("guarded deletion cannot erase a competing save committed after inspection", async t => {
+  const db = installDb(t);
+  await saveWalletSnapshot(new Uint8Array([1]), preview(10), () => true);
+  const baseline = await readSavedSnapshotRecord(); assert.ok(baseline?.key);
+  db.records.set("seed.enc", { ct: "seed" });
+  db.records.set("passkey.v1", { ct: "passkey" });
+  db.holdOpens = true;
+  const removing = clearSavedWallet({ passkey: true, expected: { generation: baseline.generation, key: baseline.key } });
+  const rejection = assert.rejects(removing, error => error instanceof WalletError && error.code === "wallet_changed");
+  await turn(); assert.equal(db.opens.length, 1);
+  db.holdOpens = false;
+  await saveWalletSnapshot(encodePending(), preview(20), () => true, baseline.generation);
+  const committed = structuredClone(db.records);
+  db.opens.shift()!(); await rejection;
+  assert.deepEqual(db.records, committed, "pending bytes, vaults and generation must survive stale deletion");
+  const current = await readSavedSnapshotRecord(); assert.ok(current?.key);
+  await clearSavedWallet({ passkey: true, expected: { generation: current.generation, key: current.key } });
+  assert.equal(await readSavedSnapshotRecord(), null);
+  assert.equal(db.records.has("seed.enc"), false);
+  assert.equal(db.records.has("passkey.v1"), false);
+});

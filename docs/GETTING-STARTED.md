@@ -4,22 +4,30 @@ Start with a working app, then replace its screens one step at a time. The walle
 engine runs locally. Accounts, cloud backups and payment integrations are optional
 application services; they are not needed for this walkthrough.
 
+**Spending limitation:** the published preview verifies empty-wallet setup and sync.
+It does not currently provide a supported funded public-testnet walkthrough.
+The faucet and wallet server must agree on the chain after block **4,465,026**
+before you request test coins. See [funded testing](#funded-testing) for the fork
+check and the separate source-checkout regtest path.
+
 ## 1. Get matching archives
 
-The published **alpha.3** preview includes NU7 support. Use Node 22.18+ and npm;
+The published **alpha.4** preview includes NU7 support. Use Node 22.18+ and npm;
 no Rust toolchain or npm account is needed for these built archives. The SDK
 archive includes compiled single-threaded and threaded WASM engines, bindings,
 workers, integrity manifests, and bundled core and passkey helpers. Building
 the engine yourself is optional.
-Download and verify both checksum layers:
+Download and verify both checksum layers. `--quiet` suppresses successful
+per-file lines (including the offline API files); a zero exit status means the
+check passed. Mismatches still print an error:
 
 ```sh
-gh release download v0.1.0-alpha.3 --repo tzarebczan/z-stack --dir sdk-alpha
+gh release download v0.1.0-alpha.4 --repo tzarebczan/z-stack --dir sdk-alpha
 cd sdk-alpha
-sha256sum -c SHA256SUMS-alpha.3 # macOS: shasum -a 256 -c SHA256SUMS-alpha.3
-tar -xzf z-stack-preview-0.1.0-alpha.3-*.tgz
+sha256sum --quiet -c SHA256SUMS-alpha.4 # macOS: shasum -q -a 256 -c SHA256SUMS-alpha.4
+tar -xzf z-stack-preview-0.1.0-alpha.4-*.tgz
 cd z-stack-preview
-sha256sum -c SHA256SUMS # macOS: shasum -a 256 -c SHA256SUMS
+sha256sum --quiet -c SHA256SUMS # macOS: shasum -q -a 256 -c SHA256SUMS
 ```
 
 Continue from **inside the extracted bundle**, using its scripts and matching
@@ -64,15 +72,48 @@ For production-shaped verification, use `npm run build`, then `npm run preview`
 (Vite) or `npm run start` (Next). HTTPS or localhost is required. Your host must
 serve WASM, workers and integrity manifests without SPA fallback, and preserve
 [the isolation/security headers](INTEGRATION.md#production-host). Without cross-origin
-isolation the SDK uses its single-thread engine. See [the browser matrix](SUPPORT.md)
+isolation the SDK uses its single-thread engine.
+Default browser startup downloads roughly **30 MB of uncompressed WASM**:
+about 10.9 MB for key/UI bindings and the single-thread fallback, plus 19.2 MB
+for the threaded scanner. Transfers depend on host compression and cache headers.
+These are two engine variants. Each initialization reuses its integrity-verified
+bytes; workers can request the same cached asset. The Vite demo
+shows `wallet.runtime`; its final scanner mode is available after loading a wallet
+or syncing. Set `VITE_ZSTACK_MULTICORE=false` before startup to use only the
+single-thread engine, reducing download size at the cost of parallel scanning.
+Applications can use the SDK's `preferMulticore: false` option. See
+[engine loading](INTEGRATION.md#engine-loading). See [the browser matrix](SUPPORT.md)
 for tested limits; an emulated mobile viewport is not a physical-device test.
 
 ## 4. Create or restore, then sync
 
-Create displays a one-time phrase and waits for your acknowledgement before the
-first durable wallet save. Save it privately. Choose a birthday before your first deposit. Restore checks the birthday and
-refuses to replace a saved wallet before clearing the phrase input. Reopening
-loads viewing data with spending locked. No phrase is posted to Next or a backend.
+Create displays a one-time phrase and waits for acknowledgement before its
+first durable save. Save it privately. In the Vite demo, a blank **Birthday
+height** uses the light server's latest height minus 100, so Create needs a
+working server. Enter an explicit positive height to create offline; Sync still
+needs the server. A new wallet's birthday must precede its first deposit. The
+Next demo uses the automatic birthday.
+
+Restore needs a height or date before the first deposit. Invalid words have the
+`invalid_recovery_phrase` code and fixed display copy. A refused restore retains
+the input; a successful restore clears it. Restore is hidden when a saved wallet
+exists. **Remove local wallet** has its own backup confirmation; it deletes
+this browser's viewing data and local vault, not on-chain funds. Save any payment
+receipts too. The Vite demo blocks removal until pending payments confirm or
+expire, including after a reload or another tab’s send. It uses
+`wallet.forget({ passkey: true, pending: "reject" })`; the SDK policy is optional
+for other applications. Reopening loads viewing data with spending locked. No phrase is
+posted to Next or a backend.
+
+## Funded testing
+
+The preview bundle includes the scaffolder and built packages, not the native
+fixture or funded test runner. **There is no supported funded receive/send path
+using only the published preview until the faucet and wallet's gRPC-Web server
+are verified to agree past height 4,465,026.** Empty sync is not spending evidence.
+For reproducible funded acceptance now, use a source checkout and the isolated
+regtest recipe below. Local source test tools are separate from installing the
+prebuilt SDK in your application.
 
 **Before requesting test funds:** the public funding path is not certified.
 On 2026-10-08, ChainSafe and Zexplorer agree at height **4,465,025**, then report
@@ -126,7 +167,8 @@ pnpm test:funded-demos
 pnpm regtest:native:down
 ```
 
-Run these from the source checkout after building/packing the SDK. The test
+These commands are not included in the preview bundle. Run them from the source
+checkout after building/packing the SDK. The test
 scaffolds both demos, funds disposable wallets, proves shielded payments and
 checks confirmation and reload. See [native fixture prerequisites](NODE.md)
 and [verification limits](SUPPORT.md). It is regtest evidence, not public-testnet certification.
@@ -139,6 +181,9 @@ Do not change a running wallet's network or reuse its storage with another chain
 Use a separate origin/profile or [your own namespace](STORAGE.md).
 
 ## 5. Review and send
+
+Continue only after the chain/funding check above, or in the isolated regtest
+fixture. The public preview does not certify this step.
 
 Enter a shielded recipient address, a positive test-coin amount and an optional memo.
 Review the exact recipient, amount, memo and estimated fee. The demo freezes this

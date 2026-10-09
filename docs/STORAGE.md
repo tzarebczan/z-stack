@@ -75,3 +75,16 @@ Test your adapter with the SDK's replacement, abort, cross-tab revision, quota,
 forget-tombstone and submission regressions before using it with funds. The
 reference IndexedDB and memory adapters are covered by the repository tests;
 third-party storage engines need their own crash/durability acceptance.
+
+## Pending-aware removal
+
+Use `await wallet.forget({ passkey: true, pending: "reject" })` for a removal UI
+that must preserve unresolved outgoing payments. The SDK adopts newer saved
+state under the origin spend lock, checks outgoing reservations, then deletes
+only if the inspected snapshot revision and wallet generation still match in
+the storage transaction. A competing save returns `wallet_changed`; a pending
+payment returns `forget_pending`. Reload the saved wallet and reconcile it.
+
+This policy is optional. Omitting `pending` keeps explicit local deletion;
+standalone `forgetWallet()` also performs explicit deletion without loading the
+engine. A phrase alone does not preserve pending-payment receipts or reservations.

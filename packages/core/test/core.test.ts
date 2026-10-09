@@ -400,7 +400,7 @@ test("WalletError maps known engine strings and leaves unknown intact", () => {
   assert.equal(e.userMessage(), walletErrorMessage("insufficient_funds"));
   assert.equal(WalletError.fromUnknown(e), e);
   assert.equal(WalletError.fromUnknown(new Error("no wasm wallet")).code, "not_found");
-  assert.match(walletErrorMessage("wallet_db"), /wipe scan/i);
+  assert.doesNotMatch(walletErrorMessage("wallet_db"), /wipe|z-wallet/i);
   assert.equal(walletErrorMessage("unknown", "raw dump"), "raw dump");
 });
 
@@ -472,4 +472,21 @@ test("NU7 spacing and date estimates cross activation without changing mainnet",
     assert.equal(parseBirthdayInput("100", activation + 1_000, "testnet"), 100);
     assert.throws(() => blockSpacingSeconds({network:"regtest", regtestNu7Height:2}, 10));
   } finally { Date.now = originalNow; }
+});
+
+
+test("malformed recovery phrases have a stable code and never expose engine detail", () => {
+  for (const message of ["invalid recovery phrase: unknown word SYNTHETIC_PRIVATE_WORD", "Invalid recovery phrase: checksum failed", "invalid mnemonic: SYNTHETIC_PRIVATE_WORD"]) {
+    const error = WalletError.fromMessage(message);
+    assert.equal(error.code, "invalid_recovery_phrase");
+    assert.equal(error.userMessage(), "Those words are not a valid recovery phrase.");
+    assert.doesNotMatch(error.userMessage(), /SYNTHETIC_PRIVATE_WORD|checksum/);
+  }
+  assert.equal(classifyWalletError("those words do not match this wallet's viewing key"), "seed_mismatch");
+});
+
+test("shared display copy does not prescribe native-only or destructive recovery commands", () => {
+  for (const code of ["missing_params", "wallet_db", "auth"] as const) {
+    assert.doesNotMatch(walletErrorMessage(code), /z-wallet|wipe|bridge token/);
+  }
 });

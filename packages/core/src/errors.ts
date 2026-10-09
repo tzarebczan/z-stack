@@ -23,6 +23,8 @@ export type WalletErrorCode =
   | "deep_sync_rejected"
   | "birthday_above_tip"
   | "invalid_birthday"
+  | "invalid_recovery_phrase"
+  | "forget_pending"
   | "rescan_pending"
   | "rescan_later_birthday"
   | "unsupported_payment_uri"
@@ -59,14 +61,16 @@ export const WALLET_ERROR_MESSAGES: Record<WalletErrorCode, string> = {
   no_account: "This wallet has no account yet.",
   sync_required: "Sync the wallet before sending.",
   insufficient_funds: "Not enough shielded funds for this send (including the fee).",
-  missing_params: "Proving parameters are missing. Run `z-wallet params` first.",
+  missing_params: "Required proving parameters are unavailable. Check the wallet setup.",
   seed_mismatch: "This recovery phrase does not match your wallet.",
-  seed_locked: "Unlock the seed to send or shield.",
-  view_only: "This wallet is view-only. Paste the seed to send.",
+  seed_locked: "Unlock spending to send or shield funds.",
+  view_only: "This wallet can show activity but cannot spend.",
   seed_decrypt_failed: "Could not decrypt the seed. Check the passphrase.",
   chain_mismatch: "This wallet does not match the light server chain.",
   deep_sync_rejected: "Birthday is too far below tip for a default sync.",
+  invalid_recovery_phrase: "Those words are not a valid recovery phrase.",
   invalid_birthday: "Enter a positive block height or a valid date in YYYY-MM-DD format.",
+  forget_pending: "Sync to confirm or expire pending payments before removing this wallet.",
   rescan_pending: "Sync to confirm or expire your pending payment before rescanning.",
   rescan_later_birthday: "Choose a height or date at or before the wallet’s current birthday.",
   unsupported_payment_uri: "Paste the recipient address itself. This form does not accept zcash: payment links.",
@@ -76,13 +80,13 @@ export const WALLET_ERROR_MESSAGES: Record<WalletErrorCode, string> = {
   wallet_changed: "The wallet was updated in another tab and has been reloaded. Try again.",
   reorg: "The chain reorganized. Rescan to continue.",
   transport: "Could not reach the light server.",
-  wallet_db: "The wallet database hit an error. Try wipe scan & resync if notes look wrong.",
+  wallet_db: "Could not read or update wallet data. Keep your recovery backup and try again.",
   storage_full: "Could not save recent wallet progress: browser storage is full. Free device space and retry. Keep this site's data and your recovery backup.",
   invalid_network: "Unknown network.",
   invalid_address: "That address is not a valid Zcash destination.",
   invalid_amount: "Enter a valid amount with up to eight decimal places.",
   invalid_memo: "Memo is too long.",
-  auth: "This action needs the bridge token from `z-wallet serve`.",
+  auth: "This wallet action is not authorized.",
   unsupported_transparent: "Transparent send is not supported. Shield first.",
   unsupported_destination:
     "Need a shielded receiver. Transparent-only destinations are not supported.",
@@ -151,6 +155,8 @@ export function isWalletError(err: unknown): err is WalletError {
 export function classifyWalletError(message: string): WalletErrorCode {
   const m = message.trim();
   const lower = m.toLowerCase();
+
+  if (lower.includes("invalid recovery phrase:") || lower.includes("invalid mnemonic:")) return "invalid_recovery_phrase";
 
   if (lower.includes("those words do not match this wallet\'s viewing key")) return "seed_mismatch";
 
