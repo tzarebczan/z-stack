@@ -3,6 +3,7 @@
 import { grpcWebTransport } from '../packages/sdk/dist/index.js';
 const args = process.argv.slice(2);
 let server = 'https://zcash-testnet.chainsafe.dev', explorer = 'https://zexplorer.app', height;
+class PublicLookupError extends Error {}
 try {
   for (let i = 0; i < args.length; i++) {
     if (!['--server', '--explorer', '--height'].includes(args[i]) || !args[i + 1]) throw new Error();
@@ -22,11 +23,16 @@ try {
 }
 try {
   const transport = grpcWebTransport(server);
-  const [state, response] = await Promise.all([
+  const [lookup, page] = await Promise.allSettled([
     transport.treeState(height, AbortSignal.timeout(20_000)),
     fetch(new URL(`/api/v1/testnet/blocks/${height}`, explorer), { signal: AbortSignal.timeout(20_000), credentials: 'omit', redirect: 'error' }),
   ]);
-  if (!response.ok) throw new Error();
+  if (page.status === 'rejected') throw new PublicLookupError(`Explorer lookup failed at height ${height}. Check explorer availability.`);
+  const response = page.value;
+  if (response.status === 404) throw new PublicLookupError(`Explorer has no block at height ${height} (HTTP 404). Compare a height available on both providers; a missing block alone does not prove a fork.`);
+  if (!response.ok) throw new PublicLookupError(`Explorer lookup failed at height ${height} (HTTP ${response.status}).`);
+  if (lookup.status === 'rejected') throw new PublicLookupError(`Light-server lookup failed at height ${height}. Check endpoint availability, the server tip and gRPC-Web support.`);
+  const state = lookup.value;
   const result = await response.json();
   const block = result?.data?.summary;
   const valid = hash => typeof hash === 'string' && /^[0-9a-f]{64}$/i.test(hash);
@@ -39,7 +45,7 @@ try {
     serverHash: state.hash, explorerHash: block.block_hash, match, reversedMatch }, null, 2));
   if (reversedMatch) { console.error("Hashes match in reversed byte order. Normalize provider encoding before diagnosing a fork."); process.exitCode = 2; }
   else if (!match) process.exitCode = 1;
-} catch {
-  console.error('Could not compare public block data. Check the height, endpoint availability, and gRPC-Web support.');
+} catch (error) {
+  console.error(error instanceof PublicLookupError ? error.message : 'Could not compare public block data. Check the height, endpoint availability, and gRPC-Web support.');
   process.exitCode = 2;
 }

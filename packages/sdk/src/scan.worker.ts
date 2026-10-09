@@ -2,6 +2,7 @@
 
 import { allowMissingBuiltWasm, verifyWasmAt } from "./integrity";
 import { runHardware, type HardwareAction, type HardwareStatics, type HardwareWalletHandle } from "./hardware-ops";
+import type { EngineLoadProgress } from "./engine-progress";
 
 type InitMod = {
   default: (args?: unknown) => Promise<unknown>;
@@ -111,7 +112,8 @@ let wasm: InitMod | null = null;
 let wallet: Wallet | null = null;
 let mode: "single-thread" | "multi-thread" = "single-thread";
 
-async function loadWasm(preferMulticore: boolean, threads: number, wasmBasePath?: string): Promise<InitMod> {
+async function loadWasm(preferMulticore: boolean, threads: number, wasmBasePath: string | undefined,
+  progress: (progress: Omit<EngineLoadProgress, "component">) => void): Promise<InitMod> {
   const base = wasmBasePath?.replace(/\/+$/, "");
   if (preferMulticore && !base) {
     try {
@@ -119,7 +121,9 @@ async function loadWasm(preferMulticore: boolean, threads: number, wasmBasePath?
       const wasmUrl = new URL("./generated-mt/z_wasm_bg.wasm", import.meta.url);
       const bytes = await verifyWasmAt(wasmUrl.href, new URL("./generated-mt/integrity.json", import.meta.url).href, {
         allowMissing: allowMissingBuiltWasm(false),
+        onProgress: progress,
       });
+      progress({ phase: "initialize" });
       await mt.default({ module_or_path: bytes ?? wasmUrl });
       if (typeof mt.initThreadPool !== "function") throw new Error("multicore wasm is missing initThreadPool");
       await mt.initThreadPool(Math.max(1, threads));
@@ -127,12 +131,14 @@ async function loadWasm(preferMulticore: boolean, threads: number, wasmBasePath?
       return mt;
     } catch {
       console.warn("scan worker MT failed; using single-thread");
+      progress({ phase: "fallback" });
     }
   }
   const st = (await import("./generated/z_wasm.js")) as unknown as InitMod;
   const wasmUrl = base ? `${base}/z_wasm_bg.wasm` : new URL("./generated/z_wasm_bg.wasm", import.meta.url).href;
   const integrityUrl = base ? `${base}/integrity.json` : new URL("./generated/integrity.json", import.meta.url).href;
-  const bytes = await verifyWasmAt(wasmUrl, integrityUrl, { allowMissing: allowMissingBuiltWasm(!!base) });
+  const bytes = await verifyWasmAt(wasmUrl, integrityUrl, { allowMissing: allowMissingBuiltWasm(!!base), onProgress: progress });
+  progress({ phase: "initialize" });
   await st.default({ module_or_path: bytes ?? wasmUrl });
   mode = "single-thread";
   return st;
@@ -188,7 +194,8 @@ async function handle(msg: Req): Promise<void> {
   try {
     switch (msg.op) {
       case "init": {
-        wasm = await loadWasm(!!msg.preferMulticore, msg.threads ?? 8, msg.wasmBasePath);
+        wasm = await loadWasm(!!msg.preferMulticore, msg.threads ?? 8, msg.wasmBasePath,
+          progress => post({ id: msg.id, progress: true, ...progress }));
         if (msg.regtestNu63Height) wasm.setRegtestNu63Height?.(msg.regtestNu63Height);
         if (msg.regtestNu7Height) wasm.setRegtestNu7Height?.(msg.regtestNu7Height);
         const caps = JSON.parse(needWasm().WasmWallet.capabilities()) as {

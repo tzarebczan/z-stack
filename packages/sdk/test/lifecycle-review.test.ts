@@ -341,7 +341,7 @@ test("scan worker falls back to verified ST when the MT artifact lacks its threa
   t.mock.method(console, "warn", () => {});
   const reply = deferred<Record<string, unknown>>();
   const scope = { onmessage: null as ((event: MessageEvent) => void) | null,
-    postMessage: (message: Record<string, unknown>) => reply.resolve(message) };
+    postMessage: (message: Record<string, unknown>) => { if (!message.progress) reply.resolve(message); } };
   f.install("self", scope);
   const moduleUrl = (code: string) => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
   const mark = "globalThis.__lifecycleReviewArtifactCalls";

@@ -705,7 +705,7 @@ export function App() {
         if (gen !== probeGen.current) return;
         setLightOk(false);
         const msg = (e as Error).message;
-        setProbeNote(`probe failed via ${transport.kind}: ${msg}`);
+        setProbeNote(opts?.silent ? "Local services are not reachable. Start the fixture, then choose Probe Zaino / Zakura." : `probe failed via ${transport.kind}: ${msg}`);
         if (!opts?.silent) setError(formatUiError(e));
       } finally {
         if (gen === probeGen.current) setProbeBusy(false);
@@ -1242,7 +1242,7 @@ export function App() {
   }
 
   useEffect(() => {
-    if (wallet || overlay || !passkeyOk || bootBusy || busy) return;
+    if (wallet || overlay || !passkeyOk || !hasPasskey || bootBusy || busy) return;
     const ac = new AbortController();
     emptyPasskeyAbort.current = ac;
     void unlockPasskeySeed({ mediation: "conditional", signal: ac.signal })
@@ -1258,7 +1258,7 @@ export function App() {
     };
     // Empty plate: Bitwarden / Chrome conditional UI. Restore still needs a chooser gesture.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wallet, overlay, passkeyOk, bootBusy, busy]);
+  }, [wallet, overlay, passkeyOk, hasPasskey, bootBusy, busy]);
 
   function openRestore() {
     setBenchOpen(true);
@@ -1275,7 +1275,7 @@ export function App() {
       <header className="top">
         <div className="brand">
           <div className="mark">z-stack</div>
-          <div className="policy">Shielded wallet</div>
+          <div className="policy">SDK diagnostic bench</div>
         </div>
         <div className="top-status">
           <span className={`lamp${lightOk ? " on" : ""}`} aria-hidden="true" />
@@ -1297,6 +1297,10 @@ export function App() {
           <span>{transportLabel}</span>
         </div>
       </header>
+      <aside className="status" aria-label="Diagnostic setup">
+        Local diagnostic tools · This app expects the source-checkout Zaino/validator fixture and optional native bridge.
+        {" "}<a href="https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md">Use the public testnet example</a> for an integration walkthrough.
+      </aside>
 
       {showSync && overlayProgress ? (
         <SyncOverlay

@@ -1,5 +1,6 @@
 import { launchBrowser } from "./browser-launch.mjs";
 import assert from "node:assert/strict";
+import { assertSavedHide, verifyBackForward } from "./browser-hide-lifecycle.mjs";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -239,6 +240,8 @@ export async function verifyExampleRecovery(app, chromium) {
     });
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.waitForFunction(() => document.getElementById("status").textContent === "Create a wallet or restore one.");
+    await page.waitForFunction(() => document.getElementById("runtime").textContent !== "Starting scanner…");
+    assert.equal(await page.locator("#engine-progress-bar").isVisible(), false, "startup completion updates without a click");
     assert.equal(await page.locator("#sync").isDisabled(), true);
     assert.equal(await page.locator("#lock").isDisabled(), true);
     await page.locator("#words").fill("not a valid recovery phrase");
@@ -302,6 +305,21 @@ export async function verifyExampleRecovery(app, chromium) {
     await page.locator("#send-amount").fill("0.1");
     await page.locator("#review-send").click();
     await page.locator("#send-status").filter({hasText:"Not enough shielded funds"}).waitFor();
+    const savedAddress = await page.locator("#address").textContent();
+    for (let reload = 0; reload < 3; reload++) {
+      await page.reload();
+      await page.waitForFunction(expected => document.getElementById("address").textContent === expected, savedAddress);
+    }
+    await page.locator("#lock").waitFor();
+    await page.waitForFunction(() => !document.getElementById("lock").disabled);
+    await assertSavedHide(page, savedAddress);
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await page.locator("#lock").click();
+    await page.locator("#status").filter({hasText:"Spending locked."}).waitFor();
+    await verifyBackForward(page, () => page.waitForFunction(() => !document.getElementById("sync").disabled), savedAddress);
+    assert.ok(!diagnostics.some(value => value.includes("snapshot save on hide failed")), "reload must not close the scanner during hide persistence");
+    await page.locator("#send-to").fill(savedAddress);
+    await page.locator("#send-amount").fill("0.1");
     await page.locator("#send-amount").fill("invalid");
     await page.locator("#review-send").click();
     await page.locator("#send-status").filter({hasText:"Enter a valid amount"}).waitFor();

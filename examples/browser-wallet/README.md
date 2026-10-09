@@ -13,7 +13,7 @@ downloaded archive. A fresh clone has no `artifacts/` directory; plain
 
 ```sh
 cd /path/to/copied/browser-wallet
-npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.4.tgz
+npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.5.tgz
 npm run dev
 ```
 
@@ -59,7 +59,10 @@ private data and are not printed.
 
 ## Loading and funding limits
 
-The demo shows `wallet.runtime` beside the balance. Default isolated startup
+The demo shows scanner readiness beside the balance using `on("runtime")`,
+and displays engine download and initialization through `onLoadProgress`.
+It shows “Starting scanner…” until readiness or fallback is reported.
+Default isolated startup
 uses roughly 30 MB of uncompressed WASM across its two engine variants. Set
 `VITE_ZSTACK_MULTICORE=false` before starting Vite to download only the roughly
 10.9 MB single-thread engine; scanning then uses one thread. Both modes keep

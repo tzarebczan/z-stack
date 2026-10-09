@@ -27,6 +27,10 @@ as a side effect of routine cleanup.
 `@z-stack/source` export condition. Consumers resolve `dist/`; test both.
 The [browser example](examples/browser-wallet/README.md) uses the installed
 distribution exports, without aliases or a source condition.
+`pnpm web:dev` opens the local regtest bench, which expects the loopback fixture
+and optional native bridge. Start with the installed browser example for a public
+testnet walkthrough. A missing local service is a setup condition, not a testnet
+wallet failure.
 
 ## Code boundaries
 

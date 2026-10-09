@@ -9,6 +9,8 @@ import {
 } from "@z-stack/core";
 import type { ChainTip, CreationResult, EngineHealth, WaitOpts } from "./engine";
 import { balanceEvent, createEventBus } from "./events";
+import { observeWasmRuntime, wasmRuntime } from "./runtime";
+import type { WalletEventHandler } from "./events";
 import {
   type HardwareAccount
 } from "./hardware";
@@ -44,6 +46,7 @@ export function createWasmClient(
   const persistenceRequired = opts.requirePersistence === true || walletStorageAvailable();
 
   const bus = createEventBus();
+  const offRuntime = observeWasmRuntime(current => bus.emit("runtime", current));
 
   let session: ScanSession | null = null;
 
@@ -378,6 +381,7 @@ export function createWasmClient(
       memoAbort?.abort();
       runtime.runtimeState.persistOnHide = null;
       runtime.runtimeState.unbindHide?.();
+      offRuntime();
       bus.clear();
       // Keep the session and its operation valid until an unsubmitted durable
       // reservation is rolled back. Submitted sends resolve this barrier before
@@ -399,7 +403,17 @@ export function createWasmClient(
       }
     },
     baseUrl: `wasm:${network}`,
-    on: (event, handler) => bus.on(event, handler),
+    on: (event, handler) => {
+      const off = bus.on(event, handler);
+      if (event === "runtime") {
+        const current = wasmRuntime();
+        if (current) {
+          try { (handler as WalletEventHandler<"runtime">)({ ...current }); }
+          catch { console.warn("runtime event handler"); }
+        }
+      }
+      return off;
+    },
     off: (event, handler) => bus.off(event, handler),
     health: async (): Promise<EngineHealth> => ({
       ok: true,

@@ -4,6 +4,7 @@
     "index.html",
     "package.json",
     "src/connection.ts",
+    "src/engine-loading.ts",
     "src/main.ts",
     "src/send.ts",
     "src/style.css",

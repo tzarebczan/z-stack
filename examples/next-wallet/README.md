@@ -16,7 +16,7 @@ For manual setup, download the SDK archive first; a fresh clone has no archives.
 Copy this directory outside the SDK checkout. From your copy:
 
 ```sh
-npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.4.tgz
+npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.5.tgz
 npm run build
 npm run start
 ```

@@ -12,11 +12,13 @@
       <p>A minimal SDK integration. Use test funds only.</p>
       <p id="status" role="status">Loading engine…</p>
       <p id="runtime" class="hint">Preparing engine…</p>
-      <aside id="chain-warning" class="notice" aria-label="Testnet funding limitation">
-        <strong>Public testnet spending is not verified.</strong>
-        <p>The light server and explorer disagree after NU7. Only request funds after your faucet and wallet server agree on the chain. Empty-wallet sync does not test spending.</p>
+      <p id="engine-progress" class="hint" role="status"></p>
+      <progress id="engine-progress-bar" aria-label="Loading wallet engine" hidden></progress>
+      <details id="chain-warning" class="notice" aria-label="Testnet funding limitation">
+        <summary>Testnet funding: check your faucet’s chain</summary>
+        <p>Create, save and sync work on the configured server. Funded public-testnet receive/send remains unverified. Some providers disagree after NU7; confirm your faucet uses the same chain before requesting funds.</p>
         <a href="https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing">Funded testing options</a>
-      </aside>
+      </details>
       <p id="balance">— TAZ</p>
       <section id="scan-panel" hidden aria-label="Scan details">
         <p id="scan-details"></p>
@@ -35,7 +37,7 @@
       <p id="copy-status" role="status"></p>
       </section>
       <section id="create-panel" aria-label="Create wallet">
-        <label for="create-birthday">Birthday height (optional)</label>
+        <label for="create-birthday">Start scanning from block (optional)</label>
         <input id="create-birthday" inputmode="numeric" aria-describedby="create-help" placeholder="Automatic" />
         <p id="create-help" class="hint">Automatic uses the light server’s latest height minus 100. Enter a known height to create offline. Sync still needs a server. For new wallets, use a height before the first deposit.</p>
         <button id="create" disabled>Create wallet</button>

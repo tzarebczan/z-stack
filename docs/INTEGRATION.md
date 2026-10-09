@@ -10,7 +10,7 @@ local archives. The steps below cover adapting your own application.
 ## Install
 
 Download the SDK archive from the
-[alpha.4 release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.4)
+[alpha.5 release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.5)
 and [verify its checksum](GETTING-STARTED.md#1-get-matching-archives), then install
 the `.tgz` in your app. It includes both single-threaded and threaded WASM
 engines, JavaScript bindings, workers, integrity manifests, and matching core
@@ -24,7 +24,7 @@ using those packages directly. Node 22.18+ is required for setup tools; npm’s
 `engines` check is advisory, so an install warning does not certify older Node.
 
 ```sh
-npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.4.tgz
+npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.5.tgz
 ```
 
 Use the [runnable Vite example](../examples/browser-wallet/README.md) as a starting
@@ -194,6 +194,13 @@ and scanning available. `forget()` deletes local data but leaves the client
 usable; a passkey record stays unless `forget({ passkey: true })` is requested.
 Provider logout is a separate explicit application action.
 
+On `pagehide`, lock spending and clear phrase inputs. Do not call `close()` from
+that event: the SDK starts a best-effort snapshot flush on hide, and terminating
+the scanner interrupts it. Keep the locked client for back/forward-cache returns,
+or reload the page on a persisted `pageshow`. Await `close()` during an explicit
+component/app teardown while the document is still alive. Save during normal
+operations; browsers can stop a page before any hide callback finishes.
+
 ## Production host
 
 For threaded WASM, serve HTML with:
@@ -230,7 +237,8 @@ application policy; do not replace an existing policy with this partial list.
 | Worker URL points at `node_modules` or a `.ts` file in production | Use `/vite`, rebuild packages, and import distribution exports |
 | WASM fetch returns HTML or 404 | Host routing, asset base URL, missing deployment assets |
 | Integrity mismatch | Engine binary and manifest came from different builds |
-| Runtime stays single-threaded | HTTPS/localhost, isolation headers, iframe permissions, worker console errors |
+| Runtime stays single-threaded | HTTPS/localhost, isolation headers, iframe permissions, worker console errors. Subscribe to `on("runtime")`; the initial mode describes key bindings while `scanner` is `"starting"` |
+| Reload logs `snapshot save on hide failed` | Lock on `pagehide`; calling `close()` there interrupts the scanner needed for the best-effort hide flush. Await `close()` during active app teardown |
 | CORS failure | gRPC-Web and CORS support at the selected server; isolation does not grant CORS |
 | `/zstack/memos` returns 404 | Server does not support shared ranges; do not set `sharedMemos: true` |
 | Old restore rejected | Supply a real birthday and explicitly opt into deep sync |
@@ -275,8 +283,29 @@ integrity verification to reduce network work.
 download. Scanning stays in a worker, but uses one thread. Apply this option
 before initialization; changing runtime settings requires a reload. `threads: 2`
 limits the threaded scanner but does not select the smaller engine. Runtime
-mode can change while the background scanner starts; read `wallet.runtime`
-after loading a wallet or syncing before presenting its final mode.
+mode can change while the background scanner starts. Subscribe without a timer:
+
+```ts
+const wallet = await createWallet({
+  network: "testnet", server: "https://zcash-testnet.chainsafe.dev",
+  onLoadProgress: progress => showEngineLoading(progress),
+});
+const offRuntime = wallet.on("runtime", runtime => showRuntime(runtime));
+// runtime.scanner is "starting", "ready" (worker), or "main-thread".
+// Before app teardown: offRuntime(); await wallet.close();
+```
+
+`on("runtime")` immediately supplies the current state and then reports worker
+readiness, restart and fallback. A failed scan generation still needs explicit
+wallet-load recovery; a runtime event does not replay failed wallet operations.
+`onLoadProgress` reports local key/scanner download, verification and startup,
+including background scanner work. Its callback is released on close or failed
+creation. It contains no wallet identifiers or provider payloads. Byte counts
+are decoded WASM bytes; totals are omitted when compressed transfer lengths
+cannot describe decoded size, including cross-origin responses that may hide
+compression headers. Do not show 100% or allow wallet operations before
+integrity verification and initialization finish. Handler exceptions never
+skip verification. Native engine clients do not emit browser runtime events.
 
 Creating with `birthday: "auto"` requires a tip request. A numeric
 `birthday: 4480403` can create offline; choose a known height before the wallet's

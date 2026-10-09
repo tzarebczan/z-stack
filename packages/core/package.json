@@ -1,6 +1,6 @@
 {
   "name": "@z-stack/core",
-  "version": "0.1.0-alpha.4",
+  "version": "0.1.0-alpha.5",
   "private": true,
   "type": "module",
   "sideEffects": false,

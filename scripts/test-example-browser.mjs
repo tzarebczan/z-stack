@@ -1,4 +1,5 @@
 import { launchBrowser } from "./browser-launch.mjs";
+import { assertSavedHide, verifyBackForward } from "./browser-hide-lifecycle.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
@@ -78,9 +79,10 @@ async function verifyRecovery(app, browser, port, example) {
     const build = spawnSync("npm", ["run", "build"], {cwd:app, stdio:"inherit", shell:process.platform === "win32"});
     assert.equal(build.status, 0, "recovery consumer failed to build");
     context = await browser.newContext();
-    const page = await context.newPage(), requests = [], errors = [];
+    const page = await context.newPage(), requests = [], errors = [], diagnostics = [];
     page.setDefaultTimeout(30_000);
     page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => diagnostics.push(message.text()));
     page.on("request", request => requests.push(request.url() + (request.postData() ?? "")));
     const origin = `http://127.0.0.1:${port}`;
     await page.route("**/*", route => {
@@ -91,6 +93,14 @@ async function verifyRecovery(app, browser, port, example) {
     const create = () => page.getByRole("button", {name:"Create wallet",exact:true}).click();
     const phrase = page.locator("#phrase");
     await page.goto(origin); await ready();
+    if (example === "react-wallet") {
+      await page.evaluate(() => {
+        window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+        window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+      });
+      await ready();
+      assert.equal((await page.locator("#address").textContent()).trim(), "");
+    }
     if (example === "react-wallet") {
       await create(); await phrase.waitFor({state:"visible"});
       await page.getByRole("button", {name:"Close wallet screen"}).click();
@@ -116,6 +126,23 @@ async function verifyRecovery(app, browser, port, example) {
     await page.reload();
     await page.getByRole("status").filter({hasText:"Wallet opened."}).waitFor({timeout:90_000});
     assert.equal(await page.locator("#address").textContent(), address);
+    for (let reload = 0; reload < 3; reload++) {
+      await page.reload();
+      await page.getByRole("status").filter({hasText:"Wallet opened."}).waitFor({timeout:90_000});
+      assert.equal(await page.locator("#address").textContent(), address);
+    }
+    await assertSavedHide(page, address);
+    if (example === "react-wallet") {
+      await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+      await page.getByRole("status").filter({hasText:"Wallet opened."}).waitFor();
+      await page.getByRole("button", {name:"Lock",exact:true}).click();
+      await page.getByRole("status").filter({hasText:"Spending locked."}).waitFor();
+      await verifyBackForward(page, () => page.getByRole("status").filter({hasText:"Wallet opened."}).waitFor({timeout:90_000}), address);
+    } else {
+      await page.reload();
+      await page.getByRole("status").filter({hasText:"Wallet opened."}).waitFor({timeout:90_000});
+    }
+    assert.ok(!diagnostics.some(value => value.includes("snapshot save on hide failed")), "hide must leave the scan worker available for its snapshot flush");
     assert.ok(!(await page.locator("body").textContent()).includes(recovery));
     assert.ok(requests.every(request => !request.includes(recovery)), "recovery phrase left the browser");
     assert.deepEqual(errors, []);

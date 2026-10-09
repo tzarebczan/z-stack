@@ -86,6 +86,46 @@ function fixture(t: TestContext) {
 }
 const code = (expected: string) => (error: unknown) => error instanceof WalletError && error.code === expected;
 
+test("runtime subscriptions replay, update on scanner readiness and release on close", async t => {
+  const f = fixture(t), wallet = await f.open();
+  const states: string[] = [];
+  const off = wallet.on("runtime", value => states.push(`${value.scanner}:${value.mode}`));
+  assert.equal(states.length, 1, "current state is replayed without a click or timer");
+  class StartingWorker extends EventTarget {
+    id = 0;
+    postMessage(msg: { id: number; op: string }) { if (msg.op === "init") this.id = msg.id; }
+    terminate() {}
+    ready() { this.dispatchEvent(new MessageEvent("message", { data: { id: this.id, mode: "multi-thread", threads: 2 } })); }
+  }
+  const worker = new StartingWorker();
+  const attaching = attachScanWorker(worker as unknown as Worker, { threads: 2, preferMulticore: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(states.at(-1)?.startsWith("starting:"));
+  worker.ready(); await attaching;
+  assert.equal(states.at(-1), "ready:multi-thread");
+  const count = states.length;
+  const offSecond = wallet.on("runtime", () => {});
+  assert.equal(states.length, count, "a new subscriber does not replay into existing subscribers");
+  offSecond(); off();
+  await wallet.close();
+  assert.equal(states.length, count, "teardown does not notify released handlers");
+});
+
+test("startup observers are owned by the wallet and are released after failure or close", async t => {
+  const { reportEngineProgress } = await import("../src/engine-progress.ts");
+  const f = fixture(t);
+  let calls = 0;
+  const wallet = await f.open({ onLoadProgress: () => { calls++; } });
+  assert.ok(calls > 0);
+  await wallet.close();
+  const count = calls;
+  reportEngineProgress({ component: "keys", phase: "ready" });
+  assert.equal(calls, count);
+  await assert.rejects(createWallet({ network: "regtest", server: "https://example.invalid", onLoadProgress: () => { calls++; } }), code("wallet_db"));
+  reportEngineProgress({ component: "keys", phase: "ready" });
+  assert.equal(calls, count);
+});
+
 test("public load recovers an interrupted replacement and retains an uncertain payment", async t => {
   const f = fixture(t);
   const wallet = await f.open({ server: { kind: "fixture", label: "offline", tip: async () => 10,

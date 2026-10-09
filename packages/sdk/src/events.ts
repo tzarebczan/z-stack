@@ -5,8 +5,9 @@
 
 import type { SyncStage } from "@z-stack/core";
 import type { WalletSnapshot } from "@z-stack/core";
+import type { WasmRuntime } from "./runtime";
 
-export type WalletEventName = "sync" | "balance" | "broadcast";
+export type WalletEventName = "sync" | "balance" | "broadcast" | "runtime";
 
 export type SyncEvent = {
   stage: SyncStage;
@@ -32,6 +33,8 @@ export type BalanceEvent = {
 };
 
 export type WalletEventMap = {
+  /** Browser scanner changes, including startup, readiness and fallback. */
+  runtime: WasmRuntime;
   sync: SyncEvent;
   balance: BalanceEvent;
   /** WASM: emitted after reservation persistence, immediately before network submission. */

@@ -1167,3 +1167,89 @@ test("createWallet URL servers require a separate shared memo capability", async
     });
   }
 });
+
+test("cached owners start a scanner before announcing readiness and clean up failed setup", async t => {
+  const { createWallet } = await import("../src/create-wallet.ts");
+  const { wasmRuntime } = await import("../src/runtime.ts");
+  const workers: WarmWorker[] = [];
+  class WarmWorker extends EventTarget {
+    terminated = false;
+    constructor() { super(); workers.push(this); }
+    postMessage(message: { id: number; op: string }) {
+      queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: {
+        id: message.id, ...(message.op === "init" ? { mode: "single-thread", threads: 1 } : {}),
+      } })));
+    }
+    terminate() { this.terminated = true; }
+  }
+  for (const [key, value] of Object.entries({ window: new EventTarget(), document: new EventTarget(), Worker: WarmWorker })) {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    t.after(() => previous ? Object.defineProperty(globalThis, key, previous) : Reflect.deleteProperty(globalThis, key));
+  }
+  const options = { network: "regtest" as const, storage: memoryWalletStorage(), autoSync: false,
+    prewarmProvingKey: false, server: { kind: "fixture", label: "offline", tip: async () => 1, blocks: async () => new Uint8Array() } };
+  for (let reopen = 0; reopen < 2; reopen++) {
+    const phases: string[] = [];
+    const wallet = await createWallet({ ...options, onLoadProgress: value => {
+      if (value.component === "scanner") phases.push(value.phase);
+    } });
+    try {
+      await turn();
+      assert.equal(phases[0], "initialize", "cached reopen must not claim ready before the new scanner starts");
+      assert.equal(phases.at(-1), "ready");
+      assert.equal(wasmRuntime()?.scanner, "ready");
+    } finally { await wallet.close(); }
+  }
+  await assert.rejects(createWallet({ ...options, get autoSync(): false { throw new Error("fixture setup failed after client creation"); } }), /fixture setup failed/);
+  assert.equal(workers.at(-1)?.terminated, true, "a failed setup releases its client and scanner before the owner lease");
+  assert.equal(wasmRuntime()?.scanner, "main-thread");
+});
+
+test("scanner init failure reports fallback once, without a stale ready event", async t => {
+  const { observeEngineProgress } = await import("../src/engine-progress.ts");
+  const { forgetScanWorkerWallet } = await import("../src/scan-host.ts");
+  const phases: string[] = [];
+  const off = observeEngineProgress(value => { if (value.component === "scanner") phases.push(value.phase); });
+  t.after(async () => { off(); await forgetScanWorkerWallet(); });
+  t.mock.method(console, "warn", () => {});
+  class FailingWorker extends EventTarget {
+    postMessage(message: { id: number }) {
+      queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: { id: message.id, error: "fixture init failure" } })));
+    }
+    terminate() {}
+  }
+  assert.equal(await attachScanWorker(new FailingWorker() as unknown as Worker, { threads: 1, preferMulticore: false }), null);
+  assert.deepEqual(phases, ["initialize", "fallback", "ready"]);
+  assert.equal(workerScanSession(), null);
+});
+
+test("a startup observer can replace a worker without announcing the retired scanner ready", async t => {
+  const { observeEngineProgress } = await import("../src/engine-progress.ts");
+  const { forgetScanWorkerWallet, scanWorkerStarting } = await import("../src/scan-host.ts");
+  class ReplacementWorker extends EventTarget {
+    posted = 0;
+    postMessage(message: { id: number }) {
+      this.posted++;
+      queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: { id: message.id, mode: "single-thread", threads: 1 } })));
+    }
+    terminate() {}
+  }
+  const first = new ReplacementWorker(), successor = new ReplacementWorker();
+  let replaced: Promise<unknown> | undefined;
+  const phases: string[] = [];
+  const off = observeEngineProgress(value => {
+    if (value.component !== "scanner") return;
+    phases.push(value.phase);
+    if (value.phase === "initialize" && !replaced) {
+      replaced = restartScanWorker(() => successor as unknown as Worker);
+    }
+  });
+  t.after(async () => { off(); await forgetScanWorkerWallet(); });
+  assert.equal(await attachScanWorker(first as unknown as Worker, { threads: 1, preferMulticore: false }), null);
+  await replaced;
+  assert.equal(await scanWorkerStarting(), true);
+  assert.equal(first.posted, 0, "retired startup must not send init into a successor generation");
+  assert.equal(successor.posted, 1);
+  assert.deepEqual(phases, ["initialize", "initialize", "ready"]);
+});

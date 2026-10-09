@@ -147,8 +147,8 @@ export async function verifyNextWallet(app, browsers, browserNames = []) {
 async function flows(origin, engine, name, isolated) {
   const browser = await launchBrowser(engine);
   const context = await browser.newContext({ viewport: name === "chromium" ? {width:390,height:844} : {width:1280,height:900} });
+  const page = await context.newPage();
   try {
-    const page = await context.newPage();
     page.setDefaultTimeout(30_000);
     const errors = [], requests = [], workers = [];
     page.on("pageerror", error => errors.push(error.message));
@@ -370,5 +370,11 @@ async function flows(origin, engine, name, isolated) {
     assert.ok(requests.every(request => !request.includes(phrase)), "phrase left the browser");
     assert.deepEqual(errors, [], "Next wallet had an unhandled runtime error");
     console.log(`Next.js ${name} ${isolated ? "MT" : "ST"}: create/backup/sync/error/reload/unlock/navigation/creation-teardown/diagnostics/forget/restore passed`);
+  } catch (error) {
+    try {
+      console.error(`Next.js ${name} ${isolated ? "MT" : "ST"} status at failure:`,
+        await page.locator(".wallet-main > .status").textContent({ timeout: 2000 }));
+    } catch { /* The page may already be gone; never print phrase inputs. */ }
+    throw error;
   } finally { await context.close(); await browser.close(); }
 }
