@@ -68,7 +68,7 @@ test('copied wallet setup guard explains missing SDK dependency and accepts manu
       const guard = join(dir, 'scripts/check-setup.mjs');
       const missing = spawnSync(process.execPath, [guard], {encoding:'utf8'});
       assert.equal(missing.status, 1);
-      assert.match(missing.stderr, /source template.*published preview/);
+      assert.match(missing.stderr, /source template.*prebuilt preview/);
       const manifest = JSON.parse(readFileSync(join(dir, 'package.json')));
       manifest.dependencies['@z-stack/sdk'] = 'file:vendor/sdk.tgz';
       writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest));
@@ -97,4 +97,10 @@ test('preview source receipt requires a clean matching SDK archive and valid rev
       assert.equal(readPreviewRevision(file, sdk), null, JSON.stringify(change));
     }
   } finally { rmSync(dir, {recursive:true, force:true}); }
+});
+
+test('installed generated instructions remove the redundant install command',()=>{
+ const input='# Demo\n\nDescription.\n\nInstall:\n\n```sh\nnpm install /path/sdk.tgz\nnpm run dev\n```\n';
+ const result=generatedReadme(generatedReadme(input),true);
+ assert.doesNotMatch(result,/npm install/);assert.match(result,/Dependencies were installed/);assert.match(result,/npm run dev/);
 });

@@ -3,8 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { formatZatoshis } from "@z-stack/sdk";
 import type { SendDraft, SendReview, SendReceipt } from "../lib/send";
 
-export function SendPayment({ unit, disabled, canReview, clearStatus, canCancel, receipt, reviewPayment, sendPayment, cancelPayment, clearReceipt }: {
-  unit: string; disabled: boolean; canReview: boolean; clearStatus(): void; canCancel: boolean; receipt?: SendReceipt;
+export function SendPayment({ unit, pendingAmount, disabled, canReview, clearStatus, canCancel, receipt, reviewPayment, sendPayment, cancelPayment, clearReceipt }: {
+  unit: string; pendingAmount?: string; disabled: boolean; canReview: boolean; clearStatus(): void; canCancel: boolean; receipt?: SendReceipt;
   reviewPayment(draft: SendDraft): Promise<SendReview | undefined>;
   sendPayment(review: SendReview, words: string): Promise<void | undefined>;
   cancelPayment(): void; clearReceipt(): void;
@@ -30,6 +30,7 @@ export function SendPayment({ unit, disabled, canReview, clearStatus, canCancel,
     }}>New payment</button>}
   </section>;
   return <section className="payment" aria-label={`Send ${unit}`} ref={panel} tabIndex={-1}>
+    {pendingAmount && <p id="send-confirming" className="hint">{pendingAmount} {unit} is still confirming. Only available funds can be spent.</p>}
     <h2>{review ? "Review payment" : `Send ${unit}`}</h2>
     {review ? <>
       <dl><dt>To</dt><dd>{review.to}</dd><dt>Amount</dt><dd>{review.amount} {unit}</dd>

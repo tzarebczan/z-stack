@@ -1,6 +1,6 @@
 {
   "name": "@z-stack/base",
-  "version": "0.1.0-alpha.6",
+  "version": "0.1.0-alpha.7",
   "private": true,
   "description": "Optional Base wallet and explicit Simple7702 paymaster primitives for z-stack integrations",
   "type": "module",

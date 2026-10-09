@@ -16,7 +16,7 @@ For manual setup, use the SDK archive in the verified preview’s `artifacts/` d
 Copy this directory outside the SDK checkout. From your copy:
 
 ```sh
-npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.6.tgz
+npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.7.tgz
 npm run build
 npm run start
 ```
@@ -121,3 +121,12 @@ The receive QR uses the app-owned MIT-licensed [qrcode-generator](https://github
 encodes only the public address and makes no remote request. Copy address remains available.
 From an installed generated app, `npm run check:chain -- --height 4465026` compares public provider hashes;
 a disagreement is diagnostic evidence, not proof that funding or spending is impossible.
+
+## Available and confirming funds
+
+The balance separates spendable funds from funds waiting for confirmations.
+Incoming testnet funds need three confirmations by default. Activity shows the
+amount and confirmation count; the send form explains waiting funds. These views
+use the SDK balance and confirmation policy without changing spending rules.
+Restore keeps words on a failed attempt and marks an invalid phrase in the form.
+Valid BIP39 phrases of 12, 15, 18, 21 or 24 words are supported. New wallets generate 24.

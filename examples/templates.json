@@ -15,7 +15,8 @@
     "public/favicon.svg",
     "src/receive-qr.ts",
     "sdk-build.json",
-    "scripts/check-setup.mjs"
+    "scripts/check-setup.mjs",
+    "src/wallet-view.ts"
   ],
   "next-wallet": [
     ".gitignore",
@@ -44,7 +45,8 @@
     "lib/receive-qr.ts",
     "sdk-build.json",
     "scripts/check-setup.mjs",
-    "components/ReceiveQr.tsx"
+    "components/ReceiveQr.tsx",
+    "lib/wallet-view.ts"
   ],
   "react-wallet": [
     "README.md",

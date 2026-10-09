@@ -8,7 +8,7 @@ import { reportEngineProgress } from "./engine-progress";
  */
 
 /** Keep lockstep with `packages/sdk/package.json`. */
-export const SDK_VERSION = "0.1.0-alpha.6";
+export const SDK_VERSION = "0.1.0-alpha.7";
 
 export const LOCAL_ZAINO_GRPC = "http://127.0.0.1:8137";
 /** Development mainnet Zaino convention; configure your own endpoint explicitly. */

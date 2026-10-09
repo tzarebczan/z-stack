@@ -7,6 +7,7 @@ import { useWallet } from "../lib/use-wallet";
 import { SecretForm } from "./SecretForm";
 import { SetupChecks } from "./SetupChecks";
 import { BaseWallet } from "./BaseWallet";
+import { pendingFunds, confirmationLabel } from "../lib/wallet-view";
 import { ScanDetails } from "./ScanDetails";
 import { SendPayment } from "./SendPayment";
 
@@ -21,13 +22,14 @@ export function WalletScreen() {
   const disabled = !wallet.ready || !!wallet.busy;
   const backup = !!wallet.phrase;
   const unit = wallet.network === "testnet" ? "TAZ" : "ZEC";
+  const confirming = wallet.snapshot ? pendingFunds(wallet.snapshot) : 0n;
   return <>
     <p className="sdk-build">SDK {SDK_VERSION} · {sdkBuild.version === SDK_VERSION && sdkBuild.revision ? "source " + sdkBuild.revision.slice(0,12) : "local archives"}</p>
     <div className="title-row"><div><p className="eyebrow">Your local wallet</p><h1>A little pocket of privacy.</h1></div>
       <span className="network">{wallet.network === "testnet" ? "Testnet" : "Regtest fixture"}</span></div>
     {wallet.network === "testnet" && <details className="funding-notice" aria-label="Testnet funding limitation">
       <summary>Testnet funding status</summary>
-      <p>Request test coins from the <a href="https://faucet.testnet.valargroup.dev/">Valar faucet</a>, then sync. Daily limits apply. Public-testnet funded receive/send is not yet verified; see the documented results.</p>
+      <p>Request test coins from the <a href="https://faucet.testnet.valargroup.dev/">Valar faucet</a>, then sync. Daily limits apply. A public testnet receive has been reported; outgoing spending remains unverified.</p>
       <a href="https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing">Funded testing options</a>
     </details>}
     <div className="workspace">
@@ -35,6 +37,10 @@ export function WalletScreen() {
         <div className="balance-block"><p className="eyebrow">Available balance</p>
           <p className="balance" id="balance">{wallet.snapshot ? formatZatoshis(BigInt(wallet.snapshot.balance?.totalAvailable ?? 0)) : "—"}
             <span>{unit}</span></p>
+          {confirming > 0n && <div className="pending-balance">
+            <p id="pending-balance" role="status">Confirming · {formatZatoshis(confirming)} {unit}</p>
+            <p className="hint">Confirming funds cannot be spent yet.{wallet.snapshot?.confirmations && ` Incoming shielded funds need ${wallet.snapshot.confirmations.untrusted} confirmations.`} Sync to update.</p>
+          </div>}
           <div className="wallet-state"><span>{wallet.spending ? "Spending unlocked" : "Spending locked"}</span>
             <span>{wallet.runtime}</span></div>
         </div>
@@ -45,7 +51,7 @@ export function WalletScreen() {
             setSaved(false); setPhraseCopied(""); setAddressCopied(""); void wallet.create();
           }}>{wallet.busy === "Creating" ? "Creating…" : "Create wallet"}</button>
           <details><summary>Restore an existing wallet</summary>
-            <SecretForm restore disabled={disabled} submit={wallet.restore} /></details>
+            <SecretForm restore disabled={disabled} clearStatus={wallet.clearStatus} submit={wallet.restore} /></details>
         </div> : <>
           <div className="actions sync-actions"><button className="primary" disabled={disabled || backup}
             onClick={() => void wallet.sync()}>Sync wallet</button>
@@ -68,8 +74,8 @@ export function WalletScreen() {
             <p role="status">{phraseCopied}</p>
             <button disabled={!saved} onClick={() => { setPhraseCopied(""); wallet.hidePhrase(); }}>Done, hide phrase</button></section>}
           {!backup && !wallet.spending && <details><summary>Unlock with your recovery phrase</summary>
-            <SecretForm disabled={disabled} submit={words => wallet.unlock(words)} /></details>}
-          {!backup && <SendPayment unit={unit} key={wallet.snapshot.unifiedAddress} disabled={disabled} canReview={(wallet.snapshot.scannedHeight ?? 0) >= wallet.snapshot.birthdayHeight}
+            <SecretForm disabled={disabled} clearStatus={wallet.clearStatus} submit={words => wallet.unlock(words)} /></details>}
+          {!backup && <SendPayment unit={unit} pendingAmount={confirming > 0n ? formatZatoshis(confirming) : undefined} key={wallet.snapshot.unifiedAddress} disabled={disabled} canReview={(wallet.snapshot.scannedHeight ?? 0) >= wallet.snapshot.birthdayHeight}
             clearStatus={wallet.clearStatus} canCancel={wallet.canCancelPayment}
             receipt={wallet.receipt} reviewPayment={wallet.reviewPayment} sendPayment={wallet.sendPayment}
             cancelPayment={wallet.cancelPayment} clearReceipt={wallet.clearReceipt} />}
@@ -77,7 +83,8 @@ export function WalletScreen() {
           <section className="activity" aria-label="Activity"><div className="section-title"><h2>Activity</h2>
             <span className="hint">{wallet.snapshot.scannedHeight ? `Scanned to ${wallet.snapshot.scannedHeight.toLocaleString()}` : "Sync to update"}</span></div>
             {wallet.history.length ? <ul>{wallet.history.map(entry => <li key={entry.txid}>
-              <strong>{classifyHistory(entry).action}</strong><code>{entry.txid}</code></li>)}</ul>
+              <strong>{classifyHistory(entry).label} · {classifyHistory(entry).action === "received" ? "+" : classifyHistory(entry).action === "sent" ? "−" : ""}{classifyHistory(entry).displayZec} {unit}</strong>
+              <span>{confirmationLabel(entry, wallet.snapshot!)}</span><code>{entry.txid}</code></li>)}</ul>
               : <div className="empty"><span className="empty-mark" aria-hidden="true">↗</span><p>No activity yet.</p>
                 <p className="hint">Receive {unit}, then sync to see it here.</p></div>}
           </section>

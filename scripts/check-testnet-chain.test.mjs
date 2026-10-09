@@ -31,12 +31,22 @@ test('invalid hash or credential-bearing endpoint never reports a successful che
  }
 });
 test('explorer mismatch is reported as provider disagreement, not spending failure',()=>{
- const result=check(['--height','4465026'],{explorerHash:'cd'.repeat(32)});assert.equal(result.status,1);assert.match(result.stderr,/does not by itself prove/);
+ const result=check(['--height','4465026','--compare-explorer'],{explorerHash:'cd'.repeat(32)});assert.equal(result.status,1);assert.match(result.stderr,/does not by itself prove/);
 });
 test('missing explorer block is not diagnosed as a fork',()=>{
- const result=check(['--height','4465026'],{status:404});assert.equal(result.status,2);assert.match(result.stderr,/missing block alone does not prove a fork/);
+ const result=check(['--height','4465026','--compare-explorer'],{status:404});assert.equal(result.status,2);assert.match(result.stderr,/missing block alone does not prove a fork/);
 });
 test('reversed provider encoding is not diagnosed as a genuine mismatch',()=>{
  const ordered=Array.from({length:32},(_,i)=>i.toString(16).padStart(2,'0')).join('');
- const result=check(['--height','4465026'],{state:{height:4465026,hash:ordered,network:'test'},explorerHash:ordered.match(/../g).reverse().join('')});assert.equal(result.status,2);assert.match(result.stderr,/reversed byte order/);
+ const result=check(['--height','4465026','--compare-explorer'],{state:{height:4465026,hash:ordered,network:'test'},explorerHash:ordered.match(/../g).reverse().join('')});assert.equal(result.status,2);assert.match(result.stderr,/reversed byte order/);
+});
+
+test('default checks the published NU7 anchor without querying the disagreeing explorer',()=>{
+ const canonical='000089ba27100beede16d64b34e3d1b626b428cb7ee9fe6dcfdc217ce24e78af';
+ const result=check([],{state:{height:4465026,hash:canonical,network:'test'},status:404});assert.equal(result.status,0,result.stderr);
+});
+test('custom heights and incompatible check modes require explicit intent',()=>{
+ for(const args of [['--height','4465027'],['--compare-explorer','--expected-hash',hash]]) {
+  assert.equal(check(args).status,2);
+ }
 });

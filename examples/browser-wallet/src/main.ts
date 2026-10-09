@@ -1,6 +1,7 @@
 import { SDK_VERSION, classifyHistory, createWallet, validateBirthdayInput, formatZatoshis, WalletError, type WalletSnapshot } from "@z-stack/sdk";
 import "./style.css";
 import buildInfo from "../sdk-build.json";
+import { pendingFunds, confirmationLabel, loadedWalletStatus } from "./wallet-view";
 import { drawReceiveQr } from "./receive-qr";
 import { attachBase } from "./base";
 import { connection } from "./connection";
@@ -94,9 +95,18 @@ async function start() {
   wallet.on("sync", progress => {
     status.textContent = progress.stage === "synced" ? "Up to date" : `Syncing · ${Math.round(progress.percent ?? 0)}%`;
   });
-  wallet.on("balance", value => {
-    balance.textContent = `${formatZatoshis(BigInt(value.availableZat))} ${unit}`;
-  });
+  function showBalance(available: bigint, pending: bigint, required?: number) {
+    balance.textContent = `${formatZatoshis(available)} ${unit}`;
+    element("pending-balance").hidden = pending === 0n;
+    element("pending-balance").textContent = `Confirming · ${formatZatoshis(pending)} ${unit}`;
+    element("pending-help").hidden = pending === 0n;
+    element("pending-help").textContent = required === undefined ? "Confirming funds cannot be spent yet. Sync to update."
+      : `Incoming shielded funds need ${required} ${required === 1 ? "confirmation" : "confirmations"}. Sync to update.`;
+    element("send-confirming").hidden = pending === 0n;
+    element("send-confirming").textContent = `${formatZatoshis(pending)} ${unit} is still confirming. Only available funds can be spent.`;
+  }
+  wallet.on("balance", value => showBalance(BigInt(value.availableZat), BigInt(value.pendingZat ?? 0)));
+
 
   async function render(snapshot: WalletSnapshot) {
     identity = snapshot.unifiedAddress;
@@ -114,11 +124,17 @@ async function start() {
       receipt = await refreshReceipt(wallet, receipt);
       showReceipt(receipt);
     }
-    balance.textContent = `${formatZatoshis(BigInt(snapshot.balance?.totalAvailable ?? 0))} ${unit}`;
+    showBalance(BigInt(snapshot.balance.totalAvailable), pendingFunds(snapshot), snapshot.confirmations?.untrusted);
     const entries = await wallet.history(20);
     const rows = entries.map(entry => {
       const row = document.createElement("li");
-      row.textContent = `${classifyHistory(entry).action} · ${entry.txid}`;
+      const item = classifyHistory(entry);
+      const movement = document.createElement("strong"), confirmations = document.createElement("span"), txid = document.createElement("code");
+      const sign = item.action === "received" ? "+" : item.action === "sent" ? "−" : "";
+      movement.textContent = `${item.label} · ${sign}${item.displayZec} ${unit}`;
+      confirmations.textContent = confirmationLabel(entry, snapshot);
+      txid.textContent = entry.txid;
+      row.append(movement, confirmations, txid);
       return row;
     });
     history.replaceChildren(...rows);
@@ -360,7 +376,12 @@ async function start() {
       // Keep the input available if validation, transport or persistence fails.
       let restored: WalletSnapshot;
       try { restored = await wallet.restore(mnemonic, { birthday: restoreBirthday }); }
-      catch (error) { restoreValidation = WalletError.fromUnknown(error).userMessage(); throw error; }
+      catch (error) {
+        const safe = WalletError.fromUnknown(error);
+        restoreValidation = safe.userMessage();
+        if (safe.code === "invalid_recovery_phrase" || safe.code === "seed_mismatch") words.setAttribute("aria-invalid", "true");
+        throw error;
+      }
       clearPhrase();
       await render(restored);
       status.textContent = "Wallet restored. Sync to recover activity.";
@@ -396,6 +417,7 @@ async function start() {
     sendStatus.textContent = ""; element("copy-status").textContent = "";
     element("remove-status").textContent = ""; removeConfirm.checked = false;
     address.textContent = ""; balance.textContent = `— ${unit}`; history.replaceChildren();
+    for (const id of ["pending-balance", "pending-help", "send-confirming"]) element(id).hidden = true;
     for (const id of ["receive-panel", "scan-panel", "send-panel"]) element(id).hidden = true;
     element("history-empty").hidden = false;
     element("history-empty").textContent = "Create or restore a wallet to see activity.";
@@ -455,7 +477,7 @@ async function start() {
   await run(async () => {
     const saved = await wallet.load();
     if (saved) await render(saved);
-    status.textContent = saved ? "Wallet opened. Sync when ready." : "Create a wallet or restore one.";
+    status.textContent = saved ? loadedWalletStatus(saved) : "Create a wallet or restore one.";
   });
 }
 

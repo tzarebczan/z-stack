@@ -10,16 +10,23 @@ try {
   process.exit(2);
 }
 const args = process.argv.slice(2);
-let server = 'https://zcash-testnet.chainsafe.dev', explorer = 'https://zexplorer.app', height, expectedHash;
+const activation = {height:4465026, hash:'000089ba27100beede16d64b34e3d1b626b428cb7ee9fe6dcfdc217ce24e78af'};
+let server = 'https://zcash-testnet.chainsafe.dev', explorer = 'https://zexplorer.app', height = activation.height, expectedHash, compareExplorer = false;
 class PublicLookupError extends Error {}
 try {
   for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--compare-explorer') { compareExplorer = true; continue; }
     if (!['--server', '--explorer', '--height', '--expected-hash'].includes(args[i]) || !args[i + 1]) throw new Error();
     const flag = args[i], value = args[++i];
     if (flag === '--server') server = value;
     else if (flag === '--explorer') explorer = value;
     else if (flag === '--expected-hash') expectedHash = value.toLowerCase();
     else height = Number(value);
+  }
+  if (compareExplorer && expectedHash !== undefined || args.includes("--explorer") && !compareExplorer) throw new Error();
+  if (!compareExplorer && expectedHash === undefined) {
+    if (height !== activation.height) throw new Error();
+    expectedHash = activation.hash;
   }
   if (!Number.isSafeInteger(height) || height < 1 || height > 0xffff_ffff) throw new Error();
   if (expectedHash !== undefined && !/^[0-9a-f]{64}$/.test(expectedHash)) throw new Error();
@@ -28,7 +35,7 @@ try {
     if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw new Error();
   }
 } catch {
-  console.error('Usage: node scripts/check-testnet-chain.mjs --height <positive block height> [--server <HTTPS gRPC-Web URL>] [--explorer <HTTPS Zexplorer origin>] [--expected-hash <64 hex characters>]');
+  console.error('Usage: node scripts/check-testnet-chain.mjs [--height <positive block height>] [--server <HTTPS gRPC-Web URL>] [--expected-hash <64 hex characters> | --compare-explorer [--explorer <HTTPS Zexplorer origin>]]. Default checks the published NU7 activation block; other heights need an expected hash or explicit explorer comparison.');
   process.exit(2);
 }
 try {
@@ -62,7 +69,7 @@ try {
   console.log(JSON.stringify({ height, server: new URL(server).host, explorer: new URL(explorer).host,
     serverHash: state.hash, explorerHash: block.block_hash, match, reversedMatch }, null, 2));
   if (reversedMatch) { console.error("Hashes match in reversed byte order. Normalize provider encoding before diagnosing a fork."); process.exitCode = 2; }
-  else if (!match) { console.error("Providers disagree at this height. This does not by itself prove a faucet or wallet cannot send."); process.exitCode = 1; }
+  else if (!match) { console.error("Explorer comparison found a provider disagreement (exit 1); this is not an SDK installation health check. This does not by itself prove a faucet or wallet cannot send."); process.exitCode = 1; }
   }
 } catch (error) {
   console.error(error instanceof PublicLookupError ? error.message : 'Could not compare public block data. Check the height, endpoint availability, and gRPC-Web support.');

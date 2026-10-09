@@ -231,7 +231,7 @@ async function flows(origin, engine, name, isolated) {
     await configure({tip:"2"});
     await page.reload();
     await page.waitForFunction(() => document.querySelector(".status")?.textContent !== "Opening local wallet…", null, {timeout:90_000});
-    assert.match(await page.locator(".status").textContent(), /Wallet opened\. Spending is locked\./,
+    assert.match(await page.locator(".status").textContent(), /Wallet opened · scanned through block/,
       `Reload failed; browser errors: ${JSON.stringify(errors)}`);
     assert.equal(await page.locator("#address").textContent(), address);
     assert.equal(await page.locator(".words").count(), 0, "reload retained recovery phrase");
@@ -249,7 +249,7 @@ async function flows(origin, engine, name, isolated) {
     for(let i=0;i<3;i++) {
       await page.getByRole("link", {name:"How it works",exact:true}).click();
       await page.getByRole("link", {name:"Back to wallet",exact:true}).click();
-      await status("Wallet opened. Spending is locked.").waitFor({timeout:30_000});
+      await status("Wallet opened ·").waitFor({timeout:30_000});
       assert.equal(await page.locator("#address").textContent(), address);
     }
     await page.getByText("Check this deployment", {exact:true}).click();
@@ -275,7 +275,15 @@ async function flows(origin, engine, name, isolated) {
     await page.getByRole("button", {name:"Remove from this browser",exact:true}).click();
     await status("Local wallet removed.").waitFor();
     await page.getByText("Restore an existing wallet", {exact:true}).click();
+    await page.locator("#restore-words").fill("not a recovery phrase");
+    await page.locator("#birthday").fill("1");
+    await page.getByRole("button", {name:"Restore wallet",exact:true}).click();
+    await page.locator("#restore-error").filter({hasText:"Those words are not a valid recovery phrase."}).waitFor();
+    assert.equal(await page.locator("#restore-words").inputValue(), "not a recovery phrase");
+    assert.equal(await page.locator("#restore-words").getAttribute("aria-invalid"), "true");
     await page.locator("#restore-words").fill(phrase);
+    assert.equal(await page.locator("#restore-words").getAttribute("aria-invalid"), null);
+    assert.equal(await page.locator("#restore-error").innerText(), "");
     await page.locator("#birthday").fill("1");
     await page.getByRole("button", {name:"Restore wallet",exact:true}).click();
     await status("Wallet restored.").waitFor();
@@ -361,7 +369,7 @@ async function flows(origin, engine, name, isolated) {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await page.evaluate(() => window.__releaseWalletCommit());
     await page.getByRole("link", {name:"Back to wallet",exact:true}).click();
-    await status("Wallet opened. Spending is locked.").waitFor({timeout:30_000});
+    await status("Wallet opened ·").waitFor({timeout:30_000});
     assert.equal(await page.locator("#address").textContent(), committedAddress);
     assert.equal(await page.locator(".words").count(), 0, "acknowledged phrase survived navigation");
     await page.getByRole("link", {name:"How it works",exact:true}).click();
@@ -369,7 +377,7 @@ async function flows(origin, engine, name, isolated) {
     assert.equal(await page.evaluate(() => window.dispatchEvent(new Event("beforeunload", {cancelable:true}))), true,
       "acknowledgement left the unsaved-backup warning active");
     await page.getByRole("link", {name:"Back to wallet",exact:true}).click();
-    await status("Wallet opened. Spending is locked.").waitFor();
+    await status("Wallet opened ·").waitFor();
     assert.ok(requests.every(request => !request.includes(confirmedPhrase)), "confirmed phrase left the browser");
     assert.ok(requests.every(request => !request.includes(phrase)), "phrase left the browser");
     assert.deepEqual(errors, [], "Next wallet had an unhandled runtime error");

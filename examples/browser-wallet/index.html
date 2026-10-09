@@ -17,10 +17,13 @@
       <progress id="engine-progress-bar" aria-label="Loading wallet engine" hidden></progress>
       <details id="chain-warning" class="notice" aria-label="Testnet funding limitation">
         <summary>Testnet funding status</summary>
-        <p>Request test coins from the <a href="https://faucet.testnet.valargroup.dev/">Valar faucet</a>, then sync. Daily limits apply. Public-testnet funded receive/send is not yet verified; see the documented results.</p>
+        <p>Request test coins from the <a href="https://faucet.testnet.valargroup.dev/">Valar faucet</a>, then sync. Daily limits apply. A public testnet receive has been reported; outgoing spending remains unverified.</p>
         <a href="https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing">Funded testing options</a>
       </details>
+      <p class="hint">Available</p>
       <p id="balance">— TAZ</p>
+      <p id="pending-balance" role="status" hidden></p>
+      <p id="pending-help" class="hint" hidden></p>
       <section id="scan-panel" hidden aria-label="Scan details">
         <p id="scan-details"></p>
         <p>Missing a deposit? Confirm it on this server’s chain. Deposits below the birthday need an earlier scan. Rescanning cannot find a payment on another chain.</p>
@@ -54,9 +57,9 @@
       <p id="phrase-copy-status" role="status" hidden></p>
       <form id="restore-form" aria-describedby="restore-help status">
         <h2>Restore a wallet</h2>
-        <p id="restore-help" class="hint">Use a height or date before your first deposit.</p>
+        <p id="restore-help" class="hint">Use a height or date before your first deposit. Restore accepts valid 12-, 15-, 18-, 21- or 24-word phrases; new wallets use 24.</p>
         <label for="words">Recovery phrase</label>
-        <textarea id="words" autocomplete="off" autocapitalize="none" spellcheck="false" required></textarea>
+        <textarea id="words" aria-describedby="restore-help status" autocomplete="off" autocapitalize="none" spellcheck="false" required></textarea>
         <button id="clear-words" type="button">Clear phrase</button>
         <label for="birthday">Birthday height or date</label>
         <input id="birthday" aria-describedby="status" required placeholder="Height or YYYY-MM-DD" />
@@ -71,6 +74,7 @@
           <input id="send-amount" name="amount" aria-describedby="send-status" required inputmode="decimal" autocomplete="off" />
           <label for="send-memo">Memo (optional)</label>
           <textarea id="send-memo" name="memo" aria-describedby="send-status" rows="2" maxlength="512"></textarea>
+          <p id="send-confirming" class="hint" hidden></p>
           <p id="send-readiness">Sync the wallet before reviewing a payment.</p>
           <button id="review-send" disabled>Review payment</button>
         </form>
