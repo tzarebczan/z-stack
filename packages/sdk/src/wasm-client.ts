@@ -584,17 +584,16 @@ export function createWasmClient(
         // Register before any other await so the click still counts as a WebAuthn user gesture.
         if (createOpts?.passkey) passkeyWrite = await runtime.persistPasskeyIfBrowser(mnemonic, operation);
         let tip: number;
-        try {
-          tip = await transport.tip();
-        } catch (e) {
-          // An explicit block height does not need the server. Anything else
-          // would become birthday 1 and then fail the next sync as too deep.
-          if (!(typeof birthday === "number" && birthday > 0)) {
-            throw new Error(
-              `light server tip failed (${transport.label}): ${e instanceof Error ? e.message : e}`,
-            );
-          }
+        if (typeof birthday === "number") {
+          // Already validated. An explicit creation height is fully local;
+          // sync checks the selected server later.
           tip = birthday;
+        } else {
+          try {
+            tip = await transport.tip();
+          } catch (e) {
+            throw new WalletError("transport", `light server tip failed (${transport.label})`, e);
+          }
         }
         operation.assertCurrent();
         const bday = await runtime.resolveBirthday(birthday, tip, Math.max(1, tip - 100), { network: net, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });

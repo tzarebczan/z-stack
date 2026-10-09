@@ -52,7 +52,7 @@ function fixture(t: TestContext) {
       memoEnhancementTxids: () => "[]",
       history: () => JSON.stringify(state.pending ? [{ txid, status: "pending" }] : []),
       nextUnifiedAddress() {},
-      attachSeed(secret: string) { if (secret !== words) throw new Error("seed fingerprint does not match"); },
+      attachSeed(secret: string) { if (secret === "not a phrase") throw new Error("invalid mnemonic: SYNTHETIC_PRIVATE_WORD"); if (secret !== words) throw new Error("seed fingerprint does not match"); },
       proveSend() { state.pending = true; return JSON.stringify({ hex: "synthetic-transaction", txid }); },
       hardwareCreateSend() { state.reserved = true; return new Uint8Array([1]); },
       ledgerSigningPlan() { return JSON.stringify({ commands: [], reviewIndex: 0, signatures: [] }); },
@@ -1066,4 +1066,47 @@ test("a failed in-memory rescan rollback retires the source and keeps the origin
   f.onRevive(); fail = false;
   assert.equal((await wallet.getWallet()).birthdayHeight, 8);
   assert.deepEqual(await readSavedSnapshotRecord(), before);
+});
+
+
+test("numeric birthday creation is offline; automatic creation reports a stable transport failure", async t => {
+  const f = fixture(t);
+  let tips = 0;
+  const wallet = await f.open({server: {
+    kind: "fixture", label: "unavailable", tip: async () => { tips++; throw new Error("SYNTHETIC_PRIVATE_PROVIDER_CONTEXT"); },
+    blocks: async () => { throw new Error("Unexpected sync"); },
+  }});
+  await assert.rejects(wallet.create({birthday: 0}), code("invalid_birthday"));
+  assert.equal(tips, 0);
+  const created = await wallet.create({birthday: 1});
+  assert.ok(created.wallet.unifiedAddress);
+  assert.equal(tips, 0, "offline creation must not contact the light server");
+  await wallet.forget();
+  await assert.rejects(wallet.create({birthday: "auto"}), error => {
+    assert.ok(error instanceof WalletError);
+    assert.equal(error.code, "transport");
+    assert.equal(error.userMessage(), "Could not reach the light server.");
+    assert.doesNotMatch(error.userMessage(), /SYNTHETIC_PRIVATE_PROVIDER_CONTEXT/);
+    return true;
+  });
+  assert.equal(tips, 1);
+  assert.equal(await wallet.load(), null, "failed automatic creation saved a wallet");
+});
+
+
+test("public unlock reports malformed words without granting spending access", async t => {
+  const f = fixture(t);
+  const wallet = await f.open();
+  await wallet.create({ birthday: 1 });
+  wallet.lock();
+  await assert.rejects(wallet.unlock("not a phrase"), error => {
+    assert.ok(error instanceof WalletError);
+    assert.equal(error.code, "invalid_recovery_phrase");
+    assert.equal(error.userMessage(), "Those words are not a valid recovery phrase.");
+    assert.doesNotMatch(error.userMessage(), /SYNTHETIC_PRIVATE_WORD/);
+    return true;
+  });
+  assert.equal(wallet.hasSpendingSeed(), false);
+  await wallet.unlock(words);
+  assert.equal(wallet.hasSpendingSeed(), true);
 });

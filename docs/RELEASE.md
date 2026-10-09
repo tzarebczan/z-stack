@@ -1,7 +1,7 @@
 # Package builds and verification
 
-The current preview is [`0.1.0-alpha.3`](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.3),
-with NU7 support and downloadable archives. Earlier previews predate NU7. Packages are not published to npm or Cargo. The browser SDK includes
+The current preview is [`0.1.0-alpha.4`](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.4),
+with NU7 support and downloadable archives. Alpha.1 and alpha.2 predate NU7. Packages are not published to npm or Cargo. The browser SDK includes
 production WASM engines, so an app consuming built packages does not need Rust. See the
 [walkthrough](GETTING-STARTED.md) and [support limits](SUPPORT.md).
 
@@ -33,7 +33,7 @@ The preview bundle adds runnable templates, the setup helper, offline API docs,
 license provenance, `PREVIEW.json` and an internal `SHA256SUMS` inventory. Build it
 from a clean committed revision. `--allow-dirty` produces a marked local rehearsal,
 which must not be treated as a release artifact. After unpacking a bundle, run
-`sha256sum -c SHA256SUMS` inside `z-stack-preview/`, then scaffold and build an app
+`sha256sum --quiet -c SHA256SUMS` inside `z-stack-preview/`, then scaffold and build an app
 outside the SDK checkout. None of these commands publishes to a registry.
 
 ## Local checks
@@ -154,15 +154,15 @@ pnpm pack:sdk
 pnpm pack:base
 pnpm bundle:preview
 cd artifacts
-sha256sum z-stack-core-0.1.0-alpha.3.tgz z-stack-passkey-0.1.0-alpha.3.tgz \
-  z-stack-sdk-0.1.0-alpha.3.tgz z-stack-base-0.1.0-alpha.3.tgz \
-  z-stack-preview-0.1.0-alpha.3-*.tgz > SHA256SUMS-alpha.3
-sha256sum -c SHA256SUMS-alpha.3
+sha256sum z-stack-core-0.1.0-alpha.4.tgz z-stack-passkey-0.1.0-alpha.4.tgz \
+  z-stack-sdk-0.1.0-alpha.4.tgz z-stack-base-0.1.0-alpha.4.tgz \
+  z-stack-preview-0.1.0-alpha.4-*.tgz > SHA256SUMS-alpha.4
+sha256sum --quiet -c SHA256SUMS-alpha.4
 # macOS: use shasum -a 256 in place of sha256sum for both commands.
 ```
 
 Use a directory with exactly one preview bundle for this version. Upload these
-five archives and the checksums to the prerelease tagged `v0.1.0-alpha.3`, targeting
+five archives and the checksums to the prerelease tagged `v0.1.0-alpha.4`, targeting
 the verified commit. Download them again and compare all hashes before publishing.
 Scaffold an app from the downloaded bundle as the final acceptance check. Publishing
 a GitHub prerelease does not publish to npm or Cargo. Keep source tags and signed

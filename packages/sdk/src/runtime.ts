@@ -7,7 +7,7 @@ import { canUseScanWorker, scanWorkerFailed, scanWorkerPresent, scanWorkerRuntim
  */
 
 /** Keep lockstep with `packages/sdk/package.json`. */
-export const SDK_VERSION = "0.1.0-alpha.3";
+export const SDK_VERSION = "0.1.0-alpha.4";
 
 export const LOCAL_ZAINO_GRPC = "http://127.0.0.1:8137";
 /** Development mainnet Zaino convention; configure your own endpoint explicitly. */

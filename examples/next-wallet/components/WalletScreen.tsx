@@ -20,6 +20,11 @@ export function WalletScreen() {
   return <>
     <div className="title-row"><div><p className="eyebrow">Your local wallet</p><h1>A little pocket of privacy.</h1></div>
       <span className="network">{wallet.network === "testnet" ? "Testnet" : "Regtest fixture"}</span></div>
+    {wallet.network === "testnet" && <aside className="funding-notice" aria-label="Testnet funding limitation">
+      <strong>Public testnet spending is not verified.</strong>
+      <p>The light server and explorer disagree after NU7. Request funds only after your faucet and wallet server agree on the chain.</p>
+      <a href="https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing">Funded testing options</a>
+    </aside>}
     <div className="workspace">
       <section className="wallet-main" aria-label="Wallet">
         <div className="balance-block"><p className="eyebrow">Available balance</p>

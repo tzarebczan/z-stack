@@ -7,10 +7,10 @@ their UI, authentication, and backup service.
 **Alpha.** The packages are not published to npm. Original code is Apache-2.0;
 see [licensing](docs/LICENSING.md) and
 [release status](docs/RELEASE.md).
-The [alpha.3 preview](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.3)
+The [alpha.4 preview](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.4)
 includes NU7 support and prebuilt browser SDK archives, with both single-threaded
 and threaded WASM engines. No Rust toolchain is needed to use these archives.
-Earlier previews predate NU7.
+Alpha.1 and alpha.2 predate NU7.
 
 ## Start here
 
@@ -33,9 +33,9 @@ Earlier previews predate NU7.
 
 ## Run the published preview
 
-The current prebuilt preview is **alpha.3**, with NU7 support. Public-testnet
+The current prebuilt preview is **alpha.4**, with NU7 support. Public-testnet
 funding remains unverified because providers disagree after activation; check
-[the funding limitation](docs/GETTING-STARTED.md#4-create-or-restore-then-sync)
+[the funding limitation](docs/GETTING-STARTED.md#funded-testing)
 before requesting test coins. Node 22.18+ is required.
 
 Use the prebuilt WASM to avoid compiling the wallet engine. The SDK archive in
@@ -44,12 +44,12 @@ manifests, and bundled core and passkey helpers. Download the bundle, verify
 both checksum layers, then generate an app:
 
 ```sh
-gh release download v0.1.0-alpha.3 --repo tzarebczan/z-stack --dir sdk-alpha
+gh release download v0.1.0-alpha.4 --repo tzarebczan/z-stack --dir sdk-alpha
 cd sdk-alpha
-sha256sum -c SHA256SUMS-alpha.3
-tar -xzf z-stack-preview-0.1.0-alpha.3-*.tgz
+sha256sum --quiet -c SHA256SUMS-alpha.4
+tar -xzf z-stack-preview-0.1.0-alpha.4-*.tgz
 cd z-stack-preview
-sha256sum -c SHA256SUMS
+sha256sum --quiet -c SHA256SUMS
 node scripts/create-example.mjs browser-wallet ../my-wallet --install
 cd ../my-wallet
 npm run dev
@@ -87,7 +87,7 @@ npm run dev
 helpers, both WASM engines and their workers. For a wallet app, install it alone:
 
 ```sh
-npm install /path/to/artifacts/z-stack-sdk-0.1.0-alpha.3.tgz
+npm install /path/to/artifacts/z-stack-sdk-0.1.0-alpha.4.tgz
 ```
 
 Configure Vite once:

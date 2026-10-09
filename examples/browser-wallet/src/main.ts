@@ -20,6 +20,9 @@ const restore = element<HTMLButtonElement>("restore");
 const clearWords = element<HTMLButtonElement>("clear-words");
 const copyAddress = element<HTMLButtonElement>("copy-address");
 const copyPhrase = element<HTMLButtonElement>("copy-phrase");
+const createBirthday = element<HTMLInputElement>("create-birthday");
+const remove = element<HTMLButtonElement>("remove");
+const removeConfirm = element<HTMLInputElement>("remove-confirm");
 const restoreForm = element<HTMLFormElement>("restore-form");
 
 async function start() {
@@ -34,17 +37,26 @@ async function start() {
   });
 
   const unit = connection.network === "testnet" ? "TAZ" : "ZEC";
+  element("title").textContent = `${connection.network[0].toUpperCase()}${connection.network.slice(1)} wallet`;
   balance.textContent = `— ${unit}`;
   element("send-panel").setAttribute("aria-label", `Send ${unit}`);
   for (const el of document.querySelectorAll("h2, label")) if (el.textContent?.includes("ZEC")) el.textContent = el.textContent.replace("ZEC", unit);
   let server = "Configured transport";
   try { if (typeof connection.server === "string") server = new URL(connection.server, window.location.href).host; } catch { /* Keep a fixed label; never render credential-bearing URLs. */ }
+  element("chain-warning").hidden = connection.network !== "testnet";
+  function showRuntime() {
+    const runtime = wallet.runtime;
+    element("runtime").textContent = runtime.mode === "multi-thread"
+      ? `Threaded scanner · ${runtime.threads} threads` : "Single-thread engine";
+  }
+  showRuntime();
   let review: SendReview | undefined;
   let receipt: SendReceipt | undefined;
   let sending: AbortController | undefined;
   let busy = false;
   let identity: string | undefined;
   let hasScanned = false;
+  let pendingPayment = false;
   let recoveryPhrase = "";
   const sendWords = element<HTMLTextAreaElement>("send-words");
   const sendStatus = element("send-status");
@@ -69,6 +81,9 @@ async function start() {
 
   async function render(snapshot: WalletSnapshot) {
     identity = snapshot.unifiedAddress;
+    pendingPayment = (await wallet.pending(1)).length > 0;
+    showRuntime();
+    element("receive-panel").hidden = false;
     hasScanned = (snapshot.scannedHeight ?? 0) >= snapshot.birthdayHeight;
     copyAddress.hidden = false;
     element("scan-panel").hidden = false;
@@ -98,14 +113,22 @@ async function start() {
     copyPhrase.hidden = true;
     element("phrase-copy-status").textContent = "";
     element("phrase-copy-status").hidden = true;
-    restoreForm.hidden = false;
+    restoreForm.hidden = !!identity || creating;
     phrase.hidden = true;
     hidePhrase.hidden = true;
     words.value = "";
     sendWords.value = "";
+    sendWords.removeAttribute("aria-invalid");
   }
 
   function updateControls() {
+    showRuntime();
+    element("create-panel").hidden = !!identity || creating;
+    restoreForm.hidden = !!identity || creating;
+    element("remove-panel").hidden = !identity;
+    const removalBlocked = pendingPayment || receipt?.state === "pending" || receipt?.state === "unknown";
+    remove.disabled = busy || !identity || !removeConfirm.checked || removalBlocked;
+    element("remove-pending").hidden = !removalBlocked;
     create.disabled = busy || !!identity;
     sync.disabled = busy || !identity;
     lock.disabled = busy || !identity;
@@ -139,17 +162,24 @@ async function start() {
     }
   }
 
-  async function run(action: () => Promise<void>) {
+  async function run(action: () => Promise<void>, output: HTMLElement = status) {
     try { await perform(action); }
     catch (error) {
       const safe = WalletError.fromUnknown(error);
       console.warn("Wallet action failed", { code: safe.code });
-      status.textContent = safe.userMessage();
+      output.textContent = safe.userMessage();
+      if (output === sendStatus) {
+        const fields: Partial<Record<WalletError["code"], string>> = { invalid_address: "send-to", invalid_amount: "send-amount", invalid_memo: "send-memo", invalid_recovery_phrase: "send-words", seed_mismatch: "send-words" };
+        const field = fields[safe.code];
+        if (field) element(field).setAttribute("aria-invalid", "true");
+      }
     }
   }
-  const disposeBase = attachBase(wallet, perform, () => identity);
+  let disposeBase = attachBase(wallet, perform, () => identity);
 
   function showReceipt(value: SendReceipt) {
+    if (value.state === "mined") sendStatus.textContent = "Payment confirmed.";
+    if (value.state === "expired") sendStatus.textContent = "Payment expired. Check your balance before another payment.";
     review = undefined;
     reviewPanel.hidden = true;
     sendForm.hidden = true;
@@ -160,8 +190,20 @@ async function start() {
       ? "Submission not confirmed. Sync and check this transaction before making another payment." : "Submitted · awaiting confirmation";
     element<HTMLButtonElement>("another-send").hidden = value.state === "unknown";
   }
-  sendForm.addEventListener("input", () => { sendStatus.textContent = ""; status.textContent = ""; });
-  sendForm.addEventListener("invalid", () => { sendStatus.textContent = "Complete the required payment fields."; status.textContent = ""; }, true);
+  sendForm.addEventListener("reset", () => {
+    sendStatus.textContent = "";
+    for (const field of sendForm.querySelectorAll("[aria-invalid]")) field.removeAttribute("aria-invalid");
+  });
+  element("confirm-send-form").addEventListener("input", event => {
+    if (event.target instanceof HTMLElement) event.target.removeAttribute("aria-invalid");
+    sendStatus.textContent = "";
+  });
+  sendForm.addEventListener("input", event => {
+    if (event.target instanceof HTMLElement) event.target.removeAttribute("aria-invalid");
+    sendStatus.textContent = ""; status.textContent = "";
+  });
+  sendForm.addEventListener("invalid", event => {
+    if (event.target instanceof HTMLElement) event.target.setAttribute("aria-invalid", "true"); sendStatus.textContent = "Complete the required payment fields."; status.textContent = ""; }, true);
   sendForm.addEventListener("submit", event => {
     event.preventDefault();
     if (!hasScanned) { sendStatus.textContent = "Sync the wallet before sending."; return; }
@@ -180,7 +222,7 @@ async function start() {
       sendStatus.textContent = "Check the recipient, amount and memo.";
       element<HTMLButtonElement>("confirm-send").textContent = `Send ${review.amount} ${unit}`;
       reviewPanel.focus();
-    });
+    }, sendStatus);
   });
   element<HTMLFormElement>("confirm-send-form").addEventListener("submit", event => {
     event.preventDefault();
@@ -207,12 +249,14 @@ async function start() {
         if (error instanceof WalletError && error.code === "broadcast_failed" && error.txid) {
           receipt = { txid: error.txid, state: "unknown" }; showReceipt(receipt);
         }
-        sendStatus.textContent = WalletError.fromUnknown(error).userMessage();
+        const safe = WalletError.fromUnknown(error);
+        sendStatus.textContent = safe.userMessage();
+        if (safe.code === "invalid_recovery_phrase" || safe.code === "seed_mismatch") sendWords.setAttribute("aria-invalid", "true");
       } finally { wallet.lock(); sending = undefined; cancelSend.hidden = true; }
-    });
+    }, sendStatus);
   });
   element("edit-send").addEventListener("click", () => {
-    review = undefined; sendWords.value = ""; reviewPanel.hidden = true; sendForm.hidden = false;
+    review = undefined; sendWords.value = ""; sendWords.removeAttribute("aria-invalid"); sendStatus.textContent = ""; reviewPanel.hidden = true; sendForm.hidden = false;
     element("send-to").focus();
   });
   cancelSend.addEventListener("click", () => {
@@ -222,38 +266,56 @@ async function start() {
     receipt = undefined; sendForm.reset(); receiptPanel.hidden = true; sendForm.hidden = false; sendStatus.textContent = "";
   });
 
-  create.addEventListener("click", () => void run(async () => {
-    if (await wallet.load()) {
-      status.textContent = "A wallet is already saved here. Back it up before replacing it.";
-      return;
-    }
-    creating = true;
+  createBirthday.addEventListener("input", () => createBirthday.setCustomValidity(""));
+  create.addEventListener("click", () => {
+    const input = createBirthday.value.trim();
+    const creationBirthday = input ? Number(input) : "auto";
     try {
-      const created = await wallet.create({ birthday: "auto", beforeCommit: preparation => {
-        // No wallet snapshot exists yet. Leaving now cancels creation rather
-        // than storing a wallet whose recovery phrase has never been saved.
-        recoveryPhrase = preparation.recoveryPhrase;
-        phrase.replaceChildren(...recoveryPhrase.split(/\s+/).map(word => {
-          const item = document.createElement("li"); item.textContent = word + " "; return item;
-        }));
-        restoreForm.hidden = true;
-        copyPhrase.hidden = false;
-        element("phrase-copy-status").hidden = false;
-        phrase.hidden = false;
-        hidePhrase.hidden = false;
-        status.textContent = "Save these words, then finish creating your wallet.";
-        return new Promise<void>((resolve, reject) => {
-          const cleanup = () => { confirmRecovery = undefined; preparation.signal.removeEventListener("abort", cancel); clearPhrase(); };
-          const cancel = () => { cleanup(); reject(new DOMException("Creation cancelled", "AbortError")); };
-          confirmRecovery = () => { cleanup(); status.textContent = "Saving wallet…"; resolve(); };
-          preparation.signal.addEventListener("abort", cancel, { once: true });
-          if (preparation.signal.aborted) cancel();
-        });
-      } });
-      await render(created.wallet);
-      status.textContent = "Wallet created. Sync when ready.";
-    } finally { creating = false; clearPhrase(); }
-  }));
+      if (input && !/^\d+$/.test(input)) throw new WalletError("invalid_birthday", "Create needs a block height.");
+      validateBirthdayInput(creationBirthday);
+    } catch (error) {
+      createBirthday.setCustomValidity(WalletError.fromUnknown(error).userMessage());
+      createBirthday.reportValidity(); return;
+    }
+    void run(async () => {
+      if (await wallet.load()) {
+        status.textContent = "A wallet is already saved here. Back it up before replacing it.";
+        return;
+      }
+      creating = true;
+      try {
+        const created = await wallet.create({ birthday: creationBirthday, beforeCommit: preparation => {
+          // No wallet snapshot exists yet. Leaving now cancels creation rather
+          // than storing a wallet whose recovery phrase has never been saved.
+          recoveryPhrase = preparation.recoveryPhrase;
+          phrase.replaceChildren(...recoveryPhrase.split(/\s+/).map(word => {
+            const item = document.createElement("li"); item.textContent = word + " "; return item;
+          }));
+          restoreForm.hidden = true;
+          element("create-panel").hidden = true;
+          copyPhrase.hidden = false;
+          element("phrase-copy-status").hidden = false;
+          phrase.hidden = false;
+          hidePhrase.hidden = false;
+          status.textContent = "Save these words, then finish creating your wallet.";
+          return new Promise<void>((resolve, reject) => {
+            const cleanup = () => { confirmRecovery = undefined; preparation.signal.removeEventListener("abort", cancel); clearPhrase(); };
+            const cancel = () => { cleanup(); reject(new DOMException("Creation cancelled", "AbortError")); };
+            confirmRecovery = () => { cleanup(); status.textContent = "Saving wallet…"; resolve(); };
+            preparation.signal.addEventListener("abort", cancel, { once: true });
+            if (preparation.signal.aborted) cancel();
+          });
+        } });
+        await render(created.wallet);
+        status.textContent = "Wallet created. Sync when ready.";
+      } catch (error) {
+        const safe = WalletError.fromUnknown(error);
+        if (creationBirthday === "auto" && safe.code === "transport") {
+          status.textContent = "Automatic birthday needs the light server. Retry, or enter a known birthday height to create offline.";
+        } else { throw error; }
+      } finally { creating = false; clearPhrase(); }
+    });
+  });
 
   sync.addEventListener("click", () => void run(async () => {
     // Retain the previous balance and history while syncing.
@@ -268,9 +330,9 @@ async function start() {
     try { validateBirthdayInput(restoreBirthday); }
     catch (error) { birthday.setCustomValidity(WalletError.fromUnknown(error).userMessage()); birthday.reportValidity(); return; }
     void run(async () => {
-      // This sample does not implement a replacement-confirmation flow.
+      // Only restore into an empty local slot. Removal has its own confirmation.
       if (await wallet.load()) {
-        status.textContent = "A wallet is already saved here. Use another browser profile to try recovery.";
+        status.textContent = "A wallet is already saved here. Save your recovery phrase before removing it to try recovery.";
         return;
       }
       // Keep the input available if validation, transport or persistence fails.
@@ -293,6 +355,33 @@ async function start() {
       await render(await wallet.rescan({ birthday: rescanBirthday.value.trim() }));
       await render(await wallet.sync());
     });
+  });
+  removeConfirm.addEventListener("change", updateControls);
+  element<HTMLFormElement>("remove-form").addEventListener("submit", event => {
+    event.preventDefault();
+    if (!identity || !removeConfirm.checked) return;
+    void run(async () => {
+      // Check persisted history again: reloads and another tab can change pending state.
+      if ((await wallet.pending(1)).length || receipt?.state === "pending" || receipt?.state === "unknown") {
+        pendingPayment = true;
+        element("remove-status").textContent = "Sync to confirm or expire pending payments before removing this wallet.";
+        return;
+      }
+      await wallet.forget({ passkey: true });
+      identity = undefined; hasScanned = false; pendingPayment = false; review = undefined; receipt = undefined;
+      disposeBase(); disposeBase = attachBase(wallet, perform, () => identity);
+      clearPhrase(); restoreForm.reset(); birthday.setCustomValidity("");
+      createBirthday.value = ""; createBirthday.setCustomValidity("");
+      sendForm.reset(); reviewPanel.hidden = true; receiptPanel.hidden = true; sendForm.hidden = false;
+      sendStatus.textContent = ""; element("copy-status").textContent = "";
+      element("remove-status").textContent = ""; removeConfirm.checked = false;
+      address.textContent = ""; balance.textContent = `— ${unit}`; history.replaceChildren();
+      for (const id of ["receive-panel", "scan-panel", "send-panel"]) element(id).hidden = true;
+      element("history-empty").hidden = false;
+      element("history-empty").textContent = "Create or restore a wallet to see activity.";
+      element<HTMLDetailsElement>("remove-panel").open = false;
+      status.textContent = "Local wallet removed. You can create or restore.";
+    }, element("remove-status"));
   });
   lock.addEventListener("click", () => {
     wallet.lock(); clearPhrase(); status.textContent = "Spending locked. History stays visible.";

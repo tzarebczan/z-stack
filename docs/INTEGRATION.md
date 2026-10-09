@@ -10,7 +10,7 @@ local archives. The steps below cover adapting your own application.
 ## Install
 
 Download the SDK archive from the
-[alpha.3 release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.3)
+[alpha.4 release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.4)
 and [verify its checksum](GETTING-STARTED.md#1-get-matching-archives), then install
 the `.tgz` in your app. It includes both single-threaded and threaded WASM
 engines, JavaScript bindings, workers, integrity manifests, and matching core
@@ -24,7 +24,7 @@ using those packages directly. Node 22.18+ is required for setup tools; npm’s
 `engines` check is advisory, so an install warning does not certify older Node.
 
 ```sh
-npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.3.tgz
+npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.4.tgz
 ```
 
 Use the [runnable Vite example](../examples/browser-wallet/README.md) as a starting
@@ -261,3 +261,25 @@ is unstable. Atomics are required for shared WASM memory. The build verifies the
 real threaded engine; do not remove the feature to silence the warning. Recheck
 both engines and browser acceptance before updating the toolchain. Downloading
 the prebuilt alpha avoids this source-build requirement.
+
+## Engine loading
+
+With workers and cross-origin isolation, default startup fetches both WASM
+variants: roughly 10.9 MB single-threaded for key/UI helpers and fallback, and
+19.2 MB threaded for scanning (uncompressed sizes). Each engine initialization reuses its
+integrity-verified bytes for instantiation. Separate worker contexts can request
+the same asset; configure compression and caching for the emitted hashed assets. Do not skip
+integrity verification to reduce network work.
+
+`createWallet({ ...options, preferMulticore: false })` avoids the threaded-engine
+download. Scanning stays in a worker, but uses one thread. Apply this option
+before initialization; changing runtime settings requires a reload. `threads: 2`
+limits the threaded scanner but does not select the smaller engine. Runtime
+mode can change while the background scanner starts; read `wallet.runtime`
+after loading a wallet or syncing before presenting its final mode.
+
+Creating with `birthday: "auto"` requires a tip request. A numeric
+`birthday: 4480403` can create offline; choose a known height before the wallet's
+first deposit and sync later. Date birthdays need the selected server's tip.
+Never substitute an arbitrary height when automatic creation cannot reach a
+server: doing so can omit deposits from the later scan.

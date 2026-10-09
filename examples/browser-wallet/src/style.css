@@ -26,3 +26,13 @@ dl { margin: 16px 0; } dt { font-size: 13px; margin-top: 14px; } dd { margin: 4p
 #phrase { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 24px; padding: 20px 20px 20px 44px; background: white; border: 1px solid #bac9c2; border-radius: 8px; }
 #phrase li { margin: 0; }
 @media (max-width: 480px) { #phrase { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.hint { color: #46635a; font-size: .9rem; line-height: 1.5; }
+.notice { border-left: 4px solid #8b651b; padding: 12px 16px; background: #fff3d9; margin-block: 20px; }
+.notice p { margin-block: 8px; }
+#scan-panel { margin-bottom: 24px; }
+#receive-panel, #create-panel { margin-block: 24px; }
+#remove-panel { margin-block: 24px; }
+.checkbox { display: flex; align-items: start; gap: 12px; }
+.checkbox input { width: 20px; min-height: 20px; flex: 0 0 20px; }
+input:user-invalid, textarea:user-invalid { border-color: #a52424; }

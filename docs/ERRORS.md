@@ -77,3 +77,9 @@ If local storage is unavailable, standalone or owned-wallet forget rejects with
 `wallet_db`; it cannot confirm deletion. Keep the recovery backup and retry once
 the configured store is accessible. Do not treat locking or an empty UI as proof
 that saved wallet/seed/passkey records were deleted.
+
+Malformed recovery words use `invalid_recovery_phrase`; a valid phrase for a
+different saved wallet uses `seed_mismatch`. Neither display string includes the
+words or the engine's parsing detail. `unknown` remains generic. Shared display
+copy is browser-safe; native applications can add their own setup instructions
+based on the code rather than parsing `message`.

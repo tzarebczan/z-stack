@@ -4,8 +4,11 @@ A Zcash wallet for browser apps, backed by Rust/WebAssembly. Keys, compact-block
 scanning, and proofs run on the device. The same package includes a client for
 the native loopback engine.
 
-**Alpha:** distributed as archives from a z-stack checkout. The SDK archive
-produced by `pnpm pack:sdk` bundles its matching core and passkey helpers; it
+**Alpha:** download the prebuilt archives from the
+[alpha.4 release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.4).
+Both WASM engines, bindings, workers and integrity manifests are included; no
+Rust build is needed. For custom source builds, `pnpm pack:sdk` produces the
+same archive layout. The SDK bundles its matching core and passkey helpers; it
 can be installed on its own without fetching unpublished packages. Separate
 core and passkey archives are available for direct integrations. Passkey helpers
 do not run unless your app uses them. Not currently published to npm; original z-stack

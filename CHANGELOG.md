@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0-alpha.4
+
+- Stable `invalid_recovery_phrase` errors for restore and payment unlock, with fixed display copy; shared errors no longer prescribe native CLI commands or wiping wallet data.
+- Numeric-birthday wallet creation skips the tip request entirely; automatic-tip failures use the stable `transport` code.
+- Vite demo creation with an explicit offline birthday, a visible runtime and funding warning, receive/scan context, confirmed local removal guarded while payments remain pending, hidden restore after creation, and payment errors beside the form.
+- Documented engine download costs and the optional single-thread setting.
+- Prebuilt-first integration docs and preview bundle aligned with this release; clearer missing-archive recovery and quiet checksum commands.
+- Public-testnet funded spending remains uncertified while providers disagree after NU7. Source-checkout funded regtest remains a separate verification path.
+
 ## 0.1.0-alpha.3
 
 - Self-contained SDK archive with matching core/passkey helpers; no registry lookup for unpublished packages.

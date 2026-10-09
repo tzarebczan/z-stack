@@ -140,7 +140,14 @@ try {
     await ui.getByRole('button',{name:'Review payment',exact:true}).click();
     await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).waitFor({timeout:60_000});
     assert.ok((await ui.getByRole('region',{name:'Review payment',exact:true}).count()) || kind==='next');
+    if (!uncertain) {
+      await ui.getByLabel('Recovery phrase for this payment',{exact:true}).fill('not a phrase');
+      await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).click();
+      await ui.getByText('Those words are not a valid recovery phrase.',{exact:true}).waitFor({timeout:60_000});
+      if (kind === 'vite') assert.equal(await ui.locator('#send-words').getAttribute('aria-invalid'), 'true');
+    }
     await ui.getByLabel('Recovery phrase for this payment',{exact:true}).fill(faucetWords);
+    if (kind === 'vite') assert.equal(await ui.locator('#send-words').getAttribute('aria-invalid'), null);
     if (uncertain) gateway.loseNextAcknowledgement();
     await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).click();
     assert.equal(await ui.locator('#send-words').inputValue(),'','Phrase must clear before awaiting proof');
@@ -152,8 +159,27 @@ try {
       await ui.getByText(/Submission not confirmed/).waitFor({timeout:30_000});
       assert.equal(await ui.getByRole('button',{name:'Review payment',exact:true}).isVisible().catch(()=>false),false, 'Unknown submission must block a second payment');
     }
+    if (kind === 'vite') {
+      await ui.getByText('Remove local wallet',{exact:true}).click();
+      await ui.getByLabel('I saved my recovery phrase and payment receipts',{exact:true}).check();
+      assert.equal(await ui.getByRole('button',{name:'Remove from this browser',exact:true}).isEnabled(),false,'Pending/uncertain payment must block removal');
+      const reopened = await context.newPage();
+      try {
+        await reopened.goto(origin);
+        await reopened.getByText('Wallet opened. Sync when ready.',{exact:true}).waitFor({timeout:120_000});
+        await reopened.getByText('Remove local wallet',{exact:true}).click();
+        await reopened.getByLabel('I saved my recovery phrase and payment receipts',{exact:true}).check();
+        assert.equal(await reopened.getByRole('button',{name:'Remove from this browser',exact:true}).isEnabled(),false,'Persisted pending payment must block removal after reopen');
+      } finally { await reopened.close(); }
+    }
     await generate(15); await ui.waitForTimeout(1500); await syncUi(ui,kind);
     await ui.getByText('Confirmed on-chain',{exact:true}).waitFor({timeout:180_000});
+    if (kind === 'vite') {
+      assert.equal(await ui.locator('#send-status').innerText(), 'Payment confirmed.', 'Confirmed receipt retained an uncertain-submission warning');
+      assert.equal(await ui.getByRole('button',{name:'Remove from this browser',exact:true}).isEnabled(),true,'Confirmation must release the local removal guard');
+      await ui.getByLabel('I saved my recovery phrase and payment receipts',{exact:true}).uncheck();
+      await ui.getByText('Remove local wallet',{exact:true}).click();
+    }
     if (!uncertain) await ui.getByRole('button',{name:'New payment',exact:true}).click();
     }
     await ui.getByText('Scan an earlier range',{exact:true}).click();

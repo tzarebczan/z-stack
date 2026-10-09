@@ -80,3 +80,5 @@ footer { color: var(--muted); padding: 30px 0; font-size: 12px; }
 .scan-details dl { margin: 0 0 16px; }
 .scan-details dt { font-size: 12px; color: var(--muted); margin-top: 12px; }
 .scan-details dd { margin: 3px 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+
+.funding-notice { border-left: 4px solid #8b651b; padding: 16px 20px; background: #fff3d9; margin-block: 20px; border-radius: 8px; }
