@@ -34,7 +34,8 @@ Alpha.1 and alpha.2 predate NU7.
 ## Run the published preview
 
 The current prebuilt preview is **alpha.6**, with NU7 support. Public-testnet
-funded receive/send remains unverified; current faucet attempts did not fund a wallet. Check
+funded receive/send remains unverified. Use the [Valar faucet](https://faucet.testnet.valargroup.dev/)
+for test coins; daily limits apply. Check
 [the funding limitation](docs/GETTING-STARTED.md#funded-testing)
 before requesting test coins. Node 22.18+ is required.
 

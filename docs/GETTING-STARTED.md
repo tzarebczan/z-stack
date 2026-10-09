@@ -127,11 +127,13 @@ report activation hash `000089ba27100beede16d64b34e3d1b626b428cb7ee9fe6dcfdc217c
 Provider disagreement alone does not prove that a faucet payment cannot arrive.
 A faucet's explorer link also does not identify its underlying node's chain.
 
-A disposable-wallet claim from [Fauzec](https://fauzec.com/) returned HTTP 503,
-`runtime_unavailable`, before funding. The [Jino Labs faucet](https://zcashfaucet.jinolabs.xyz/)
-status reported no node/balance and a miner waiting behind the chain. Neither is
-a verified funding source for this release; availability can change. No public
-receive/send success is claimed. Do not reuse a mainnet phrase for this test.
+Use the [Valar testnet faucet](https://faucet.testnet.valargroup.dev/). It sends
+from a shielded wallet to Zakura nodes and provides a transaction receipt. Check
+its availability and daily limits before requesting coins. On **2026-10-09**, its
+status reported a synced wallet, but our disposable-wallet claim returned HTTP 429:
+“The faucet has reached its daily payout cap.” No coins were sent, so public
+receive/send remains unverified. Respect the retry time; do not resubmit to bypass
+limits. Do not reuse a mainnet phrase for this test.
 
 ### Try a funded public walkthrough
 
@@ -147,8 +149,11 @@ receive/send success is claimed. Do not reuse a mainnet phrase for this test.
    `--server <HTTPS gRPC-Web URL>` selects your server. The checker ships in generated
    wallets; a built source checkout can also run `node scripts/check-testnet-chain.mjs`.
 2. Create a disposable wallet, save its phrase privately, and copy or scan its
-   receive address. Use a birthday before the first deposit. Request a small drip
-   only from an available faucet; retain the receipt, transaction ID and mined height.
+   receive address. Use a birthday before the first deposit. Paste the address into
+   the [Valar faucet](https://faucet.testnet.valargroup.dev/) and request test coins.
+   Retain the receipt, transaction ID and mined height. The faucet sees your IP
+   and receiving address; never send it your phrase or viewing key. If it reports
+   a daily limit, wait until the retry time before requesting again.
 3. Confirm the receipt exists on your selected server's chain, then Sync. An
    unavailable faucet, a pending receipt, an absent transaction and a wrong-chain
    payment are different outcomes. Stop and record that outcome if funding fails;

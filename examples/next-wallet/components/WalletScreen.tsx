@@ -27,7 +27,7 @@ export function WalletScreen() {
       <span className="network">{wallet.network === "testnet" ? "Testnet" : "Regtest fixture"}</span></div>
     {wallet.network === "testnet" && <details className="funding-notice" aria-label="Testnet funding limitation">
       <summary>Testnet funding status</summary>
-      <p>Create, save and sync work on the configured server. Funded public-testnet receive/send remains unverified. The latest faucet attempts did not fund a wallet. A provider disagreement alone does not prove spending is blocked; check the documented results.</p>
+      <p>Request test coins from the <a href="https://faucet.testnet.valargroup.dev/">Valar faucet</a>, then sync. Daily limits apply. Public-testnet funded receive/send is not yet verified; see the documented results.</p>
       <a href="https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing">Funded testing options</a>
     </details>}
     <div className="workspace">

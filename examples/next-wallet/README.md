@@ -103,7 +103,8 @@ It is not funded payment, physical-device, hosting-platform or Turbopack certifi
 
 The demo displays the network, server, birthday and scanned height. Use **Scan an
 earlier range** for older deposits on the same chain; it retains the wallet and
-address. Check [the current public funding limitation](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing)
+address. Request test coins from the [Valar faucet](https://faucet.testnet.valargroup.dev/);
+daily limits apply. Check [the current public funding limitation](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing)
 before claiming test coins. On testnet, amounts are TAZ. The amount parser still
 uses Zcash’s eight-decimal units. `zcash:` links require a dedicated review UI;
 this example asks for the recipient address itself.

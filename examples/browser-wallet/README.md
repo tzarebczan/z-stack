@@ -67,7 +67,8 @@ integrity checks and run scanning in a worker.
 
 The funding warning is visible before Create and Send. Empty testnet sync
 verifies only the selected light server. Funded receive/send has not yet been
-verified on public testnet; the latest documented faucet claim failed before funding.
+verified on public testnet. Use the [Valar faucet](https://faucet.testnet.valargroup.dev/)
+for test coins; daily limits apply. The latest documented claim reached its daily payout cap.
 [Funded testing](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing)
 explains the chain check and the separate source-checkout regtest runner. Payment
 errors stay beside the payment form; engine details are not display copy.
