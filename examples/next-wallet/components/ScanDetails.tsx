@@ -11,7 +11,7 @@ export function ScanDetails({ snapshot, server, disabled, rescan }: {
   return <section className="scan-details" aria-label="Scan details">
     <dl><dt>Light server</dt><dd>{server}</dd><dt>Wallet birthday</dt>
       <dd>{snapshot.birthdayHeight.toLocaleString()}</dd><dt>Scanned through</dt>
-      <dd>{(snapshot.scannedHeight ?? 0).toLocaleString()}</dd></dl>
+      <dd>{(snapshot.scannedHeight ?? 0) >= snapshot.birthdayHeight ? snapshot.scannedHeight!.toLocaleString() : "Not scanned yet"}</dd></dl>
     <p className="hint">Missing a deposit? Check its confirmation on this server’s chain.
       Deposits below the birthday need an earlier scan. A rescan cannot find a payment on another chain.</p>
     <details><summary>Scan an earlier range</summary>

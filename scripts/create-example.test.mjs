@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { copyTemplate, createExample, inspectArchives, archiveMembers, generatedReadme } from './create-example.mjs';
+import { spawnSync } from 'node:child_process';
+import { copyTemplate, createExample, inspectArchives, archiveMembers, generatedReadme, readPreviewRevision } from './create-example.mjs';
 
 test('scaffolding refuses an occupied destination before reading archives', () => {
   const dir=mkdtempSync(join(tmpdir(),'sdk-scaffold-'));
@@ -57,4 +58,43 @@ test('generated wallet guides retain setup links from the actual templates', () 
     }
     assert.doesNotMatch(generated, /Copy this directory|\/path\/to\//);
   }
+});
+
+test('copied wallet setup guard explains missing SDK dependency and accepts manual setup', () => {
+  for (const name of ['browser-wallet', 'next-wallet']) {
+    const dir = mkdtempSync(join(tmpdir(), 'sdk-template-guard-'));
+    try {
+      copyTemplate(name, dir);
+      const guard = join(dir, 'scripts/check-setup.mjs');
+      const missing = spawnSync(process.execPath, [guard], {encoding:'utf8'});
+      assert.equal(missing.status, 1);
+      assert.match(missing.stderr, /source template.*published preview/);
+      const manifest = JSON.parse(readFileSync(join(dir, 'package.json')));
+      manifest.dependencies['@z-stack/sdk'] = 'file:vendor/sdk.tgz';
+      writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest));
+      assert.equal(spawnSync(process.execPath, [guard], {encoding:'utf8'}).status, 0);
+    } finally { rmSync(dir, {recursive:true, force:true}); }
+  }
+});
+
+test('preview source receipt requires a clean matching SDK archive and valid revision', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sdk-preview-receipt-'));
+  const file = join(dir, 'PREVIEW.json');
+  const sdk = {version:'0.1.0-test', sha256:'a'.repeat(64)};
+  const revision = '1234567890abcdef1234567890abcdef12345678';
+  const receipt = {version:sdk.version, revision, dirty:false, packages:{'@z-stack/sdk':sdk}};
+  try {
+    assert.equal(readPreviewRevision(file, sdk), null);
+    writeFileSync(file, JSON.stringify(receipt));
+    assert.equal(readPreviewRevision(file, sdk), revision);
+    for (const change of [
+      {dirty:true}, {revision:'not-a-commit'}, {version:'another-version'},
+      {packages:{'@z-stack/sdk':{...sdk, sha256:'b'.repeat(64)}}},
+      {packages:{'@z-stack/sdk':{...sdk, version:'another-version'}}},
+      {packages:{}},
+    ]) {
+      writeFileSync(file, JSON.stringify({...receipt, ...change}));
+      assert.equal(readPreviewRevision(file, sdk), null, JSON.stringify(change));
+    }
+  } finally { rmSync(dir, {recursive:true, force:true}); }
 });

@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import * as playwright from 'playwright';
 import { launchBrowser } from './browser-launch.mjs';
+import { verifyReceiveQr } from './verify-receive-qr.mjs';
 import { baseDemoFixture, exerciseCombinedBase } from './base-demo-fixture.mjs';
 import { createExample } from './create-example.mjs';
 import { regtestBrowserGateway } from './regtest-browser-gateway.mjs';
@@ -127,6 +128,7 @@ try {
     for(let attempt=0; attempt<100;attempt++){ if(await ui.getByRole('button',{name:kind==='vite'?'Sync':'Sync wallet',exact:true}).isEnabled())break; await ui.waitForTimeout(200); }
     await syncUi(ui,kind);
     const address=await ui.locator('#address').innerText(); assert.ok(address.startsWith('uregtest'));
+    await verifyReceiveQr(ui, address);
     assert.equal((await ui.request.get(origin + '/favicon.svg')).status(), 200);
     await ui.getByLabel('Recipient address',{exact:true}).fill('zcash:' + address);
     await ui.getByLabel('Amount (ZEC)',{exact:true}).fill('0.0005');
@@ -229,7 +231,7 @@ try {
     await ui.reload(); await ui.getByRole('button',{name:kind==='vite'?'Sync':'Sync wallet',exact:true}).waitFor({timeout:120_000});
     if (txid) await ui.locator(kind==='vite'?'#history':'.activity').getByText(txid,{exact:kind==='next'}).waitFor({timeout:60_000});
     assert.equal(errors.length,0,errors.join('\n')); await context.close();
-    console.log(`Funded ${kind}: ${baseOnly ? "shared-wallet restore/sync/Base/reload/mobile" : "Zcash review/prove/pending/confirmed + Base/reload/mobile"} passed`);
+    console.log(`Funded ${kind}: ${baseOnly ? "shared-wallet restore/sync/Base/reload/mobile" : "Zcash review/prove/pending/confirmed/reload/mobile"} passed`);
   }
   writeFileSync(join(scratch,'ACCEPTANCE.json'),JSON.stringify({sdkRevision:process.env.Z_STACK_REVISION||'working-tree',browser:browserName,baseTransfers:baseFixture?.hashes,nu63,nu7:nu7??null,gateway:gateway.url,fixtureRecipient:recipient,fixtureFundingTxid:funding.txid},null,2));
   console.log(`Funded demo evidence: ${scratch}`);

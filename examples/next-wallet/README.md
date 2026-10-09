@@ -9,14 +9,14 @@ The Next CLI wrapper disables its telemetry during dev/build/start.
 
 ## Run
 
-Use [the setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md), or download the verified archives directly as it describes. Only custom engine
+Use [the setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md), or download and verify its preview bundle. Only custom engine
 builds need the [SDK build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md).
 
-For manual setup, download the SDK archive first; a fresh clone has no archives.
+For manual setup, use the SDK archive in the verified preview’s `artifacts/` directory; a fresh clone has no archives.
 Copy this directory outside the SDK checkout. From your copy:
 
 ```sh
-npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.5.tgz
+npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.6.tgz
 npm run build
 npm run start
 ```
@@ -111,3 +111,12 @@ this example asks for the recipient address itself.
 Next’s generated agent-rule files are disabled with `agentRules: false`. The
 Rayon circular-chunk webpack warning is described in [framework integration](https://github.com/tzarebczan/z-stack/blob/main/docs/INTEGRATION.md);
 verify the production worker and WASM assets rather than suppressing build errors.
+
+## Release identity and receive QR
+
+The generated app displays the SDK version and, for a verified preview, its source revision.
+`sdk-build.json` and `SDK-ARCHIVES.json` record the matching archive identity.
+The receive QR uses the app-owned MIT-licensed [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator),
+encodes only the public address and makes no remote request. Copy address remains available.
+From an installed generated app, `npm run check:chain -- --height 4465026` compares public provider hashes;
+a disagreement is diagnostic evidence, not proof that funding or spending is impossible.

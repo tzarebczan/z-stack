@@ -125,6 +125,8 @@ try {
     for (const [, name, source] of examples) writeFileSync(join(app, "src", `guide-${file.slice(0, -3)}-${name}.ts`), source);
   }
   run("npm", ["run", "build"]);
+  const { verifyVitePreview } = await import("./test-vite-preview.mjs");
+  await verifyVitePreview(app);
   const assets = readdirSync(join(app, "dist", "assets"));
   assert.ok(assets.filter(file => file.endsWith(".wasm")).length >= 2, "both engine variants must be emitted");
   for (const worker of ["scan.worker", "prove.worker", "workerHelpers"]) {

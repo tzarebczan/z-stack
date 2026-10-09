@@ -1,4 +1,5 @@
 import { launchBrowser } from "./browser-launch.mjs";
+import { verifyReceiveQr } from "./verify-receive-qr.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -172,6 +173,7 @@ async function flows(origin, engine, name, isolated) {
     await configure({tip:"1"});
     await page.goto(origin);
     await status("Ready to create or restore.").waitFor({timeout:90_000});
+    assert.equal(await page.locator('.sdk-build').innerText(), `SDK ${JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).version} · local archives`);
     console.log(`Next.js ${name}: browser ready (${isolated ? "isolated" : "non-isolated"})`);
     // A warm worker may already report its real mode. The key loader alone
     // must not label an isolated, MT-capable deployment as single-threaded.
@@ -200,6 +202,8 @@ async function flows(origin, engine, name, isolated) {
     await page.getByLabel("I saved my recovery phrase").check();
     await page.getByRole("button", {name:"Done, hide phrase"}).click();
     console.log(`Next.js ${name}: create and backup validated`);
+    await page.getByText('Not scanned yet', {exact:true}).waitFor();
+    await verifyReceiveQr(page, address);
     await page.getByRole("button", {name:"Copy address",exact:true}).click();
     await status("Address copied.").waitFor();
     assert.equal(await page.evaluate(() => window.copiedValue), address);

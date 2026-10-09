@@ -6,10 +6,14 @@
     "dev": "vite --host localhost",
     "check": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --host localhost"
+    "preview": "vite preview --host localhost",
+    "preinstall": "node scripts/check-setup.mjs"
   },
   "devDependencies": {
     "typescript": "5.9.3",
     "vite": "6.4.3"
+  },
+  "dependencies": {
+    "qrcode-generator": "2.0.4"
   }
 }

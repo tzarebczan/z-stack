@@ -1,12 +1,17 @@
-import { classifyHistory, createWallet, validateBirthdayInput, formatZatoshis, WalletError, type WalletSnapshot } from "@z-stack/sdk";
+import { SDK_VERSION, classifyHistory, createWallet, validateBirthdayInput, formatZatoshis, WalletError, type WalletSnapshot } from "@z-stack/sdk";
 import "./style.css";
+import buildInfo from "../sdk-build.json";
+import { drawReceiveQr } from "./receive-qr";
 import { attachBase } from "./base";
 import { connection } from "./connection";
 import { engineLoading } from "./engine-loading";
 import { reviewSend, recheckReview, refreshReceipt, type SendReview, type SendReceipt } from "./send";
 
+const sdkBuild: { version: string; revision: string | null } = buildInfo;
+
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const status = element("status");
+element("sdk-build").textContent = `SDK ${SDK_VERSION} · ${sdkBuild.version === SDK_VERSION && sdkBuild.revision ? "source " + sdkBuild.revision.slice(0, 12) : "local archives"}`;
 const balance = element("balance");
 const address = element("address");
 const history = element("history");
@@ -74,6 +79,15 @@ async function start() {
     sendStatus.textContent = "Submitting payment…";
   });
   let creating = false;
+  let restoreValidation = "";
+  function clearRestoreValidation() {
+    if (restoreValidation && status.textContent === restoreValidation) status.textContent = "";
+    restoreValidation = "";
+  }
+  function showRestoreValidation(message: string) {
+    restoreValidation = message;
+    status.textContent = message;
+  }
   let confirmRecovery: (() => void) | undefined;
   let cancelRecovery: (() => void) | undefined;
 
@@ -92,8 +106,9 @@ async function start() {
     hasScanned = (snapshot.scannedHeight ?? 0) >= snapshot.birthdayHeight;
     copyAddress.hidden = false;
     element("scan-panel").hidden = false;
-    element("scan-details").textContent = `${connection.network} · ${server} · Birthday ${snapshot.birthdayHeight.toLocaleString()} · Scanned through ${(snapshot.scannedHeight ?? 0).toLocaleString()}`;
+    element("scan-details").textContent = `${connection.network} · ${server} · Birthday ${snapshot.birthdayHeight.toLocaleString()} · ${hasScanned ? "Scanned through " + snapshot.scannedHeight!.toLocaleString() : "Not scanned yet"}`;
     element("send-panel").hidden = false;
+    if (address.textContent !== snapshot.unifiedAddress) drawReceiveQr(element<HTMLCanvasElement>("receive-qr"), snapshot.unifiedAddress);
     address.textContent = snapshot.unifiedAddress;
     if (receipt) {
       receipt = await refreshReceipt(wallet, receipt);
@@ -168,6 +183,7 @@ async function start() {
   }
 
   async function run(action: () => Promise<void>, output: HTMLElement = status) {
+    restoreValidation = "";
     try { await perform(action); }
     catch (error) {
       const safe = WalletError.fromUnknown(error);
@@ -334,7 +350,7 @@ async function start() {
     const mnemonic = words.value.trim();
     const restoreBirthday = birthday.value.trim();
     try { validateBirthdayInput(restoreBirthday); }
-    catch (error) { birthday.setCustomValidity(WalletError.fromUnknown(error).userMessage()); birthday.reportValidity(); return; }
+    catch (error) { const message = WalletError.fromUnknown(error).userMessage(); showRestoreValidation(message); birthday.setCustomValidity(message); birthday.setAttribute("aria-invalid", "true"); birthday.reportValidity(); return; }
     void run(async () => {
       // Only restore into an empty local slot. Removal has its own confirmation.
       if (await wallet.load()) {
@@ -342,13 +358,22 @@ async function start() {
         return;
       }
       // Keep the input available if validation, transport or persistence fails.
-      const restored = await wallet.restore(mnemonic, { birthday: restoreBirthday });
+      let restored: WalletSnapshot;
+      try { restored = await wallet.restore(mnemonic, { birthday: restoreBirthday }); }
+      catch (error) { restoreValidation = WalletError.fromUnknown(error).userMessage(); throw error; }
       clearPhrase();
       await render(restored);
       status.textContent = "Wallet restored. Sync to recover activity.";
     });
   });
-  birthday.addEventListener("input", () => birthday.setCustomValidity(""));
+  birthday.addEventListener("input", () => { birthday.setCustomValidity(""); birthday.removeAttribute("aria-invalid"); clearRestoreValidation(); });
+  words.addEventListener("input", () => { words.removeAttribute("aria-invalid"); clearRestoreValidation(); });
+  restoreForm.addEventListener("invalid", event => {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+      event.target.setAttribute("aria-invalid", "true");
+      showRestoreValidation(event.target.validationMessage);
+    }
+  }, true);
   const rescanBirthday = element<HTMLInputElement>("rescan-birthday");
   rescanBirthday.addEventListener("input", () => rescanBirthday.setCustomValidity(""));
   element<HTMLFormElement>("rescan-form").addEventListener("submit", event => {
@@ -405,7 +430,7 @@ async function start() {
     wallet.lock(); clearPhrase(); status.textContent = "Spending locked. History stays visible.";
   });
   hidePhrase.addEventListener("click", () => confirmRecovery?.());
-  clearWords.addEventListener("click", clearPhrase);
+  clearWords.addEventListener("click", () => { clearPhrase(); birthday.setCustomValidity(""); birthday.removeAttribute("aria-invalid"); words.removeAttribute("aria-invalid"); clearRestoreValidation(); });
   window.addEventListener("beforeunload", event => {
     if (creating) { event.preventDefault(); event.returnValue = ""; }
   });

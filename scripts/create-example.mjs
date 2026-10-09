@@ -106,6 +106,15 @@ export function generatedReadme(text) {
     commands + '\n```' + text.slice(match.index + match[0].length);
 }
 
+export function readPreviewRevision(previewFile, sdk) {
+  if (!sdk || !existsSync(previewFile)) return null;
+  const preview = JSON.parse(readFileSync(previewFile, 'utf8'));
+  const entry = preview?.packages?.['@z-stack/sdk'];
+  return preview?.dirty === false && preview.version === sdk.version &&
+    /^[0-9a-f]{40}$/.test(preview.revision) && entry?.version === sdk.version &&
+    entry?.sha256 === sdk.sha256 ? preview.revision : null;
+}
+
 export function createExample(template, destination, archives, { withBase = false } = {}) {
   assert.ok(!withBase || ["browser-wallet", "next-wallet"].includes(template), "--with-base supports browser-wallet and next-wallet");
   assert.ok(templates.includes(template), `Choose ${templates.join(', ')}`);
@@ -120,8 +129,15 @@ export function createExample(template, destination, archives, { withBase = fals
   try {
     copyTemplate(template, scratch);
     mkdirSync(join(scratch, 'vendor'));
+    if (template !== 'base-wallet') {
+      mkdirSync(join(scratch, 'scripts'), { recursive: true });
+      const checker = join(root, 'scripts/check-testnet-chain.mjs');
+      assert.ok(lstatSync(checker).isFile() && !lstatSync(checker).isSymbolicLink(), 'Chain checker must be a regular file');
+      cpSync(checker, join(scratch, 'scripts/check-testnet-chain.mjs'));
+    }
     const manifestFile = join(scratch, 'package.json');
     const manifest = JSON.parse(readFileSync(manifestFile));
+    if (template !== 'base-wallet') manifest.scripts['check:chain'] = 'node scripts/check-testnet-chain.mjs';
     for (const [name, pkg] of packages) {
       cpSync(pkg.file, join(scratch, 'vendor', pkg.filename));
       // The SDK archive includes its core/passkey helpers. Installing those again
@@ -149,6 +165,11 @@ export function createExample(template, destination, archives, { withBase = fals
     }
     writeFileSync(join(scratch, 'README.md'), generatedReadme(readFileSync(join(scratch, 'README.md'), 'utf8')));
     writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
+    if (['browser-wallet', 'next-wallet'].includes(template)) {
+      const sdk = packages.get('@z-stack/sdk');
+      const revision = readPreviewRevision(join(root, 'PREVIEW.json'), sdk);
+      writeFileSync(join(scratch, 'sdk-build.json'), JSON.stringify({version: sdk.version, revision, sdkSha256: sdk.sha256}, null, 2) + '\n');
+    }
     writeFileSync(join(scratch, 'SDK-ARCHIVES.json'), JSON.stringify(Object.fromEntries([...packages].map(([name, { filename, version, sha256 }]) => [name, { filename, version, sha256 }])), null, 2) + '\n');
     if (existsSync(target)) rmdirSync(target); // Only the verified empty directory.
     renameSync(scratch, target);

@@ -1,5 +1,6 @@
 import type { WalletOptions } from "@z-stack/sdk";
 
+// ChainSafe’s website redirect is not its gRPC-Web RPC URL; keep this origin.
 // Public endpoint only. Disposable regtest tests replace this app-owned module.
 export const connection: Pick<WalletOptions, "network" | "server" | "preferMulticore"> = {
   network: "testnet",

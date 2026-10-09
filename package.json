@@ -1,7 +1,7 @@
 {
   "name": "z-stack",
   "private": true,
-  "version": "0.1.0-alpha.5",
+  "version": "0.1.0-alpha.6",
   "description": "Zcash wallet engine and browser SDK",
   "scripts": {
     "build:engine": "cargo build -p z-engine",
@@ -15,7 +15,7 @@
     "regtest:mine": "node scripts/regtest-mine.mjs",
     "regtest:native:up": "node scripts/regtest-native.mjs up",
     "regtest:native:down": "node scripts/regtest-native.mjs down",
-    "test": "node --conditions=@z-stack/source --import tsx --test scripts/release-versions.test.mjs scripts/regtest-rpc.test.mjs scripts/regtest-container.test.mjs scripts/create-example.test.mjs scripts/check-patches.test.mjs scripts/example-lifetime.test.mjs scripts/grpc-web-proxy.test.mjs packages/passkey/test/vault.test.ts packages/sdk/test/grpc-web.test.ts packages/sdk/test/diagnostics.test.ts packages/sdk/test/public-data.test.ts packages/core/test/core.test.ts packages/sdk/test/browser-wallet.test.ts packages/sdk/test/engine.test.ts packages/sdk/test/integrity.test.ts packages/sdk/test/loading.test.ts packages/sdk/test/lifecycle.test.ts packages/sdk/test/lifecycle-review.test.ts packages/sdk/test/harness.test.ts packages/sdk/test/worker-artifacts.test.ts packages/sdk/test/storage.test.ts packages/sdk/test/prefetch.test.ts packages/sdk/test/subtree-roots.test.ts packages/sdk/test/wasm.test.ts packages/sdk/test/passkey.test.ts packages/sdk/test/hardware.test.ts packages/sdk/test/package-exports.test.ts packages/sdk/test/setup-diagnostics.test.ts packages/sdk/test/adapter-conformance.test.ts && pnpm test:base",
+    "test": "node --conditions=@z-stack/source --import tsx --test scripts/release-versions.test.mjs scripts/regtest-rpc.test.mjs scripts/regtest-container.test.mjs scripts/create-example.test.mjs scripts/check-testnet-chain.test.mjs scripts/check-patches.test.mjs scripts/example-lifetime.test.mjs scripts/grpc-web-proxy.test.mjs packages/passkey/test/vault.test.ts packages/sdk/test/grpc-web.test.ts packages/sdk/test/diagnostics.test.ts packages/sdk/test/public-data.test.ts packages/core/test/core.test.ts packages/sdk/test/browser-wallet.test.ts packages/sdk/test/engine.test.ts packages/sdk/test/integrity.test.ts packages/sdk/test/loading.test.ts packages/sdk/test/lifecycle.test.ts packages/sdk/test/lifecycle-review.test.ts packages/sdk/test/harness.test.ts packages/sdk/test/worker-artifacts.test.ts packages/sdk/test/storage.test.ts packages/sdk/test/prefetch.test.ts packages/sdk/test/subtree-roots.test.ts packages/sdk/test/wasm.test.ts packages/sdk/test/passkey.test.ts packages/sdk/test/hardware.test.ts packages/sdk/test/package-exports.test.ts packages/sdk/test/setup-diagnostics.test.ts packages/sdk/test/adapter-conformance.test.ts && pnpm test:base",
     "test:regtest": "node scripts/regtest-test.mjs && node --import tsx scripts/sdk-regtest.mjs",
     "test:sdk:regtest": "node --conditions=@z-stack/source --import tsx scripts/sdk-regtest.mjs",
     "test:sdk:testnet": "node --import tsx scripts/sdk-testnet.mjs",
@@ -49,6 +49,7 @@
   },
   "packageManager": "pnpm@12.6.0",
   "devDependencies": {
+    "jsqr": "1.4.0",
     "playwright": "1.61.1",
     "tsx": "^4.23.15",
     "typedoc": "0.28.20",

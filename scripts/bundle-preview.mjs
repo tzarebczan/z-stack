@@ -18,7 +18,7 @@ assert.ok(changes.length === 0 || process.argv.includes('--allow-dirty'), 'Commi
 assert.ok(existsSync(join(root, 'docs/api/index.html')), 'Generate the offline API reference first: pnpm docs:api');
 const packages = inspectArchives(join(root, 'artifacts'), undefined, ['core', 'passkey', 'sdk', 'base']);
 assert.ok([...packages.values()].every(pkg => pkg.version === version), 'Archive versions must match the bundle release version');
-const output = join(root, 'artifacts', `z-stack-preview-${version}-${revision.slice(0, 12)}${changes.length ? '-dirty' : ''}.tgz`);
+const output = join(root, 'artifacts', `z-stack-preview-${version}${changes.length ? '-dirty' : ''}.tgz`);
 const scratch = mkdtempSync(join(tmpdir(), 'z-stack-preview-'));
 try {
   const bundle = join(scratch, 'z-stack-preview'); mkdirSync(bundle);
@@ -32,7 +32,7 @@ try {
   copy('examples/README.md'); copy('examples/templates.json');
   for (const template of Object.keys(JSON.parse(readFileSync(join(root, 'examples/templates.json'))))) copyTemplate(template, join(bundle, 'examples', template));
   for (const name of ['sdk', 'core', 'passkey', 'base']) copy(`packages/${name}/README.md`);
-  mkdirSync(join(bundle, 'scripts')); copy('scripts/create-example.mjs');
+  mkdirSync(join(bundle, 'scripts')); copy('scripts/create-example.mjs'); copy('scripts/check-testnet-chain.mjs');
   mkdirSync(join(bundle, 'artifacts'));
   for (const pkg of packages.values()) cpSync(pkg.file, join(bundle, 'artifacts', pkg.filename));
   writeFileSync(join(bundle, 'package.json'), JSON.stringify({ name: 'z-stack-preview', private: true, version,
@@ -40,7 +40,7 @@ try {
   const manifest = { version, revision, dirty: changes.length > 0,
     packages: Object.fromEntries([...packages].map(([name, { filename, version, sha256 }]) => [name, { filename, version, sha256 }])) };
   writeFileSync(join(bundle, 'PREVIEW.json'), JSON.stringify(manifest, null, 2) + '\n');
-  writeFileSync(join(bundle, 'README.md'), `# z-stack preview ${version}\n\nSource revision: ${revision}${changes.length ? ' (local uncommitted rehearsal)' : ''}.\n\nUse Node 22.18+; no Rust toolchain or npm scope is needed for these built archives.\n\n1. Unpack this bundle into an ordinary local directory.\n2. Run \`node scripts/create-example.mjs browser-wallet /path/to/my-wallet --install\`. Use \`next-wallet\` for Next.js.\n3. In the generated app, run \`npm run dev\`. Use disposable test funds only.\n4. Follow [the integration walkthrough](docs/GETTING-STARTED.md). The bundle supports empty-wallet setup/sync; funded public-testnet spending requires an aligned faucet and light server after NU7. [Funded testing](docs/GETTING-STARTED.md#funded-testing) describes the limitation and the separate source-checkout regtest path.\n\nThe offline API starts at [docs/api/index.html](docs/api/index.html). PREVIEW.json records archive hashes and the source revision. Notices are included in every package. Source-build instructions and patch links in the deeper docs refer to the repository checkout.\n\nAccount and backup services are optional and configured by your application.\n`);
+  writeFileSync(join(bundle, 'README.md'), `# z-stack preview ${version}\n\nSource revision: ${revision}${changes.length ? ' (local uncommitted rehearsal)' : ''}.\n\nUse Node 22.18+; no Rust toolchain or npm scope is needed for these built archives.\n\n1. Unpack this bundle into an ordinary local directory.\n2. Run \`node scripts/create-example.mjs browser-wallet /path/to/my-wallet --install\`. Use \`next-wallet\` for Next.js.\n3. In the generated app, run \`npm run dev\`. Use disposable test funds only.\n4. Follow [the integration walkthrough](docs/GETTING-STARTED.md). Create, reload and sync are verified on public testnet. Funded public-testnet receive/send is not yet verified; the latest documented faucet claim failed. [Funded testing](docs/GETTING-STARTED.md#funded-testing) describes the limitation and the separate source-checkout regtest path.\n\nThe offline API starts at [docs/api/index.html](docs/api/index.html). PREVIEW.json records archive hashes and the source revision. Notices are included in every package. Source-build instructions and patch links in the deeper docs refer to the repository checkout.\n\nAccount and backup services are optional and configured by your application.\n`);
   const files = [];
   function inventory(dir, relative = '') {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -53,5 +53,7 @@ try {
   inventory(bundle); writeFileSync(join(bundle, 'SHA256SUMS'), files.sort().join('\n') + '\n');
   const result = spawnSync('tar', ['-czf', output, '-C', scratch, 'z-stack-preview'], { stdio: 'inherit' });
   assert.equal(result.status, 0, 'tar failed: install a tar command (included on current Windows/macOS/Linux)');
+  const filename = output.split(/[\\/]/).at(-1);
+  writeFileSync(output + '.sha256', `${createHash('sha256').update(readFileSync(output)).digest('hex')}  ${filename}\n`);
   console.log(`Preview bundle: ${output}`);
 } finally { rmSync(scratch, { recursive: true, force: true }); }

@@ -4,15 +4,14 @@ Start with a working app, then replace its screens one step at a time. The walle
 engine runs locally. Accounts, cloud backups and payment integrations are optional
 application services; they are not needed for this walkthrough.
 
-**Spending limitation:** the published preview verifies empty-wallet setup and sync.
-It does not currently provide a supported funded public-testnet walkthrough.
-The faucet and wallet server must agree on the chain after block **4,465,026**
-before you request test coins. See [funded testing](#funded-testing) for the fork
-check and the separate source-checkout regtest path.
+The preview supports NU7 testnet create, restore and sync. Payment review is
+verified on the isolated regtest fixture.
+Public funded receive/send has not yet been verified. [Funded testing](#funded-testing)
+explains the current faucet results and the reproducible regtest alternative.
 
 ## 1. Get matching archives
 
-The published **alpha.5** preview includes NU7 support. Use Node 22.18+ and npm;
+The published **alpha.6** preview includes NU7 support. Use Node 22.18+ and npm;
 no Rust toolchain or npm account is needed for these built archives. The SDK
 archive includes compiled single-threaded and threaded WASM engines, bindings,
 workers, integrity manifests, and bundled core and passkey helpers. Building
@@ -22,17 +21,21 @@ per-file lines (including the offline API files); a zero exit status means the
 check passed. Mismatches still print an error:
 
 ```sh
-gh release download v0.1.0-alpha.5 --repo tzarebczan/z-stack --dir sdk-alpha
+gh release download v0.1.0-alpha.6 --repo tzarebczan/z-stack --dir sdk-alpha \
+  --pattern 'z-stack-preview-0.1.0-alpha.6.tgz*'
 cd sdk-alpha
-sha256sum --quiet -c SHA256SUMS-alpha.5 # macOS: shasum -q -a 256 -c SHA256SUMS-alpha.5
-tar -xzf z-stack-preview-0.1.0-alpha.5-*.tgz
+sha256sum --quiet -c z-stack-preview-0.1.0-alpha.6.tgz.sha256 # macOS: shasum -q -a 256 -c z-stack-preview-0.1.0-alpha.6.tgz.sha256
+tar -xzf z-stack-preview-0.1.0-alpha.6.tgz
 cd z-stack-preview
 sha256sum --quiet -c SHA256SUMS # macOS: shasum -q -a 256 -c SHA256SUMS
 ```
 
-The outer checksum list covers all five release archives. `gh release download`
-fetches the whole set; for manual downloads, save every named archive in one
-directory before checking it. A partial download reports missing files.
+The bundle's `.sha256` file checks only the preview download. The separate
+`SHA256SUMS-alpha.6` asset covers all five archives if you download the full set.
+
+Without GitHub CLI, open the [release downloads](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.6),
+choose `z-stack-preview-0.1.0-alpha.6.tgz` and its `.sha256` file, and verify both checksum layers as above.
+The [README](../README.md#run-the-published-preview) also provides curl commands.
 
 Continue from **inside the extracted bundle**, using its scripts and matching
 archives. Do not mix its packages with the current source scaffolder. Checksums
@@ -79,7 +82,7 @@ serve WASM, workers and integrity manifests without SPA fallback, and preserve
 isolation the SDK uses its single-thread engine.
 Default browser startup downloads roughly **30 MB of uncompressed WASM**:
 about 10.9 MB for key/UI bindings and the single-thread fallback, plus 19.2 MB
-for the threaded scanner. Transfers depend on host compression and cache headers.
+for the threaded scanner (approximately **4.3 MB + 4.7 MB with gzip** in the preview build). Transfers depend on host compression and cache headers.
 These are two engine variants. Each initialization reuses its integrity-verified
 bytes; workers can request the same cached asset. The Vite demo
 shows engine download/startup progress and subscribes to `wallet.on("runtime")`
@@ -111,47 +114,72 @@ posted to Next or a backend.
 
 ## Funded testing
 
-The preview bundle includes the scaffolder and built packages, not the native
-fixture or funded test runner. **There is no supported funded receive/send path
-using only the published preview until the faucet and wallet's gRPC-Web server
-are verified to agree past height 4,465,026.** Empty sync is not spending evidence.
-For reproducible funded acceptance now, use a source checkout and the isolated
-regtest recipe below. Local source test tools are separate from installing the
-prebuilt SDK in your application.
+### Public testnet status
 
-**Before requesting test funds:** the public funding path is not certified.
-On 2026-10-08, ChainSafe and Zexplorer agree at height **4,465,025**, then report
-different hashes at NU7 activation, **4,465,026**. ChainSafe reports
-`000089ba27100beede16d64b34e3d1b626b428cb7ee9fe6dcfdc217ce24e78af`;
-Zexplorer reports `0713a6429dc1cef50224668082022ca8881593e09a3170717e6a725491c03b96`.
-An explorer link from a faucet does not establish which chain its payment uses.
-Compare a block hash at the same post-activation height on your wallet server and
-the faucet's node before requesting TAZ. If you cannot establish agreement, stop
-here for public funding; use the isolated regtest steps below for receive/send checks.
-An empty balance on another chain is not evidence that a deposit was lost.
+SDK NU7 support is implemented; public testnet activated at block **4,465,026**.
+The missing acceptance check is a faucet-funded receive, outgoing send and mined
+confirmation through the selected light server. This is not an established SDK
+send failure.
 
-Once the faucet and wallet server agree, copy the receive address and request
-TAZ (testnet coins). `connection.ts` must select a gRPC-Web endpoint with CORS
-for your origin. ChainSafe's root website redirects to `testnet.zec.rocks`, but
-its gRPC-Web RPC paths still respond. Do not change the configured URL based on
-that website redirect: native `application/grpc` is not browser gRPC-Web.
-Sync reports the configured server's view; it cannot prove a faucet payment
-exists on that chain. Balance and activity stay visible during updates.
+Checked on **2026-10-09**: ChainSafe and [Zecblock](https://testnet.zecblock.com/block/4465026)
+report activation hash `000089ba27100beede16d64b34e3d1b626b428cb7ee9fe6dcfdc217ce24e78af`;
+[Zexplorer](https://zexplorer.app/) reports `0713a6429dc1cef50224668082022ca8881593e09a3170717e6a725491c03b96`.
+Provider disagreement alone does not prove that a faucet payment cannot arrive.
+A faucet's explorer link also does not identify its underlying node's chain.
 
-The engine supports the pinned NU7 testnet schedule at block **4,465,026**.
-Mainnet's NU7 height is not set upstream. Updating the engine does not reconcile
-providers following different chains. Empty-wallet sync does not verify spending;
-use the [NU7 regtest recipe](RELEASE.md#nu7-acceptance) for a funded walkthrough.
+A disposable-wallet claim from [Fauzec](https://fauzec.com/) returned HTTP 503,
+`runtime_unavailable`, before funding. The [Jino Labs faucet](https://zcashfaucet.jinolabs.xyz/)
+status reported no node/balance and a miner waiting behind the chain. Neither is
+a verified funding source for this release; availability can change. No public
+receive/send success is claimed. Do not reuse a mainnet phrase for this test.
+
+### Try a funded public walkthrough
+
+1. Scaffold and install the preview, then check the light server from the generated app:
+
+   ```sh
+   npm run check:chain -- --height 4465026 --expected-hash 000089ba27100beede16d64b34e3d1b626b428cb7ee9fe6dcfdc217ce24e78af
+   ```
+
+   This reads one public block; it is not full consensus validation and does not
+   verify the faucet. Without `--expected-hash`, the checker compares Zexplorer
+   and the light server and reports a disagreement separately from availability errors.
+   `--server <HTTPS gRPC-Web URL>` selects your server. The checker ships in generated
+   wallets; a built source checkout can also run `node scripts/check-testnet-chain.mjs`.
+2. Create a disposable wallet, save its phrase privately, and copy or scan its
+   receive address. Use a birthday before the first deposit. Request a small drip
+   only from an available faucet; retain the receipt, transaction ID and mined height.
+3. Confirm the receipt exists on your selected server's chain, then Sync. An
+   unavailable faucet, a pending receipt, an absent transaction and a wrong-chain
+   payment are different outcomes. Stop and record that outcome if funding fails;
+   do not treat an empty balance as a successful receive test.
+4. After shielded funds become spendable, follow [payment review and sending](#5-review-and-send)
+   with a small amount. Keep the outgoing receipt and sync until confirmation.
+   A self-send to the same disposable wallet is sufficient to exercise local proving
+   and broadcast without giving another party funds. Reload and check identity/history.
+
+ChainSafe's root website redirects to `testnet.zec.rocks`, but its gRPC-Web RPC
+paths still respond. Keep the configured ChainSafe origin; the redirect target's
+native `application/grpc` endpoint is not browser gRPC-Web. Sync follows the
+configured server's view. Changing the birthday cannot reconcile different chains.
+
+### Reproducible funded regtest
+
+The preview includes the app scaffolder, built packages and public chain checker.
+The native validator and funded fixture runner remain source-checkout tools.
+Use the [NU7 regtest recipe](RELEASE.md#nu7-acceptance) for reproducible proving,
+broadcast and confirmation tests without relying on public faucet availability.
 
 To investigate a missing payment:
 
 1. Record its receipt’s transaction ID and mined height. Querying a public explorer
    can link that transaction to your IP; do not submit your phrase or viewing key.
-2. Compare the hash of a common block on the faucet’s explorer and your light
-   server. Heights alone do not identify the same chain. From a built source
-   checkout, `node scripts/check-testnet-chain.mjs --height 4465026` compares public
-   block data without wallet queries. A different hash needs an aligned server or
-   funding source; changing the birthday cannot repair it.
+2. Check whether the receipt’s transaction is available on your light server.
+   Compare public block hashes with `npm run check:chain -- --height 4465026`
+   from the generated app. Heights alone do not identify a chain, and an explorer
+   disagreement does not identify the faucet’s node. If the payment is confirmed
+   on a different chain, use an aligned server or funding source; changing the
+   birthday cannot repair that.
 3. If the receipt is on your server’s chain but below **Wallet birthday**, choose
    **Scan an earlier range**. This keeps the wallet and receiving address, locks
    spending in the demo and rebuilds balance/history. Pending outgoing payments
@@ -162,20 +190,11 @@ To investigate a missing payment:
    Dates estimate a height with a safety margin; use the receipt’s exact block
    height or an earlier one when available.
 
-For repeatable funding without a public faucet, run a native loopback validator
-(no Docker required):
-
-```sh
-pnpm regtest:native:up
-pnpm test:funded-demos
-pnpm regtest:native:down
-```
-
-These commands are not included in the preview bundle. Run them from the source
-checkout after building/packing the SDK. The test
-scaffolds both demos, funds disposable wallets, proves shielded payments and
-checks confirmation and reload. See [native fixture prerequisites](NODE.md)
-and [verification limits](SUPPORT.md). It is regtest evidence, not public-testnet certification.
+The [NU7 regtest recipe](RELEASE.md#nu7-acceptance) starts an isolated validator,
+mines mature fixture funds and tests both generated demos. Run it from the source
+checkout after building/packing the SDK; the fixture tools are not included in
+this preview bundle. The test proves shielded payments and checks confirmation,
+uncertain submissions and reload. It is regtest evidence, not public-testnet certification.
 Public chain providers can see IP addresses and request timing; memo retrieval
 remains on-demand. Never use production funds in this walkthrough.
 
@@ -187,7 +206,7 @@ Use a separate origin/profile or [your own namespace](STORAGE.md).
 ## 5. Review and send
 
 Continue only after the chain/funding check above, or in the isolated regtest
-fixture. The public preview does not certify this step.
+fixture. The public faucet-funded path remains unverified; the source regtest fixture verifies this step.
 
 Enter a shielded recipient address, a positive test-coin amount and an optional memo.
 Review the exact recipient, amount, memo and estimated fee. The demo freezes this
@@ -216,28 +235,3 @@ Use [the API guide](SDK.md), [framework integration](INTEGRATION.md),
 [storage contracts](STORAGE.md) and [optional services](SERVICES.md) while replacing
 one concern at a time. Applications can add an iframe API around their wallet;
 that API and any account or fiat services stay outside z-stack.
-
-## 7. Prepare a reviewable preview
-
-This optional step is for SDK maintainers preparing a custom bundle. Skip it
-when using the published archives. From a clean SDK source revision:
-
-```sh
-pnpm release:check
-pnpm pack:sdk
-pnpm pack:base
-pnpm bundle:preview
-```
-
-The versioned bundle contains the four archives (including optional Base), all example templates, this
-walkthrough, an offline API reference, license provenance and `SHA256SUMS`.
-`PREVIEW.json` records the source commit and archive hashes. The bundle helper
-requires the system `tar` command. `--allow-dirty` is for a local rehearsal and
-marks the artifact dirty; it is not a release candidate. Building a bundle does
-not publish it or alter repository visibility.
-
-## Optional Base account
-
-To add a Base wallet without a second recovery secret, use the separate
-[`@z-stack/base` integration](BASE-WALLET.md). It has its own archive and
-Base-only demo. Pure Zcash integrations do not depend on it.

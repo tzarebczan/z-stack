@@ -12,7 +12,10 @@
     "tsconfig.json",
     "vite.config.ts",
     "src/base.ts",
-    "public/favicon.svg"
+    "public/favicon.svg",
+    "src/receive-qr.ts",
+    "sdk-build.json",
+    "scripts/check-setup.mjs"
   ],
   "next-wallet": [
     ".gitignore",
@@ -37,7 +40,11 @@
     "tsconfig.json",
     "components/BaseWallet.tsx",
     "components/ScanDetails.tsx",
-    "public/favicon.svg"
+    "public/favicon.svg",
+    "lib/receive-qr.ts",
+    "sdk-build.json",
+    "scripts/check-setup.mjs",
+    "components/ReceiveQr.tsx"
   ],
   "react-wallet": [
     "README.md",

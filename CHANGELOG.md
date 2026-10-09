@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-alpha.6
+
+- Show SDK version/source identity in generated Vite and Next apps; generate receive QR locally.
+- Provide preview-only downloads/checksums and an installed-app public chain checker.
+- Clarify public funding evidence, remove maintainer steps from the beginner path, and fix stale validation/scan copy.
+- Demonstrate immutable hashed-asset caching in Vite preview; document compressed WASM sizes.
+
 ## 0.1.0-alpha.5
 
 - Add scanner runtime events and local engine download/verification/startup progress.

@@ -6,8 +6,19 @@
     "dev": "node scripts/next.mjs dev --webpack --hostname localhost",
     "build": "node scripts/next.mjs build --webpack",
     "start": "node scripts/next.mjs start --hostname localhost",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "preinstall": "node scripts/check-setup.mjs"
   },
-  "dependencies": { "next": "16.3.8", "react": "19.3.0", "react-dom": "19.3.0" },
-  "devDependencies": { "typescript": "5.9.3", "@types/node": "^22", "@types/react": "^19", "@types/react-dom": "^19" }
+  "dependencies": {
+    "next": "16.3.8",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "qrcode-generator": "2.0.4"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19"
+  }
 }
