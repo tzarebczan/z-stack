@@ -10,13 +10,14 @@
     <main>
       <h1 id="title">Testnet wallet</h1>
       <p>A minimal SDK integration. Use test funds only.</p>
+      <p id="sdk-build" class="hint"></p>
       <p id="status" role="status">Loading engine…</p>
       <p id="runtime" class="hint">Preparing engine…</p>
       <p id="engine-progress" class="hint" role="status"></p>
       <progress id="engine-progress-bar" aria-label="Loading wallet engine" hidden></progress>
       <details id="chain-warning" class="notice" aria-label="Testnet funding limitation">
-        <summary>Testnet funding: check your faucet’s chain</summary>
-        <p>Create, save and sync work on the configured server. Funded public-testnet receive/send remains unverified. Some providers disagree after NU7; confirm your faucet uses the same chain before requesting funds.</p>
+        <summary>Testnet funding status</summary>
+        <p>Request test coins from the <a href="https://faucet.testnet.valargroup.dev/">Valar faucet</a>, then sync. Daily limits apply. Public-testnet funded receive/send is not yet verified; see the documented results.</p>
         <a href="https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing">Funded testing options</a>
       </details>
       <p id="balance">— TAZ</p>
@@ -32,6 +33,7 @@
         </form></details>
       </section>
       <section id="receive-panel" hidden aria-label="Receive"><h2>Receive ZEC</h2>
+      <canvas id="receive-qr" role="img" aria-label="Receive address QR code">Use Copy address to receive.</canvas>
       <p id="address"></p>
       <button id="copy-address" type="button" hidden>Copy address</button>
       <p id="copy-status" role="status"></p>
@@ -50,14 +52,14 @@
       <ol id="phrase" hidden></ol>
       <button id="copy-phrase" type="button" hidden>Copy recovery phrase</button>
       <p id="phrase-copy-status" role="status" hidden></p>
-      <form id="restore-form" aria-describedby="restore-help">
+      <form id="restore-form" aria-describedby="restore-help status">
         <h2>Restore a wallet</h2>
         <p id="restore-help" class="hint">Use a height or date before your first deposit.</p>
         <label for="words">Recovery phrase</label>
         <textarea id="words" autocomplete="off" autocapitalize="none" spellcheck="false" required></textarea>
         <button id="clear-words" type="button">Clear phrase</button>
         <label for="birthday">Birthday height or date</label>
-        <input id="birthday" required placeholder="Height or YYYY-MM-DD" />
+        <input id="birthday" aria-describedby="status" required placeholder="Height or YYYY-MM-DD" />
         <button id="restore" disabled>Restore wallet</button>
       </form>
       <section id="send-panel" hidden aria-label="Send ZEC">

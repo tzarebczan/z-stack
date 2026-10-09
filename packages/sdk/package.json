@@ -1,6 +1,6 @@
 {
   "name": "@z-stack/sdk",
-  "version": "0.1.0-alpha.5",
+  "version": "0.1.0-alpha.6",
   "private": true,
   "description": "Zcash wallet SDK for the browser (Rust/WASM engine) and the native desktop engine.",
   "type": "module",

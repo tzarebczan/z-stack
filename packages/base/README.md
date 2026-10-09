@@ -1,6 +1,6 @@
 # @z-stack/base
 
-**Alpha.** Part of the matching `0.1.0-alpha.5` archive release; not published to npm.
+**Alpha.** Part of the matching `0.1.0-alpha.6` archive release; not published to npm.
 
 Optional Base wallet support. Use the existing recovery phrase to derive a Base
 account, read ETH/USDC balances, review and send payments, and integrate your

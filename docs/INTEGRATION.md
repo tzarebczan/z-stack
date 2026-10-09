@@ -9,10 +9,9 @@ local archives. The steps below cover adapting your own application.
 
 ## Install
 
-Download the SDK archive from the
-[alpha.5 release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.5)
-and [verify its checksum](GETTING-STARTED.md#1-get-matching-archives), then install
-the `.tgz` in your app. It includes both single-threaded and threaded WASM
+Download and [verify the preview bundle](GETTING-STARTED.md#1-get-matching-archives)
+from the [alpha.6 release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.6).
+The SDK archive is inside its `artifacts/` directory. Install that `.tgz` in your app. It includes both single-threaded and threaded WASM
 engines, JavaScript bindings, workers, integrity manifests, and matching core
 and passkey helpers. No Rust toolchain or engine compilation is required.
 
@@ -24,7 +23,7 @@ using those packages directly. Node 22.18+ is required for setup tools; npm’s
 `engines` check is advisory, so an install warning does not certify older Node.
 
 ```sh
-npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.5.tgz
+npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.6.tgz
 ```
 
 Use the [runnable Vite example](../examples/browser-wallet/README.md) as a starting
@@ -34,7 +33,7 @@ The SDK is ESM-only. Browser wallet initialization belongs in client code;
 
 Configure a compatible hosted gRPC-Web provider for browser sync. Running a
 validator or light server is optional; the separate
-[NU7 container fixture](../infra/nu7/README.md) is for local testing and is not
+[NU7 container fixture](https://github.com/tzarebczan/z-stack/blob/main/infra/nu7/README.md) is for local testing and is not
 needed to use the prebuilt WASM.
 
 ## Configure Vite
@@ -312,3 +311,14 @@ Creating with `birthday: "auto"` requires a tip request. A numeric
 first deposit and sync later. Date birthdays need the selected server's tip.
 Never substitute an arbitrary height when automatic creation cannot reach a
 server: doing so can omit deposits from the later scan.
+
+### Why two browser engines load
+
+In multicore mode the current SDK keeps synchronous key/address and wallet bindings
+on the page using the single-thread engine, while the threaded scanner runs in a
+worker with separate WebAssembly memory. Reusing one engine for both requires a
+change to those ownership or API boundaries; removing a download without that
+change would break initialization or worker isolation. This release retains both
+integrity-checked engines. Use `preferMulticore: false` for the existing smaller
+startup, or enable HTTP compression and immutable hashed-asset caching. Moving
+key operations behind an asynchronous worker API is a separate architecture change.

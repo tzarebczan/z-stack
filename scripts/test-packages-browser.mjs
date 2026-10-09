@@ -1,4 +1,5 @@
 import { launchBrowser } from "./browser-launch.mjs";
+import { verifyReceiveQr } from "./verify-receive-qr.mjs";
 import assert from "node:assert/strict";
 import { assertSavedHide, verifyBackForward } from "./browser-hide-lifecycle.mjs";
 import { spawnSync } from "node:child_process";
@@ -240,16 +241,29 @@ export async function verifyExampleRecovery(app, chromium) {
     });
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.waitForFunction(() => document.getElementById("status").textContent === "Create a wallet or restore one.");
+    assert.equal(await page.locator('#sdk-build').innerText(), `SDK ${JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).version} · local archives`);
     await page.waitForFunction(() => document.getElementById("runtime").textContent !== "Starting scanner…");
     assert.equal(await page.locator("#engine-progress-bar").isVisible(), false, "startup completion updates without a click");
     assert.equal(await page.locator("#sync").isDisabled(), true);
     assert.equal(await page.locator("#lock").isDisabled(), true);
     await page.locator("#words").fill("not a valid recovery phrase");
     await page.locator("#birthday").fill("1");
+    assert.equal(await page.locator('#status').innerText(), 'Create a wallet or restore one.',
+      'Editing restore fields must preserve unrelated wallet status');
     await page.locator("#restore").click();
     await page.locator("#status").filter({hasText:"Those words are not a valid recovery phrase."}).waitFor();
     assert.equal(await page.locator("#words").inputValue(), "not a valid recovery phrase", "invalid restore erased its input");
     await page.locator("#clear-words").click();
+    assert.equal(await page.locator('#status').innerText(), '', 'Clear phrase retained the old restore error');
+    await page.locator('#words').fill('not a valid recovery phrase');
+    await page.locator('#birthday').fill('2026-13-40');
+    await page.locator('#restore').click();
+    assert.match(await page.locator('#status').innerText(), /positive block height/);
+    assert.equal(await page.locator('#birthday').evaluate(input => input.validity.valid), false);
+    await page.locator('#birthday').fill('1');
+    assert.equal(await page.locator('#status').innerText(), '');
+    assert.equal(await page.locator('#birthday').evaluate(input => input.validity.valid), true);
+    await page.locator('#clear-words').click();
     await page.locator("#create").click();
     await page.locator("#phrase").waitFor({state:"visible"});
     assert.equal(await page.locator("#restore-form").isVisible(), false);
@@ -277,6 +291,8 @@ export async function verifyExampleRecovery(app, chromium) {
     await page.waitForFunction(() => !document.getElementById("sync").disabled);
     const originalAddress = await page.locator("#address").textContent();
     assert.ok(originalAddress, "confirmed wallet creation did not complete");
+    assert.match(await page.locator('#scan-details').innerText(), /Not scanned yet/);
+    await verifyReceiveQr(page, originalAddress);
     assert.equal(await page.locator("#phrase").textContent(), "");
     assert.equal(await page.locator("#phrase").isVisible(), false);
     assert.equal(await page.locator("#review-send").isDisabled(), true);

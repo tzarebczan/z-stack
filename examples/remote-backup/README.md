@@ -14,7 +14,7 @@ commands in that copy. Install paths below refer to the original `artifacts/`
 directory; the SDK archive includes its matching core and passkey helpers.
 
 ```sh
-npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.5.tgz
+npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.6.tgz
 npm run server
 ```
 

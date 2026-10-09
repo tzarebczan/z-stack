@@ -1,12 +1,16 @@
 "use client";
 import { useState } from "react";
-import { classifyHistory, formatZatoshis } from "@z-stack/sdk";
+import buildInfo from "../sdk-build.json";
+import { ReceiveQr } from "./ReceiveQr";
+import { SDK_VERSION, classifyHistory, formatZatoshis } from "@z-stack/sdk";
 import { useWallet } from "../lib/use-wallet";
 import { SecretForm } from "./SecretForm";
 import { SetupChecks } from "./SetupChecks";
 import { BaseWallet } from "./BaseWallet";
 import { ScanDetails } from "./ScanDetails";
 import { SendPayment } from "./SendPayment";
+
+const sdkBuild: { version: string; revision: string | null } = buildInfo;
 
 export function WalletScreen() {
   const wallet = useWallet();
@@ -18,11 +22,12 @@ export function WalletScreen() {
   const backup = !!wallet.phrase;
   const unit = wallet.network === "testnet" ? "TAZ" : "ZEC";
   return <>
+    <p className="sdk-build">SDK {SDK_VERSION} · {sdkBuild.version === SDK_VERSION && sdkBuild.revision ? "source " + sdkBuild.revision.slice(0,12) : "local archives"}</p>
     <div className="title-row"><div><p className="eyebrow">Your local wallet</p><h1>A little pocket of privacy.</h1></div>
       <span className="network">{wallet.network === "testnet" ? "Testnet" : "Regtest fixture"}</span></div>
     {wallet.network === "testnet" && <details className="funding-notice" aria-label="Testnet funding limitation">
-      <summary>Testnet funding: check your faucet’s chain</summary>
-      <p>Create, save and sync work on the configured server. Funded public-testnet receive/send remains unverified. Some providers disagree after NU7; confirm your faucet uses the same chain before requesting funds.</p>
+      <summary>Testnet funding status</summary>
+      <p>Request test coins from the <a href="https://faucet.testnet.valargroup.dev/">Valar faucet</a>, then sync. Daily limits apply. Public-testnet funded receive/send is not yet verified; see the documented results.</p>
       <a href="https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing">Funded testing options</a>
     </details>}
     <div className="workspace">
@@ -81,7 +86,7 @@ export function WalletScreen() {
       <aside>
         <section className="receive"><p className="eyebrow">Receive</p><h2>Your private address</h2>
           {wallet.snapshot ? <><p className="hint">Use this unified address for shielded test deposits.</p>
-            <code id="address">{wallet.snapshot.unifiedAddress}</code>
+            <ReceiveQr address={wallet.snapshot.unifiedAddress} /><code id="address">{wallet.snapshot.unifiedAddress}</code>
             {!backup && <><button onClick={() => {
               void (async () => {
                 try { await navigator.clipboard.writeText(wallet.snapshot!.unifiedAddress); setAddressCopied("Address copied."); }

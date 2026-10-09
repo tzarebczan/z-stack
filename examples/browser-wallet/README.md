@@ -6,14 +6,14 @@ It demonstrates SDK integration, not a production recovery or login flow.
 
 Prefer [the guided setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md). Source compilation is optional; for custom engines follow the [root instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md).
 
-For manual setup, first download and verify the published SDK archive as that
-guide describes. Copy this directory outside the workspace, then install the
+For manual setup, use the SDK archive inside the verified preview bundle’s
+`artifacts/` directory. Copy this directory outside the workspace, then install the
 downloaded archive. A fresh clone has no `artifacts/` directory; plain
 `npm install` in a copied template does not add the unpublished SDK:
 
 ```sh
 cd /path/to/copied/browser-wallet
-npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.5.tgz
+npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.6.tgz
 npm run dev
 ```
 
@@ -29,10 +29,6 @@ The example imports only installed package exports, with no workspace aliases or
 `@z-stack/source` condition. `npm run check` validates the types and `npm run build`
 builds production assets. Hosting still needs the
 [production configuration](https://github.com/tzarebczan/z-stack/blob/main/docs/INTEGRATION.md#production-host).
-
-The release consumer test copies this example into a temporary external app and
-installs the actual tarballs. Its optional browser harness uses a separate mock
-regtest page; no test hook or mock provider is shipped in this example.
 
 ## Sending
 
@@ -63,17 +59,30 @@ The demo shows scanner readiness beside the balance using `on("runtime")`,
 and displays engine download and initialization through `onLoadProgress`.
 It shows “Starting scanner…” until readiness or fallback is reported.
 Default isolated startup
-uses roughly 30 MB of uncompressed WASM across its two engine variants. Set
+uses roughly 30 MB of uncompressed WASM across its two engine variants
+(about 4.3 MB + 4.7 MB with gzip). Configure compression on the production host. Set
 `VITE_ZSTACK_MULTICORE=false` before starting Vite to download only the roughly
 10.9 MB single-thread engine; scanning then uses one thread. Both modes keep
 integrity checks and run scanning in a worker.
 
 The funding warning is visible before Create and Send. Empty testnet sync
-verifies only the selected light server. The preview cannot provide a supported
-funded receive/send walkthrough until a faucet and that server agree past NU7.
+verifies only the selected light server. Funded receive/send has not yet been
+verified on public testnet. Use the [Valar faucet](https://faucet.testnet.valargroup.dev/)
+for test coins; daily limits apply. The latest documented claim reached its daily payout cap.
 [Funded testing](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing)
 explains the chain check and the separate source-checkout regtest runner. Payment
 errors stay beside the payment form; engine details are not display copy.
 
 Local removal is disabled while payment history contains pending transactions.
 Sync until they confirm or expire before removing the browser’s saved wallet.
+
+## Release identity and receive QR
+
+The generated app displays the SDK version and, for a verified preview, its source revision.
+`sdk-build.json` and `SDK-ARCHIVES.json` record the matching archive identity.
+The receive QR uses the app-owned MIT-licensed [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator),
+encodes only the public address and makes no remote request. Copy address remains available.
+From an installed generated app, `npm run check:chain -- --height 4465026` compares public provider hashes;
+a disagreement is diagnostic evidence, not proof that funding or spending is impossible.
+
+`npm run preview` caches hashed JS/CSS/WASM for one year with `immutable`; HTML keeps its normal revalidation policy. This is an example policy; configure your production host separately. Default WASM is about 30 MB uncompressed, or 4.3 MB + 4.7 MB with gzip; disabling multicore avoids the threaded download.

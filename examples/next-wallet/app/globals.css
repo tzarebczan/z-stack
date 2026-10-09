@@ -82,3 +82,6 @@ footer { color: var(--muted); padding: 30px 0; font-size: 12px; }
 .scan-details dd { margin: 3px 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 
 .funding-notice { border-left: 4px solid #8b651b; padding: 16px 20px; background: #fff3d9; margin-block: 20px; border-radius: 8px; }
+
+.receive-qr { display: block; max-width: 100%; height: auto; image-rendering: pixelated; background: white; margin-block: 16px; }
+.sdk-build { font-size: .8rem; color: #4e665d; overflow-wrap: anywhere; }

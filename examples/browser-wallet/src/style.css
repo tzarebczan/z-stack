@@ -36,3 +36,5 @@ dl { margin: 16px 0; } dt { font-size: 13px; margin-top: 14px; } dd { margin: 4p
 .checkbox { display: flex; align-items: start; gap: 12px; }
 .checkbox input { width: 20px; min-height: 20px; flex: 0 0 20px; }
 input:user-invalid, textarea:user-invalid { border-color: #a52424; }
+
+#receive-qr { display: block; max-width: 100%; height: auto; image-rendering: pixelated; background: white; }

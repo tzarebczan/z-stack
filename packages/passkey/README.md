@@ -1,6 +1,6 @@
 # @z-stack/passkey
 
-**Alpha.** Part of the matching `0.1.0-alpha.5` archive release; not published to npm.
+**Alpha.** Part of the matching `0.1.0-alpha.6` archive release; not published to npm.
 
 Protect a secret, such as a wallet recovery phrase, with one or more passkeys.
 It is client-only and has no runtime dependencies: native WebAuthn, the PRF
