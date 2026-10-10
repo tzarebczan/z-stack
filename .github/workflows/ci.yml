@@ -94,8 +94,8 @@ jobs:
       # checks stay on.
       - name: Engine check + tests
         run: |
-          bash scripts/ci-time.sh "Engine library tests" cargo test --config .github/ci/native-profile.toml -p z-engine --features native,cli --lib --timings
-          bash scripts/ci-time.sh "Engine binaries check" cargo check --config .github/ci/native-profile.toml -p z-engine --features native,cli --bins --timings
+          bash scripts/ci-time.sh "Engine library tests" cargo test --config .github/ci/native-profile.toml -p z-engine --features native,cli,native-pir --lib --timings
+          bash scripts/ci-time.sh "Engine binaries check" cargo check --config .github/ci/native-profile.toml -p z-engine --features native,cli,native-pir --bins --timings
       - name: Desktop check
         run: bash scripts/ci-time.sh "Desktop check" cargo check --config .github/ci/native-profile.toml -p z-desktop --timings
       - name: Node launcher check

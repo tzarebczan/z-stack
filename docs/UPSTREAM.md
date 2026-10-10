@@ -134,3 +134,104 @@ vendored tree without updating its reproducible patch.
 | `zakura-client-memory` is crates.io-reserved `0.0.0` | WASM uses `z-engine::web` snapshot + `scan_block` + in-memory shardtrees / `WalletWrite`. Do **not** take crates.io `zcash_client_memory` (upstream orchard). Swap the store when Zakura publishes the memory backend. |
 
 Native selective shard scanning uses public `zakura-client-backend::data_api::ll::wallet::put_blocks_rows` (notes/txs) then hashes only birthday, marked, and tip shards. Not a fork.
+
+## Native PIR qualification
+
+Optional `z-engine/native-pir` pins [wallet-pir](https://github.com/valargroup/wallet-pir)
+revision `bec1f41326cf98261d8df7a16ffa4b4686b48231`. Its transparent-wallet,
+transparent-events and transparent-filter crates define PIR, ledger and store
+semantics; the [original MIT license](../licenses/upstream/wallet-pir-LICENSE)
+is retained. Its transitive ipir-sp tag is `v0.1.0-rc.6` (locked commit
+`1f2aec65`). No upstream source is patched. The narrowly scoped
+`valar-spiral-rs` dev/test profile disables overflow checks for its intentionally
+wrapping Barrett reduction, matching the pinned upstream profile.
+
+`NativeWallet::sync_regtest_pir` is a Rust-only, bounded qualification API.
+The caller supplies separate public filters/private transport and a regtest
+chain snapshot independently accepted by its local node. A publisher signature,
+map endpoint or cloud-scanned wallet database is not independent chain acceptance.
+The API enrolls the existing native non-ephemeral transparent receiver scope,
+including change and standalone imports only where enabled by the pinned wallet.
+Derived receivers require their account birthday. Standalone imports have no
+trustworthy creation-height bound, so they require publication history from
+height one regardless of the account birthday. The current native build keeps
+upstream standalone key import disabled. Coverage cannot raise these floors. Completion is explicitly
+`complete-for-enrolled-scope`; it does not establish wallet-wide gap discovery.
+
+An `ext_coffer_pir_*` hash-chained journal in the wallet SQLite database replays
+upstream MemoryStore semantics. Every shard's history, coverage and pending work
+commit together through `transactionally_with_extension`, using FULL synchronous
+on that owned handle, a generation fence, native account/scope revalidation and
+cancellation checks. The journal is limited to 16,384 operations and 64 MiB;
+individual operations are limited to 8 MiB. Alteration, truncation, unknown schema,
+limits, contradiction or write failure refuse advancement. Reopened report reads
+refuse changed native scope/scanner state until another independently anchored
+sync reconciles it. Every committed journal mutation after a final report
+invalidates the current completion; a failed later attempt cannot restore it.
+Journal replay and its head use one read snapshot.
+After reading bounded publication metadata, sync captures native scope and scanner
+state in one read transaction. It checks all retained native hashes within the
+independently accepted prefix, including fully/max scanned frontiers. A known
+fork refuses reconciliation. An unscanned native baseline can qualify the separate
+PIR ledger; a native island beyond the accepted prefix refuses without an overlap proof. The final report transaction revalidates chain height, fully/max
+scanned block hashes, the accepted-anchor hash, retained prefix hashes and scan ranges. Concurrent native
+advancement, rewind or same-height fork replacement refuses that report without
+changing the journal or its in-memory state. Already committed PIR history and
+coverage remain durable, with current completion absent until a successful sync.
+The report persists a digest of that full scanner snapshot; status also refuses
+later partial-island or queue changes. Older reports without this digest require
+fresh reconciliation, while their committed ledger remains replayable. The
+report's `native_scanned_height` is the backend's fully scanned frontier; the
+wallet's existing last-filled-island status and balances are unchanged.
+`RegtestAcceptedChain::with_context_identity` binds a canonical application
+enrollment digest and the full independently accepted snapshot to the persisted
+report. Call `regtest_pir_discovery_for` with the current enrolled chain/context;
+the historical no-argument status cannot establish current enrollment freshness.
+Unique script counts deduplicate scripts while identity and commit fences retain
+every native account association. A stable `data.sqlite.ownership-lock` OS sidecar
+protects the complete PIR transport/snapshot/store/status lifetime with a shared
+lease. All native builds take an exclusive lease before database reset, incomplete
+creation cleanup or interrupted-reset recovery changes the database. Both lease
+acquisitions use nonblocking try-locks and return a bounded busy refusal. SQLite
+connections close before their shared lease is released; the sidecar is never
+renamed or removed by these paths. Reset can proceed after PIR exits and discards
+this research journal. These advisory leases require cooperating current native
+builds; older unfenced binaries and external file manipulation are outside this guarantee.
+
+PIR confirmed history is separate from native history, balances, reservations and
+spendability. Event records are not complete authenticated raw transactions and
+must not be inserted as spendable UTXOs; native coinbase maturity continues using
+the existing full transaction path. No plaintext address/txid fallback is added.
+Production gates remain relational bounded storage, native gap discovery,
+authenticated transaction enhancement, combined native/PIR reorg commits,
+endpoint/privacy enrollment and actual macOS/Windows verification. WASM does not
+enable this feature.
+
+## Native public regtest scanning
+
+`NativeWallet::scan_public_regtest_incremental` accepts the same caller-authenticated
+genesis-based compact publication as `scan_public_regtest`. It verifies every
+committed overlap hash and rejects a publication below the recorded native chain
+height. A single native wallet transaction checks that maximum and fully scanned
+boundaries agree, reconstructs persisted Sapling, Orchard and Ironwood frontiers,
+checks their sizes against native boundary metadata and their roots against
+persisted tree roots truncated at that exact commitment position, and scans only the suffix.
+Prefetched complete subtree roots may extend beyond the scanned position;
+they do not change the boundary root used for this comparison.
+The pinned shardtree can prune rightmost unmarked leaves
+while retaining a valid persisted root. If that prevents frontier extraction,
+the API requires native trees to reach the boundary commitment positions,
+then reconstructs commitment frontiers from the already authenticated full
+prefix and requires their exact sizes and roots to match native tree state.
+This recovery hashes prefix commitments; it does not trial-decrypt or write
+prefix blocks again. Missing overlap, missing native roots and contradictory
+commitments or sizes refuse resume. An identical prefix does not scan again. A divergent fork requires an explicit native rewind/reset.
+
+The bounds remain 320 blocks and 128 MiB for the full publication, with regtest
+birthday one and the exact native activation schedule. This reduces repeated
+local trial decryption and tree writes (with prefix commitment hashing when
+native frontier leaves were pruned); it does not reduce publication download
+size, authenticate the publisher's chain independently, enable transparent
+lookup, or establish an unbounded production scanner. Tests compare encrypted
+Orchard notes, nullifiers, frontiers, balances and spending witnesses after full
+scan versus suffix/reopen, and cover no-op, rewind/reorg and SQL rollback.

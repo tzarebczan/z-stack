@@ -59,3 +59,18 @@ pub(crate) fn replace_file(
     }
     written
 }
+
+/// Experimental Rust-only qualification adapters.
+#[cfg(feature = "native-pir")]
+pub use transparent_wallet::{
+    FilterSource as PirFilterSource, ShardTransport as PirShardTransport,
+    WorkLimits as PirWorkLimits,
+};
+#[cfg(feature = "native-pir")]
+pub use wallet::{PirConfirmedTransaction, PirDiscoveryReport, RegtestAcceptedChain};
+
+#[cfg(feature = "native-pir")]
+pub use transparent_wallet::{
+    client::Table as PirTable, refusal as pir_refusal, transport::BoxError as PirTransportError,
+    Overloaded as PirOverloaded, StaleRevision as PirStaleRevision,
+};

@@ -1,6 +1,11 @@
 //! SQLite-backed native wallet: create, sync, balance, shield, send.
 
+mod database_lease;
 mod payments;
+#[cfg(feature = "native-pir")]
+mod pir;
+#[cfg(feature = "native-pir")]
+pub use pir::{PirConfirmedTransaction, PirDiscoveryReport, RegtestAcceptedChain};
 mod public_scan;
 pub use payments::PaymentReceipt;
 pub use public_scan::RegtestScanSchedule;
@@ -353,6 +358,10 @@ impl WalletPaths {
             return Err(EngineError::AlreadyExists(self.root.display().to_string()));
         }
         if self.data_db.exists() {
+            let _lease = database_lease::exclusive(&self.data_db)?;
+            if self.meta_path.exists() || self.reset_backup().exists() {
+                return Err(EngineError::AlreadyExists(self.root.display().to_string()));
+            }
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
@@ -374,6 +383,13 @@ impl WalletPaths {
     fn recover_interrupted_reset(&self) {
         let bak = self.reset_backup();
         if !self.data_db.exists() && bak.exists() {
+            let Ok(_lease) = database_lease::exclusive(&self.data_db) else {
+                warn!("wallet database recovery is busy");
+                return;
+            };
+            if self.data_db.exists() || !bak.exists() {
+                return;
+            }
             match std::fs::rename(&bak, &self.data_db) {
                 Ok(()) => warn!("restored data.sqlite from an interrupted rescan"),
                 Err(_e) => warn!("could not restore data.sqlite.bak"),
@@ -1958,6 +1974,7 @@ impl NativeWallet {
         birthday: &AccountBirthday,
     ) -> Result<()> {
         let db_path = &self.paths.data_db;
+        let _lease = database_lease::exclusive(db_path)?;
         payments::require_rescan_safe(db_path)?;
         Self::checkpoint_sqlite(db_path)?;
         // Build the replacement beside the live database and swap it in with

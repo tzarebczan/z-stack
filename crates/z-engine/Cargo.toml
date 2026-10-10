@@ -54,6 +54,7 @@ lwd = [
 ]
 sync = ["lwd", "zcash_client_backend/sync"]
 transparent-inputs = ["zcash_client_backend/transparent-inputs", "dep:transparent"]
+native-pir = ["native", "dep:transparent-wallet", "dep:transparent-events", "dep:transparent-filter", "dep:sha2"]
 # WASM proving (Orchard/Ironwood in-process). Sapling params stay out of the blob.
 wasm-prove = ["orchard/circuit", "zcash_primitives/circuits"]
 # Hardware signers (Keystone, Ledger) via PCZTs: create, prove, redact, apply
@@ -158,6 +159,11 @@ ff = { version = "0.14", optional = true, default-features = false }
 blake2b_simd = { version = "1", optional = true }
 zcash_note_encryption = { version = "=0.4.2", optional = true }
 
+sha2 = { version = "0.10", optional = true }
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "bec1f41326cf98261d8df7a16ffa4b4686b48231", optional = true }
+transparent-events = { git = "https://github.com/valargroup/wallet-pir", rev = "bec1f41326cf98261d8df7a16ffa4b4686b48231", optional = true }
+transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "bec1f41326cf98261d8df7a16ffa4b4686b48231", optional = true }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 # `create_proposed_transactions` stamps OffsetDateTime::now_utc(); without this
@@ -165,6 +171,7 @@ getrandom = { version = "0.2", features = ["js"] }
 time = { version = "0.3.22", default-features = false, features = ["std", "wasm-bindgen"] }
 
 [dev-dependencies]
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "bec1f41326cf98261d8df7a16ffa4b4686b48231", features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile = "3"
 zcash_note_encryption = "=0.4.2"
