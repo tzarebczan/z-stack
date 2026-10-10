@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { reuseConsumerArchives } from "./consumer-archives.mjs";
+import { buildConsumer } from "./build-consumer.mjs";
 // Real external-consumer check. No workspace links, TS source aliases, or SDK stubs.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -19,6 +20,7 @@ let playwright;
 const browserNames = (process.argv.find(arg => arg.startsWith("--browsers="))?.slice(11) ?? "chromium").split(",");
 assert.ok(browserNames.every(name => ["chromium", "firefox", "webkit"].includes(name)), "unsupported browser selection");
 function run(command, args, cwd = app) {
+  if (command === "npm" && args.join(" ") === "run build") return buildConsumer(cwd, { env: { NODE_OPTIONS: "" } });
   const result = spawnSync(command, args, { cwd, stdio: "inherit", shell: process.platform === "win32",
     env: { ...process.env, NODE_OPTIONS: "" } });
   assert.equal(result.status, 0, `${command} ${args.join(" ")} failed`);
@@ -144,6 +146,11 @@ try {
       await verifyFundedBrowser(app, playwright);
     }
   }
+  const prepareOnly = process.env.Z_STACK_CONSUMER_BUILD_MODE === "prepare";
+  if (prepareOnly) {
+    const { verifyBrowserPackages } = await import("./test-packages-browser.mjs");
+    await verifyBrowserPackages(app, undefined, "chromium", { prepareOnly });
+  }
   for (const example of ["react-wallet", "local-passkey", "remote-backup", "next-wallet"]) {
     const consumer = join(scratch, example);
     createExample(example, consumer, archives);
@@ -172,14 +179,15 @@ try {
     }
     if (example === "next-wallet") {
       const { verifyNextWallet } = await import("./test-next-wallet.mjs");
-      await verifyNextWallet(consumer, playwright, playwright ? browserNames : []);
-    } else if (playwright) {
+      await verifyNextWallet(consumer, playwright, playwright ? browserNames : [], { prepareOnly });
+    } else if (playwright || prepareOnly) {
       const { verifyExampleBrowser } = await import("./test-example-browser.mjs");
       if (example === "remote-backup") {
         const { verifyRemoteBackupBrowser } = await import("./test-remote-backup-browser.mjs");
-        if (browserNames.includes("chromium")) await verifyRemoteBackupBrowser(consumer, playwright);
+        if (playwright && browserNames.includes("chromium")) await verifyRemoteBackupBrowser(consumer, playwright);
         else console.log("Remote WebAuthn verifier runs in the Chromium shard (virtual authenticator requires CDP)");
-      } else for (const browserName of browserNames) await verifyExampleBrowser(consumer, playwright, example, browserName);
+      } else if (prepareOnly) await verifyExampleBrowser(consumer, undefined, example, "chromium", { prepareOnly });
+      else for (const browserName of browserNames) await verifyExampleBrowser(consumer, playwright, example, browserName);
     }
   }
   console.log("External SDK consumer passed: installed archives, types, ESM, real WASM, Vite workers");

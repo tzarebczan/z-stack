@@ -1,13 +1,14 @@
 import { launchBrowser } from "./browser-launch.mjs";
 import { assertSavedHide, verifyBackForward } from "./browser-hide-lifecycle.mjs";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { buildConsumer } from "./build-consumer.mjs";
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 
 /** Run the actual production example, without replacing the SDK or its engine. */
-export async function verifyExampleBrowser(app, browsers, example, browserName = "chromium") {
+export async function verifyExampleBrowser(app, browsers, example, browserName = "chromium", options = {}) {
+  if (options.prepareOnly) return verifyRecovery(app, undefined, 0, example, options);
   const chromium = browsers[browserName];
   const dist = resolve(app, "dist");
   const server = createServer((req, res) => {
@@ -60,7 +61,7 @@ export async function verifyExampleBrowser(app, browsers, example, browserName =
 
 
 /** Change only the app-owned chain connection in the disposable installed consumer. */
-async function verifyRecovery(app, browser, port, example) {
+async function verifyRecovery(app, browser, port, example, options = {}) {
   const path = join(app, "src", example === "react-wallet" ? "WalletPanel.tsx" : "main.ts");
   const source = readFileSync(path, "utf8");
   const fixture = join(app, "src", "wallet-fixture.ts");
@@ -76,8 +77,8 @@ async function verifyRecovery(app, browser, port, example) {
   `);
   let context;
   try {
-    const build = spawnSync("npm", ["run", "build"], {cwd:app, stdio:"inherit", shell:process.platform === "win32"});
-    assert.equal(build.status, 0, "recovery consumer failed to build");
+    buildConsumer(app);
+    if (options.prepareOnly) return;
     context = await browser.newContext();
     const page = await context.newPage(), requests = [], errors = [], diagnostics = [];
     page.setDefaultTimeout(30_000);

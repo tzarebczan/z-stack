@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { reuseConsumerArchives } from "./consumer-archives.mjs";
+import { buildConsumer } from "./build-consumer.mjs";
 // Fresh optional-package consumer: no source aliases, WASM, SDK or account backend.
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
@@ -16,6 +17,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
 const app = join(scratch, "app"),
   archives = join(scratch, "archives");
 function run(command, args, cwd = root) {
+  if (command === "npm" && args.join(" ") === "run build") return buildConsumer(cwd, { env: { NODE_OPTIONS: "" } });
   const r = spawnSync(command, args, {
     cwd,
     stdio: "inherit",
