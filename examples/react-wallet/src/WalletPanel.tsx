@@ -30,7 +30,9 @@ export function WalletPanel() {
       if (disposed || !wallet) return;
       owner.current = wallet;
       unsubscribe.push(wallet.on("sync", progress => {
-        if (!disposed) setStatus(progress.stage === "synced" ? "Up to date" : "Syncing…");
+        // load() reports snapshot hydration through this event; it is not a sync.
+        if (disposed || progress.heading === "Restoring snapshot") return;
+        setStatus(progress.stage === "synced" ? "Up to date" : "Syncing…");
       }));
       const saved = await wallet.load();
       if (disposed) return;

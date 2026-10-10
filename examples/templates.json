@@ -1,6 +1,7 @@
 {
   "browser-wallet": [
     "README.md",
+    "HOW-IT-WORKS.md",
     "index.html",
     "package.json",
     "src/connection.ts",

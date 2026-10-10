@@ -41,7 +41,7 @@ const saved = await wallet.load();
 Only one browser client may own the engine at a time. Choose a local storage
 namespace with `indexedDbWalletStorage({ name: "my-app-wallet" })`, or supply
 a transactional `WalletStorage`. Multiple concurrently active wallets are not
-supported; a second owner fails with `busy`.
+supported; a second owner fails with `owner_conflict`.
 Register `wallet.on("sync", …)` and `wallet.on("balance", …)` before syncing.
 Each registration returns an unsubscribe function. Unsubscribe and call
 `await wallet.close()` when your app tears down the wallet screen. It locks,
