@@ -1,5 +1,10 @@
 //! SQLite-backed native wallet: create, sync, balance, shield, send.
 
+mod payments;
+mod public_scan;
+pub use payments::PaymentReceipt;
+pub use public_scan::RegtestScanSchedule;
+
 use crate::error::{EngineError, Result};
 use crate::native::block_cache::FsBlockCache;
 use crate::native::lwd::{self, LwdClient};
@@ -1953,6 +1958,7 @@ impl NativeWallet {
         birthday: &AccountBirthday,
     ) -> Result<()> {
         let db_path = &self.paths.data_db;
+        payments::require_rescan_safe(db_path)?;
         Self::checkpoint_sqlite(db_path)?;
         // Build the replacement beside the live database and swap it in with
         // one rename. A kill at any point leaves the old wallet or the new one
@@ -2783,11 +2789,11 @@ impl NativeWallet {
         let raw = db
             .get_transaction(txid)
             .map_err(|e| EngineError::WalletDb(format!("get_transaction: {e}")))?
-            .ok_or_else(|| EngineError::Message(format!("tx {txid} missing from db")))?;
+            .ok_or_else(|| EngineError::WalletDb(format!("tx {txid} missing from db")))?;
 
         let mut data = Vec::new();
         raw.write(&mut data)
-            .map_err(|e| EngineError::Message(format!("serialize tx: {e}")))?;
+            .map_err(|e| EngineError::WalletDb(format!("serialize tx: {e}")))?;
         self.submit_raw(client, data).await?;
         info!("broadcast ok");
         Ok(txid.to_string())
@@ -2805,7 +2811,7 @@ impl NativeWallet {
             let sent =
                 tokio::task::spawn_blocking(move || super::rpc::send_raw_transaction(&url, &bytes))
                     .await
-                    .map_err(|e| EngineError::Message(format!("broadcast task: {e}")))?;
+                    .map_err(|e| EngineError::Transport(format!("broadcast task: {e}")))?;
             match sent {
                 Ok(_hash) => {
                     info!("broadcast via validator sendrawtransaction");
@@ -3758,7 +3764,7 @@ mod tests {
         assert!(!paths.reset_backup().exists());
     }
 
-    fn fixture_wallet(dir: &Path) -> NativeWallet {
+    pub(super) fn fixture_wallet(dir: &Path) -> NativeWallet {
         let paths = WalletPaths::new(dir);
         paths.ensure_dirs().unwrap();
         let meta = fixture_meta();
@@ -3813,7 +3819,7 @@ mod tests {
         }
     }
 
-    fn fixture_account() -> (UnifiedFullViewingKey, AccountBirthday) {
+    pub(super) fn fixture_account() -> (UnifiedFullViewingKey, AccountBirthday) {
         let ufvk =
             UnifiedSpendingKey::from_seed(&ZNetwork::Regtest, &[7u8; 32], Zip32AccountId::ZERO)
                 .unwrap()
