@@ -1,7 +1,7 @@
 import { formatZatoshis, WalletError } from "@z-stack/sdk";
 import type { WalletApp } from "./app-context";
 import { element } from "./dom";
-import { reviewSend, recheckReview, assertReviewCurrent, refreshReceipt, type SendReview, type SendReceipt } from "./send";
+import { reviewSend, syncForReview, recheckReview, assertReviewCurrent, refreshReceipt, type SendReview, type SendReceipt } from "./send";
 import { paymentErrorMessage } from "./wallet-view";
 
 export function attachPayments(app: WalletApp) {
@@ -99,6 +99,7 @@ export function attachPayments(app: WalletApp) {
       try {
         status.textContent = "Checking payment…";
         cancel.hidden = false;
+        await app.render(await syncForReview(app.wallet, approved, sending.signal));
         await recheckReview(app.wallet, approved, sending.signal);
         sending.signal.throwIfAborted();
         await app.wallet.unlock(mnemonic);

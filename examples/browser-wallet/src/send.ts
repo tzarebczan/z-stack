@@ -1,4 +1,4 @@
-import { parseZecToZatoshis, formatZatoshis, WalletError, type Wallet } from "@z-stack/sdk";
+import { parseZecToZatoshis, formatZatoshis, WalletError, type Wallet, type WalletSnapshot } from "@z-stack/sdk";
 
 export type SendDraft = Readonly<{ to: string; amount: string; memo: string }>;
 export type SendReview = SendDraft & Readonly<{ feeZat: number; walletAddress: string; reviewedAt: number }>;
@@ -35,24 +35,30 @@ export function assertReviewCurrent(review: SendReview): void {
   if (Date.now() - review.reviewedAt >= 5 * 60_000) throw new ReviewOutdatedError();
 }
 
-export async function recheckReview(wallet: Wallet, review: SendReview, signal?: AbortSignal): Promise<void> {
+/** Return fresh state so the UI can render it even if payment validation fails. */
+export async function syncForReview(wallet: Wallet, review: SendReview, signal?: AbortSignal): Promise<WalletSnapshot> {
   signal?.throwIfAborted();
   assertReviewCurrent(review);
   const cancelSync = () => wallet.cancelSync();
   signal?.addEventListener("abort", cancelSync, { once: true });
   try {
     // Entering the phrase can leave the wallet more than 10 blocks behind.
-    await wallet.sync();
+    const snapshot = await wallet.sync();
     signal?.throwIfAborted();
-    assertReviewCurrent(review);
-    const current = await reviewSend(wallet, review);
-    signal?.throwIfAborted();
-    assertReviewCurrent(review);
-    if (current.walletAddress !== review.walletAddress || current.feeZat !== review.feeZat) {
-      throw new ReviewOutdatedError();
-    }
+    return snapshot;
   } finally {
     signal?.removeEventListener("abort", cancelSync);
+  }
+}
+
+export async function recheckReview(wallet: Wallet, review: SendReview, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  assertReviewCurrent(review);
+  const current = await reviewSend(wallet, review);
+  signal?.throwIfAborted();
+  assertReviewCurrent(review);
+  if (current.walletAddress !== review.walletAddress || current.feeZat !== review.feeZat) {
+    throw new ReviewOutdatedError();
   }
 }
 

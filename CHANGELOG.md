@@ -4,6 +4,7 @@
 
 - Refresh per-pool history totals once after scanning wallet activity, including mined self-sends, without repeated catch-up rebuilds.
 - Recognize Zebra's duplicate mempool and queued-download responses without encouraging a replacement payment.
+- Preserve app-owned payment guard errors through rollback, and display fresh sync state before validating or unlocking a payment.
 - Report interrupted syncs as cancellation instead of an unknown error.
 - Cancel the pre-send sync with the payment; sync before rechecking example payments and preserve clear expired-review errors through the public SDK's error normalization and pre-broadcast guard.
 - Run example setup guards after installation and before dev, build and type checking; clarify transaction ID byte order and scanner state after local removal.

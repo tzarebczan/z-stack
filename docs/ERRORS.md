@@ -6,6 +6,15 @@ Use fixed application copy or `walletErrorMessage(code)` without a raw fallback.
 `WalletError.userMessage()` also returns fixed copy for unknown errors; the raw
 message and cause remain available for private debugging.
 
+Before signing, sync and render the returned snapshot, then revalidate the
+approved amount, fee and review deadline. A payment that fails validation or
+unlocking must still show the confirmations and history found by that sync.
+Tie payment cancellation to `wallet.cancelSync()` during this check.
+
+A `WalletError` subclass thrown by `beforeBroadcast` survives spending rollback
+and SDK normalization. The examples use an app-owned `ReviewOutdatedError` for
+fixed expired-review copy; the SDK does not manage application review deadlines.
+
 | Code | Next action |
 | --- | --- |
 | `cancelled`, `hardware_cancelled` | Keep the last committed state; let the user retry |

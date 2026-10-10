@@ -238,7 +238,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
           { txid: sentTxid },
         );
       }
-      if (reloaded) throw e;
+      if (isWalletError(e)) throw e;
       if (e instanceof DOMException && e.name === "AbortError") throw e;
       throw new Error(treeConflictUserMessage(message));
     } finally {

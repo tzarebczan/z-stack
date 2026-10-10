@@ -484,6 +484,29 @@ for (const signing of ["software", "hardware"] as const) {
   });
 }
 
+test("software spend preserves an app-owned WalletError from a late broadcast guard and rolls back", async t => {
+  const f = fixture(t);
+  let expired = false, submissions = 0;
+  const wallet = await f.open({server:{kind:"fixture",label:"offline",tip:async()=>10,
+    blocks:async()=>new Uint8Array(),submit:async()=>{submissions++;return txid;}}});
+  await wallet.create({birthday:1}); await wallet.unlock(words);
+  class ReviewOutdated extends WalletError {
+    override readonly name = "ReviewOutdatedError";
+    constructor() { super("cancelled", "This payment review is out of date."); }
+  }
+  const error = new ReviewOutdated();
+  f.onRevive(()=>{expired=true;});
+  await assert.rejects(wallet.send("fixture", "0.00005", undefined, {
+    beforeBroadcast:()=>{if(expired) throw error;return true;},
+  }), caught=>caught===error);
+  assert.equal(expired,true,"the guard expires during transaction construction");
+  assert.equal(submissions,0);
+  assert.deepEqual(await wallet.pending(),[]);
+  assert.deepEqual(await wallet.history(),[]);
+  assert.equal((await wallet.getWallet()).balance.totalAvailable,10);
+  assert.equal(wallet.hasSpendingSeed(),false);
+});
+
 test("memory storage serializes transactions, clones values, and rolls back a failed write", async () => {
   const storage = memoryWalletStorage();
   const value = { count: 0 };

@@ -31,6 +31,7 @@ for (const [name, send] of sends) {
     const review={to:'address',amount:'0.002',memo:'',feeZat:10000,walletAddress:'own',reviewedAt:now};
     try {
       const wallet={sync:async()=>{now+=5*60_000;},estimateFee:async()=>{estimates++;return {feeZat:10000};}};
+      await send.syncForReview(wallet,review);
       await assert.rejects(send.recheckReview(wallet,review),send.ReviewOutdatedError);
       assert.equal(estimates,0);
       const {WalletError}=await import(new URL('../packages/core/src/index.ts',import.meta.url).href);
@@ -51,7 +52,7 @@ for (const [name, send] of sends) {
       estimateFee: async () => { estimates++; return {feeZat:10000}; },
     };
     const review = {to:'address',amount:'0.002',memo:'',feeZat:10000,walletAddress:'own',reviewedAt:Date.now()};
-    const checking = send.recheckReview(wallet,review,operation.signal);
+    const checking = send.syncForReview(wallet,review,operation.signal);
     operation.abort();
     await assert.rejects(checking,{name:'AbortError'});
     assert.equal(stops,1);
@@ -60,18 +61,20 @@ for (const [name, send] of sends) {
   test(`${name}: an already cancelled payment never starts sync`, async () => {
     const operation = new AbortController(); operation.abort();
     let syncs = 0;
-    await assert.rejects(send.recheckReview({sync:async()=>{syncs++;}}, {}, operation.signal),{name:'AbortError'});
+    await assert.rejects(send.syncForReview({sync:async()=>{syncs++;}}, {}, operation.signal),{name:'AbortError'});
     assert.equal(syncs,0);
   });
   test(`${name}: sync happens before rechecking a frozen payment and fee changes require a new review`, async () => {
     const steps=[];
     let fee=10000;
     const wallet={
-      sync:async()=>{steps.push('sync');},
+      sync:async()=>{steps.push('sync');return {scannedHeight:42};},
       estimateFee:async()=>{steps.push('fee');return {feeZat:fee};},
       getWallet:async()=>({unifiedAddress:'own',balance:{totalAvailable:1000000}}),
     };
     const review={to:'address',amount:'0.002',memo:'',feeZat:fee,walletAddress:'own',reviewedAt:Date.now()};
+    const fresh=await send.syncForReview(wallet,review);
+    assert.equal(fresh.scannedHeight,42,'fresh state is available before validating the review');
     await send.recheckReview(wallet,review);
     assert.deepEqual(steps,['sync','fee']);
     fee=20000;

@@ -207,6 +207,9 @@ try {
       await ui.getByLabel('Recovery phrase for this payment',{exact:true}).fill('not a phrase');
       await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).click();
       await ui.getByText('Those words are not a valid recovery phrase.',{exact:true}).waitFor({timeout:60_000});
+      const syncedHeight=(await zebraRpc('getblockchaininfo')).blocks;
+      if (kind==='vite') assert.ok((await ui.locator('#scan-details').innerText()).includes(syncedHeight.toLocaleString()));
+      else await ui.getByText(`Scanned to ${syncedHeight.toLocaleString()}`,{exact:true}).waitFor();
       if (kind === 'vite') assert.equal(await ui.locator('#send-words').getAttribute('aria-invalid'), 'true');
     }
     await ui.getByLabel('Recovery phrase for this payment',{exact:true}).fill(faucetWords);

@@ -6,7 +6,7 @@ import { createWallet, WalletError, walletErrorMessage, type HistoryEntry,
 import { connection } from "./connection";
 import { walletLifetime } from "./lifetime";
 import { pendingRecovery } from "./recovery-memory";
-import { reviewSend, recheckReview, assertReviewCurrent, refreshReceipt, type SendDraft, type SendReview, type SendReceipt } from "./send";
+import { reviewSend, syncForReview, recheckReview, assertReviewCurrent, refreshReceipt, type SendDraft, type SendReview, type SendReceipt } from "./send";
 
 const acquire = walletLifetime(() => createWallet({ ...connection, autoSync: false,
   autoShield: false, memoFetch: "on-demand", unlockPolicy: "each-spend", threads: 2 }));
@@ -137,6 +137,7 @@ export function useWallet() {
       const operation = new AbortController(); sendOperation.current = operation; setCanCancelPayment(true);
       try {
         setStatus("Checking payment…");
+        await refresh(wallet, await syncForReview(wallet, review, operation.signal));
         await recheckReview(wallet, review, operation.signal);
         operation.signal.throwIfAborted();
         await wallet.unlock(words);
