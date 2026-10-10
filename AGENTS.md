@@ -51,3 +51,15 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup and checks, and
   [docs/UPSTREAM.md](docs/UPSTREAM.md). Preserve original third-party legal notices.
 - Sign commits with your registered signing key. Keep commit messages focused on
   the change. Report vulnerabilities through [SECURITY.md](SECURITY.md).
+
+## Cursor Cloud specific instructions
+
+- The diagnostic bench is `pnpm web:dev` (Vite on port 5174). Key derivation
+  runs locally in the browser. Restore also queries the light server; Create does too with an automatic or date-based birthday. Only Create
+  with an explicit block height can run offline. Sync always needs the configured
+  server. For regtest, start the matching loopback fixture separately.
+- `pnpm test`, package builds, and the bench need both WASM engines from
+  `pnpm build:sdk`. Keep `CARGO_BUILD_JOBS` at 1 so release compiles stay within
+  this VM's memory. The environment start script enables an 8G `/swapfile`.
+- CI uses Node 22.23.3. `/exec-daemon/node` on the base image is older; the
+  environment install puts 22.23.3 first on `PATH`.
