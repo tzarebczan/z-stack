@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { WalletError } from "@z-stack/core";
 import { createBlockPrefetch } from "../src/prefetch.ts";
 import { createLightServerRecovery, LightServerUnavailableError } from "../src/light-server-recovery.ts";
 import { isTransientLightServerError, TransientLightServerError } from "../src/lwd.ts";
@@ -67,7 +68,12 @@ test("light-server recovery is bounded and stops immediately on cancellation", a
   const controller = new AbortController();
   const recovery = createLightServerRecovery({ signal: controller.signal, graceMs: 20, retryBaseMs: 2 });
   let calls = 0;
-  await assert.rejects(recovery.run(async () => { calls++; throw new TypeError("offline"); }), LightServerUnavailableError);
+  await assert.rejects(recovery.run(async () => { calls++; throw new TypeError("offline"); }), (error) => {
+    assert.ok(error instanceof LightServerUnavailableError);
+    assert.equal(WalletError.fromUnknown(error).code, "transport");
+    assert.ok(error.cause instanceof TypeError);
+    return true;
+  });
   assert.ok(calls >= 2 && calls < 12, `retry count was ${calls}`);
   const cancelled = new AbortController();
   let waiting = 0;

@@ -341,7 +341,9 @@ test("replacement requires consent, close releases handles but preserves data, a
   const initial = await wallet.create({ birthday: 1 });
   await assert.rejects(wallet.create({ birthday: 1 }), code("already_exists"));
   assert.equal((await wallet.getWallet()).unifiedAddress, initial.wallet.unifiedAddress);
-  await assert.rejects(createWallet({ network: "regtest", server: "https://unused.invalid" }), code("busy"));
+  await assert.rejects(createWallet({ network: "regtest", server: "https://unused.invalid" }), code("owner_conflict"));
+  await assert.rejects(forgetWallet({ storage: f.storage }), code("owner_conflict"));
+  assert.equal((await wallet.getWallet()).unifiedAddress, initial.wallet.unifiedAddress);
   await wallet.create({ birthday: 1, replace: true });
   const address = (await wallet.getWallet()).unifiedAddress;
   await wallet.unlock(words);
@@ -1110,6 +1112,17 @@ test("a deep rescan needs client opt-in and rejects before changing state", asyn
   assert.equal((await wallet.getWallet()).birthdayHeight, 8);
 });
 
+test("restore rejects a birthday the client would refuse to sync before saving", async t => {
+  const f = fixture(t), wallet = await f.open({ server: {
+    kind: "fixture", label: "offline", tip: async () => 200000, blocks: async () => new Uint8Array(),
+  } });
+  await assert.rejects(wallet.restore(words), code("deep_sync_rejected"));
+  await assert.rejects(wallet.restore(words, { birthday: 3 }), code("deep_sync_rejected"));
+  assert.equal(await wallet.load(), null, "an unsyncable restore was saved");
+  await wallet.restore(words, { birthday: 100000 });
+  assert.ok(await wallet.load(), "a syncable restore was not saved");
+});
+
 
 test("a failed in-memory rescan rollback retires the source and keeps the original save error", async t => {
   const f = fixture(t);
@@ -1154,8 +1167,33 @@ test("numeric birthday creation is offline; automatic creation reports a stable 
   });
   assert.equal(tips, 1);
   assert.equal(await wallet.load(), null, "failed automatic creation saved a wallet");
+  await assert.rejects(wallet.restore(words, { birthday: 1 }), error => {
+    assert.ok(error instanceof WalletError);
+    assert.equal(error.code, "transport");
+    assert.doesNotMatch(error.userMessage(), /SYNTHETIC_PRIVATE_PROVIDER_CONTEXT/);
+    return true;
+  });
+  assert.equal(await wallet.load(), null, "failed restore saved a wallet");
 });
 
+
+test("creation and phrase restoration preserve permanent light-server error codes", async t => {
+  const f = fixture(t);
+  let error: unknown = new Error("HTTP 401: bridge token required");
+  const wallet = await f.open({ server: {
+    kind: "fixture", label: "protected", tip: async () => { throw error; },
+    blocks: async () => new Uint8Array(),
+  } });
+  for (const failure of [
+    { error, expected: "auth" },
+    { error: new WalletError("chain_mismatch", "wrong chain"), expected: "chain_mismatch" },
+  ]) {
+    error = failure.error;
+    await assert.rejects(wallet.create({ birthday: "auto" }), code(failure.expected));
+    await assert.rejects(wallet.restore(words, { birthday: 1 }), code(failure.expected));
+    assert.equal(await wallet.load(), null);
+  }
+});
 
 test("public unlock reports malformed words without granting spending access", async t => {
   const f = fixture(t);
@@ -1213,3 +1251,40 @@ for (const status of ["scanning", "unavailable"] as const) {
     await clock.tick(); assert.equal(syncs,4,"transparent automatic work is independent of the manual memo policy");
   });
 }
+
+
+test("automatic restore birthdays reject before fetching or modifying saved state", async t => {
+  const f = fixture(t);
+  let tips = 0;
+  const wallet = await f.open({ deepSync: true, server: {
+    kind: "fixture", label: "offline", tip: async () => { tips++; return 200000; }, blocks: async () => new Uint8Array(),
+  } });
+  for (const birthday of ["auto", " AUTO ", "", "  "]) {
+    await assert.rejects(wallet.restore(words, { birthday }), code("invalid_birthday"));
+  }
+  assert.equal(tips, 0);
+  assert.equal(await wallet.load(), null);
+});
+
+test("configured zero outage grace stops after the first failed tip and keeps saved state", async t => {
+  const f = fixture(t);
+  let tips = 0;
+  const wallet = await f.open({ lightServerGraceMs: 0, server: {
+    kind: "fixture", label: "offline", tip: async () => { tips++; throw new TypeError("SYNTHETIC_PRIVATE_PROVIDER_DETAIL"); },
+    blocks: async () => new Uint8Array(),
+  } });
+  const created = await wallet.create({ birthday: 1 });
+  const before = await readSavedSnapshotRecord();
+  await assert.rejects(wallet.sync(), code("transport"));
+  assert.equal(tips, 1);
+  assert.deepEqual(await readSavedSnapshotRecord(), before);
+  assert.equal((await wallet.getWallet()).unifiedAddress, created.wallet.unifiedAddress);
+});
+
+test("invalid outage configuration releases the owner for a later client", async t => {
+  for (const lightServerGraceMs of [-1, Infinity, 0.5, 2_147_483_648]) {
+    await assert.rejects(createWallet({ network: "regtest", storage: memoryWalletStorage(), server: "https://unused.invalid", lightServerGraceMs }), code("unknown"));
+  }
+  const f = fixture(t);
+  assert.ok(await f.open());
+});

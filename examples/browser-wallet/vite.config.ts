@@ -13,6 +13,12 @@ const previewCache: Plugin = {
       .filter(entry => entry.isFile()).map(entry => entry.name) : []);
     server.middlewares.use((request, response, next) => {
       const path = new URL((request as { url?: string }).url ?? "/", "http://localhost").pathname;
+      const emittedAsset = path.startsWith("/assets/") && assets.has(path.slice("/assets/".length));
+      if ((path.startsWith("/assets/") || path.endsWith(".wasm")) && !emittedAsset) {
+        response.writeHead(404, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+        response.end("Asset not found");
+        return;
+      }
       const hashedAsset = assets.has(path.slice("/assets/".length)) && /^\/assets\/[^/]+-[A-Za-z0-9_-]{8,}\.(?:wasm|js|css)$/.test(path);
       // Encoded asset variants must remain distinct in shared caches.
       if (hashedAsset) response.appendHeader("Vary", "Accept-Encoding");

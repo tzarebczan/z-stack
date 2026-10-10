@@ -159,6 +159,11 @@ test("hardware wallets restore, refuse seed sends, and ask the device nothing th
   });
   const ufvk = deriveAccount(REGTEST_FAUCET_MNEMONIC, "regtest", 0).ufvk;
   const account = { device: "keystone" as const, ufvk, seedFingerprint: seedFingerprint(REGTEST_FAUCET_MNEMONIC), accountIndex: 0 };
+  tip = async () => { throw new Error("HTTP 401: bridge token required"); };
+  const authFailure = (error: unknown) => isWalletError(error) && error.code === "auth";
+  await assert.rejects(client.restoreUfvk(ufvk, "regtest", 1), authFailure);
+  await assert.rejects(client.restoreHardware(account, "regtest", 1), authFailure);
+  tip = async () => 2;
   const w = await client.restoreHardware(account, "regtest", 1);
   assert.equal(w.viewOnly, false, "a hardware wallet can spend");
   assert.deepEqual(w.hardware, { device: "keystone", seedFingerprint: account.seedFingerprint, accountIndex: 0 });

@@ -53,6 +53,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         : "catching_up";
     ctx.bus.emit("sync", {
       stage,
+      activity: p.activity ?? "syncing",
       scanned: p.scanned,
       downloaded: p.downloaded,
       tip: p.tip,
@@ -124,6 +125,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     report({
       stage: "connecting",
       heading: ctx.session ? "Catching up" : "Restoring snapshot",
+      activity: ctx.session ? "syncing" : "loading",
       message: ctx.session ? "reading chain tip" : "hydrating snapshot",
       scanned: 0,
       tip: 0,
@@ -161,7 +163,9 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const recovery = createLightServerRecovery({
       signal,
       cancelled,
+      graceMs: ctx.opts.lightServerGraceMs,
       onWaiting: () => report({
+        activity: "waiting_for_server",
         stage: "connecting",
         heading: "Waiting for light server",
         scanned: recoveryScanned,
@@ -180,9 +184,6 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     recoveryScanned = start - 1;
     recoveryStart = start;
     const birthday = await source.birthday();
-    if (start <= birthday && tip - start > 8_000) {
-      console.warn("Sync restarted from the wallet birthday; checking the saved snapshot is recommended.");
-    }
     const syncStarted = Date.now();
     const nearTip = tip - start <= NEAR_TIP_BLOCKS;
     const followOn = tip - start <= STALL_QUIET_REMAINING;

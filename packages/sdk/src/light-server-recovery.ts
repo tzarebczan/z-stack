@@ -1,8 +1,14 @@
+import { WalletError } from "@z-stack/core";
 import { isTransientLightServerError } from "./lwd";
 
 export const LIGHT_SERVER_GRACE_MS = 90_000;
 
-export class LightServerUnavailableError extends Error {}
+export class LightServerUnavailableError extends WalletError {
+  constructor(message: string, cause?: unknown) {
+    super("transport", message, cause);
+    this.name = "LightServerUnavailableError";
+  }
+}
 
 export type LightServerRecovery = ReturnType<typeof createLightServerRecovery>;
 
@@ -36,7 +42,7 @@ export function createLightServerRecovery(opts: {
     if (remainingMs <= 0) {
       throw new LightServerUnavailableError(
         `Light server has been unavailable for ${Math.ceil(graceMs / 1000)} seconds. Sync can resume when it returns.`,
-        { cause: error },
+        error,
       );
     }
     opts.onWaiting?.(remainingMs);

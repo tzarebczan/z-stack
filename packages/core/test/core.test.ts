@@ -393,6 +393,11 @@ test("WalletError maps known engine strings and leaves unknown intact", () => {
     "auth",
   );
   assert.equal(classifyWalletError("ledger_status_6a80: Ledger rejected the PCZT data or key path"), "hardware_rejected");
+  assert.equal(
+    classifyWalletError("Light server has been unavailable for 90 seconds. Sync can resume when it returns."),
+    "transport",
+  );
+  assert.equal(classifyWalletError("light server tip failed (grpc-web): HTTP 503"), "transport");
   assert.equal(classifyWalletError("some novel engine panic"), "unknown");
   assert.equal(classifyWalletError("sync cancelled"), "cancelled");
   assert.equal(WalletError.fromMessage("sync cancelled").userMessage(), "Wallet operation cancelled.");
@@ -472,6 +477,11 @@ test("NU7 spacing and date estimates cross activation without changing mainnet",
     Date.now = () => midnight;
     assert.equal(parseBirthdayInput("2026-10-07", activation + 1_000, "testnet"), activation + 400);
     assert.equal(parseBirthdayInput("100", activation + 1_000, "testnet"), 100);
+    assert.ok(parseBirthdayInput("2026-10-08", activation + 1_000, "testnet") <= activation + 1_000);
+    for (const future of ["2026-10-09", "2030-01-01"]) {
+      assert.throws(() => parseBirthdayInput(future, activation + 1_000, "testnet"),
+        error => error instanceof WalletError && error.code === "birthday_above_tip");
+    }
     assert.throws(() => blockSpacingSeconds({network:"regtest", regtestNu7Height:2}, 10));
   } finally { Date.now = originalNow; }
 });

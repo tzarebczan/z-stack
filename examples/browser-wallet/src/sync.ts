@@ -1,21 +1,34 @@
 import { validateBirthdayInput, WalletError } from "@z-stack/sdk";
 import type { WalletApp } from "./app-context";
 import { element } from "./dom";
-import { memoDetailsMessage, syncedWalletStatus } from "./wallet-view";
+import { memoDetailsMessage, syncedWalletStatus, syncProgressLabel } from "./wallet-view";
 
 export function attachSync(app: WalletApp) {
   const status = element("status");
-  app.wallet.on("sync", progress => {
-    status.textContent = progress.stage === "synced"
-      ? `Synced through block ${progress.scanned?.toLocaleString() ?? "unknown"}. Sync again for payments mined later.`
-      : `Syncing · ${Math.round(progress.percent ?? 0)}%`;
-  });
-  element("sync").addEventListener("click", () => void app.run(async () => {
+  const cancel = element("cancel-sync", HTMLButtonElement);
+  app.wallet.on("sync", progress => { status.textContent = syncProgressLabel(progress); });
+
+  /** The live scan can be ahead of its last durable checkpoint after cancellation. */
+  async function cancellable(scan: () => Promise<void>) {
+    cancel.hidden = false;
+    try {
+      await scan();
+    } catch (error) {
+      if (WalletError.fromUnknown(error).code !== "cancelled") throw error;
+      await app.render(await app.wallet.getWallet());
+      status.textContent = "Sync stopped. Recent progress may need rescanning after a reload.";
+    } finally {
+      cancel.hidden = true;
+    }
+  }
+  cancel.addEventListener("click", () => app.wallet.cancelSync());
+
+  element("sync").addEventListener("click", () => void app.run(() => cancellable(async () => {
     // Previous activity and balances stay visible while the SDK scans.
     const snapshot = await app.wallet.sync();
     await app.render(snapshot);
     status.textContent = syncedWalletStatus(snapshot);
-  }));
+  })));
   element("load-details").addEventListener("click", () => void app.run(async () => {
     const snapshot = await app.wallet.fetchMemos();
     const entries = await app.render(snapshot);
@@ -37,7 +50,7 @@ export function attachSync(app: WalletApp) {
     void app.run(async () => {
       app.wallet.lock();
       await app.render(await app.wallet.rescan({ birthday: birthday.value.trim() }));
-      await app.render(await app.wallet.sync());
+      await cancellable(async () => { await app.render(await app.wallet.sync()); });
     });
   });
 }
