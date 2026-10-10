@@ -62,7 +62,9 @@ four-byte block framing.
 
 The caller must authenticate the complete publication, digests, network,
 freshness and anti-rollback state before calling. The engine checks framing,
-heights, parent links and compatibility with already-scanned hashes, then uses
+heights, parent links and compatibility with already-scanned hashes. A
+publication cannot lower the recorded chain tip, even when scanning lags behind
+that tip. The engine then uses
 the standard native shielded scanner in one wallet DB transaction. Replaying the
 same publication is supported. It performs no network, transparent-address,
 transaction-ID, memo-enhancement or rebroadcast requests.
