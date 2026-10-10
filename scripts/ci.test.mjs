@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -95,4 +95,28 @@ test("the workflow gate CLI exits unsuccessfully for a cancelled browser matrix"
   assert.throws(() => execFileSync(process.execPath, [script], {
     env: { ...process.env, CI_NEEDS: JSON.stringify(cancelled) }, stdio: "pipe",
   }), error => error.status === 1);
+});
+
+test("CI timing preserves command arguments, failures and the existing summary", { skip: process.platform !== "linux" }, t => {
+  const root = mkdtempSync(join(tmpdir(), "z-stack-ci-time-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const summary = join(root, "summary");
+  writeFileSync(summary, "Existing cache evidence\n");
+  const script = resolve(import.meta.dirname, "ci-time.sh");
+  const run = (...command) => spawnSync("bash", [script, "Disposable command", ...command], {
+    encoding: "utf8", env: { ...process.env, GITHUB_STEP_SUMMARY: summary },
+  });
+  const literal = "spaces; $(exit 99)";
+  const success = run("bash", "-c", 'printf "%s\\n" "$1"', "_", literal);
+  assert.equal(success.status, 0, success.stderr);
+  assert.ok(success.stdout.startsWith(`${literal}\n`));
+  assert.match(success.stdout, /Wall seconds: [\d.]+/);
+  assert.match(success.stdout, /User CPU seconds: [\d.]+/);
+  const failure = run("bash", "-c", "exit 37");
+  assert.equal(failure.status, 37, failure.stderr);
+  assert.match(failure.stdout, /Exit status: 37/);
+  const report = readFileSync(summary, "utf8");
+  assert.ok(report.startsWith("Existing cache evidence\n"));
+  assert.match(report, /Exit status: 0/);
+  assert.match(report, /Exit status: 37/);
 });
