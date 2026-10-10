@@ -304,12 +304,13 @@ impl<'a> NativePirStore<'a> {
             .map_err(io)?;
         }
         tx.commit().map_err(io)?;
+        let read = conn.transaction().map_err(io)?;
         let mut state = Replay::default();
         let mut generation = 0;
         let mut bytes = 0;
         let mut digest = String::new();
         {
-            let mut stmt = conn
+            let mut stmt = read
                 .prepare(
                     "SELECT id,length(payload),payload FROM ext_coffer_pir_journal ORDER BY id",
                 )
@@ -336,7 +337,7 @@ impl<'a> NativePirStore<'a> {
                 digest = journal_digest(&digest, &payload);
             }
         }
-        let recorded: (u64, u64, String) = conn
+        let recorded: (u64, u64, String) = read
             .query_row(
                 "SELECT generation,bytes,digest FROM ext_coffer_pir_head WHERE id=1",
                 [],
@@ -346,6 +347,7 @@ impl<'a> NativePirStore<'a> {
         if recorded != (generation, bytes, digest.clone()) {
             return Err(corrupt());
         }
+        read.commit().map_err(io)?;
         let db = WalletDb::from_connection(conn, wallet.network, SystemClock, new_rng());
         Ok(Self {
             db,
@@ -647,6 +649,26 @@ mod tests {
         let generation = cancelled.generation;
         assert!(cancelled.commit_shard(commit()).is_err());
         assert_eq!(cancelled.generation, generation);
+    }
+    #[test]
+    fn concurrent_reopen_observes_one_committed_journal_snapshot() {
+        let (_dir, wallet) = fixture();
+        NativePirStore::open(&wallet, &LIVE).unwrap();
+        std::thread::scope(|threads| {
+            threads.spawn(|| {
+                let mut store = NativePirStore::open(&wallet, &LIVE).unwrap();
+                for _ in 0..200 {
+                    store.bind_set(&testing::identity()).unwrap();
+                }
+            });
+            for _ in 0..40 {
+                NativePirStore::open(&wallet, &LIVE).unwrap();
+            }
+        });
+        assert_eq!(
+            NativePirStore::open(&wallet, &LIVE).unwrap().generation,
+            200
+        );
     }
     #[test]
     fn corrupt_truncated_and_unknown_version_journals_fail_closed() {

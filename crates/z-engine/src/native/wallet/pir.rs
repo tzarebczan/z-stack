@@ -25,9 +25,11 @@ fn store_failed(error: StoreError) -> EngineError {
 /// A caller supplies hashes from its independently accepted local regtest node.
 /// This constructor validates shape/network; it does not authenticate that node.
 /// Publisher hashes, map endpoints and cloud-scanned DB hashes are not provenance.
+#[derive(Clone)]
 pub struct RegtestAcceptedChain {
     hashes: BTreeMap<u64, String>,
     target: Anchor,
+    context_identity: Option<String>,
 }
 impl RegtestAcceptedChain {
     pub fn from_local_node(
@@ -61,7 +63,26 @@ impl RegtestAcceptedChain {
             height: *height,
             hash: hash.clone(),
         };
-        Ok(Self { hashes, target })
+        Ok(Self {
+            hashes,
+            target,
+            context_identity: None,
+        })
+    }
+    /// Bind the whole enrolled transport/source configuration to this accepted snapshot.
+    /// The caller supplies a canonical digest, not endpoint strings or secret material.
+    pub fn with_context_identity(mut self, identity: &str) -> Result<Self> {
+        if identity.len() != 64
+            || !identity
+                .bytes()
+                .all(|b| matches!(b,b'0'..=b'9'|b'a'..=b'f'))
+        {
+            return Err(failed("native_pir_context_invalid"));
+        }
+        let bytes = serde_json::to_vec(&(&self.hashes, identity))
+            .map_err(|_| failed("native_pir_context_invalid"))?;
+        self.context_identity = Some(format!("{:x}", Sha256::digest(bytes)));
+        Ok(self)
     }
     pub fn target_height(&self) -> u32 {
         self.target.height as u32
@@ -93,6 +114,7 @@ pub struct PirDiscoveryReport {
     pub reconciled: bool,
     pub accepted_anchor: Option<Anchor>,
     pub source_identity: String,
+    pub context_identity: Option<String>,
     pub scope_identity: String,
     pub enrolled_script_count: usize,
     pub covered_through: u64,
@@ -131,6 +153,13 @@ impl NativeScope {
                     && next.entry.required_from <= prior.entry.required_from
             })
         })
+    }
+    fn unique_script_count(&self) -> usize {
+        self.0
+            .iter()
+            .map(|e| e.entry.script.as_slice())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
     }
     fn scripts(&self) -> Vec<ScriptEntry> {
         self.0.iter().map(|e| e.entry.clone()).collect()
@@ -369,8 +398,9 @@ impl NativeWallet {
                 .map_err(store_failed)?
                 .ok_or_else(|| failed("native_pir_source_invalid"))?
                 .digest(),
+            context_identity: chain.context_identity.clone(),
             scope_identity: scope.identity()?,
-            enrolled_script_count: scope.0.len(),
+            enrolled_script_count: scope.unique_script_count(),
             covered_through: report.covered_through,
             settled_through: report.settled_through,
             confirmed_ledger_zat: report.ledger.confirmed_balance(),
@@ -395,6 +425,22 @@ impl NativeWallet {
         store.persist_report(result.clone()).map_err(store_failed)?;
         Ok(result)
     }
+    /// Only return a result for this exact independently accepted chain and enrollment.
+    /// A changed source key/context requires reconciliation; it does not reset the ledger.
+    pub fn regtest_pir_discovery_for(
+        &self,
+        chain: &RegtestAcceptedChain,
+    ) -> Result<Option<PirDiscoveryReport>> {
+        let report = self.regtest_pir_discovery()?;
+        if report.as_ref().is_some_and(|report| {
+            report.accepted_anchor.as_ref() != Some(&chain.target)
+                || report.context_identity != chain.context_identity
+        }) {
+            return Err(failed("native_pir_reconciliation_required"));
+        }
+        Ok(report)
+    }
+    /// Historical qualification only; application status must use `regtest_pir_discovery_for`.
     /// Refuses stale discovery after native scope or scanner state changes.
     pub fn regtest_pir_discovery(&self) -> Result<Option<PirDiscoveryReport>> {
         if self.network != ZNetwork::Regtest {
@@ -478,8 +524,9 @@ mod tests {
                 hash: "11".repeat(32),
             }),
             source_identity: "test-only".into(),
+            context_identity: None,
             scope_identity: scope.identity().unwrap(),
-            enrolled_script_count: scope.0.len(),
+            enrolled_script_count: scope.unique_script_count(),
             covered_through: 0,
             settled_through: 0,
             confirmed_ledger_zat: 0,
@@ -535,6 +582,63 @@ mod tests {
         let (key, birthday) = fixture_account();
         wallet.replace_scan_db(&key, &birthday).unwrap();
         assert!(wallet.regtest_pir_discovery().unwrap().is_none());
+    }
+    #[test]
+    fn current_context_and_anchor_are_required_after_reopen() {
+        let (_dir, wallet) = fixture();
+        let schedule = RegtestScanSchedule {
+            nu6_3_height: crate::regtest_nu6_3_height(),
+            nu7_height: crate::regtest_nu7_height(),
+        };
+        let chain = RegtestAcceptedChain::from_local_node(
+            schedule,
+            vec![(0, GENESIS.into()), (1, "11".repeat(32))],
+        )
+        .unwrap()
+        .with_context_identity(&"aa".repeat(32))
+        .unwrap();
+        assert!(chain
+            .clone()
+            .with_context_identity(&"AA".repeat(32))
+            .is_err());
+        let cancel = AtomicBool::new(false);
+        let mut store = store::NativePirStore::open(&wallet, &cancel).unwrap();
+        let scope = native_scope(&wallet.open_db().unwrap(), 1).unwrap();
+        store.enroll(scope.clone(), 1).unwrap();
+        let mut report = make_report(&wallet, &scope);
+        report.context_identity = chain.context_identity.clone();
+        store.persist_report(report.clone()).unwrap();
+        drop(store);
+        assert_eq!(
+            wallet.regtest_pir_discovery_for(&chain).unwrap(),
+            Some(report)
+        );
+        let changed = chain
+            .clone()
+            .with_context_identity(&"bb".repeat(32))
+            .unwrap();
+        assert!(wallet.regtest_pir_discovery_for(&changed).is_err());
+        let changed_anchor = RegtestAcceptedChain::from_local_node(
+            schedule,
+            vec![(0, GENESIS.into()), (1, "22".repeat(32))],
+        )
+        .unwrap()
+        .with_context_identity(&"aa".repeat(32))
+        .unwrap();
+        assert!(wallet.regtest_pir_discovery_for(&changed_anchor).is_err());
+    }
+    #[test]
+    fn unique_script_count_retains_every_account_binding_in_identity() {
+        let (_dir, wallet) = fixture();
+        let scope = native_scope(&wallet.open_db().unwrap(), 1).unwrap();
+        let one = NativeScope(vec![scope.0[0].clone()]);
+        let mut duplicate = one.0[0].clone();
+        duplicate.account = "another-account".into();
+        let two = NativeScope(vec![one.0[0].clone(), duplicate]);
+        assert_eq!(one.unique_script_count(), 1);
+        assert_eq!(two.unique_script_count(), 1);
+        assert_ne!(one.identity().unwrap(), two.identity().unwrap());
+        assert!(!one.continues(&two));
     }
     #[test]
     fn scope_is_native_owned_and_missing_prehistory_is_refused() {

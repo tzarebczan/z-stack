@@ -164,7 +164,13 @@ cancellation checks. The journal is limited to 16,384 operations and 64 MiB;
 individual operations are limited to 8 MiB. Alteration, truncation, unknown schema,
 limits, contradiction or write failure refuse advancement. Reopened report reads
 refuse changed native scope/scanner state until another independently anchored
-sync reconciles it. Resetting the native database discards this research journal.
+sync reconciles it. Journal replay and its head use one read snapshot.
+`RegtestAcceptedChain::with_context_identity` binds a canonical application
+enrollment digest and the full independently accepted snapshot to the persisted
+report. Call `regtest_pir_discovery_for` with the current enrolled chain/context;
+the historical no-argument status cannot establish current enrollment freshness.
+Unique script counts deduplicate scripts while identity and commit fences retain
+every native account association. Resetting the native database discards this research journal.
 
 PIR confirmed history is separate from native history, balances, reservations and
 spendability. Event records are not complete authenticated raw transactions and
