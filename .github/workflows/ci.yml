@@ -41,10 +41,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Rust formatting
         run: cargo fmt --all -- --check
+      # Dependencies (proving, curves) are optimized for the test builds only;
+      # z-engine itself stays unoptimized and debug assertions and overflow
+      # checks stay on. Measured: the engine tests run about 2x faster.
       - name: Engine check + tests
         run: |
           cargo check -p z-engine --features native,cli
-          cargo test -p z-engine --features native --lib
+          cargo test --config 'profile.dev.package."*".opt-level=2' -p z-engine --features native --lib
       - name: Desktop check
         run: cargo check -p z-desktop
       - name: Node launcher check
@@ -57,7 +60,7 @@ jobs:
             (cd "vendor/zakura/$c" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/vendor-tests" cargo test --release --lib)
           done
       - name: Compile ignored regtest test (no docker)
-        run: cargo test -p z-engine --test regtest --no-run
+        run: cargo test --config 'profile.dev.package."*".opt-level=2' -p z-engine --test regtest --no-run
 
   sdk:
     runs-on: ubuntu-24.04
