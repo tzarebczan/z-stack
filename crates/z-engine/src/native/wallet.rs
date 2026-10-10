@@ -1,5 +1,9 @@
 //! SQLite-backed native wallet: create, sync, balance, shield, send.
 
+mod payments;
+mod public_scan;
+pub use payments::PaymentReceipt;
+
 use crate::error::{EngineError, Result};
 use crate::native::block_cache::FsBlockCache;
 use crate::native::lwd::{self, LwdClient};
@@ -1953,6 +1957,7 @@ impl NativeWallet {
         birthday: &AccountBirthday,
     ) -> Result<()> {
         let db_path = &self.paths.data_db;
+        payments::require_rescan_safe(db_path)?;
         Self::checkpoint_sqlite(db_path)?;
         // Build the replacement beside the live database and swap it in with
         // one rename. A kill at any point leaves the old wallet or the new one
@@ -3758,7 +3763,7 @@ mod tests {
         assert!(!paths.reset_backup().exists());
     }
 
-    fn fixture_wallet(dir: &Path) -> NativeWallet {
+    pub(super) fn fixture_wallet(dir: &Path) -> NativeWallet {
         let paths = WalletPaths::new(dir);
         paths.ensure_dirs().unwrap();
         let meta = fixture_meta();
@@ -3813,7 +3818,7 @@ mod tests {
         }
     }
 
-    fn fixture_account() -> (UnifiedFullViewingKey, AccountBirthday) {
+    pub(super) fn fixture_account() -> (UnifiedFullViewingKey, AccountBirthday) {
         let ufvk =
             UnifiedSpendingKey::from_seed(&ZNetwork::Regtest, &[7u8; 32], Zip32AccountId::ZERO)
                 .unwrap()
