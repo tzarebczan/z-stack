@@ -1175,6 +1175,24 @@ test("numeric birthday creation is offline; automatic creation reports a stable 
 });
 
 
+test("creation and phrase restoration preserve permanent light-server error codes", async t => {
+  const f = fixture(t);
+  let error: unknown = new Error("HTTP 401: bridge token required");
+  const wallet = await f.open({ server: {
+    kind: "fixture", label: "protected", tip: async () => { throw error; },
+    blocks: async () => new Uint8Array(),
+  } });
+  for (const failure of [
+    { error, expected: "auth" },
+    { error: new WalletError("chain_mismatch", "wrong chain"), expected: "chain_mismatch" },
+  ]) {
+    error = failure.error;
+    await assert.rejects(wallet.create({ birthday: "auto" }), code(failure.expected));
+    await assert.rejects(wallet.restore(words, { birthday: 1 }), code(failure.expected));
+    assert.equal(await wallet.load(), null);
+  }
+});
+
 test("public unlock reports malformed words without granting spending access", async t => {
   const f = fixture(t);
   const wallet = await f.open();

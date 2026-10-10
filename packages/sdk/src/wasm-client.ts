@@ -43,6 +43,13 @@ export function createWasmClient(
 
   const { network, transport } = opts;
 
+  function tipFailure(error: unknown): WalletError {
+    const normalized = WalletError.fromUnknown(error);
+    return normalized.code === "unknown"
+      ? new WalletError("transport", `light server tip failed (${transport.label})`, error)
+      : normalized;
+  }
+
   const persistenceRequired = opts.requirePersistence === true || walletStorageAvailable();
 
   const bus = createEventBus();
@@ -654,7 +661,7 @@ export function createWasmClient(
           try {
             tip = await transport.tip();
           } catch (e) {
-            throw new WalletError("transport", `light server tip failed (${transport.label})`, e);
+            throw tipFailure(e);
           }
         }
         operation.assertCurrent();
@@ -740,11 +747,7 @@ export function createWasmClient(
           operation.assertCurrent();
         } catch (e) {
           operation.assertCurrent();
-          throw new WalletError(
-            "transport",
-            `light server tip failed (${transport.label}): ${e instanceof Error ? e.message : e}`,
-            e,
-          );
+          throw tipFailure(e);
         }
         const bday = await runtime.resolveBirthday(birthday, tip, 1, { network: net, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
         if (bday > tip) throw new Error(`birthday ${bday} is above tip ${tip}`);
@@ -803,11 +806,7 @@ export function createWasmClient(
           operation.assertCurrent();
         } catch (e) {
           operation.assertCurrent();
-          throw new WalletError(
-            "transport",
-            `light server tip failed (${transport.label}): ${e instanceof Error ? e.message : e}`,
-            e,
-          );
+          throw tipFailure(e);
         }
         const bday = await runtime.resolveBirthday(birthday, tip, 1, { network: net, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
         if (bday > tip) throw new Error(`birthday ${bday} is above tip ${tip}`);
@@ -869,11 +868,7 @@ export function createWasmClient(
         operation.assertCurrent();
       } catch (e) {
         operation.assertCurrent();
-        throw new WalletError(
-          "transport",
-          `light server tip failed (${transport.label}): ${e instanceof Error ? e.message : e}`,
-          e,
-        );
+        throw tipFailure(e);
       }
       const bday = await runtime.resolveBirthday(birthday, tip, 1, { network, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
       if (bday > tip) throw new Error(`birthday ${bday} is above tip ${tip}`);

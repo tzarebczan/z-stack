@@ -31,7 +31,7 @@ export function attachPayments(app: WalletApp) {
       : value.state === "expired" ? "Expired. Sync and check your balance before another payment."
       : value.state === "unknown" ? "Submission not confirmed. Sync and check this transaction before making another payment."
       : "Submitted · awaiting confirmation";
-    element("another-send").hidden = value.state === "unknown";
+    element("another-send").hidden = value.state === "pending" || value.state === "unknown";
   }
   function showReview(value: SendReview) {
     const details = element("review-details");
@@ -174,15 +174,16 @@ export function attachPayments(app: WalletApp) {
       receipt = await refreshReceipt(app.wallet, receipt);
       showReceipt(receipt);
     },
-    reset() {
+    reset({ preserveReceipt = false }: { preserveReceipt?: boolean } = {}) {
       review = undefined;
-      receipt = undefined;
+      if (!preserveReceipt) receipt = undefined;
       clearWords();
       form.reset();
       reviewPanel.hidden = true;
       receiptPanel.hidden = true;
       form.hidden = false;
       status.textContent = "";
+      if (receipt) showReceipt(receipt);
     },
   };
 }

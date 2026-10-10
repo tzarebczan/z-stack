@@ -57,12 +57,12 @@ export async function startApp() {
     run,
     updateControls,
     clearSecrets() { backup.clear(); restore.clearWords(); payments.clearWords(); },
-    reset() {
+    reset(options) {
       screen.clear();
       app.clearSecrets();
       restore.reset();
       creation.reset();
-      payments.reset();
+      payments.reset(options);
       disposeBase();
       disposeBase = attachBase(wallet, perform, () => app.snapshot?.unifiedAddress);
       status.textContent = "Local wallet removed. You can create or restore.";
@@ -110,7 +110,7 @@ export async function startApp() {
   async function showSavedWallet() {
     const saved = await perform(async () => {
       const current = await wallet.load();
-      app.reset();
+      app.reset({ preserveReceipt: current !== null });
       if (current) await app.render(current);
       return current;
     }).catch(() => undefined);

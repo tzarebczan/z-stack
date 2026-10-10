@@ -11,5 +11,5 @@ export type WalletApp = {
   run(action: () => Promise<void>, output?: HTMLElement): Promise<void>;
   updateControls(): void;
   clearSecrets(): void;
-  reset(): void;
+  reset(options?: { preserveReceipt?: boolean }): void;
 };

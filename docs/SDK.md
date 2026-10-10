@@ -44,7 +44,7 @@ const { txid } = await wallet.send("u1…", "0.25", "thanks!");
 
 `createWallet` loads the engine, picks the right transport for `server`, and
 returns a network-bound browser wallet. Only one active client is supported;
-creating another fails with `busy`. Await `close()` before opening the next.
+creating another fails with `owner_conflict`. Await `close()` before opening the next.
 Close interrupts the captured proof actor instead of waiting for its RPC timeout.
 An unfinished software proof has no durable reservation; the saved wallet stays
 intact. Interrupted hardware proving reloads the latest durable state, releases

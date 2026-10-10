@@ -8,7 +8,7 @@ export function attachSync(app: WalletApp) {
   const cancel = element("cancel-sync", HTMLButtonElement);
   app.wallet.on("sync", progress => { status.textContent = syncProgressLabel(progress); });
 
-  /** Cancel keeps committed progress; render it rather than the pre-sync view. */
+  /** The live scan can be ahead of its last durable checkpoint after cancellation. */
   async function cancellable(scan: () => Promise<void>) {
     cancel.hidden = false;
     try {
@@ -16,7 +16,7 @@ export function attachSync(app: WalletApp) {
     } catch (error) {
       if (WalletError.fromUnknown(error).code !== "cancelled") throw error;
       await app.render(await app.wallet.getWallet());
-      status.textContent = "Sync stopped. Scanned blocks are saved; Sync resumes from there.";
+      status.textContent = "Sync stopped. Recent progress may need rescanning after a reload.";
     } finally {
       cancel.hidden = true;
     }
