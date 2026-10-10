@@ -156,6 +156,8 @@ export function classifyWalletError(message: string): WalletErrorCode {
   const m = message.trim();
   const lower = m.toLowerCase();
 
+  if (lower === "sync cancelled") return "cancelled";
+
   if (lower.includes("invalid recovery phrase:") || lower.includes("invalid mnemonic:")) return "invalid_recovery_phrase";
 
   if (lower.includes("those words do not match this wallet\'s viewing key")) return "seed_mismatch";
