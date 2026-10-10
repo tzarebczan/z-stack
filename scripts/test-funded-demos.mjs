@@ -108,6 +108,43 @@ try {
     await page.getByRole('button',{name:kind === 'vite' ? 'Sync' : 'Sync wallet',exact:true}).waitFor();
     await page.waitForFunction(() => !document.querySelector('#sync')?.disabled && ![...document.querySelectorAll('button')].some(button => button.textContent === 'Sync wallet' && button.disabled),null,{timeout:180_000});
   }
+  // Exercise the example's UI acknowledgement gate, not only the SDK callback.
+  if (!process.argv.includes('--next-only')) {
+    const creationContext = await browser.newContext();
+    const creation = await creationContext.newPage();
+    creation.on('dialog', dialog => dialog.accept());
+    const errors = [];
+    creation.on('pageerror', error => errors.push(error.message));
+    try {
+      await creation.goto(viteOrigin);
+      await creation.getByText('Create a wallet or restore one.', {exact:true}).waitFor();
+      await creation.locator('#create').click();
+      await creation.locator('#phrase li').nth(23).waitFor();
+      assert.equal(await creation.locator('#phrase li').count(), 24);
+      assert.equal(await creation.locator('#balance-panel').isVisible(), false);
+      assert.equal(await creation.locator('#restore-form').isVisible(), false);
+      await creation.reload();
+      await creation.getByText('Create a wallet or restore one.', {exact:true}).waitFor();
+      assert.equal(await creation.locator('#backup-panel').isVisible(), false, 'Leaving before acknowledgement must not save a wallet');
+      await creation.locator('#create').click();
+      await creation.locator('#phrase li').nth(23).waitFor();
+      await creation.locator('#hide-phrase').click();
+      await creation.getByText('Wallet created. Sync when ready.', {exact:true}).waitFor();
+      const address = await creation.locator('#address').innerText();
+      assert.ok(address.startsWith('uregtest'));
+      assert.equal(await creation.locator('#phrase').innerText(), '', 'Acknowledgement clears words before commit');
+      await creation.reload();
+      await creation.getByText(/Wallet opened/).waitFor();
+      assert.equal(await creation.locator('#address').innerText(), address);
+      await creation.getByText('Remove local wallet', {exact:true}).click();
+      await creation.locator('#remove-confirm').check();
+      await creation.locator('#remove').click();
+      await creation.getByText('Local wallet removed. You can create or restore.', {exact:true}).waitFor();
+      await creation.getByText('Scanner starts when you create or restore', {exact:true}).waitFor();
+      assert.equal(errors.length, 0, errors.join('\n'));
+      console.log('Vite creation: acknowledgement, cancelled backup, reload and local removal passed');
+    } finally { await creationContext.close(); }
+  }
   for (const [kind, origin] of (process.argv.includes('--next-only') ? [['next', nextOrigin]] : [['vite', viteOrigin], ['next', nextOrigin]])) {
     const context = await browser.newContext(); const ui = await context.newPage(); const errors=[];
     ui.on('pageerror', error=>errors.push(error.message));
@@ -150,6 +187,8 @@ try {
       assert.equal(await staleRemoval.getByRole('button',{name:'Remove from this browser',exact:true}).isEnabled(),true);
     }
     if (!uncertain) {
+      // Reproduce typing long enough to exceed the SDK's ten-block spend lag.
+      await generate(11);
       await ui.getByLabel('Recovery phrase for this payment',{exact:true}).fill('not a phrase');
       await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).click();
       await ui.getByText('Those words are not a valid recovery phrase.',{exact:true}).waitFor({timeout:60_000});

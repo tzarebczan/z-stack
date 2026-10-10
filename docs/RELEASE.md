@@ -1,6 +1,6 @@
 # Package builds and verification
 
-The current preview is [`0.1.0-alpha.8`](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.8),
+The current preview is [`0.1.0-alpha.9`](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.9),
 with NU7 support and downloadable archives. Alpha.1 and alpha.2 predate NU7. Packages are not published to npm or Cargo. The browser SDK includes
 production WASM engines, so an app consuming built packages does not need Rust. See the
 [walkthrough](GETTING-STARTED.md) and [support limits](SUPPORT.md).
@@ -171,15 +171,15 @@ pnpm pack:sdk
 pnpm pack:base
 pnpm bundle:preview
 cd artifacts
-sha256sum z-stack-core-0.1.0-alpha.8.tgz z-stack-passkey-0.1.0-alpha.8.tgz \
-  z-stack-sdk-0.1.0-alpha.8.tgz z-stack-base-0.1.0-alpha.8.tgz \
-  z-stack-preview-0.1.0-alpha.8.tgz > SHA256SUMS-alpha.8
-sha256sum --quiet -c SHA256SUMS-alpha.8
-# macOS: generate with shasum -a 256; verify with shasum -q -a 256 -c SHA256SUMS-alpha.8.
+sha256sum z-stack-core-0.1.0-alpha.9.tgz z-stack-passkey-0.1.0-alpha.9.tgz \
+  z-stack-sdk-0.1.0-alpha.9.tgz z-stack-base-0.1.0-alpha.9.tgz \
+  z-stack-preview-0.1.0-alpha.9.tgz > SHA256SUMS-alpha.9
+sha256sum --quiet -c SHA256SUMS-alpha.9
+# macOS: generate with shasum -a 256; verify with shasum -q -a 256 -c SHA256SUMS-alpha.9.
 ```
 
 Use a directory with exactly one preview bundle for this version. Upload these
-five archives, the preview `.sha256` sidecar and the full-set checksums to the prerelease tagged `v0.1.0-alpha.8`, targeting
+five archives, the preview `.sha256` sidecar and the full-set checksums to the prerelease tagged `v0.1.0-alpha.9`, targeting
 the verified commit. Download them again and compare all hashes before publishing.
 Scaffold an app from the downloaded bundle as the final acceptance check. Publishing
 a GitHub prerelease does not publish to npm or Cargo. Keep source tags and signed
@@ -197,7 +197,7 @@ pnpm bundle:preview
 ```
 
 The optional `z-stack-zaino-image.json` asset is a container build receipt, separate
-from the SDK archives. `SHA256SUMS-alpha.8` covers only its named files; a passing
+from the SDK archives. `SHA256SUMS-alpha.9` covers only its named files; a passing
 checksum does not verify additional downloads. Verify the receipt's GitHub artifact
 attestation separately with `gh attestation verify z-stack-zaino-image.json --repo tzarebczan/z-stack`, then use its immutable image digest. The SDK preview does not
 need this container or receipt.

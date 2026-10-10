@@ -10,7 +10,7 @@ local archives. The steps below cover adapting your own application.
 ## Install
 
 Download and [verify the preview bundle](GETTING-STARTED.md#1-get-matching-archives)
-from the [alpha.8 release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.8).
+from the [alpha.9 release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.9).
 The SDK archive is inside its `artifacts/` directory. Install that `.tgz` in your app. It includes both single-threaded and threaded WASM
 engines, JavaScript bindings, workers, integrity manifests, and matching core
 and passkey helpers. No Rust toolchain or engine compilation is required.
@@ -23,7 +23,7 @@ using those packages directly. Node 22.18+ is required for setup tools; npm’s
 `engines` check is advisory, so an install warning does not certify older Node.
 
 ```sh
-npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.8.tgz
+npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.9.tgz
 ```
 
 Use the [runnable Vite example](../examples/browser-wallet/README.md) as a starting

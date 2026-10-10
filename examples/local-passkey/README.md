@@ -30,7 +30,7 @@ Follow the [build instructions](https://github.com/tzarebczan/z-stack/blob/main/
 Copy this directory outside the workspace, then run:
 
 ```sh
-npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.8.tgz
+npm install /path/to/sdk-alpha/z-stack-sdk-0.1.0-alpha.9.tgz
 npm run dev
 ```
 

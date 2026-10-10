@@ -15,7 +15,7 @@ downloaded archive. A fresh clone has no `artifacts/` directory; plain
 
 ```sh
 cd /path/to/copied/browser-wallet
-npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.8.tgz
+npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.9.tgz
 npm run dev
 ```
 
@@ -107,3 +107,16 @@ amount and confirmation count; the send form explains waiting funds. These views
 use the SDK balance and confirmation policy without changing spending rules.
 New wallets generate 24 words. Restore accepts valid BIP39 phrases of 12, 15, 18,
 21 or 24 words; a valid shorter phrase is not a validation failure.
+
+## Read the example
+
+Start at `src/main.ts`, then `src/app.ts` for wallet options, action coordination and page lifecycle. Each flow uses the public SDK directly:
+
+- `create.ts` creates the wallet; `recovery.ts` waits for phrase acknowledgement before the SDK commits it.
+- `restore.ts` validates inputs, preserves words on failure and imports into an empty local slot.
+- `sync.ts` handles scanning, rescans and explicit memo retrieval.
+- `payment.ts` owns forms and receipts; `send.ts` validates amounts, freezes reviews and checks them before proving and broadcast.
+- `remove.ts` confirms local deletion and respects pending-payment guards.
+- `screen.ts` renders balances, receive addresses and activity. `wallet-view.ts` formats SDK data without changing balances or confirmation policy.
+
+`app-context.ts` contains the small shared coordination contract. The flow modules keep recovery words, payment reviews and other transient state local to their own closures. `dom.ts` checks template elements at lookup and handles explicit clipboard writes. The optional `base.ts` adapter remains separate.

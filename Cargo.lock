@@ -8278,7 +8278,7 @@ dependencies = [
 
 [[package]]
 name = "z-desktop"
-version = "0.1.0-alpha.8"
+version = "0.1.0-alpha.9"
 dependencies = [
  "anyhow",
  "gpui",
@@ -8292,7 +8292,7 @@ dependencies = [
 
 [[package]]
 name = "z-engine"
-version = "0.1.0-alpha.8"
+version = "0.1.0-alpha.9"
 dependencies = [
  "anyhow",
  "argon2",
@@ -8349,7 +8349,7 @@ dependencies = [
 
 [[package]]
 name = "z-node-launcher"
-version = "0.1.0-alpha.8"
+version = "0.1.0-alpha.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -8359,7 +8359,7 @@ dependencies = [
 
 [[package]]
 name = "z-wasm"
-version = "0.1.0-alpha.8"
+version = "0.1.0-alpha.9"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.4.3",

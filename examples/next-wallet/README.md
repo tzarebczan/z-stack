@@ -18,7 +18,7 @@ For manual setup, use the SDK archive in the verified preview’s `artifacts/` d
 Copy this directory outside the SDK checkout. From your copy:
 
 ```sh
-npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.8.tgz
+npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.9.tgz
 npm run build
 npm run start
 ```

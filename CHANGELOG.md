@@ -1,11 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.9
 
 - Refresh per-pool history totals when a follow-on scan finds wallet activity, including mined self-sends.
 - Recognize Zebra's duplicate mempool and queued-download responses without encouraging a replacement payment.
 - Sync before rechecking example payments and preserve clear expired-review errors through the public SDK's error normalization and pre-broadcast guard.
-- Run example setup guards before dev, build and type checking; clarify transaction ID byte order and scanner state after local removal.
+- Run example setup guards after installation and before dev, build and type checking; clarify transaction ID byte order and scanner state after local removal.
+- Split the browser wallet into documented create, recovery, restore, sync, payment, removal and rendering modules, with checked DOM lookups and shared action coordination.
 
 ## 0.1.0-alpha.8
 
