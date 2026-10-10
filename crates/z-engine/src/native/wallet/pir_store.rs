@@ -255,12 +255,16 @@ pub(super) struct NativePirStore<'a> {
     cancel: &'a AtomicBool,
     scope: Option<NativeScope>,
     publication_start: u64,
+    // Fields drop in declaration order: close SQLite before releasing its lease.
+    _database_lease: std::fs::File,
 }
 impl<'a> NativePirStore<'a> {
     pub(super) fn open(
         wallet: &NativeWallet,
         cancel: &'a AtomicBool,
     ) -> std::result::Result<Self, StoreError> {
+        let database_lease = database_lease::shared(&wallet.paths.data_db)
+            .map_err(|_| StoreError::Io("native_pir_database_busy".into()))?;
         // Initialize/migrate the native wallet before introducing extension schema.
         drop(
             wallet
@@ -358,6 +362,7 @@ impl<'a> NativePirStore<'a> {
             cancel,
             scope: None,
             publication_start: 0,
+            _database_lease: database_lease,
         })
     }
     pub(super) fn enroll(
@@ -385,7 +390,12 @@ impl<'a> NativePirStore<'a> {
         report: PirDiscoveryReport,
         expected: &NativeScanSnapshot,
     ) -> std::result::Result<(), StoreError> {
-        if report.native_scanner_identity != Some(expected.identity()?) {
+        if report.native_scanner_identity != Some(expected.identity()?)
+            || !report
+                .accepted_anchor
+                .as_ref()
+                .is_some_and(|anchor| expected.matches_anchor(anchor))
+        {
             return Err(StoreError::Io("native_pir_reconciliation_required".into()));
         }
         self.write_at(

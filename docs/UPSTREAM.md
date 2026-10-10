@@ -169,9 +169,12 @@ refuse changed native scope/scanner state until another independently anchored
 sync reconciles it. Every committed journal mutation after a final report
 invalidates the current completion; a failed later attempt cannot restore it.
 Journal replay and its head use one read snapshot.
-Before network work, sync captures native scope and scanner state in one read
-transaction. The final report transaction revalidates chain height, fully/max
-scanned block hashes, the accepted-anchor hash and scan ranges. Concurrent native
+After reading bounded publication metadata, sync captures native scope and scanner
+state in one read transaction. It checks all retained native hashes within the
+independently accepted prefix, including fully/max scanned frontiers. A known
+fork refuses reconciliation. An unscanned native baseline can qualify the separate
+PIR ledger; a native island beyond the accepted prefix refuses without an overlap proof. The final report transaction revalidates chain height, fully/max
+scanned block hashes, the accepted-anchor hash, retained prefix hashes and scan ranges. Concurrent native
 advancement, rewind or same-height fork replacement refuses that report without
 changing the journal or its in-memory state. Already committed PIR history and
 coverage remain durable, with current completion absent until a successful sync.
@@ -185,7 +188,15 @@ enrollment digest and the full independently accepted snapshot to the persisted
 report. Call `regtest_pir_discovery_for` with the current enrolled chain/context;
 the historical no-argument status cannot establish current enrollment freshness.
 Unique script counts deduplicate scripts while identity and commit fences retain
-every native account association. Resetting the native database discards this research journal.
+every native account association. A stable `data.sqlite.ownership-lock` OS sidecar
+protects the complete PIR transport/snapshot/store/status lifetime with a shared
+lease. All native builds take an exclusive lease before database reset, incomplete
+creation cleanup or interrupted-reset recovery changes the database. Both lease
+acquisitions use nonblocking try-locks and return a bounded busy refusal. SQLite
+connections close before their shared lease is released; the sidecar is never
+renamed or removed by these paths. Reset can proceed after PIR exits and discards
+this research journal. These advisory leases require cooperating current native
+builds; older unfenced binaries and external file manipulation are outside this guarantee.
 
 PIR confirmed history is separate from native history, balances, reservations and
 spendability. Event records are not complete authenticated raw transactions and

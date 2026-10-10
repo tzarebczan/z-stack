@@ -240,6 +240,7 @@ pub(super) struct NativeScanSnapshot {
     fully_scanned: Option<(u32, String)>,
     max_scanned: Option<(u32, String)>,
     scan_ranges: Vec<(u32, u32, String)>,
+    accepted_overlap: Vec<(u32, String)>,
 }
 impl NativeScanSnapshot {
     pub(super) fn capture<D: WalletRead>(
@@ -247,6 +248,9 @@ impl NativeScanSnapshot {
         anchor_height: u32,
     ) -> std::result::Result<Self, StoreError> {
         let invalid = || StoreError::Io("native_pir_database_failed".into());
+        if anchor_height > 2048 {
+            return Err(invalid());
+        }
         let block = |b: zcash_client_backend::data_api::BlockMetadata| {
             (u32::from(b.block_height()), b.block_hash().to_string())
         };
@@ -263,7 +267,16 @@ impl NativeScanSnapshot {
             })
             .collect::<Vec<_>>();
         scan_ranges.sort();
+        // The accepted chain is bounded to 2048 heights. Include every retained
+        // native hash within that prefix, not just the final scanner frontier.
+        let mut accepted_overlap = Vec::new();
+        for height in 0..=anchor_height {
+            if let Some(hash) = db.get_block_hash(height.into()).map_err(|_| invalid())? {
+                accepted_overlap.push((height, hash.to_string()));
+            }
+        }
         Ok(Self {
+            accepted_overlap,
             anchor_height,
             anchor_hash: db
                 .get_block_hash(anchor_height.into())
@@ -274,6 +287,24 @@ impl NativeScanSnapshot {
             max_scanned: db.block_max_scanned().map_err(|_| invalid())?.map(block),
             scan_ranges,
         })
+    }
+    pub(super) fn matches_anchor(&self, anchor: &Anchor) -> bool {
+        u64::from(self.anchor_height) == anchor.height
+            && self.anchor_hash.as_ref().is_none_or(|hash| hash == &anchor.hash)
+            // A native island beyond the accepted prefix has no independent
+            // overlap proof here. An unscanned baseline remains eligible.
+            && self.max_scanned.as_ref().is_none_or(|(height, _)| u64::from(*height) <= anchor.height)
+    }
+    fn matches_chain(&self, chain: &RegtestAcceptedChain) -> bool {
+        self.matches_anchor(&chain.target)
+            && self
+                .accepted_overlap
+                .iter()
+                .all(|(height, hash)| chain.hashes.get(&u64::from(*height)) == Some(hash))
+            && [&self.fully_scanned, &self.max_scanned]
+                .into_iter()
+                .flatten()
+                .all(|(height, hash)| chain.hashes.get(&u64::from(*height)) == Some(hash))
     }
     fn scanned_height(&self) -> u32 {
         self.fully_scanned.as_ref().map(|b| b.0).unwrap_or(0)
@@ -380,6 +411,7 @@ impl NativeWallet {
             return Err(failed("native_pir_regtest_only"));
         }
         check(cancel).map_err(|_| failed("native_pir_cancelled"))?;
+        let _database_lease = database_lease::shared(&self.paths.data_db)?;
         let mut filters = CancelFilters {
             inner: filters,
             cancel,
@@ -417,6 +449,9 @@ impl NativeWallet {
             })
             .map_err(EngineError::from)?;
         drop(db);
+        if !native_snapshot.matches_chain(chain) {
+            return Err(failed("native_pir_reconciliation_required"));
+        }
         let mut store = store::NativePirStore::open(self, cancel).map_err(store_failed)?;
         store
             .enroll(scope.clone(), map.start_height)
@@ -500,12 +535,28 @@ impl NativeWallet {
         &self,
         chain: &RegtestAcceptedChain,
     ) -> Result<Option<PirDiscoveryReport>> {
+        let _database_lease = database_lease::shared(&self.paths.data_db)?;
         let report = self.regtest_pir_discovery()?;
         if report.as_ref().is_some_and(|report| {
             report.accepted_anchor.as_ref() != Some(&chain.target)
                 || report.context_identity != chain.context_identity
         }) {
             return Err(failed("native_pir_reconciliation_required"));
+        }
+        if report.is_some() {
+            let mut db = self.open_db()?;
+            let snapshot = db
+                .transactionally(|wdb| -> anyhow::Result<_> {
+                    Ok(NativeScanSnapshot::capture(wdb, chain.target.height as u32)
+                        .map_err(store_failed)?)
+                })
+                .map_err(EngineError::from)?;
+            if !snapshot.matches_chain(chain)
+                || report.as_ref().unwrap().native_scanner_identity
+                    != Some(snapshot.identity().map_err(store_failed)?)
+            {
+                return Err(failed("native_pir_reconciliation_required"));
+            }
         }
         Ok(report)
     }
@@ -524,7 +575,9 @@ impl NativeWallet {
             .accepted_anchor
             .as_ref()
             .ok_or_else(|| failed("native_pir_store_invalid"))?
-            .height as u32;
+            .height
+            .try_into()
+            .map_err(|_| failed("native_pir_store_invalid"))?;
         let mut db = self.open_db()?;
         let (snapshot, actual_scope) = db
             .transactionally(|wdb| -> anyhow::Result<_> {
@@ -534,7 +587,8 @@ impl NativeWallet {
                 ))
             })
             .map_err(EngineError::from)?;
-        if snapshot.anchor_hash != report.native_anchor_hash
+        if !snapshot.matches_anchor(report.accepted_anchor.as_ref().unwrap())
+            || snapshot.anchor_hash != report.native_anchor_hash
             || snapshot.scanned_height() != report.native_scanned_height
             || snapshot.chain_height != report.native_chain_height
             || report.native_scanner_identity != Some(snapshot.identity().map_err(store_failed)?)
@@ -554,7 +608,16 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, NativeWallet) {
         let dir = tempfile::tempdir().unwrap();
         let wallet = fixture_wallet(dir.path());
-        let (key, birthday) = fixture_account();
+        let (key, _) = fixture_account();
+        let mut genesis = crate::web::from_hex(GENESIS).unwrap();
+        genesis.reverse();
+        let birthday = AccountBirthday::from_parts(
+            zcash_client_backend::data_api::chain::ChainState::empty(
+                0.into(),
+                zcash_primitives::block::BlockHash::from_slice(&genesis),
+            ),
+            None,
+        );
         wallet.replace_scan_db(&key, &birthday).unwrap();
         (dir, wallet)
     }
@@ -925,6 +988,245 @@ mod tests {
             let store = store::NativePirStore::open(&reopened, &cancel).unwrap();
             assert_eq!(store.ledger().unwrap().confirmed_balance(), 10_000);
         }
+    }
+    #[test]
+    fn database_lease_refuses_reset_until_report_connection_is_closed() {
+        let (dir, wallet) = fixture();
+        let other = NativeWallet::open(dir.path()).unwrap();
+        let (key, birthday) = fixture_account();
+        let cancel = AtomicBool::new(false);
+        let mut store = store::NativePirStore::open(&wallet, &cancel).unwrap();
+        let scope = native_scope(&wallet.open_db().unwrap(), 1).unwrap();
+        store.enroll(scope.clone(), 1).unwrap();
+        let snapshot = NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 1).unwrap();
+        let report = make_report(&wallet, &scope);
+        std::thread::scope(|threads| {
+            threads
+                .spawn(|| {
+                    let error = other.replace_scan_db(&key, &birthday).unwrap_err();
+                    assert_eq!(error.to_string(), "native_pir_database_busy");
+                })
+                .join()
+                .unwrap();
+        });
+        store.persist_report(report.clone(), &snapshot).unwrap();
+        drop(store);
+        let reopened = NativeWallet::open(dir.path()).unwrap();
+        assert_eq!(reopened.regtest_pir_discovery().unwrap(), Some(report));
+        other.replace_scan_db(&key, &birthday).unwrap();
+        assert!(dir.path().join("data.sqlite.ownership-lock").exists());
+        assert_eq!(
+            NativeWallet::open(dir.path())
+                .unwrap()
+                .regtest_pir_discovery()
+                .unwrap(),
+            None
+        );
+    }
+    #[test]
+    fn database_lease_also_fences_incomplete_and_recovery_renames() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = WalletPaths::new(dir.path());
+        paths.ensure_dirs().unwrap();
+        std::fs::write(&paths.data_db, b"unfinished").unwrap();
+        let lease = database_lease::shared(&paths.data_db).unwrap();
+        assert_eq!(
+            paths.prepare_new_wallet().unwrap_err().to_string(),
+            "native_pir_database_busy"
+        );
+        assert_eq!(std::fs::read(&paths.data_db).unwrap(), b"unfinished");
+        drop(lease);
+        paths.prepare_new_wallet().unwrap();
+        assert!(!paths.data_db.exists());
+        std::fs::write(paths.reset_backup(), b"recoverable").unwrap();
+        let lease = database_lease::shared(&paths.data_db).unwrap();
+        paths.recover_interrupted_reset();
+        assert!(!paths.data_db.exists());
+        assert!(paths.reset_backup().exists());
+        drop(lease);
+        paths.recover_interrupted_reset();
+        assert_eq!(std::fs::read(&paths.data_db).unwrap(), b"recoverable");
+        assert!(!paths.reset_backup().exists());
+    }
+    struct UnusedTransport;
+    impl ShardTransport for UnusedTransport {
+        fn init(&mut self) -> std::result::Result<(Vec<u8>, u64), BoxError> {
+            unreachable!()
+        }
+        fn manifest(&mut self, _: u64, _: &str) -> std::result::Result<(Vec<u8>, u64), BoxError> {
+            unreachable!()
+        }
+        fn setup(
+            &mut self,
+            _: u64,
+            _: &str,
+            _: Table,
+            _: u32,
+        ) -> std::result::Result<(Vec<u8>, u64), BoxError> {
+            unreachable!()
+        }
+        fn query(
+            &mut self,
+            _: u64,
+            _: &str,
+            _: Table,
+            _: &[u8],
+        ) -> std::result::Result<Vec<u8>, BoxError> {
+            unreachable!()
+        }
+    }
+    #[test]
+    fn reset_during_first_transport_boundary_is_bounded_and_cannot_detach_database() {
+        struct Filters<'a>(&'a NativeWallet);
+        impl FilterSource for Filters<'_> {
+            fn shard_map(&mut self) -> std::result::Result<(Vec<u8>, u64), BoxError> {
+                let (key, birthday) = fixture_account();
+                assert_eq!(
+                    self.0
+                        .replace_scan_db(&key, &birthday)
+                        .unwrap_err()
+                        .to_string(),
+                    "native_pir_database_busy"
+                );
+                Err(Box::new(Cancelled))
+            }
+            fn filter(&mut self, _: u64) -> std::result::Result<(Vec<u8>, u64), BoxError> {
+                unreachable!()
+            }
+        }
+        let (dir, wallet) = fixture();
+        let other = NativeWallet::open(dir.path()).unwrap();
+        let schedule = RegtestScanSchedule {
+            nu6_3_height: crate::regtest_nu6_3_height(),
+            nu7_height: crate::regtest_nu7_height(),
+        };
+        let chain = RegtestAcceptedChain::from_local_node(
+            schedule,
+            vec![(0, GENESIS.into()), (1, "11".repeat(32))],
+        )
+        .unwrap();
+        assert_eq!(
+            wallet
+                .sync_regtest_pir(
+                    &chain,
+                    &mut Filters(&other),
+                    &mut UnusedTransport,
+                    WorkLimits::default(),
+                    &AtomicBool::new(false)
+                )
+                .unwrap_err()
+                .to_string(),
+            "native_pir_transport_failed"
+        );
+        assert_eq!(
+            NativeWallet::open(dir.path())
+                .unwrap()
+                .regtest_pir_discovery()
+                .unwrap(),
+            None
+        );
+        let lease = database_lease::exclusive(&wallet.paths.data_db).unwrap();
+        assert_eq!(
+            wallet.regtest_pir_discovery().unwrap_err().to_string(),
+            "native_pir_database_busy"
+        );
+        assert_eq!(
+            wallet
+                .sync_regtest_pir(
+                    &chain,
+                    &mut Filters(&other),
+                    &mut UnusedTransport,
+                    WorkLimits::default(),
+                    &AtomicBool::new(false)
+                )
+                .unwrap_err()
+                .to_string(),
+            "native_pir_database_busy"
+        );
+        drop(lease);
+        let (key, birthday) = fixture_account();
+        other.replace_scan_db(&key, &birthday).unwrap();
+    }
+    #[test]
+    fn independent_chain_checks_retained_native_prefix_without_requiring_target_scan() {
+        use prost::Message;
+        use zcash_client_backend::proto::compact_formats::*;
+        let (dir, wallet) = fixture();
+        let schedule = RegtestScanSchedule {
+            nu6_3_height: crate::regtest_nu6_3_height(),
+            nu7_height: crate::regtest_nu7_height(),
+        };
+        let headers = vec![
+            (0, GENESIS.into()),
+            (1, "01".repeat(32)),
+            (2, "02".repeat(32)),
+        ];
+        let chain = RegtestAcceptedChain::from_local_node(schedule, headers.clone()).unwrap();
+        let baseline = NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 2).unwrap();
+        assert_eq!(baseline.scanned_height(), 0);
+        assert!(baseline.matches_chain(&chain));
+        let mut genesis = crate::web::from_hex(GENESIS).unwrap();
+        genesis.reverse();
+        let blocks: Vec<_> = (1..=2)
+            .map(|height| CompactBlock {
+                height,
+                hash: vec![height as u8; 32],
+                prev_hash: if height == 1 {
+                    genesis.clone()
+                } else {
+                    vec![1; 32]
+                },
+                chain_metadata: Some(ChainMetadata::default()),
+                ..Default::default()
+            })
+            .collect();
+        let bytes: Vec<_> = blocks
+            .iter()
+            .flat_map(Message::encode_length_delimited_to_vec)
+            .collect();
+        wallet
+            .scan_public_regtest_incremental(&bytes, schedule)
+            .unwrap();
+        let snapshot = NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 2).unwrap();
+        assert!(snapshot.matches_chain(&chain));
+        let scope = native_scope(&wallet.open_db().unwrap(), 1).unwrap();
+        let mut report = make_report(&wallet, &scope);
+        report.accepted_anchor = Some(chain.target.clone());
+        report.native_anchor_hash = snapshot.anchor_hash.clone();
+        report.native_scanned_height = snapshot.scanned_height();
+        report.native_chain_height = snapshot.chain_height;
+        report.native_scanner_identity = Some(snapshot.identity().unwrap());
+        let cancel = AtomicBool::new(false);
+        let mut store = store::NativePirStore::open(&wallet, &cancel).unwrap();
+        store.enroll(scope, 1).unwrap();
+        let mut forked_report = report.clone();
+        forked_report.accepted_anchor.as_mut().unwrap().hash = "22".repeat(32);
+        assert!(store.persist_report(forked_report, &snapshot).is_err());
+        store.persist_report(report.clone(), &snapshot).unwrap();
+        drop(store);
+        let reopened = NativeWallet::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.regtest_pir_discovery_for(&chain).unwrap(),
+            Some(report)
+        );
+        let mut earlier_fork = headers;
+        earlier_fork[1].1 = "33".repeat(32);
+        let fork = RegtestAcceptedChain::from_local_node(schedule, earlier_fork).unwrap();
+        assert!(!snapshot.matches_chain(&fork));
+        assert_eq!(
+            reopened
+                .regtest_pir_discovery_for(&fork)
+                .unwrap_err()
+                .to_string(),
+            "native_pir_reconciliation_required"
+        );
+        let mut unknown_island = snapshot;
+        unknown_island.anchor_height = 1;
+        unknown_island.anchor_hash = None;
+        assert!(!unknown_island.matches_anchor(&Anchor {
+            height: 1,
+            hash: "01".repeat(32)
+        }));
     }
     #[test]
     fn unique_script_count_retains_every_account_binding_in_identity() {
