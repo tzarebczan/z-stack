@@ -212,22 +212,34 @@ impl NativeWallet {
                     }
                     macro_rules! boundary_tree {
                         ($tree:expr,$expected:expr) => {{
-                            let size = $tree
-                                .max_leaf_position(None)?
-                                .map(|p| u64::from(p) + 1)
-                                .unwrap_or(0);
-                            if $expected.map(u64::from) != Some(size) {
+                            let size = $expected
+                                .map(u64::from)
+                                .ok_or_else(|| anyhow::anyhow!("public_scan_resume_required"))?;
+                            let maximum = $tree.max_leaf_position(None)?;
+                            let maximum_size = maximum.map(|p| u64::from(p) + 1).unwrap_or(0);
+                            if maximum_size < size {
                                 anyhow::bail!("public_scan_resume_required");
                             }
-                            let root = $tree
-                                .root_at_checkpoint_depth(None)?
-                                .ok_or_else(|| anyhow::anyhow!("public_scan_resume_required"))?;
-                            let frontier = match $tree.frontier() {
-                                Ok(frontier) => Some(frontier),
-                                Err(shardtree::error::ShardTreeError::Query(
-                                    shardtree::error::QueryError::TreeIncomplete(_),
-                                )) => None,
-                                Err(error) => return Err(anyhow::Error::from(error)),
+                            // Block metadata fixes the scanned position even when no checkpoint
+                            // was retained for an empty block or prefetched roots extend past it.
+                            let root = if size == 0 {
+                                incrementalmerkletree::Hashable::empty_root(32.into())
+                            } else {
+                                $tree.root(
+                                    incrementalmerkletree::Address::from_parts(32.into(), 0),
+                                    size.into(),
+                                )?
+                            };
+                            let frontier = if maximum_size != size {
+                                None
+                            } else {
+                                match $tree.frontier() {
+                                    Ok(frontier) => Some(frontier),
+                                    Err(shardtree::error::ShardTreeError::Query(
+                                        shardtree::error::QueryError::TreeIncomplete(_),
+                                    )) => None,
+                                    Err(error) => return Err(anyhow::Error::from(error)),
+                                }
                             };
                             Ok::<_, anyhow::Error>((root, frontier))
                         }};
@@ -299,6 +311,7 @@ impl NativeWallet {
 mod tests {
     use super::super::tests::{fixture_account, fixture_wallet};
     use super::*;
+    use shardtree::store::ShardStore;
 
     fn schedule() -> RegtestScanSchedule {
         RegtestScanSchedule {
@@ -485,6 +498,63 @@ mod tests {
             8
         );
         assert_eq!(before, snapshot(&incremental));
+    }
+    #[test]
+    fn incremental_resume_uses_boundary_position_despite_prefetched_subtree_roots() {
+        use incrementalmerkletree::Hashable;
+        use orchard::tree::MerkleHashOrchard;
+        use zcash_client_backend::data_api::chain::CommitmentTreeRoot;
+
+        for empty in [false, true] {
+            let mut blocks = encrypted_publication();
+            if empty {
+                for block in &mut blocks {
+                    block.vtx.clear();
+                    block
+                        .chain_metadata
+                        .as_mut()
+                        .unwrap()
+                        .orchard_commitment_tree_size = 0;
+                }
+            }
+            let full_dir = tempfile::tempdir().unwrap();
+            let full = initialized(full_dir.path());
+            full.scan_public_regtest(&encode(&blocks), schedule())
+                .unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let wallet = initialized(dir.path());
+            wallet
+                .scan_public_regtest_incremental(&encode(&blocks[..4]), schedule())
+                .unwrap();
+            let mut db = wallet.open_db().unwrap();
+            db.put_orchard_subtree_roots(
+                1,
+                &[CommitmentTreeRoot::from_parts(
+                    100.into(),
+                    MerkleHashOrchard::empty_root(16.into()),
+                )],
+            )
+            .unwrap();
+            db.with_orchard_tree_mut::<_, _, anyhow::Error>(|tree| {
+                let position = tree
+                    .store()
+                    .get_checkpoint(&4.into())?
+                    .and_then(|c| c.position());
+                assert_ne!(tree.max_leaf_position(None)?, position);
+                Ok(())
+            })
+            .unwrap();
+            drop(db);
+            drop(wallet);
+            let wallet = NativeWallet::open(dir.path()).unwrap();
+            wallet
+                .scan_public_regtest_incremental(&encode(&blocks), schedule())
+                .unwrap();
+            assert_eq!(snapshot(&full), snapshot(&wallet));
+            if !empty {
+                assert_witnesses(&wallet);
+            }
+        }
     }
     #[test]
     fn incremental_fork_rollback_and_failed_commit_preserve_state() {

@@ -188,10 +188,7 @@ pub(super) fn native_scope<D: WalletRead<AccountId = AccountUuid>>(
             .map_err(|_| invalid())?
         {
             let imported = metadata.scope().is_none();
-            let required_from = if imported { start } else { birthday };
-            if required_from < start {
-                return Err(invalid());
-            }
+            let required_from = receiver_history_floor(imported, birthday, start)?;
             scope.push(ScopeEntry {
                 account: account.expose_uuid().to_string(),
                 entry: ScriptEntry {
@@ -219,6 +216,20 @@ pub(super) fn native_scope<D: WalletRead<AccountId = AccountUuid>>(
         return Err(invalid());
     }
     Ok(NativeScope(scope))
+}
+
+fn receiver_history_floor(
+    imported: bool,
+    birthday: u64,
+    publication_start: u64,
+) -> std::result::Result<u64, StoreError> {
+    // Standalone receiver metadata has no trustworthy creation-height bound.
+    let floor = if imported { 1 } else { birthday };
+    if floor < publication_start {
+        Err(StoreError::Io("native_pir_scope_invalid".into()))
+    } else {
+        Ok(floor)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -962,6 +973,14 @@ mod tests {
             .iter()
             .all(|e| e.entry.origin == ScriptOrigin::Derived && e.entry.required_from == 1));
         assert!(native_scope(&db, 2).is_err());
+    }
+    #[test]
+    fn standalone_imports_require_history_from_genesis_independent_of_account_birthday() {
+        assert_eq!(receiver_history_floor(true, 100, 1).unwrap(), 1);
+        assert!(receiver_history_floor(true, 100, 2).is_err());
+        assert!(receiver_history_floor(true, 100, 100).is_err());
+        assert_eq!(receiver_history_floor(false, 100, 100).unwrap(), 100);
+        assert!(receiver_history_floor(false, 100, 101).is_err());
     }
     #[test]
     fn cancellation_at_transport_boundary_prevents_reply_use() {

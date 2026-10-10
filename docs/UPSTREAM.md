@@ -152,8 +152,10 @@ chain snapshot independently accepted by its local node. A publisher signature,
 map endpoint or cloud-scanned wallet database is not independent chain acceptance.
 The API enrolls the existing native non-ephemeral transparent receiver scope,
 including change and standalone imports only where enabled by the pinned wallet.
-Derived receivers require their account birthday; imports require publication
-prehistory. Coverage cannot raise these floors. Completion is explicitly
+Derived receivers require their account birthday. Standalone imports have no
+trustworthy creation-height bound, so they require publication history from
+height one regardless of the account birthday. The current native build keeps
+upstream standalone key import disabled. Coverage cannot raise these floors. Completion is explicitly
 `complete-for-enrolled-scope`; it does not establish wallet-wide gap discovery.
 
 An `ext_coffer_pir_*` hash-chained journal in the wallet SQLite database replays
@@ -202,9 +204,12 @@ committed overlap hash and rejects a publication below the recorded native chain
 height. A single native wallet transaction checks that maximum and fully scanned
 boundaries agree, reconstructs persisted Sapling, Orchard and Ironwood frontiers,
 checks their sizes against native boundary metadata and their roots against
-persisted tree roots, and scans only the suffix. The pinned shardtree can prune rightmost unmarked leaves
+persisted tree roots truncated at that exact commitment position, and scans only the suffix.
+Prefetched complete subtree roots may extend beyond the scanned position;
+they do not change the boundary root used for this comparison.
+The pinned shardtree can prune rightmost unmarked leaves
 while retaining a valid persisted root. If that prevents frontier extraction,
-the API checks the native maximum commitment positions against boundary sizes,
+the API requires native trees to reach the boundary commitment positions,
 then reconstructs commitment frontiers from the already authenticated full
 prefix and requires their exact sizes and roots to match native tree state.
 This recovery hashes prefix commitments; it does not trial-decrypt or write
