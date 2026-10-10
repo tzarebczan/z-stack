@@ -40,7 +40,8 @@ create a new payment, and a `signed` receipt does not prove no other path has
 broadcast those bytes. An accepted transaction may later expire or be removed
 from a mempool. Continue showing its actual wallet-history status.
 
-Missing/corrupt receipts are errors, never permission to clear an uncertain
+Missing/corrupt receipts or saved transaction bytes are storage errors, not an
+unknown delivery that can be retried normally. They are never permission to clear an uncertain
 intent. Seed restoration does not restore local proposal IDs. Whole-DB rescans
 are refused once a signed receipt exists until a migration can preserve signed
 bytes and receipts together. Normal sync remains available. Unsigned reviews

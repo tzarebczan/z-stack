@@ -2788,11 +2788,11 @@ impl NativeWallet {
         let raw = db
             .get_transaction(txid)
             .map_err(|e| EngineError::WalletDb(format!("get_transaction: {e}")))?
-            .ok_or_else(|| EngineError::Message(format!("tx {txid} missing from db")))?;
+            .ok_or_else(|| EngineError::WalletDb(format!("tx {txid} missing from db")))?;
 
         let mut data = Vec::new();
         raw.write(&mut data)
-            .map_err(|e| EngineError::Message(format!("serialize tx: {e}")))?;
+            .map_err(|e| EngineError::WalletDb(format!("serialize tx: {e}")))?;
         self.submit_raw(client, data).await?;
         info!("broadcast ok");
         Ok(txid.to_string())
@@ -2810,7 +2810,7 @@ impl NativeWallet {
             let sent =
                 tokio::task::spawn_blocking(move || super::rpc::send_raw_transaction(&url, &bytes))
                     .await
-                    .map_err(|e| EngineError::Message(format!("broadcast task: {e}")))?;
+                    .map_err(|e| EngineError::Transport(format!("broadcast task: {e}")))?;
             match sent {
                 Ok(_hash) => {
                     info!("broadcast via validator sendrawtransaction");
