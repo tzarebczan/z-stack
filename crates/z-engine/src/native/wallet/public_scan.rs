@@ -76,9 +76,14 @@ impl NativeWallet {
         }
         let tip = blocks.len() as u32;
         let mut db = self.open_db()?;
-        // A fixed publication cannot overwrite a scan from a later publication
-        // or rewrite any already-known block at the same height.
-        if self.scanned_height()? > tip {
+        // Cancellation can leave scanning behind an already recorded chain tip.
+        // Neither committed height may be rolled back by an older publication.
+        if self.scanned_height()? > tip
+            || db
+                .chain_height()
+                .map_err(|error| EngineError::WalletDb(error.to_string()))?
+                .is_some_and(|height| u32::from(height) > tip)
+        {
             return Err(invalid());
         }
         for b in &blocks {
@@ -113,6 +118,46 @@ impl NativeWallet {
 mod tests {
     use super::super::tests::{fixture_account, fixture_wallet};
     use super::*;
+
+    #[test]
+    fn publication_cannot_roll_back_an_unscanned_chain_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = fixture_wallet(dir.path());
+        let (ufvk, birthday) = fixture_account();
+        wallet.replace_scan_db(&ufvk, &birthday).unwrap();
+        wallet
+            .open_db()
+            .unwrap()
+            .update_chain_tip(300.into())
+            .unwrap();
+        let scanned = wallet.scanned_height().unwrap();
+        assert!(scanned < 1);
+        let mut genesis = crate::web::from_hex(
+            "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327",
+        )
+        .unwrap();
+        genesis.reverse();
+        let publication = CompactBlock {
+            height: 1,
+            hash: vec![1; 32],
+            prev_hash: genesis,
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec();
+
+        assert_eq!(
+            wallet
+                .scan_public_regtest(&publication)
+                .unwrap_err()
+                .to_string(),
+            "public_scan_invalid"
+        );
+        assert_eq!(wallet.scanned_height().unwrap(), scanned);
+        assert_eq!(
+            wallet.open_db().unwrap().chain_height().unwrap(),
+            Some(300.into())
+        );
+    }
 
     #[test]
     fn invalid_publication_framing_and_chain_leave_wallet_unchanged() {
