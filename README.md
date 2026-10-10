@@ -33,11 +33,9 @@ Alpha.1 and alpha.2 predate NU7.
 
 ## Run the published preview
 
-The current prebuilt preview is **alpha.9**, with NU7 support. A public-testnet
-funded receive has been reported; a mined public self-send has also been reported. Use the [Valar faucet](https://faucet.testnet.valargroup.dev/)
-for test coins; daily limits apply. Check
-[the funding walkthrough](docs/GETTING-STARTED.md#funded-testing)
-before requesting test coins. Node 22.18+ is required.
+The current prebuilt preview is **alpha.9**, with NU7 support. Node 22.18+ is required.
+Follow the [funding walkthrough](docs/GETTING-STARTED.md#funded-testing) for test coins
+and the recorded public receive/self-send results.
 
 Use the prebuilt WASM to avoid compiling the wallet engine. The SDK archive in
 the bundle contains both WASM engines, their bindings, workers, integrity

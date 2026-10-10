@@ -101,9 +101,12 @@ test("auto-sync retries unavailable ranges and selective memos without waiting f
   }
 });
 
+// A restore at the mock scan height stays inside the default sync window.
+const WORKER_BIRTHDAY = 200_000;
+
 class ScanWorker extends EventTarget {
   ops: string[] = [];
-  scanned = 200_000;
+  scanned = WORKER_BIRTHDAY;
   transparentAvailable = 0;
   transparentScanHeight = 0;
   snapshotHeights: number[] = [];
@@ -170,7 +173,7 @@ test("repeated and concurrent catch-up reuses the worker wallet and one download
     kind: "mock", label: "mock", tip: async () => tip,
     blocks: async () => { downloads++; await turn(); return new Uint8Array([1]); },
   } });
-  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
+  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
   worker.ops.length = 0;
   tip++;
   // Birthday is over 150k blocks ago; only one block is actually unscanned.
@@ -209,7 +212,7 @@ test("a compact-range outage resumes from the in-memory scanned height without r
       return blob;
     },
   } }, (progress) => { if (progress.heading) headings.push(progress.heading); });
-  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
+  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
   worker.ops.length = 0;
   const result = await client.sync();
   assert.equal(result.scannedHeight, tip);
@@ -237,7 +240,7 @@ test("an expensive WASM apply does not report a dead light server", async (t) =>
       return blob;
     },
   } }, (progress) => { if (progress.heading) headings.push(progress.heading); });
-  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
+  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
   await client.sync();
   assert.equal(worker.scanned, origin + 8_000);
   assert.equal(headings.includes("Download stuck"), false,
@@ -282,7 +285,7 @@ test("a failed block apply reloads the saved snapshot on the next sync instead o
     kind: "mock", label: "mock", tip: async () => tip,
     blocks: async () => new Uint8Array([1]),
   } });
-  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
+  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
   worker.ops.length = 0;
   tip++;
   failNext = true;
@@ -307,7 +310,7 @@ test("each sync resubmits saved unmined sends and a node that already has one is
       return "txid";
     },
   } });
-  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
+  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
   worker.pendingRaw = ["aa", "bb"];
   tip++;
   await client.sync();
@@ -336,7 +339,7 @@ test("a mistyped recovery phrase is rejected before it can fence out the saved w
     kind: "mock", label: "mock", tip: async () => worker.scanned,
     blocks: async () => new Uint8Array([1]),
   } });
-  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
+  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
   const saved = await readSavedSnapshotRecord();
   assert.ok(saved);
   worker.ops.length = 0;
@@ -366,7 +369,7 @@ test("a slow IndexedDB checkpoint queues one latest-height follow-up after commi
     kind: "mock", label: "mock", tip: async () => 328_000,
     blocks: async () => new Uint8Array([1]),
   } });
-  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
+  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
   worker.ops.length = 0;
   worker.snapshotHeights.length = 0;
   db.holdOpens = true;
@@ -404,7 +407,7 @@ test("cancelling a scan fences a pending follow-up checkpoint", async (t) => {
     kind: "mock", label: "mock", tip: async () => 328_000,
     blocks: async () => new Uint8Array([1]),
   } });
-  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
+  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
   worker.snapshotHeights.length = 0;
   db.holdOpens = true;
   const syncing = client.sync();
@@ -432,7 +435,7 @@ test("post-scan UTXO and mempool reads overlap but apply in wallet order", async
     utxos: async () => { reads.push("utxos"); return utxos; },
     mempool: async () => { reads.push("mempool"); return mempool; },
   } });
-  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
+  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
   worker.ops.length = 0;
   const sync = client.sync();
   for (let i = 0; i < 20 && reads.length < 2; i++) await turn();
@@ -465,7 +468,7 @@ test("cancellation fences snapshots during serialization and during IndexedDB op
   const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => worker.scanned, blocks: async () => new Uint8Array(),
   } });
-  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
+  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
   assert.equal(writes(), 1);
   worker.holdSnapshot = true;
   const serializing = client.nextAddress();
@@ -544,7 +547,7 @@ test("proving worker lifecycle recovers only on explicit calls and preserves its
     kind: "mock", label: "mock", tip: async () => scan.scanned + tipLag, blocks: async () => new Uint8Array(),
     submit: async () => { broadcasts++; return "fixture-txid"; },
   } });
-  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
+  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
   const base = "https://fixture.invalid/verified-artifacts";
   configureWasmWorkerBasePath(base);
   type Request = { id: number; kind: string; wasmBasePath?: string };
@@ -799,7 +802,7 @@ test("proving worker lifecycle recovers only on explicit calls and preserves its
       transport: { kind: "mock", label: "mock", tip: async () => reopenedScan.scanned,
         blocks: async () => new Uint8Array(), submit: async () => { broadcasts++; return "fixture-txid"; } } });
     t.after(() => reopened.dispose());
-    await reopened.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
+    await reopened.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
     nextMode = "reply";
     await reopened.send("uregtest-fixture", "0.00005");
     const fresh = current(); assert.notEqual(fresh, old);
@@ -856,7 +859,7 @@ test("a multicore scan worker proves in place with its own wallet and proving ke
     submit: async (hex: string) => { submissions.push("network"); broadcasts.push(hex); return "fixture-txid"; },
   } });
   t.after(() => cancelWasmSync());
-  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
+  await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
   assert.ok(workerScanSession()?.prove, "multicore sessions prove in place");
 
   scan.ops.length = 0;
@@ -933,7 +936,7 @@ test("wallet background key preparation honors defaults, opt-out and unchanged-t
           memoFetch: "on-demand", server: { kind: "mock", label: "fixture", tip: async () => tip,
             blocks: async () => new Uint8Array([1]) } });
         st.after(() => wallet.close());
-        await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 1, replace: true });
+        await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: WORKER_BIRTHDAY, replace: true });
         await wallet.setUnlockPolicy("each-spend");
         assert.equal(wallet.hasSpendingSeed(), false, "a locked software wallet can prepare a public proving key");
         tip += gap;
@@ -959,7 +962,7 @@ test("wallet background key preparation honors defaults, opt-out and unchanged-t
         memoFetch: "on-demand", server: { kind: "mock", label: "fixture", tip: async () => tip,
           blocks: async () => new Uint8Array([1]) } });
       st.after(() => wallet.close());
-      await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 1, replace: true });
+      await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: WORKER_BIRTHDAY, replace: true });
       await wallet.setUnlockPolicy("each-spend");
       assert.equal(wallet.hasSpendingSeed(), false);
       tip += gap;
@@ -976,7 +979,7 @@ test("wallet background key preparation honors defaults, opt-out and unchanged-t
       memoFetch: "on-demand", server: { kind: "mock", label: "fixture", tip: async () => scan.scanned,
         blocks: async () => { throw new Error("already at tip"); } } });
     st.after(() => wallet.close());
-    await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 1, replace: true });
+    await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: WORKER_BIRTHDAY, replace: true });
     await wallet.sync(); await turn();
     assert.equal(scan.ops.filter(op => op === "warmProvingKey").length, 0);
     wallet.setPrewarmProvingKey(true);
@@ -1046,7 +1049,7 @@ test("synchronous synced listeners can cancel before automatic shielding or key 
           submit: async () => { broadcasts++; return "fixture-txid"; },
         } });
       st.after(() => wallet.close());
-      await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 1, replace: true });
+      await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: WORKER_BIRTHDAY, replace: true });
       if (policy === "each-spend") {
         assert.equal(wallet.hasSpendingSeed(), false);
         await wallet.unlock(REGTEST_FAUCET_MNEMONIC);

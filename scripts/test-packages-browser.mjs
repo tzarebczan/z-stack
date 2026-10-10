@@ -180,9 +180,9 @@ export async function verifyExampleRecovery(app, chromium) {
   assert.match(source, /createWallet.*from "@z-stack\/sdk";/, "recovery fixture must wrap the SDK factory");
   writeFileSync(factoryPath, source.replace('from "@z-stack/sdk";', 'from "./recovery-fixture";'));
   writeFileSync(join(app, "src", "recovery-fixture.ts"), `
-    import { createWallet as realCreateWallet, type BlockTransport } from '@z-stack/sdk';
+    import { createWallet as realCreateWallet, WalletError, type BlockTransport } from '@z-stack/sdk';
     export * from '@z-stack/sdk';
-    declare global { interface Window { fixtureTipRequests?: number; fixtureTipUnavailable?: boolean; fixtureForgetWallet?: () => Promise<void>; fixtureFundingHeight?: number; } }
+    declare global { interface Window { fixtureTipRequests?: number; fixtureTipUnavailable?: boolean; fixtureForgetWallet?: () => Promise<void>; fixtureReplaceWallet?: () => Promise<void>; fixtureRestoreWallet?: (words: string) => Promise<void>; fixtureFundingHeight?: number; fixturePaymentReview?: boolean; fixtureBroadcastUnknown?: boolean; } }
     export async function createWallet(options: Parameters<typeof realCreateWallet>[0]) {
       const transport: BlockTransport = {
         kind: 'recovery-test', label: 'Offline recovery fixture', tip: async () => {
@@ -199,6 +199,10 @@ export async function verifyExampleRecovery(app, chromium) {
       };
       const wallet = await realCreateWallet({ ...options, network: "regtest", server: transport, prewarmProvingKey: false });
       Object.assign(window, {fixtureForgetWallet: () => wallet.forget({passkey:true})});
+      Object.assign(window, {
+        fixtureReplaceWallet: async () => { await wallet.load(); await wallet.create({birthday:1,replace:true}); },
+        fixtureRestoreWallet: async (words: string) => { await wallet.load(); await wallet.restore(words,{birthday:1,replace:true}); },
+      });
       let failHistory = true;
       return new Proxy(wallet, {
         get(target, key) {
@@ -207,6 +211,14 @@ export async function verifyExampleRecovery(app, chromium) {
             return window.fixtureFundingHeight === undefined ? snapshot : {...snapshot,
               scannedHeight:window.fixtureFundingHeight, confirmations:{trusted:1,untrusted:3,zeroConfShield:false},
               balance:{...snapshot.balance,totalAvailable:0,totalPending:12500000,pendingZec:'0.12500000'}};
+          };
+          if (key === 'estimateFee' && window.fixturePaymentReview) return async () => ({feeZat:10000,feeZec:'0.00010000'});
+          if (key === 'send' && window.fixtureBroadcastUnknown) return async () => {
+            throw new WalletError('broadcast_failed', 'synthetic lost submission reply', undefined, {txid:'b'.repeat(64)});
+          };
+          if (key === 'getWallet') return async () => {
+            const snapshot = await target.getWallet();
+            return window.fixturePaymentReview ? {...snapshot,balance:{...snapshot.balance,totalAvailable:100000000}} : snapshot;
           };
           if (key === 'history') return async (...args: Parameters<typeof target.history>) => {
             if (failHistory) { failHistory=false; throw new Error('injected activity read failure'); }
@@ -335,6 +347,9 @@ export async function verifyExampleRecovery(app, chromium) {
     await page.locator("#sync").click();
     await page.waitForFunction(() => !document.getElementById("review-send").disabled, null, {timeout:90000});
     await page.locator("#send-to").fill(await page.locator("#address").textContent());
+    await page.locator("#max-send").click();
+    await page.locator("#send-status").filter({hasText:"No funds are available after the estimated fee."}).waitFor();
+    assert.equal(await page.locator("#send-amount").inputValue(), "0.00000000");
     await page.locator("#send-amount").fill("0.1");
     await page.locator("#review-send").click();
     await page.locator("#send-status").filter({hasText:"Not enough shielded funds"}).waitFor();
@@ -431,15 +446,65 @@ export async function verifyExampleRecovery(app, chromium) {
     assert.equal(await page.locator("#address").textContent(), originalAddress, "restore recovered a different identity");
     assert.ok(diagnostics.every(message => !message.includes("SYNTHETIC_PRIVATE_PROVIDER_CONTEXT")), "provider context leaked");
     assert.ok(diagnostics.every(message => !message.includes("injected activity read failure")), "raw provider error reached the console");
-    // A competing realm removes the wallet after this page rendered it.
+    // Preserve an ambiguous receipt when a competing realm checkpoints the same wallet.
+    await page.locator("#sync").click();
+    await page.waitForFunction(() => !document.getElementById("review-send").disabled);
+    await page.evaluate(() => { window.fixturePaymentReview = true; window.fixtureBroadcastUnknown = true; });
+    await page.locator("#send-to").fill(originalAddress);
+    await page.locator("#send-amount").fill("0.001");
+    await page.locator("#review-send").click();
+    await page.locator("#send-review").waitFor({state:"visible"});
+    await page.locator("#send-words").fill(confirmedPhrase);
+    await page.locator("#confirm-send").click();
+    await page.locator("#receipt-state").filter({hasText:"Submission not confirmed"}).waitFor();
+    const checkpointTab = await page.context().newPage();
+    try {
+      await checkpointTab.goto(page.url());
+      await checkpointTab.waitForFunction(() => !document.getElementById("sync").disabled);
+      await checkpointTab.locator("#sync").click();
+      await checkpointTab.waitForFunction(() => !document.getElementById("sync").disabled);
+      await page.locator("#sync").click();
+      await page.locator("#status").filter({hasText:"saved wallet changed in another tab"}).waitFor();
+      assert.equal(await page.locator("#receipt-txid").textContent(), "b".repeat(64));
+      assert.match(await page.locator("#receipt-state").textContent(), /Submission not confirmed/);
+      assert.equal(await page.locator("#another-send").isVisible(), false);
+      assert.equal(await page.locator("#send-form").isVisible(), false);
+      await checkpointTab.evaluate(() => window.fixtureReplaceWallet());
+      await page.locator("#sync").click();
+      await page.locator("#previous-payments").waitFor({state:"visible"});
+      await page.locator("#previous-payments summary").click();
+      assert.match(await page.locator("#previous-payment-list").textContent(), /b{64}/);
+      assert.equal(await page.locator("#send-form").isVisible(), true);
+      assert.equal(await page.locator("#send-receipt").isVisible(), false);
+      await page.locator("#sync").click();
+      await page.waitForFunction(() => !document.getElementById("review-send").disabled);
+      await checkpointTab.evaluate(words => window.fixtureRestoreWallet(words), confirmedPhrase);
+      await page.locator("#sync").click();
+      await page.locator("#send-receipt").waitFor({state:"visible"});
+      assert.equal(await page.locator("#receipt-txid").textContent(), "b".repeat(64));
+      assert.equal(await page.locator("#send-form").isVisible(), false);
+      assert.equal(await page.locator("#previous-payments").isVisible(), false);
+    } finally { await checkpointTab.close(); }
+    await page.reload();
+    await page.waitForFunction(() => !document.getElementById("sync").disabled);
+    // A competing realm removes a reviewed wallet before payment confirmation.
+    // This error is caught inside payment.ts before app.run sees it.
+    await page.locator("#sync").click();
+    await page.waitForFunction(() => !document.getElementById("review-send").disabled);
+    await page.evaluate(() => { window.fixturePaymentReview = true; });
+    await page.locator("#send-to").fill(originalAddress);
+    await page.locator("#send-amount").fill("0.001");
+    await page.locator("#review-send").click();
+    await page.locator("#send-review").waitFor({state:"visible"});
     const other = await page.context().newPage();
     try {
       await other.goto(page.url());
       await other.waitForFunction(() => !document.getElementById("sync").disabled);
       await other.evaluate(() => window.fixtureForgetWallet());
-      await page.locator("#remove-panel summary").click();
-      await page.locator("#remove-confirm").check(); await page.locator("#remove").click();
-      await page.locator("#status").filter({hasText:"Local wallet removed."}).waitFor();
+      await page.locator("#send-words").fill(confirmedPhrase);
+      await page.locator("#confirm-send").click();
+      await page.locator("#status").filter({hasText:"This wallet was removed in another tab."}).waitFor();
+      assert.equal(await page.locator("#send-words").inputValue(), "");
       assert.equal(await page.locator("#address").textContent(), "", "competing deletion left a stale receive address");
       assert.equal(await page.locator("#send-panel").isVisible(), false);
       assert.equal(await page.locator("#restore-form").isVisible(), true);

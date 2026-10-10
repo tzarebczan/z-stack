@@ -32,7 +32,7 @@ export const wallet = await createWallet({
 ```ts
 // Open the saved wallet, or restore one.
 const saved = await wallet.load();
-if (!saved) await wallet.restore(mnemonic, { birthday: "2024-06-01" }); // birthday: date, height, or "auto"
+if (!saved) await wallet.restore(mnemonic, { birthday: "2024-06-01" }); // a date or height before the first deposit
 
 wallet.on("sync", (e) => setProgress(e.percent ?? 0));
 wallet.on("balance", (b) => setBalance(b.availableZat));
@@ -44,7 +44,7 @@ const { txid } = await wallet.send("u1…", "0.25", "thanks!");
 
 `createWallet` loads the engine, picks the right transport for `server`, and
 returns a network-bound browser wallet. Only one active client is supported;
-creating another fails with `busy`. Await `close()` before opening the next.
+creating another fails with `owner_conflict`. Await `close()` before opening the next.
 Close interrupts the captured proof actor instead of waiting for its RPC timeout.
 An unfinished software proof has no durable reservation; the saved wallet stays
 intact. Interrupted hardware proving reloads the latest durable state, releases
@@ -100,8 +100,8 @@ they can be cached forever.
 |---|---|
 | `wallet.load()` | Returns the saved wallet on this device, or `null`. It makes no network request. |
 | `wallet.create({ birthday?, replace?, beforeCommit? })` | Creates a wallet and returns `{ wallet, recoveryPhrase }`. Optional preparation confirms recovery before saving. |
-| `wallet.restore(mnemonic, { birthday?, replace? })` | Restores from a recovery phrase. |
-| `wallet.restoreUfvk(ufvk, { birthday?, replace?, signal?, assertCurrent?, beforeCommit? })` | Creates a view-only wallet. `unlock` enables spending later. |
+| `wallet.restore(mnemonic, { birthday?, replace? })` | Restores from a recovery phrase. Pass a height or date before the first deposit: an omitted birthday means height 1, and `"auto"` or a blank string is refused because it can skip earlier history. A future date rejects with `birthday_above_tip`. A birthday beyond the deep-sync limit rejects with `deep_sync_rejected` before anything is saved unless `deepSync` is enabled. |
+| `wallet.restoreUfvk(ufvk, { birthday?, replace?, signal?, assertCurrent?, beforeCommit? })` | Creates a view-only wallet. The recovery birthday rules below also apply here. `unlock` enables spending later. |
 | `wallet.sync()` | Catches up to the chain tip. Progress arrives through `on("sync")`, and `onProgress` gives scan detail. |
 | `wallet.getWallet()` | Returns the snapshot: addresses, per-pool balances, scanned height and recent history. |
 | `wallet.history(limit?)` | Returns transactions, newest first. `classifyHistory(entry)` gives the action (sent, received, shielding, …) and the display amount. Classify at read time; do not persist the result (`type`), since the engine refines it as it learns more. |
@@ -112,6 +112,12 @@ they can be cached forever.
 | `wallet.sendTransparent(to, amountZec, { maxFeeZat, beforeBroadcast }?)` | Low-level software-wallet transparent output; exposes its public destination and amount while keeping change shielded. See the restrictions below. |
 | `wallet.shield(thresholdZat?)` | Moves transparent funds into the shielded pool. |
 | `wallet.forget()` | Deletes this device's wallet. Passkeys are kept unless `{ passkey: true }`. |
+
+Phrase, UFVK and hardware restore share the same birthday rules: omitted means
+height 1; `auto` or blank strings reject with `invalid_birthday`; future birthdays
+reject with `birthday_above_tip`. Restores beyond the default deep-sync limit
+reject with `deep_sync_rejected` before saving unless `deepSync` is enabled.
+Choose a height or date before the first deposit for every recovery method.
 
 ### Transparent-send primitives
 
@@ -232,6 +238,9 @@ acceptance testing; the SDK does not promise that an asynchronous database read
 preserves user activation on every device.
 
 ## Hardware wallets
+
+Hardware imports follow the recovery birthday rules in the lifecycle section.
+Use an explicit height or date before the first deposit; `auto` is refused.
 
 Keystone and Ledger (Zcash app 3.9.3+ to sign, 3.9.4+ to connect) spend
 Orchard and Ironwood notes. The spending key never leaves the device: the
@@ -419,3 +428,25 @@ The repository diagnostic app accepts `?regtestNu63=150&regtestNu7=250` for a
 matching custom fixture. Both runtime initialization and birthday previews use
 those heights. Reload after changing the query settings; configure the selected
 loopback transport separately.
+
+
+## Browser sync status and outage policy
+
+`wallet.on("sync", event => ...)` includes `activity` for browser operations:
+`loading`, `syncing`, or `waiting_for_server`. These typed values are independent
+of native scan stages and display headings. Use them for loading and reconnecting
+copy; keep existing activity visible during scans. Native bridge events may omit
+this browser-only field.
+
+`createWallet({ ..., lightServerGraceMs: 15000 })` changes the transient sync
+outage grace, measured from the first failed request. The default is 90,000 ms;
+zero stops after the first failure. This is not an overall deadline or an override
+of transport request timeouts. `wallet.cancelSync()` interrupts both retry waits
+and supported transport requests without discarding committed progress.
+
+An additional client in the same page rejects with `owner_conflict`. The standalone
+`forgetWallet()` also returns `owner_conflict` while a client owns the engine;
+use that client’s `forget()` method instead. Reuse the
+owner or await its `close()` before opening another. A competing action on that
+client still uses `busy`. The React example serializes StrictMode teardown and
+remount rather than creating overlapping owners.

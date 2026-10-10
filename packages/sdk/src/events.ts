@@ -10,6 +10,8 @@ import type { WasmRuntime } from "./runtime";
 export type WalletEventName = "sync" | "balance" | "broadcast" | "runtime";
 
 export type SyncEvent = {
+  /** Browser operation state. Use this rather than matching heading strings. */
+  activity?: "loading" | "syncing" | "waiting_for_server";
   stage: SyncStage;
   scanned?: number;
   downloaded?: number;

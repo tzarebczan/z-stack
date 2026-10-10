@@ -119,7 +119,7 @@ test("wasm wallet: snapshot, history, orchard prove", async (t) => {
       blocks: async () => new Uint8Array(),
     },
   });
-  const w = await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", "auto");
+  const w = await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", 1);
   assert.ok(w.unifiedAddress.startsWith("uregtest1"));
   assert.equal(w.birthdayHeight, 1);
   assert.equal(w.scannedHeight, 0);

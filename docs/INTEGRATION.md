@@ -129,7 +129,8 @@ await wallet.restore(words, { birthday });
 
 `words` and `birthday` come from the user's recovery flow. Use a known birthday
 height or date before the first transaction. `auto` is suitable for new wallets;
-it is not a reliable recovery birthday for old funds. Restores more than 150,000
+phrase, viewing-key and hardware restores reject `auto` and blank strings with
+`invalid_birthday`. An omitted birthday starts at height 1. Restores more than 150,000
 blocks behind a remote server need `deepSync: true`; request that bandwidth
 explicitly in your UI rather than retrying without explaining it.
 

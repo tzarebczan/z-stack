@@ -4,10 +4,6 @@ Start with a working app, then replace its screens one step at a time. The walle
 engine runs locally. Accounts, cloud backups and payment integrations are optional
 application services; they are not needed for this walkthrough.
 
-An external alpha.7 integration reported a Valar-funded receive and a mined
-shielded self-send through ChainSafe. Both demos also pass funded NU7 regtest
-checks. Public services and faucet capacity can change; use disposable test funds.
-
 ## First session
 
 1. Download the preview and verify both checksum layers below.
@@ -118,7 +114,8 @@ working server. Enter an explicit positive height to create offline; Sync still
 needs the server. A new wallet's birthday must precede its first deposit. The
 Next demo uses the automatic birthday.
 
-Restore needs a height or date before the first deposit. Invalid words have the
+Restore needs a height or date before the first deposit. `"auto"` and blank strings
+are refused for restoration because a recent birthday could skip earlier funds. Invalid words have the
 `invalid_recovery_phrase` code and fixed display copy. A refused restore retains
 the input; a successful restore clears it. Restore is hidden when a saved wallet
 exists. **Remove local wallet** has its own backup confirmation; it deletes
@@ -190,6 +187,8 @@ payment mined later needs another Sync.
 Continue after incoming funds are available, or in the isolated regtest fixture.
 
 Enter a shielded recipient address, a positive test-coin amount and an optional memo.
+In the Vite demo, **Max** fills the spendable amount after the estimated fee, using
+the SDK's input selection. It still needs review and can change after sync.
 Review the exact recipient, amount, memo and estimated fee. The demo freezes this
 review, syncs and refreshes the balance and fee before proving, and expires review after
 five minutes. Fee estimates are not a cryptographically binding fee cap.
