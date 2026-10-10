@@ -7,14 +7,26 @@ on:
 permissions:
   contents: read
 
+# A newer push to a PR cancels that PR's older run. Pushes to main are never
+# cancelled or grouped (one group per commit), so each one seeds the cache.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Same release used for the verified local production MT build.
+  Z_STACK_WASM_MT_TOOLCHAIN: nightly-2026-09-22
+  CARGO_BUILD_JOBS: "2"
+
 jobs:
-  rust:
+  native:
     # Forks can run release checks without a third-party runner installation.
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
-      # Same release used for the verified local production MT build.
-      Z_STACK_WASM_MT_TOOLCHAIN: nightly-2026-09-22
-      CARGO_BUILD_JOBS: "2"
+      # Panics and backtraces keep file/line; full debuginfo only slows linking
+      # and bloats the cache.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -22,6 +34,13 @@ jobs:
           toolchain: "1.91"
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
+      # PRs restore main's cache; only main saves, so PRs cannot evict it.
+      # target/vendor-tests is inside target/ and is cached with it.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
       - name: Engine check + tests
         run: |
           cargo check -p z-engine --features native,cli
@@ -39,22 +58,44 @@ jobs:
           done
       - name: Compile ignored regtest test (no docker)
         run: cargo test -p z-engine --test regtest --no-run
+
+  sdk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91"
+          targets: wasm32-unknown-unknown
+      - name: Threaded WASM toolchain
+        run: |
+          rustup toolchain install "$Z_STACK_WASM_MT_TOOLCHAIN" --profile minimal --component rust-src
+          rustup target add wasm32-unknown-unknown --toolchain "$Z_STACK_WASM_MT_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ env.Z_STACK_WASM_MT_TOOLCHAIN }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Prebuilt, checksum-verified binary instead of compiling it every run.
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: wasm-pack@0.15.0
+      # check:licenses reads crate sources offline; fetch them all up front.
+      - name: Fetch crates
+        run: cargo fetch --locked
       - uses: actions/setup-node@v4
         with:
           node-version: "22.23.3"
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
-      - name: WASM build tools
-        run: |
-          cargo install wasm-pack --version 0.15.0 --locked
-          rustup toolchain install "$Z_STACK_WASM_MT_TOOLCHAIN" --profile minimal --component rust-src
-          rustup target add wasm32-unknown-unknown --toolchain "$Z_STACK_WASM_MT_TOOLCHAIN"
       # Test against both production artifacts; several lifecycle tests and
       # package-export checks need real WASM, not executable stubs.
       - name: Build production WASM and integrator packages
         run: |
           pnpm build:wasm
-          pnpm build:wasm:mt
+          # The threaded build uses another toolchain and RUSTFLAGS; its own
+          # target directory stops the two builds invalidating each other.
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/wasm-mt" pnpm build:wasm:mt
           pnpm --filter @z-stack/core build
           pnpm --filter @z-stack/passkey build
           pnpm --filter @z-stack/sdk build
@@ -97,3 +138,18 @@ jobs:
           path: artifacts/*.tgz
           retention-days: 14
           if-no-files-found: error
+
+  # Branch protection requires a check named "rust". This gate keeps that name
+  # and passes only when every job above passed (a cancel or skip fails it).
+  rust:
+    if: always()
+    needs: [native, sdk]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: All CI jobs passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "native/sdk: $RESULTS"
+          for r in $RESULTS; do test "$r" = success; done
