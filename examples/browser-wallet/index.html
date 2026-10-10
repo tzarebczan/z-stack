@@ -51,7 +51,7 @@
       <button id="copy-address" type="button" hidden>Copy address</button>
       <p id="copy-status" role="status"></p>
       </section>
-      <section id="create-panel" aria-label="Create wallet">
+      <section id="create-panel" hidden aria-label="Create wallet">
         <label for="create-birthday">Start scanning from block (optional)</label>
         <input id="create-birthday" inputmode="numeric" aria-describedby="create-help" placeholder="Automatic" />
         <p id="create-help" class="hint">Automatic uses the light server’s latest height minus 100. Enter a known height to create offline. Sync still needs a server. For new wallets, use a height before the first deposit.</p>
@@ -59,9 +59,10 @@
       </section>
       <div class="actions">
         <button id="sync" disabled>Sync</button>
+        <button id="cancel-sync" type="button" hidden>Cancel sync</button>
         <button id="lock" disabled>Lock</button>
       </div>
-      <form id="restore-form" aria-describedby="restore-help status">
+      <form id="restore-form" hidden aria-describedby="restore-help status">
         <h2>Restore a wallet</h2>
         <p id="restore-help" class="hint">Use a height or date before your first deposit. Restore accepts valid 12-, 15-, 18-, 21- or 24-word phrases; new wallets use 24.</p>
         <label for="words">Recovery phrase</label>

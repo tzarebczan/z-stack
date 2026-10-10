@@ -23,7 +23,10 @@ Open the localhost URL Vite prints. Create a testnet wallet or restore testnet
 words with a known birthday. Blank creation birthday uses the server tip minus
 100 and requires a working server. An explicit positive height creates offline;
 Sync still needs a server. Use a birthday before the first deposit. Save the phrase before closing the page. Sync keeps
-the last balance and activity visible. The example refuses to replace an existing
+the last balance and activity visible. **Cancel sync** stops a scan and keeps the
+blocks already scanned. If the light server is unreachable the status says so while
+the SDK retries; after 90 seconds Sync fails with a connection error. When another
+tab changes or removes the wallet, the page shows the saved state instead. The example refuses to replace an existing
 wallet. Use **Remove local wallet** after saving the phrase and payment receipts,
 then restore into the empty slot. Never enter a mainnet seed.
 

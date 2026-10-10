@@ -92,7 +92,7 @@ export async function startApp() {
   async function perform<T>(action: () => Promise<T>): Promise<T> {
     if (busy) throw new Error("Another wallet action is in progress.");
     busy = true;
-    const allowed = [element("hide-phrase"), element("cancel-send"), element("copy-phrase")];
+    const allowed = [element("hide-phrase"), element("cancel-send"), element("cancel-sync"), element("copy-phrase")];
     const controls = [...document.querySelectorAll("input, textarea, button")].filter(node => !allowed.some(control => control === node));
     for (const control of controls) {
       if (control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement || control instanceof HTMLButtonElement) control.disabled = true;
@@ -106,11 +106,26 @@ export async function startApp() {
       updateControls();
     }
   }
+  /** Another tab committed first: show what is saved now, including a removal. */
+  async function showSavedWallet() {
+    const saved = await perform(async () => {
+      const current = await wallet.load();
+      if (current) await app.render(current);
+      return current;
+    }).catch(() => undefined);
+    if (saved === null) {
+      app.reset();
+      updateControls();
+      status.textContent = "This wallet was removed in another tab. Create or restore to continue.";
+    }
+    return saved;
+  }
   async function run(action: () => Promise<void>, output: HTMLElement = status) {
     try { await perform(action); }
     catch (error) {
       const safe = WalletError.fromUnknown(error);
       console.warn("Wallet action failed", { code: safe.code });
+      if (safe.code === "wallet_changed" && await showSavedWallet() === null) return;
       output.textContent = output === sendStatus ? paymentErrorMessage(error, app.snapshot, unit) : safe.userMessage();
       if (output === sendStatus) {
         const fields: Partial<Record<WalletError["code"], string>> = {

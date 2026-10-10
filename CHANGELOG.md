@@ -5,6 +5,7 @@
 - Report a sync that outlasts the 90-second light-server outage window, and restore/import tip failures, as `transport` instead of `unknown`.
 - Reject restores whose birthday the client would refuse to sync (`deep_sync_rejected`) before saving, including an omitted birthday on a long chain.
 - Reject future birthday dates with `birthday_above_tip` instead of silently using the current tip.
+- Browser example: add Cancel sync, say when the light server is unreachable, stop presenting saved-wallet loading as a sync, hide Create/Restore until the saved wallet is checked, and show the saved state when another tab changes or removes the wallet.
 
 ## 0.1.0-alpha.9
 

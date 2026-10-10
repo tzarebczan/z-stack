@@ -157,3 +157,12 @@ for (const [name, view] of views) {
     assert.match(view.memoDetailsMessage({memoFetchStatus:"unsupported"},visible),/cannot load/);
   });
 }
+
+test('Vite: sync status never presents snapshot loading or an outage as scan progress', () => {
+  const view = views.find(([name]) => name === 'Vite')[1];
+  assert.equal(view.syncProgressLabel({stage:'connecting',heading:'Restoring snapshot',percent:8}),'Opening saved wallet…');
+  assert.match(view.syncProgressLabel({stage:'connecting',heading:'Waiting for light server',message:'SYNTHETIC_PROVIDER_DETAIL'}),/unreachable.*Cancel sync/);
+  assert.doesNotMatch(view.syncProgressLabel({stage:'scanning',message:'SYNTHETIC_PROVIDER_DETAIL',percent:41.6}),/SYNTHETIC/);
+  assert.equal(view.syncProgressLabel({stage:'scanning',percent:41.6}),'Syncing · 42%');
+  assert.match(view.syncProgressLabel({stage:'synced',scanned:101}),/block 101.*payments mined later/);
+});

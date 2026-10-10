@@ -1,4 +1,4 @@
-import { classifyHistory, formatZatoshis, parseZecToZatoshis, WalletError, type HistoryEntry, type WalletSnapshot, type Wallet } from "@z-stack/sdk";
+import { classifyHistory, formatZatoshis, parseZecToZatoshis, WalletError, type HistoryEntry, type SyncEvent, type WalletSnapshot, type Wallet } from "@z-stack/sdk";
 
 export function scannerLabel(runtime: Wallet["runtime"]): string {
   if (runtime.scanner === "starting") return "Starting scanner…";
@@ -54,6 +54,17 @@ export function paymentErrorMessage(error: unknown, snapshot: WalletSnapshot | u
     return `Not enough available funds for the amount and fee. ${formatZatoshis(pendingFunds(snapshot))} ${unit} is still confirming. ${confirmationPolicyText(snapshot.confirmations)}`;
   }
   return safe.userMessage();
+}
+
+/** Fixed copy only: progress `message` text can describe provider state. */
+export function syncProgressLabel(progress: SyncEvent): string {
+  if (progress.stage === "synced") {
+    return `Synced through block ${progress.scanned?.toLocaleString() ?? "unknown"}. Sync again for payments mined later.`;
+  }
+  // load() also reports snapshot hydration through the sync event.
+  if (progress.heading === "Restoring snapshot") return "Opening saved wallet…";
+  if (progress.heading === "Waiting for light server") return "Light server unreachable · retrying. Cancel sync to stop.";
+  return `Syncing · ${Math.round(progress.percent ?? 0)}%`;
 }
 
 export function syncedWalletStatus(snapshot: WalletSnapshot): string {
