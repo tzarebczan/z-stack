@@ -55,6 +55,13 @@ change requires a rebuild. Native dependency caches include the hash of
 `.github/ci/native-profile.toml`, so profile changes create a fresh cache. The
 first successful `main` run fills new cache entries for subsequent runs.
 
+The native job summary records each Cargo command's elapsed time, CPU time
+and exit status, alongside the exact cache hit and runner CPU/memory capacity.
+Its `native-timings` artifact contains Cargo's per-crate compilation reports.
+Use both to distinguish compilation from test execution; CPU seconds and
+elapsed seconds are different measurements. Timing does not change profiles,
+features or which checks run.
+
 To reuse an already-built matching archive set locally:
 
 ```sh

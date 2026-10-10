@@ -82,6 +82,11 @@ jobs:
           EXACT_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
         run: |
           printf '%s\n' "Exact Rust cache hit: ${EXACT_CACHE_HIT:-unavailable}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Record runner capacity and clear old timing reports
+        run: |
+          printf 'Runner CPU count: %s\n' "$(nproc)" >> "$GITHUB_STEP_SUMMARY"
+          awk '/MemTotal/ {printf "Runner memory KiB: %s\n", $2}' /proc/meminfo >> "$GITHUB_STEP_SUMMARY"
+          rm -rf target/cargo-timings target/vendor-tests/cargo-timings
       - name: Rust formatting
         run: cargo fmt --all -- --check
       # Dependencies (proving, curves) are optimized for the test builds only;
@@ -89,21 +94,29 @@ jobs:
       # checks stay on.
       - name: Engine check + tests
         run: |
-          cargo test --config .github/ci/native-profile.toml -p z-engine --features native,cli --lib
-          cargo check --config .github/ci/native-profile.toml -p z-engine --features native,cli --bins
+          bash scripts/ci-time.sh "Engine library tests" cargo test --config .github/ci/native-profile.toml -p z-engine --features native,cli --lib --timings
+          bash scripts/ci-time.sh "Engine binaries check" cargo check --config .github/ci/native-profile.toml -p z-engine --features native,cli --bins --timings
       - name: Desktop check
-        run: cargo check --config .github/ci/native-profile.toml -p z-desktop
+        run: bash scripts/ci-time.sh "Desktop check" cargo check --config .github/ci/native-profile.toml -p z-desktop --timings
       - name: Node launcher check
-        run: cargo check --config .github/ci/native-profile.toml -p z-node-launcher
+        run: bash scripts/ci-time.sh "Node launcher check" cargo check --config .github/ci/native-profile.toml -p z-node-launcher --timings
       - name: Wasm target (engine default-features off)
-        run: cargo check --config .github/ci/native-profile.toml -p z-wasm --target wasm32-unknown-unknown
+        run: bash scripts/ci-time.sh "WASM target check" cargo check --config .github/ci/native-profile.toml -p z-wasm --target wasm32-unknown-unknown --timings
       - name: Patched field crates (wasm32 backend tests run natively too)
         run: |
           for c in zakura-pasta-curves zakura-bls12-381 zakura-jubjub; do
-            (cd "vendor/zakura/$c" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/vendor-tests" cargo test --release --lib)
+            (cd "vendor/zakura/$c" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/vendor-tests" bash "$GITHUB_WORKSPACE/scripts/ci-time.sh" "$c tests" cargo test --release --lib --timings)
           done
       - name: Compile ignored regtest test (no docker)
-        run: cargo test --config .github/ci/native-profile.toml -p z-engine --test regtest --no-run
+        run: bash scripts/ci-time.sh "Regtest compilation" cargo test --config .github/ci/native-profile.toml -p z-engine --test regtest --no-run --timings
+      - name: Native compilation timing reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-timings-${{ github.sha }}
+          path: target/**/cargo-timings/cargo-timing-*.html
+          retention-days: 7
+          if-no-files-found: warn
 
   sdk:
     needs: changes
