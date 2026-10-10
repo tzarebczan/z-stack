@@ -134,3 +134,43 @@ vendored tree without updating its reproducible patch.
 | `zakura-client-memory` is crates.io-reserved `0.0.0` | WASM uses `z-engine::web` snapshot + `scan_block` + in-memory shardtrees / `WalletWrite`. Do **not** take crates.io `zcash_client_memory` (upstream orchard). Swap the store when Zakura publishes the memory backend. |
 
 Native selective shard scanning uses public `zakura-client-backend::data_api::ll::wallet::put_blocks_rows` (notes/txs) then hashes only birthday, marked, and tip shards. Not a fork.
+
+## Native PIR qualification
+
+Optional `z-engine/native-pir` pins [wallet-pir](https://github.com/valargroup/wallet-pir)
+revision `bec1f41326cf98261d8df7a16ffa4b4686b48231`. Its transparent-wallet,
+transparent-events and transparent-filter crates define PIR, ledger and store
+semantics; the [original MIT license](../licenses/upstream/wallet-pir-LICENSE)
+is retained. Its transitive ipir-sp tag is `v0.1.0-rc.6` (locked commit
+`1f2aec65`). No upstream source is patched. The narrowly scoped
+`valar-spiral-rs` dev/test profile disables overflow checks for its intentionally
+wrapping Barrett reduction, matching the pinned upstream profile.
+
+`NativeWallet::sync_regtest_pir` is a Rust-only, bounded qualification API.
+The caller supplies separate public filters/private transport and a regtest
+chain snapshot independently accepted by its local node. A publisher signature,
+map endpoint or cloud-scanned wallet database is not independent chain acceptance.
+The API enrolls the existing native non-ephemeral transparent receiver scope,
+including change and standalone imports only where enabled by the pinned wallet.
+Derived receivers require their account birthday; imports require publication
+prehistory. Coverage cannot raise these floors. Completion is explicitly
+`complete-for-enrolled-scope`; it does not establish wallet-wide gap discovery.
+
+An `ext_coffer_pir_*` hash-chained journal in the wallet SQLite database replays
+upstream MemoryStore semantics. Every shard's history, coverage and pending work
+commit together through `transactionally_with_extension`, using FULL synchronous
+on that owned handle, a generation fence, native account/scope revalidation and
+cancellation checks. The journal is limited to 16,384 operations and 64 MiB;
+individual operations are limited to 8 MiB. Alteration, truncation, unknown schema,
+limits, contradiction or write failure refuse advancement. Reopened report reads
+refuse changed native scope/scanner state until another independently anchored
+sync reconciles it. Resetting the native database discards this research journal.
+
+PIR confirmed history is separate from native history, balances, reservations and
+spendability. Event records are not complete authenticated raw transactions and
+must not be inserted as spendable UTXOs; native coinbase maturity continues using
+the existing full transaction path. No plaintext address/txid fallback is added.
+Production gates remain relational bounded storage, native gap discovery,
+authenticated transaction enhancement, combined native/PIR reorg commits,
+endpoint/privacy enrollment and actual macOS/Windows verification. WASM does not
+enable this feature.

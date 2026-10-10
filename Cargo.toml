@@ -53,3 +53,12 @@ codegen-units = 1
 zakura-pasta-curves = { path = "vendor/zakura/zakura-pasta-curves" }
 zakura-bls12-381 = { path = "vendor/zakura/zakura-bls12-381" }
 zakura-jubjub = { path = "vendor/zakura/zakura-jubjub" }
+
+# Pinned PIR Barrett reduction intentionally wraps; retain its own bound checks.
+[profile.dev.package.valar-spiral-rs]
+overflow-checks = false
+opt-level = 3
+
+[profile.test.package.valar-spiral-rs]
+overflow-checks = false
+opt-level = 3

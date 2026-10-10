@@ -1,6 +1,10 @@
 //! SQLite-backed native wallet: create, sync, balance, shield, send.
 
 mod payments;
+#[cfg(feature = "native-pir")]
+mod pir;
+#[cfg(feature = "native-pir")]
+pub use pir::{PirDiscoveryReport, RegtestAcceptedChain};
 mod public_scan;
 pub use payments::PaymentReceipt;
 pub use public_scan::RegtestScanSchedule;
