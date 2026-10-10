@@ -222,6 +222,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
     createdClient = client;
     Object.defineProperty(client, "runtime", { get: () => wasmRuntime() ?? runtime, enumerable: true });
 
+    let memoFetchMode = opts.memoFetch ?? "on-demand";
     let timer: ReturnType<typeof setInterval> | null = null;
     let autoSyncInterval: number | null = null;
     let forgetting = 0;
@@ -249,7 +250,10 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
         if (closed || forgetting || epoch !== keyEpoch) return;
         const snapshot = await wallet.getWallet();
         if (closed || forgetting || epoch !== keyEpoch) return;
-        const pending = [snapshot.transparentScanStatus, snapshot.memoFetchStatus ?? snapshot.sharedMemoStatus]
+        // Manual memo batches cannot be advanced by ordinary sync. Only the
+        // automatic policies count as background work at an unchanged tip.
+        const pending = [snapshot.transparentScanStatus, memoFetchMode === "on-demand"
+          ? undefined : snapshot.memoFetchStatus ?? snapshot.sharedMemoStatus]
           .some((status) => status === "scanning" || status === "unavailable");
         if (behind > 0 || pending) await wallet.sync();
       } catch {
@@ -357,6 +361,10 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
           // sync preference, including stop/start/close during the await.
           if (!forgetting) resumeAutoSync();
         }
+      },
+      setMemoFetch(mode: Parameters<WasmClient["setMemoFetch"]>[0]) {
+        client.setMemoFetch(mode);
+        memoFetchMode = mode;
       },
       cancelSync: () => cancelWasmSync(),
       startAutoSync,

@@ -1171,3 +1171,22 @@ test("pending-aware forget adopts another tab's reservation before checking dele
   await wallet.forget({ passkey: true });
   assert.equal(await readSavedSnapshotRecord(), null);
 });
+
+for (const status of ["scanning", "unavailable"] as const) {
+  test(`auto-sync ignores manual memo ${status} at an unchanged tip and follows policy changes`, async t => {
+    const clock = autoSyncClock(t), f = fixture(t); let tip = 10;
+    const wallet = await f.open({autoSync:true, server:{kind:"fixture",label:"offline",tip:async()=>tip,blocks:async()=>new Uint8Array()}});
+    await wallet.create({birthday:1});
+    const snapshot = {...await wallet.getWallet(),transparentScanStatus:"off" as const,memoFetchStatus:status};
+    t.mock.method(wallet,"getWallet",async()=>snapshot);
+    let syncs = 0; t.mock.method(wallet,"sync",async()=>{syncs++; return snapshot;});
+    await clock.tick(); assert.equal(syncs,0,"default on-demand must not keep resyncing a manual queue");
+    wallet.setMemoFetch("auto"); await clock.tick(); assert.equal(syncs,1);
+    wallet.setMemoFetch("on-demand"); await clock.tick(); assert.equal(syncs,1);
+    wallet.setMemoFetch("shared"); await clock.tick(); assert.equal(syncs,2);
+    wallet.setMemoFetch("on-demand"); tip = 11;
+    await clock.tick(); assert.equal(syncs,3,"new blocks still trigger background sync");
+    tip = 10; Object.assign(snapshot,{transparentScanStatus:"scanning"});
+    await clock.tick(); assert.equal(syncs,4,"transparent automatic work is independent of the manual memo policy");
+  });
+}
