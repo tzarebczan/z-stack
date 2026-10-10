@@ -98,7 +98,9 @@ export function attachPayments(app: WalletApp) {
       operation = sending;
       try {
         status.textContent = "Checking payment…";
-        await recheckReview(app.wallet, approved);
+        cancel.hidden = false;
+        await recheckReview(app.wallet, approved, sending.signal);
+        sending.signal.throwIfAborted();
         await app.wallet.unlock(mnemonic);
         sending.signal.throwIfAborted();
         status.textContent = "Proving payment · this can take a moment…";

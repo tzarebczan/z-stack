@@ -92,23 +92,9 @@ impl WebWallet {
         let result = self.apply_decoded_parallel(blocks).and_then(|out| {
             self.prune_settled_shards();
             self.assert_consistent_leaf_hashes()?;
-            self.refresh_pools_after_activity(&out);
             Ok(out)
         });
         self.finish_scan_update(result)
-    }
-
-    /// Near the tip no full-sync finalize follows, so a mined self-send would
-    /// keep the totals stored at construction (change only) until reload.
-    /// Catch-up still defers the rebuild to its single finalize.
-    fn refresh_pools_after_activity(&mut self, deltas: &[ScanDelta]) {
-        if self.sinsemilla_live()
-            && deltas
-                .iter()
-                .any(|d| d.notes_found > 0 || d.spends_found > 0)
-        {
-            self.recompute_pool_fields();
-        }
     }
 
     pub fn apply_compact_block(&mut self, bytes: &[u8]) -> Result<ScanDelta> {
@@ -121,7 +107,6 @@ impl WebWallet {
         );
         let result = self.apply_decoded(block).and_then(|out| {
             self.assert_consistent_leaf_hashes()?;
-            self.refresh_pools_after_activity(std::slice::from_ref(&out));
             Ok(out)
         });
         self.finish_scan_update(result)

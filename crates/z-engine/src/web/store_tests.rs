@@ -1498,18 +1498,18 @@ fn first_receipt_after_note_free_finalize_can_spend() {
         .is_ok());
 }
 
-/// A near-tip sync has no finalize after scanning. Mining a self-send through
+/// Finalizing a near-tip sync after mining a self-send through
 /// the ordinary compact-block path must count its payment output as received,
 /// the same as a reload does, rather than reporting the whole payment as sent.
 #[cfg(feature = "transparent-inputs")]
 #[test]
-fn mined_self_send_history_matches_reload_without_finalize() {
+fn mined_self_send_history_matches_reload_after_finalize() {
     check_mined_self_send_history(false);
 }
 
 #[cfg(feature = "transparent-inputs")]
 #[test]
-fn mined_self_send_history_matches_reload_without_finalize_via_blob() {
+fn mined_self_send_history_matches_reload_after_finalize_via_blob() {
     check_mined_self_send_history(true);
 }
 
@@ -1551,6 +1551,7 @@ fn check_mined_self_send_history(blob: bool) {
         w.apply_compact_block(&block.encode_to_vec()).unwrap();
     }
 
+    w.finalize_scan_trees().unwrap();
     let live = w.history_matching(1, None, Some(&txid)).remove(0);
     let fee = live.fee_zat.expect("constructed send records its fee") as i64;
     assert!(live.mined_height.is_some());

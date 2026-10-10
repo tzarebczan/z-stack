@@ -35,16 +35,24 @@ export function assertReviewCurrent(review: SendReview): void {
   if (Date.now() - review.reviewedAt >= 5 * 60_000) throw new ReviewOutdatedError();
 }
 
-export async function recheckReview(wallet: Wallet, review: SendReview): Promise<void> {
+export async function recheckReview(wallet: Wallet, review: SendReview, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   assertReviewCurrent(review);
-  // The SDK refuses a send more than 10 blocks behind the tip; entering the
-  // phrase can take that long on a fast chain.
-  await wallet.sync();
-  assertReviewCurrent(review);
-  const current = await reviewSend(wallet, review);
-  assertReviewCurrent(review);
-  if (current.walletAddress !== review.walletAddress || current.feeZat !== review.feeZat) {
-    throw new ReviewOutdatedError();
+  const cancelSync = () => wallet.cancelSync();
+  signal?.addEventListener("abort", cancelSync, { once: true });
+  try {
+    // Entering the phrase can leave the wallet more than 10 blocks behind.
+    await wallet.sync();
+    signal?.throwIfAborted();
+    assertReviewCurrent(review);
+    const current = await reviewSend(wallet, review);
+    signal?.throwIfAborted();
+    assertReviewCurrent(review);
+    if (current.walletAddress !== review.walletAddress || current.feeZat !== review.feeZat) {
+      throw new ReviewOutdatedError();
+    }
+  } finally {
+    signal?.removeEventListener("abort", cancelSync);
   }
 }
 

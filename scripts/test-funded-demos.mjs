@@ -189,6 +189,21 @@ try {
     if (!uncertain) {
       // Reproduce typing long enough to exceed the SDK's ten-block spend lag.
       await generate(11);
+      // A held light-server request must not keep Cancel busy or unlock spending.
+      let releaseCheck, checking;
+      const heldCheck = new Promise(resolve => { releaseCheck = resolve; });
+      const checkStarted = new Promise(resolve => { checking = resolve; });
+      const holdCheck = async route => { checking(); await heldCheck; await route.continue().catch(() => {}); };
+      await ui.route('**/GetLatestBlock', holdCheck);
+      try {
+        await ui.getByLabel('Recovery phrase for this payment',{exact:true}).fill(faucetWords);
+        await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).click();
+        await checkStarted;
+        await ui.getByRole('button',{name:'Cancel before submission',exact:true}).click();
+        await ui.getByText('Wallet operation cancelled.',{exact:true}).waitFor({timeout:15_000});
+        assert.equal(await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).isEnabled(),true);
+        assert.equal(await ui.locator('#send-words').inputValue(),'');
+      } finally { releaseCheck(); await ui.unroute('**/GetLatestBlock', holdCheck); }
       await ui.getByLabel('Recovery phrase for this payment',{exact:true}).fill('not a phrase');
       await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).click();
       await ui.getByText('Those words are not a valid recovery phrase.',{exact:true}).waitFor({timeout:60_000});

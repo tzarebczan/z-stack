@@ -300,14 +300,16 @@ class MemoWorker extends EventTarget {
   enhanced: string[] = [];
   candidates = ["blank", "retry", "missing"];
   ops: string[] = [];
-  postMessage(msg: { id: number; op: string; hex?: string; snapshot?: ArrayBuffer; limit?: number; transparent?: boolean }) {
+  activity = 0;
+  scanPageHeight = false;
+  postMessage(msg: { id: number; op: string; hex?: string; snapshot?: ArrayBuffer; limit?: number; transparent?: boolean; blob?: ArrayBuffer }) {
     this.ops.push(msg.op);
     let data: Record<string, unknown> = {};
     const snapshot = () => new TextEncoder().encode(JSON.stringify([...this.completed]));
     switch (msg.op) {
       case "init": data = { threads: 1, mode: "single-thread" }; break;
       case "meta": data = { scanned: this.scanned, nextHeight: this.scanned + 1, birthday: this.birthday, treesReady: true, sinsemillaLive: true, transparentCompact: this.transparentSupported }; break;
-      case "applyBlob": this.combinedApplies.push(!!msg.transparent); if (msg.transparent) this.transparentHeight = this.scanned + 1; data = { scanned: ++this.scanned }; break;
+      case "applyBlob": if (this.scanPageHeight) this.scanned = new Uint32Array(msg.blob!)[0] - 1; this.combinedApplies.push(!!msg.transparent); if (msg.transparent) this.transparentHeight = this.scanned + 1; data = { scanned: ++this.scanned, notesFound: this.activity }; break;
       case "snapshotJson": data = { json: JSON.stringify({ ...preview(this.scanned), transparentScanHeight: this.transparentHeight, memoScanHeight: this.memoHeight }) }; break;
       case "persistenceSnapshot": data = { snapshot: snapshot().buffer, json: JSON.stringify(preview(this.scanned)) }; break;
       case "fromSnapshot": this.completed = new Set(JSON.parse(new TextDecoder().decode(msg.snapshot))); break;
@@ -320,6 +322,32 @@ class MemoWorker extends EventTarget {
   }
   terminate() {}
 }
+
+test("active catch-up and follow-on scans each rebuild live pool totals once", async t => {
+  installDb(t);
+  const worker = new MemoWorker();
+  worker.scanned = 0; worker.scanPageHeight = true; worker.activity = 1; worker.candidates = [];
+  attachWasmBindings({} as never);
+  await restartScanWorker(() => worker as unknown as Worker);
+  await attachScanWorker(worker as unknown as Worker, {threads:1,preferMulticore:false});
+  let tip = 2000;
+  const client = createWasmClient({unlockPolicy:"session",network:"regtest",autoShield:false,memoFetch:"on-demand",transport:{
+    kind:"grpc-web",label:"fixture",tip:async()=>tip,
+    blocks:async (_start,end)=>new Uint8Array(new Uint32Array([end]).buffer),
+  }});
+  await client.restore("test-only worker fixture", "regtest", 1);
+  worker.ops.length = 0;
+  await client.sync();
+  assert.ok(worker.ops.filter(op=>op==="applyBlob").length > 1,"catch-up spans multiple pages");
+  assert.equal(worker.ops.filter(op=>op==="recomputePools").length,1);
+  worker.ops.length = 0; tip++;
+  await client.sync();
+  assert.equal(worker.ops.filter(op=>op==="applyBlob").length,1);
+  assert.equal(worker.ops.filter(op=>op==="recomputePools").length,1);
+  worker.ops.length = 0; worker.activity = 0; tip++;
+  await client.sync();
+  assert.equal(worker.ops.filter(op=>op==="recomputePools").length,0,"empty follow-on scan skips history traversal");
+});
 
 test("already-caught-up sync reports synced only after pending work and its snapshot commit", async (t) => {
   const db = installDb(t); const worker = new MemoWorker(); worker.candidates = [];

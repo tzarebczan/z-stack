@@ -39,6 +39,30 @@ for (const [name, send] of sends) {
       assert.throws(()=>send.assertReviewCurrent(review),send.ReviewOutdatedError);
     } finally {Date.now=originalNow;}
   });
+  test(`${name}: cancellation stops pre-send sync and skips the fee check`, async () => {
+    const operation = new AbortController();
+    let estimates = 0;
+    let stops = 0;
+    let release;
+    const waiting = new Promise(resolve => { release = resolve; });
+    const wallet = {
+      sync: async () => { await waiting; },
+      cancelSync: () => { stops++; release(); },
+      estimateFee: async () => { estimates++; return {feeZat:10000}; },
+    };
+    const review = {to:'address',amount:'0.002',memo:'',feeZat:10000,walletAddress:'own',reviewedAt:Date.now()};
+    const checking = send.recheckReview(wallet,review,operation.signal);
+    operation.abort();
+    await assert.rejects(checking,{name:'AbortError'});
+    assert.equal(stops,1);
+    assert.equal(estimates,0);
+  });
+  test(`${name}: an already cancelled payment never starts sync`, async () => {
+    const operation = new AbortController(); operation.abort();
+    let syncs = 0;
+    await assert.rejects(send.recheckReview({sync:async()=>{syncs++;}}, {}, operation.signal),{name:'AbortError'});
+    assert.equal(syncs,0);
+  });
   test(`${name}: sync happens before rechecking a frozen payment and fee changes require a new review`, async () => {
     const steps=[];
     let fee=10000;

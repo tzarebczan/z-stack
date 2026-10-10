@@ -137,7 +137,8 @@ export function useWallet() {
       const operation = new AbortController(); sendOperation.current = operation; setCanCancelPayment(true);
       try {
         setStatus("Checking payment…");
-        await recheckReview(wallet, review);
+        await recheckReview(wallet, review, operation.signal);
+        operation.signal.throwIfAborted();
         await wallet.unlock(words);
         operation.signal.throwIfAborted();
         setStatus("Proving payment · this can take a moment…");
