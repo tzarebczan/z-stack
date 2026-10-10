@@ -3,6 +3,7 @@
 mod payments;
 mod public_scan;
 pub use payments::PaymentReceipt;
+pub use public_scan::RegtestScanSchedule;
 
 use crate::error::{EngineError, Result};
 use crate::native::block_cache::FsBlockCache;

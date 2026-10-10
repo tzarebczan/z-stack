@@ -40,6 +40,11 @@ create a new payment, and a `signed` receipt does not prove no other path has
 broadcast those bytes. An accepted transaction may later expire or be removed
 from a mempool. Continue showing its actual wallet-history status.
 
+An explicit node rejection returns `broadcast_rejected`; it is not a successful
+submission or a lost transport reply. The receipt and signed bytes are retained.
+Do not clear an uncertain app intent or construct a replacement merely because
+one node rejected the saved transaction.
+
 Missing/corrupt receipts or saved transaction bytes are storage errors, not an
 unknown delivery that can be retried normally. They are never permission to clear an uncertain
 intent. Seed restoration does not restore local proposal IDs. Whole-DB rescans
@@ -55,10 +60,14 @@ APIs alone do not qualify a consumer for mainnet spending.
 
 ## Offline shared regtest blocks
 
-`scan_public_regtest(bytes)` accepts protobuf **varint-delimited** compact blocks
+`scan_public_regtest(bytes, schedule)` accepts protobuf **varint-delimited** compact blocks
 from height 1 through at most 320, with a 128 MiB input limit. It requires a
-regtest wallet with birthday 1. This framing differs from the browser engine's
-four-byte block framing.
+regtest wallet with birthday 1. Pass a `RegtestScanSchedule` with the authenticated
+chain profile's `nu6_3_height` and `nu7_height` (or `None` when unscheduled). These
+must match the engine's configured regtest activation heights. Configure them
+before opening wallets; do not change the process-wide schedule during scanning.
+The native fixture uses NU6.3 at 150 and no NU7; the compose chain has different
+defaults. This framing differs from the browser engine's four-byte block framing.
 
 The caller must authenticate the complete publication, digests, network,
 freshness and anti-rollback state before calling. The engine checks framing,
