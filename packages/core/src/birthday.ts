@@ -365,5 +365,9 @@ export function parseBirthdayInput(raw: string, tipHeight: number, network: Birt
     if (!Number.isInteger(h) || h < 1) throw new Error("birthday height is not a number");
     return h;
   }
+  // Dates are UTC days; allow one day for the user's timezone.
+  if (ymdToUnix(s) > nowUnix() + 86_400) {
+    throw new WalletError("birthday_above_tip", "birthday date is in the future");
+  }
   return heightBeforeSeconds(heightFromDate(s, tipHeight, network), DATE_SAFETY_BLOCKS * BLOCK_SECONDS, network);
 }

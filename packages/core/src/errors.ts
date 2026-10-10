@@ -213,6 +213,8 @@ export function classifyWalletError(message: string): WalletErrorCode {
   if (lower.startsWith("reorg ") || lower.includes("reorg at height")) return "reorg";
   if (
     lower.includes("grpc/transport") ||
+    lower.includes("light server has been unavailable") ||
+    lower.includes("light server tip failed") ||
     lower.includes("i/o:") ||
     lower.includes("engine not reachable") ||
     lower.includes("failed to fetch") ||

@@ -65,6 +65,14 @@ export function createWasmClient(
   let disposing = false;
   let rescanning = false;
 
+  // A new wallet's first sync starts at its birthday. Saving one this client
+  // would refuse to sync leaves no recovery path: rescan cannot raise a birthday.
+  function assertFirstSyncAllowed(birthday: number, tip: number) {
+    if (tip - birthday + 1 > runtime.MAX_GAP && !opts.allowDeepSync) {
+      throw new WalletError("deep_sync_rejected", "restore birthday needs deep sync; pass a later birthday or set deepSync: true (createWallet)");
+    }
+  }
+
   // Interrupt external device prompts before draining reservations. Aborting the
   // wallet operation itself here would destroy the session needed for rollback.
   const disposeWaits = new AbortController();
@@ -724,12 +732,15 @@ export function createWasmClient(
           tip = await transport.tip();
           operation.assertCurrent();
         } catch (e) {
-          throw new Error(
+          throw new WalletError(
+            "transport",
             `light server tip failed (${transport.label}): ${e instanceof Error ? e.message : e}`,
+            e,
           );
         }
         const bday = await runtime.resolveBirthday(birthday, tip, net === "regtest" ? 1 : 1, { network: net, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
         if (bday > tip) throw new Error(`birthday ${bday} is above tip ${tip}`);
+        assertFirstSyncAllowed(bday, tip);
         operation.assertCurrent();
         claimed = await replaceWallet(
           operation,
@@ -784,12 +795,15 @@ export function createWasmClient(
           operation.assertCurrent();
         } catch (e) {
           operation.assertCurrent();
-          throw new Error(
+          throw new WalletError(
+            "transport",
             `light server tip failed (${transport.label}): ${e instanceof Error ? e.message : e}`,
+            e,
           );
         }
         const bday = await runtime.resolveBirthday(birthday, tip, net === "regtest" ? 1 : 1, { network: net, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
         if (bday > tip) throw new Error(`birthday ${bday} is above tip ${tip}`);
+        assertFirstSyncAllowed(bday, tip);
         operation.assertCurrent();
         claimed = await replaceWallet(
           operation,
@@ -846,12 +860,15 @@ export function createWasmClient(
         tip = await transport.tip();
         operation.assertCurrent();
       } catch (e) {
-        throw new Error(
+        throw new WalletError(
+          "transport",
           `light server tip failed (${transport.label}): ${e instanceof Error ? e.message : e}`,
+          e,
         );
       }
       const bday = await runtime.resolveBirthday(birthday, tip, 1, { network, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
       if (bday > tip) throw new Error(`birthday ${bday} is above tip ${tip}`);
+      assertFirstSyncAllowed(bday, tip);
       operation.assertCurrent();
       const input = {
         device: account.device,

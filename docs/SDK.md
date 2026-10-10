@@ -32,7 +32,7 @@ export const wallet = await createWallet({
 ```ts
 // Open the saved wallet, or restore one.
 const saved = await wallet.load();
-if (!saved) await wallet.restore(mnemonic, { birthday: "2024-06-01" }); // birthday: date, height, or "auto"
+if (!saved) await wallet.restore(mnemonic, { birthday: "2024-06-01" }); // a date or height before the first deposit
 
 wallet.on("sync", (e) => setProgress(e.percent ?? 0));
 wallet.on("balance", (b) => setBalance(b.availableZat));
@@ -100,7 +100,7 @@ they can be cached forever.
 |---|---|
 | `wallet.load()` | Returns the saved wallet on this device, or `null`. It makes no network request. |
 | `wallet.create({ birthday?, replace?, beforeCommit? })` | Creates a wallet and returns `{ wallet, recoveryPhrase }`. Optional preparation confirms recovery before saving. |
-| `wallet.restore(mnemonic, { birthday?, replace? })` | Restores from a recovery phrase. |
+| `wallet.restore(mnemonic, { birthday?, replace? })` | Restores from a recovery phrase. Pass a height or date before the first deposit: an omitted birthday means height 1, and `"auto"` (tip − 100) skips earlier history. A future date rejects with `birthday_above_tip`. A birthday beyond the deep-sync limit rejects with `deep_sync_rejected` before anything is saved unless `deepSync` is enabled. |
 | `wallet.restoreUfvk(ufvk, { birthday?, replace?, signal?, assertCurrent?, beforeCommit? })` | Creates a view-only wallet. `unlock` enables spending later. |
 | `wallet.sync()` | Catches up to the chain tip. Progress arrives through `on("sync")`, and `onProgress` gives scan detail. |
 | `wallet.getWallet()` | Returns the snapshot: addresses, per-pool balances, scanned height and recent history. |

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Report a sync that outlasts the 90-second light-server outage window, and restore/import tip failures, as `transport` instead of `unknown`.
+- Reject restores whose birthday the client would refuse to sync (`deep_sync_rejected`) before saving, including an omitted birthday on a long chain.
+- Reject future birthday dates with `birthday_above_tip` instead of silently using the current tip.
+
 ## 0.1.0-alpha.9
 
 - Refresh per-pool history totals once after scanning wallet activity, including mined self-sends, without repeated catch-up rebuilds.

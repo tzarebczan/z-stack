@@ -1110,6 +1110,17 @@ test("a deep rescan needs client opt-in and rejects before changing state", asyn
   assert.equal((await wallet.getWallet()).birthdayHeight, 8);
 });
 
+test("restore rejects a birthday the client would refuse to sync before saving", async t => {
+  const f = fixture(t), wallet = await f.open({ server: {
+    kind: "fixture", label: "offline", tip: async () => 200000, blocks: async () => new Uint8Array(),
+  } });
+  await assert.rejects(wallet.restore(words), code("deep_sync_rejected"));
+  await assert.rejects(wallet.restore(words, { birthday: 3 }), code("deep_sync_rejected"));
+  assert.equal(await wallet.load(), null, "an unsyncable restore was saved");
+  await wallet.restore(words, { birthday: 100000 });
+  assert.ok(await wallet.load(), "a syncable restore was not saved");
+});
+
 
 test("a failed in-memory rescan rollback retires the source and keeps the original save error", async t => {
   const f = fixture(t);
@@ -1154,6 +1165,13 @@ test("numeric birthday creation is offline; automatic creation reports a stable 
   });
   assert.equal(tips, 1);
   assert.equal(await wallet.load(), null, "failed automatic creation saved a wallet");
+  await assert.rejects(wallet.restore(words, { birthday: 1 }), error => {
+    assert.ok(error instanceof WalletError);
+    assert.equal(error.code, "transport");
+    assert.doesNotMatch(error.userMessage(), /SYNTHETIC_PRIVATE_PROVIDER_CONTEXT/);
+    return true;
+  });
+  assert.equal(await wallet.load(), null, "failed restore saved a wallet");
 });
 
 
