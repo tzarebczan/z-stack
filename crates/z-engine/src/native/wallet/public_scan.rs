@@ -58,7 +58,7 @@ impl NativeWallet {
     ) -> Result<u32> {
         if self.network != ZNetwork::Regtest
             || self.birthday_height() != 1
-            || schedule.nu6_3_height <= 2
+            || schedule.nu6_3_height < 2
             || schedule
                 .nu7_height
                 .is_some_and(|height| height <= schedule.nu6_3_height)
@@ -160,9 +160,54 @@ mod tests {
             height: 1,
             hash: vec![1; 32],
             prev_hash: genesis,
+            chain_metadata: Some(
+                zcash_client_backend::proto::compact_formats::ChainMetadata {
+                    sapling_commitment_tree_size: 0,
+                    orchard_commitment_tree_size: 0,
+                    ironwood_commitment_tree_size: 0,
+                },
+            ),
             ..Default::default()
         }
         .encode_length_delimited_to_vec()
+    }
+
+    #[test]
+    fn activation_at_height_two_is_a_supported_offline_profile() {
+        const CASE: &str = "Z_STACK_OFFLINE_SCAN_TEST";
+        if std::env::var(CASE).as_deref() != Ok("height-two") {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "native::wallet::public_scan::tests::activation_at_height_two_is_a_supported_offline_profile"])
+                .env(CASE, "height-two")
+                .env("Z_STACK_REGTEST_NU6_3", "2")
+                .env_remove("Z_STACK_REGTEST_NU7")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = fixture_wallet(dir.path());
+        let (ufvk, _) = fixture_account();
+        let publication = first_block();
+        let block = CompactBlock::decode_length_delimited(publication.as_slice()).unwrap();
+        let birthday = AccountBirthday::from_parts(
+            ChainState::empty(0.into(), BlockHash::from_slice(&block.prev_hash)),
+            None,
+        );
+        wallet.replace_scan_db(&ufvk, &birthday).unwrap();
+        assert_eq!(crate::regtest_nu6_3_height(), 2);
+        assert_eq!(
+            wallet
+                .scan_public_regtest(&publication, schedule())
+                .unwrap(),
+            1
+        );
+        assert_eq!(wallet.scanned_height().unwrap(), 1);
     }
 
     #[test]
