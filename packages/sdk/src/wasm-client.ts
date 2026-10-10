@@ -232,6 +232,15 @@ export function createWasmClient(
     const operation = sessionOperation ?? captureWalletOperation();
     const w = JSON.parse(await source.snapshotJson(serverLabel)) as WalletSnapshot;
     assertSource(operation, source);
+    // Completion describes the current local queue, including transactions found
+    // by a later sync. Inspecting it sends no transaction IDs to the server.
+    if (memoFetch === "on-demand" && selectiveMemoStatus === "complete") {
+      const pending = await source.memoEnhancementTxids(1);
+      assertSource(operation, source);
+      if (memoFetch === "on-demand" && selectiveMemoStatus === "complete" && pending?.length) {
+        selectiveMemoStatus = "scanning";
+      }
+    }
     return decorateSnapshot(w);
   }
 

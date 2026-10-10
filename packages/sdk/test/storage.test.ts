@@ -1246,6 +1246,10 @@ test("on-demand reports a remaining 505-transaction queue without automatic requ
   assert.equal((await client.sync()).memoFetchStatus,"scanning"); assert.equal(calls,500,"sync must not fetch the remaining IDs");
   assert.equal((await client.fetchMemos()).memoFetchStatus,"complete"); assert.equal(calls,505);
   await client.fetchMemos(); assert.equal(calls,505,"completed IDs are not requested again");
+  worker.candidates.push("later-payment");
+  assert.equal((await client.sync()).memoFetchStatus,"scanning","later queued transactions invalidate completion");
+  assert.equal(calls,505,"later sync still makes no ID requests");
+  assert.equal((await client.fetchMemos()).memoFetchStatus,"complete"); assert.equal(calls,506);
   client.setMemoFetch("auto"); client.setMemoFetch("on-demand");
   assert.equal((await client.getWallet()).memoFetchStatus,"off");
 });
