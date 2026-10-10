@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { reuseConsumerArchives } from "./consumer-archives.mjs";
 // Real external-consumer check. No workspace links, TS source aliases, or SDK stubs.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -23,7 +24,8 @@ function run(command, args, cwd = app) {
   assert.equal(result.status, 0, `${command} ${args.join(" ")} failed`);
 }
 try {
-  run(process.execPath, [join(root, "scripts", "pack-sdk.mjs"), archives], root);
+  if (!reuseConsumerArchives(root, archives, ["core", "passkey", "sdk"]))
+    run(process.execPath, [join(root, "scripts", "pack-sdk.mjs"), archives], root);
   // Installing just the SDK must work with an unreachable registry and no cache.
   const standalone = join(scratch, "standalone");
   const { mkdirSync } = await import("node:fs");
@@ -175,7 +177,8 @@ try {
       const { verifyExampleBrowser } = await import("./test-example-browser.mjs");
       if (example === "remote-backup") {
         const { verifyRemoteBackupBrowser } = await import("./test-remote-backup-browser.mjs");
-        await verifyRemoteBackupBrowser(consumer, playwright);
+        if (browserNames.includes("chromium")) await verifyRemoteBackupBrowser(consumer, playwright);
+        else console.log("Remote WebAuthn verifier runs in the Chromium shard (virtual authenticator requires CDP)");
       } else for (const browserName of browserNames) await verifyExampleBrowser(consumer, playwright, example, browserName);
     }
   }

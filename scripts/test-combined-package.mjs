@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { reuseConsumerArchives } from "./consumer-archives.mjs";
 // Build both real framework consumers from archives with Base explicitly selected.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -19,8 +20,10 @@ function run(cmd, args, cwd = root) {
 }
 try {
   const archives = join(scratch, "archives");
-  run(process.execPath, ["scripts/pack-sdk.mjs", archives]);
-  run(process.execPath, ["scripts/pack-sdk.mjs", archives, "--base-only"]);
+  if (!reuseConsumerArchives(root, archives, ["core", "passkey", "sdk", "base"])) {
+    run(process.execPath, ["scripts/pack-sdk.mjs", archives]);
+    run(process.execPath, ["scripts/pack-sdk.mjs", archives, "--base-only"]);
+  }
   for (const template of ["browser-wallet", "next-wallet"]) {
     const app = join(scratch, template);
     createExample(template, app, archives, { withBase: true });

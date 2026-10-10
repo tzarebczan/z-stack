@@ -32,6 +32,39 @@ and optional native bridge. Start with the installed browser example for a publi
 testnet walkthrough. A missing local service is a setup condition, not a testnet
 wallet failure.
 
+## CI verification
+
+CI builds both production WASM engines and packs one SDK/core/passkey/Base set.
+The installed-consumer checks and three parallel browser jobs use those same
+archives. Each consumer gets a fresh app and dependency installation; workspace
+links are never substituted for the packaged SDK. Browser jobs verify the
+archive checksums before installing. The remote-backup virtual-authenticator
+scenario runs in Chromium, where Playwright exposes the required CDP interface.
+
+To reuse an already-built matching archive set locally:
+
+```sh
+pnpm build:sdk
+pnpm pack:sdk
+pnpm pack:base
+node scripts/test-packages.mjs --archives=artifacts
+node scripts/test-packages.mjs --browser --browsers=firefox --archives=artifacts
+node scripts/test-base-package.mjs --browser --browsers=firefox --archives=artifacts
+node scripts/test-combined-package.mjs --archives=artifacts
+```
+
+Without `--archives=DIR`, each check packs its own set as before. An incomplete
+or mismatched-version set fails instead of rebuilding silently.
+
+PRs confined to maintained public Markdown run documentation checks without
+Rust or browser builds. The executable guides in `docs/SDK.md` and
+`docs/SERVICES.md` always select the full route so their marked examples compile
+against installed packages. Code, dependencies, workflow files, unknown paths and
+code-to-docs renames also select the full route. Pushes to `main` always run the full
+suite and can populate the Rust caches; PRs only restore them. The required
+`rust` check runs on either route and rejects failures, cancellations and
+unexpected skips.
+
 ## Code boundaries
 
 - Cryptography, signature checks, and transaction construction belong in Rust.

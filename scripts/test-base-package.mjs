@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { reuseConsumerArchives } from "./consumer-archives.mjs";
 // Fresh optional-package consumer: no source aliases, WASM, SDK or account backend.
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
@@ -25,7 +26,8 @@ function run(command, args, cwd = root) {
 }
 let server;
 try {
-  run(process.execPath, ["scripts/pack-sdk.mjs", archives, "--base-only"]);
+  if (!reuseConsumerArchives(root, archives, ["base"]))
+    run(process.execPath, ["scripts/pack-sdk.mjs", archives, "--base-only"]);
   createExample("base-wallet", app, archives);
   run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund"], app);
   for (const pkg of ["sdk", "core", "passkey"])
