@@ -1,5 +1,5 @@
 "use client";
-import { loadedWalletStatus, memoDetailsMessage } from "./wallet-view";
+import { loadedWalletStatus, memoDetailsMessage, scannerLabel } from "./wallet-view";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createWallet, WalletError, walletErrorMessage, type HistoryEntry,
   type Wallet, type WalletSnapshot } from "@z-stack/sdk";
@@ -48,7 +48,7 @@ export function useWallet() {
   }, [phrase, busy]);
 
   function updateRuntime(wallet: Wallet) {
-    setRuntime(wallet.runtime.scanner === "starting" ? "Starting scanner…" : wallet.runtime.mode === "multi-thread" ? `${wallet.runtime.threads} threads` : wallet.runtime.scanner === "main-thread" ? "Scanner starts when you create or restore" : "Single-thread scanner");
+    setRuntime(scannerLabel(wallet.runtime));
     setSpending(wallet.hasSpendingSeed());
   }
   async function refresh(wallet: Wallet, value: WalletSnapshot) {

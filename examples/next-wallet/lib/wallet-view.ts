@@ -1,4 +1,11 @@
-import { classifyHistory, formatZatoshis, parseZecToZatoshis, WalletError, type HistoryEntry, type WalletSnapshot } from "@z-stack/sdk";
+import { classifyHistory, formatZatoshis, parseZecToZatoshis, WalletError, type HistoryEntry, type WalletSnapshot, type Wallet } from "@z-stack/sdk";
+
+export function scannerLabel(runtime: Wallet["runtime"]): string {
+  if (runtime.scanner === "starting") return "Starting scanner…";
+  if (runtime.scanner === "main-thread") return "Scanner starts when you create or restore";
+  return runtime.mode === "multi-thread"
+    ? `Threaded scanner · ${runtime.threads} threads` : "Single-thread scanner";
+}
 
 export function pendingFunds(snapshot: WalletSnapshot): bigint {
   return snapshot.balance.totalPending !== undefined

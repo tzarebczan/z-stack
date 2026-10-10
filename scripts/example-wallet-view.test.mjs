@@ -61,6 +61,12 @@ const mined = {txid:'a'.repeat(64), status:'mined', minedHeight:4482837, expiryH
   sentNoteCount:0, receivedNoteCount:1, memoCount:0, hasChange:false,
   isShielding:false, expiredUnmined:false};
 for (const [name, view] of views) {
+  test(`${name}: removed or starting scanners are not labelled as single-thread scanning`, () => {
+    assert.equal(view.scannerLabel({mode:'single-thread',threads:1,scanner:'main-thread'}),'Scanner starts when you create or restore');
+    assert.equal(view.scannerLabel({mode:'single-thread',threads:1,scanner:'starting'}),'Starting scanner…');
+    assert.equal(view.scannerLabel({mode:'multi-thread',threads:2,scanner:'ready'}),'Threaded scanner · 2 threads');
+    assert.equal(view.scannerLabel({mode:'single-thread',threads:1,scanner:'ready'}),'Single-thread scanner');
+  });
   test(`${name}: a public receive remains confirming until the configured threshold`, () => {
     const snapshot = {birthdayHeight:4482700, scannedHeight:4482837,
       confirmations:{trusted:1,untrusted:3,zeroConfShield:false},

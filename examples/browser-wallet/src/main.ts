@@ -1,7 +1,7 @@
 import { SDK_VERSION, classifyHistory, createWallet, validateBirthdayInput, formatZatoshis, WalletError, type WalletSnapshot } from "@z-stack/sdk";
 import "./style.css";
 import buildInfo from "../sdk-build.json";
-import { pendingFunds, confirmationLabel, loadedWalletStatus, activityMovement, paymentErrorMessage, syncedWalletStatus, confirmationPolicyText, memoDetailsMessage } from "./wallet-view";
+import { pendingFunds, confirmationLabel, loadedWalletStatus, activityMovement, paymentErrorMessage, syncedWalletStatus, confirmationPolicyText, memoDetailsMessage, scannerLabel } from "./wallet-view";
 import { drawReceiveQr } from "./receive-qr";
 import { attachBase } from "./base";
 import { connection } from "./connection";
@@ -54,10 +54,7 @@ async function start() {
   try { if (typeof connection.server === "string") server = new URL(connection.server, window.location.href).host; } catch { /* Keep a fixed label; never render credential-bearing URLs. */ }
   element("chain-warning").hidden = connection.network !== "testnet";
   function showRuntime() {
-    const runtime = wallet.runtime;
-    element("runtime").textContent = runtime.scanner === "starting" ? "Starting scanner…" : runtime.mode === "multi-thread"
-      ? `Threaded scanner · ${runtime.threads} threads` : runtime.scanner === "main-thread"
-        ? "Scanner starts when you create or restore" : "Single-thread scanner";
+    element("runtime").textContent = scannerLabel(wallet.runtime);
   }
   showRuntime();
   wallet.on("runtime", () => showRuntime());

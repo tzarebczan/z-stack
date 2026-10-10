@@ -10,7 +10,6 @@ import * as playwright from 'playwright';
 import { launchBrowser } from './browser-launch.mjs';
 import { verifyReceiveQr } from './verify-receive-qr.mjs';
 import { baseDemoFixture, exerciseCombinedBase } from './base-demo-fixture.mjs';
-import { createExample } from './create-example.mjs';
 import { regtestBrowserGateway } from './regtest-browser-gateway.mjs';
 import { generate, zebraRpc } from './regtest-rpc.mjs';
 import { assertLocalRegtestChain } from './sdk-harness.mjs';
@@ -34,8 +33,7 @@ const run = (command, args, cwd) => {
   assert.equal(result.status, 0, `${command} failed`);
 };
 for (const [name, app] of [['browser-wallet', vite], ['next-wallet', next]]) {
-  createExample(name, app, join(root, 'artifacts'), {withBase});
-  run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'], app);
+  run(process.execPath, ['scripts/create-example.mjs', name, app, '--install', ...(withBase ? ['--with-base'] : [])], root);
 }
 const staticRoot = resolve(vite, 'dist');
 const server = createServer((req, res) => {
