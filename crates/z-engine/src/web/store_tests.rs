@@ -1498,6 +1498,56 @@ fn first_receipt_after_note_free_finalize_can_spend() {
         .is_ok());
 }
 
+/// A near-tip sync has no finalize after scanning. Mining a self-send through
+/// the ordinary compact-block path must count its payment output as received,
+/// the same as a reload does, rather than reporting the whole payment as sent.
+#[cfg(feature = "transparent-inputs")]
+#[test]
+fn mined_self_send_history_matches_reload_without_finalize() {
+    let mut w = wallet();
+    let b1 = empty_block(1, vec![0; 32]);
+    let b2 = empty_block(2, b1.hash.clone());
+    w.apply_compact_blocks_blob(&super::super::encode_delimited([b1, b2]))
+        .unwrap();
+    w.apply_utxos_json(
+        r#"{"utxos":[{"txid":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","index":0,"script":"76a914d3c0870e8e13a9ec320f1280889127aa15a4c0a188ac","valueZat":625000000,"height":1,"address":"tmV1zYhR2xisn6VWdCNKHpeD4S7L1U1nPH6"}]}"#,
+    ).unwrap();
+    let shield = w.prove_shield(REGTEST_FAUCET_MNEMONIC, 1).unwrap();
+    w.apply_mined_raw_tx(&shield, 1).unwrap();
+    w.apply_utxos_json(r#"{"utxos":[]}"#).unwrap();
+    w.finalize_scan_trees().unwrap();
+    assert!(w.sinsemilla_live());
+
+    let own = w.unified_address().to_string();
+    let raw = w
+        .prove_send(REGTEST_FAUCET_MNEMONIC, &own, "0.002", Some("self"))
+        .unwrap();
+    let block = w.mined_raw_tx_block(&raw, 2).unwrap();
+    let txid = Transaction::read(
+        raw.as_slice(),
+        zcash_protocol::consensus::BranchId::for_height(
+            &Network::Regtest,
+            BlockHeight::from_u32(u32::try_from(block.height).unwrap()),
+        ),
+    )
+    .unwrap()
+    .txid()
+    .to_string();
+    w.apply_compact_block(&block.encode_to_vec()).unwrap();
+
+    let live = w.history_matching(1, None, Some(&txid)).remove(0);
+    let fee = live.fee_zat.expect("constructed send records its fee") as i64;
+    assert!(live.mined_height.is_some());
+    assert_eq!(live.account_delta_zat, -fee, "self-send costs only its fee");
+    let reloaded = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+    let saved = reloaded.history_matching(1, None, Some(&txid)).remove(0);
+    assert_eq!(live.account_delta_zat, saved.account_delta_zat);
+    assert_eq!(
+        live.orchard_received + live.ironwood_received,
+        saved.orchard_received + saved.ironwood_received
+    );
+}
+
 /// A shield's history keeps exactly the transparent input it spent: pending
 /// recomputes must not add it again, and a UTXO refresh after mining (which
 /// no longer lists the spent output) must not erase it.
