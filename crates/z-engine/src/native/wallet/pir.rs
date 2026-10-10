@@ -628,6 +628,35 @@ mod tests {
         assert!(wallet.regtest_pir_discovery_for(&changed_anchor).is_err());
     }
     #[test]
+    fn partial_failed_sync_cannot_republish_previous_completion_after_reopen() {
+        let (_dir, wallet) = fixture();
+        let cancel = AtomicBool::new(false);
+        let mut store = store::NativePirStore::open(&wallet, &cancel).unwrap();
+        let scope = native_scope(&wallet.open_db().unwrap(), 1).unwrap();
+        store.enroll(scope.clone(), 1).unwrap();
+        store.persist_report(make_report(&wallet, &scope)).unwrap();
+        assert!(wallet.regtest_pir_discovery().unwrap().is_some());
+        let commit = ShardCommit {
+            shard_id: 0,
+            revision_digest: "r0".into(),
+            sealed: true,
+            start_height: 1,
+            end_height: 100,
+            terminal_block_hash: "11".repeat(32),
+            events: vec![transparent_wallet::testing::receive(1, 0, 10_000, 10)],
+            covered_scripts: vec![transparent_wallet::testing::script(1)],
+            ..Default::default()
+        };
+        store.commit_shard(commit.clone()).unwrap();
+        let mut contradiction = commit;
+        contradiction.events[0] = transparent_wallet::testing::receive(1, 0, 11_000, 10);
+        assert!(store.commit_shard(contradiction).is_err());
+        drop(store);
+        assert!(wallet.regtest_pir_discovery().unwrap().is_none());
+        let store = store::NativePirStore::open(&wallet, &cancel).unwrap();
+        assert_eq!(store.ledger().unwrap().confirmed_balance(), 10_000);
+    }
+    #[test]
     fn unique_script_count_retains_every_account_binding_in_identity() {
         let (_dir, wallet) = fixture();
         let scope = native_scope(&wallet.open_db().unwrap(), 1).unwrap();

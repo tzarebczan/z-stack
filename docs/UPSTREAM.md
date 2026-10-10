@@ -164,7 +164,9 @@ cancellation checks. The journal is limited to 16,384 operations and 64 MiB;
 individual operations are limited to 8 MiB. Alteration, truncation, unknown schema,
 limits, contradiction or write failure refuse advancement. Reopened report reads
 refuse changed native scope/scanner state until another independently anchored
-sync reconciles it. Journal replay and its head use one read snapshot.
+sync reconciles it. Every committed journal mutation after a final report
+invalidates the current completion; a failed later attempt cannot restore it.
+Journal replay and its head use one read snapshot.
 `RegtestAcceptedChain::with_context_identity` binds a canonical application
 enrollment digest and the full independently accepted snapshot to the persisted
 report. Call `regtest_pir_discovery_for` with the current enrolled chain/context;
@@ -180,3 +182,29 @@ Production gates remain relational bounded storage, native gap discovery,
 authenticated transaction enhancement, combined native/PIR reorg commits,
 endpoint/privacy enrollment and actual macOS/Windows verification. WASM does not
 enable this feature.
+
+## Native public regtest scanning
+
+`NativeWallet::scan_public_regtest_incremental` accepts the same caller-authenticated
+genesis-based compact publication as `scan_public_regtest`. It verifies every
+committed overlap hash and rejects a publication below the recorded native chain
+height. A single native wallet transaction checks that maximum and fully scanned
+boundaries agree, reconstructs persisted Sapling, Orchard and Ironwood frontiers,
+checks their sizes against native boundary metadata and their roots against
+persisted tree roots, and scans only the suffix. The pinned shardtree can prune rightmost unmarked leaves
+while retaining a valid persisted root. If that prevents frontier extraction,
+the API checks the native maximum commitment positions against boundary sizes,
+then reconstructs commitment frontiers from the already authenticated full
+prefix and requires their exact sizes and roots to match native tree state.
+This recovery hashes prefix commitments; it does not trial-decrypt or write
+prefix blocks again. Missing overlap, missing native roots and contradictory
+commitments or sizes refuse resume. An identical prefix does not scan again. A divergent fork requires an explicit native rewind/reset.
+
+The bounds remain 320 blocks and 128 MiB for the full publication, with regtest
+birthday one and the exact native activation schedule. This reduces repeated
+local trial decryption and tree writes (with prefix commitment hashing when
+native frontier leaves were pruned); it does not reduce publication download
+size, authenticate the publisher's chain independently, enable transparent
+lookup, or establish an unbounded production scanner. Tests compare encrypted
+Orchard notes, nullifiers, frontiers, balances and spending witnesses after full
+scan versus suffix/reopen, and cover no-op, rewind/reorg and SQL rollback.
