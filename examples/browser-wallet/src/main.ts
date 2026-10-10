@@ -6,7 +6,7 @@ import { drawReceiveQr } from "./receive-qr";
 import { attachBase } from "./base";
 import { connection } from "./connection";
 import { engineLoading } from "./engine-loading";
-import { reviewSend, recheckReview, refreshReceipt, type SendReview, type SendReceipt } from "./send";
+import { reviewSend, recheckReview, assertReviewCurrent, refreshReceipt, type SendReview, type SendReceipt } from "./send";
 
 const sdkBuild: { version: string; revision: string | null } = buildInfo;
 
@@ -56,7 +56,8 @@ async function start() {
   function showRuntime() {
     const runtime = wallet.runtime;
     element("runtime").textContent = runtime.scanner === "starting" ? "Starting scanner…" : runtime.mode === "multi-thread"
-      ? `Threaded scanner · ${runtime.threads} threads` : "Single-thread engine";
+      ? `Threaded scanner · ${runtime.threads} threads` : runtime.scanner === "main-thread"
+        ? "Scanner starts when you create or restore" : "Single-thread scanner";
   }
   showRuntime();
   wallet.on("runtime", () => showRuntime());
@@ -287,7 +288,11 @@ async function start() {
         sendStatus.textContent = "Proving payment · this can take a moment…";
         cancelSend.hidden = false;
         const sent = await wallet.send(approved.to, approved.amount, approved.memo || undefined, {
-          signal: operation.signal, beforeBroadcast: () => review === approved && !operation.signal.aborted && Date.now() - approved.reviewedAt < 5 * 60_000,
+          signal: operation.signal, beforeBroadcast: () => {
+            if (review !== approved || operation.signal.aborted) return false;
+            assertReviewCurrent(approved);
+            return true;
+          },
         });
         if (!sent.txid) throw new Error("Missing receipt");
         receipt = { txid: sent.txid, state: "pending" }; showReceipt(receipt);

@@ -22,18 +22,29 @@ export async function reviewSend(wallet: Wallet, draft: SendDraft): Promise<Send
 }
 
 /** App-owned: the SDK's `wallet_changed` copy describes another tab, not a stale review. */
-export class ReviewOutdatedError extends Error {
+export class ReviewOutdatedError extends WalletError {
   override readonly name = "ReviewOutdatedError";
+
+  constructor() {
+    super("cancelled", "This payment review is out of date.");
+  }
+}
+
+/** Also call immediately before broadcast: sync and proving can outlast a review. */
+export function assertReviewCurrent(review: SendReview): void {
+  if (Date.now() - review.reviewedAt >= 5 * 60_000) throw new ReviewOutdatedError();
 }
 
 export async function recheckReview(wallet: Wallet, review: SendReview): Promise<void> {
-  if (Date.now() - review.reviewedAt > 5 * 60_000) throw new ReviewOutdatedError("review expired");
+  assertReviewCurrent(review);
   // The SDK refuses a send more than 10 blocks behind the tip; entering the
   // phrase can take that long on a fast chain.
   await wallet.sync();
+  assertReviewCurrent(review);
   const current = await reviewSend(wallet, review);
+  assertReviewCurrent(review);
   if (current.walletAddress !== review.walletAddress || current.feeZat !== review.feeZat) {
-    throw new ReviewOutdatedError("wallet or fee changed");
+    throw new ReviewOutdatedError();
   }
 }
 

@@ -12,6 +12,8 @@ The Next CLI wrapper disables its telemetry during dev/build/start.
 Use [the setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md), or download and verify its preview bundle. Only custom engine
 builds need the [SDK build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md).
 
+`npm run setup:check` checks the SDK dependency. Dev, build and type checking also run this guard, including after an install with lifecycle scripts disabled.
+
 For manual setup, use the SDK archive in the verified preview’s `artifacts/` directory; a fresh clone has no archives.
 Copy this directory outside the SDK checkout. From your copy:
 

@@ -6,15 +6,55 @@ import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 // Exercise the maintained view code; only resolve the SDK import to the local core.
 const temp=mkdtempSync(join(tmpdir(),'wallet-view-'));
+writeFileSync(join(temp,'package.json'),JSON.stringify({type:'module'}));
 const views=[];
+const sends=[];
 try {
   for (const [name,file] of [['Vite','examples/browser-wallet/src/wallet-view.ts'],['Next','examples/next-wallet/lib/wallet-view.ts']]) {
     const copy=join(temp,name+'.ts');
     const source=readFileSync(new URL('../'+file,import.meta.url),'utf8');
     writeFileSync(copy,source.replace('"@z-stack/sdk"',JSON.stringify(new URL('../packages/core/src/index.ts',import.meta.url).href)));
     views.push([name,await import(pathToFileURL(copy).href)]);
+    const sendCopy=join(temp,name+'-send.ts');
+    const sendSource=readFileSync(new URL('../'+file.replace('wallet-view.ts','send.ts'),import.meta.url),'utf8');
+    writeFileSync(sendCopy,sendSource.replace('"@z-stack/sdk"',JSON.stringify(new URL('../packages/core/src/index.ts',import.meta.url).href)));
+    sends.push([name,await import(pathToFileURL(sendCopy).href)]);
   }
 } finally {rmSync(temp,{recursive:true,force:true});}
+
+for (const [name, send] of sends) {
+  test(`${name}: a review that expires during sync cannot proceed to fee checking`, async () => {
+    const originalNow=Date.now;
+    let now=1000;
+    Date.now=()=>now;
+    let estimates=0;
+    const review={to:'address',amount:'0.002',memo:'',feeZat:10000,walletAddress:'own',reviewedAt:now};
+    try {
+      const wallet={sync:async()=>{now+=5*60_000;},estimateFee:async()=>{estimates++;return {feeZat:10000};}};
+      await assert.rejects(send.recheckReview(wallet,review),send.ReviewOutdatedError);
+      assert.equal(estimates,0);
+      const {WalletError}=await import(new URL('../packages/core/src/index.ts',import.meta.url).href);
+      const error=new send.ReviewOutdatedError();
+      assert.equal(WalletError.fromUnknown(error),error,'public SDK normalization retains the app-owned display error');
+      assert.throws(()=>send.assertReviewCurrent(review),send.ReviewOutdatedError);
+    } finally {Date.now=originalNow;}
+  });
+  test(`${name}: sync happens before rechecking a frozen payment and fee changes require a new review`, async () => {
+    const steps=[];
+    let fee=10000;
+    const wallet={
+      sync:async()=>{steps.push('sync');},
+      estimateFee:async()=>{steps.push('fee');return {feeZat:fee};},
+      getWallet:async()=>({unifiedAddress:'own',balance:{totalAvailable:1000000}}),
+    };
+    const review={to:'address',amount:'0.002',memo:'',feeZat:fee,walletAddress:'own',reviewedAt:Date.now()};
+    await send.recheckReview(wallet,review);
+    assert.deepEqual(steps,['sync','fee']);
+    fee=20000;
+    await assert.rejects(send.recheckReview(wallet,review),send.ReviewOutdatedError);
+    assert.equal(review.feeZat,10000);
+  });
+}
 
 const mined = {txid:'a'.repeat(64), status:'mined', minedHeight:4482837, expiryHeight:null,
   accountDeltaZat:12500000, spentZat:0, receivedZat:12500000, feeZat:null,

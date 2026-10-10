@@ -6,6 +6,8 @@ It demonstrates SDK integration, not a production recovery or login flow.
 
 Prefer [the guided setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md). Source compilation is optional; for custom engines follow the [root instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md).
 
+`npm run setup:check` checks the SDK dependency. Dev, build and type checking also run this guard, including after an install with lifecycle scripts disabled.
+
 For manual setup, use the SDK archive inside the verified preview bundle’s
 `artifacts/` directory. Copy this directory outside the workspace, then install the
 downloaded archive. A fresh clone has no `artifacts/` directory; plain

@@ -330,3 +330,7 @@ change would break initialization or worker isolation. This release retains both
 integrity-checked engines. Use `preferMulticore: false` for the existing smaller
 startup, or enable HTTP compression and immutable hashed-asset caching. Moving
 key operations behind an asynchronous worker API is a separate architecture change.
+
+## Transaction ID byte order
+
+`BlockTransport.tx(txid)` accepts the 64-character transaction ID shown by explorers and returned by wallet history. The built-in transports convert it to the wire byte order expected by the light server. Do not reverse it before calling `tx()`. A custom transport must perform that conversion itself. This fetch remains an explicit privacy choice: the server learns the requested transaction ID.

@@ -1504,6 +1504,17 @@ fn first_receipt_after_note_free_finalize_can_spend() {
 #[cfg(feature = "transparent-inputs")]
 #[test]
 fn mined_self_send_history_matches_reload_without_finalize() {
+    check_mined_self_send_history(false);
+}
+
+#[cfg(feature = "transparent-inputs")]
+#[test]
+fn mined_self_send_history_matches_reload_without_finalize_via_blob() {
+    check_mined_self_send_history(true);
+}
+
+#[cfg(feature = "transparent-inputs")]
+fn check_mined_self_send_history(blob: bool) {
     let mut w = wallet();
     let b1 = empty_block(1, vec![0; 32]);
     let b2 = empty_block(2, b1.hash.clone());
@@ -1533,7 +1544,12 @@ fn mined_self_send_history_matches_reload_without_finalize() {
     .unwrap()
     .txid()
     .to_string();
-    w.apply_compact_block(&block.encode_to_vec()).unwrap();
+    if blob {
+        w.apply_compact_blocks_blob(&super::super::encode_delimited([block]))
+            .unwrap();
+    } else {
+        w.apply_compact_block(&block.encode_to_vec()).unwrap();
+    }
 
     let live = w.history_matching(1, None, Some(&txid)).remove(0);
     let fee = live.fee_zat.expect("constructed send records its fee") as i64;

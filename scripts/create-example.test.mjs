@@ -69,6 +69,11 @@ test('copied wallet setup guard explains missing SDK dependency and accepts manu
       const missing = spawnSync(process.execPath, [guard], {encoding:'utf8'});
       assert.equal(missing.status, 1);
       assert.match(missing.stderr, /source template.*prebuilt preview/);
+      for (const command of ['dev','build','check']) {
+        const result=spawnSync('npm',['run',command,'--ignore-scripts'],{cwd:dir,encoding:'utf8'});
+        assert.equal(result.status,1,`${name}: ${command} must run the guard even with lifecycle scripts disabled`);
+        assert.match(result.stderr,/source template.*prebuilt preview/);
+      }
       const manifest = JSON.parse(readFileSync(join(dir, 'package.json')));
       manifest.dependencies['@z-stack/sdk'] = 'file:vendor/sdk.tgz';
       writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest));

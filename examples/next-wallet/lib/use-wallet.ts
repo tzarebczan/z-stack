@@ -6,7 +6,7 @@ import { createWallet, WalletError, walletErrorMessage, type HistoryEntry,
 import { connection } from "./connection";
 import { walletLifetime } from "./lifetime";
 import { pendingRecovery } from "./recovery-memory";
-import { reviewSend, recheckReview, refreshReceipt, type SendDraft, type SendReview, type SendReceipt } from "./send";
+import { reviewSend, recheckReview, assertReviewCurrent, refreshReceipt, type SendDraft, type SendReview, type SendReceipt } from "./send";
 
 const acquire = walletLifetime(() => createWallet({ ...connection, autoSync: false,
   autoShield: false, memoFetch: "on-demand", unlockPolicy: "each-spend", threads: 2 }));
@@ -48,7 +48,7 @@ export function useWallet() {
   }, [phrase, busy]);
 
   function updateRuntime(wallet: Wallet) {
-    setRuntime(wallet.runtime.scanner === "starting" ? "Starting scanner…" : wallet.runtime.mode === "multi-thread" ? `${wallet.runtime.threads} threads` : "Single thread");
+    setRuntime(wallet.runtime.scanner === "starting" ? "Starting scanner…" : wallet.runtime.mode === "multi-thread" ? `${wallet.runtime.threads} threads` : wallet.runtime.scanner === "main-thread" ? "Scanner starts when you create or restore" : "Single-thread scanner");
     setSpending(wallet.hasSpendingSeed());
   }
   async function refresh(wallet: Wallet, value: WalletSnapshot) {
@@ -142,8 +142,11 @@ export function useWallet() {
         operation.signal.throwIfAborted();
         setStatus("Proving payment · this can take a moment…");
         const sent = await wallet.send(review.to, review.amount, review.memo || undefined, {
-          signal: operation.signal, beforeBroadcast: () => owner.current === wallet && !operation.signal.aborted &&
-            Date.now() - review.reviewedAt < 5 * 60_000,
+          signal: operation.signal, beforeBroadcast: () => {
+            if (owner.current !== wallet || operation.signal.aborted) return false;
+            assertReviewCurrent(review);
+            return true;
+          },
         });
         if (!sent.txid) throw new Error("Missing receipt");
         if (owner.current !== wallet) return;

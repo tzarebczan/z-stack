@@ -3,11 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node scripts/next.mjs dev --webpack --hostname localhost",
-    "build": "node scripts/next.mjs build --webpack",
+    "dev": "node scripts/check-setup.mjs && node scripts/next.mjs dev --webpack --hostname localhost",
+    "build": "node scripts/check-setup.mjs && node scripts/next.mjs build --webpack",
     "start": "node scripts/next.mjs start --hostname localhost",
-    "check": "tsc --noEmit",
-    "preinstall": "node scripts/check-setup.mjs"
+    "check": "node scripts/check-setup.mjs && tsc --noEmit",
+    "preinstall": "node scripts/check-setup.mjs",
+    "setup:check": "node scripts/check-setup.mjs"
   },
   "dependencies": {
     "next": "16.3.8",
