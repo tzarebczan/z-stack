@@ -35,6 +35,13 @@ fn invalid() -> EngineError {
     EngineError::Message("public_scan_invalid".into())
 }
 
+/// Activation heights from the caller's authenticated regtest chain profile.
+#[derive(Clone, Copy, Debug)]
+pub struct RegtestScanSchedule {
+    pub nu6_3_height: u32,
+    pub nu7_height: Option<u32>,
+}
+
 impl NativeWallet {
     /// Scan a complete, contiguous genesis-based regtest publication, using the
     /// standard native scanner and one wallet transaction. No network requests,
@@ -44,9 +51,19 @@ impl NativeWallet {
     /// verifies publication signatures, freshness, digests and anti-rollback first.
     /// This is shielded-wallet integration research, not production chain trust,
     /// transparent history, or a scalable incremental scanning API.
-    pub fn scan_public_regtest(&self, mut bytes: &[u8]) -> Result<u32> {
+    pub fn scan_public_regtest(
+        &self,
+        mut bytes: &[u8],
+        schedule: RegtestScanSchedule,
+    ) -> Result<u32> {
         if self.network != ZNetwork::Regtest
             || self.birthday_height() != 1
+            || schedule.nu6_3_height <= 2
+            || schedule
+                .nu7_height
+                .is_some_and(|height| height <= schedule.nu6_3_height)
+            || schedule.nu6_3_height != crate::regtest_nu6_3_height()
+            || schedule.nu7_height != crate::regtest_nu7_height()
             || bytes.is_empty()
             || bytes.len() > 128 * 1024 * 1024
         {
@@ -126,6 +143,63 @@ mod tests {
     use super::super::tests::{fixture_account, fixture_wallet};
     use super::*;
 
+    fn schedule() -> RegtestScanSchedule {
+        RegtestScanSchedule {
+            nu6_3_height: crate::regtest_nu6_3_height(),
+            nu7_height: crate::regtest_nu7_height(),
+        }
+    }
+
+    fn first_block() -> Vec<u8> {
+        let mut genesis = crate::web::from_hex(
+            "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327",
+        )
+        .unwrap();
+        genesis.reverse();
+        CompactBlock {
+            height: 1,
+            hash: vec![1; 32],
+            prev_hash: genesis,
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec()
+    }
+
+    #[test]
+    fn wrong_activation_schedule_leaves_wallet_state_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = fixture_wallet(dir.path());
+        let (ufvk, birthday) = fixture_account();
+        wallet.replace_scan_db(&ufvk, &birthday).unwrap();
+        let scanned = wallet.scanned_height().unwrap();
+        let tip = wallet.open_db().unwrap().chain_height().unwrap();
+        let current = schedule();
+        for mismatch in [
+            RegtestScanSchedule {
+                nu6_3_height: current.nu6_3_height + 1,
+                ..current
+            },
+            RegtestScanSchedule {
+                nu7_height: Some(current.nu6_3_height),
+                ..current
+            },
+            RegtestScanSchedule {
+                nu7_height: Some(current.nu6_3_height + 1),
+                ..current
+            },
+        ] {
+            assert_eq!(
+                wallet
+                    .scan_public_regtest(&first_block(), mismatch)
+                    .unwrap_err()
+                    .to_string(),
+                "public_scan_invalid"
+            );
+            assert_eq!(wallet.scanned_height().unwrap(), scanned);
+            assert_eq!(wallet.open_db().unwrap().chain_height().unwrap(), tip);
+        }
+    }
+
     #[test]
     fn publication_cannot_roll_back_an_unscanned_chain_tip() {
         let dir = tempfile::tempdir().unwrap();
@@ -154,7 +228,7 @@ mod tests {
 
         assert_eq!(
             wallet
-                .scan_public_regtest(&publication)
+                .scan_public_regtest(&publication, schedule())
                 .unwrap_err()
                 .to_string(),
             "public_scan_invalid"
@@ -193,16 +267,19 @@ mod tests {
             .encode_length_delimited_to_vec(),
         ] {
             assert_eq!(
-                wallet.scan_public_regtest(&bytes).unwrap_err().to_string(),
+                wallet
+                    .scan_public_regtest(&bytes, schedule())
+                    .unwrap_err()
+                    .to_string(),
                 "public_scan_invalid"
             );
             assert_eq!(wallet.scanned_height().unwrap(), before);
         }
         let mut wrong_profile = wallet;
         wrong_profile.meta.birthday_height = 2;
-        assert!(wrong_profile.scan_public_regtest(&[0]).is_err());
+        assert!(wrong_profile.scan_public_regtest(&[0], schedule()).is_err());
         wrong_profile.meta.birthday_height = 1;
         wrong_profile.network = ZNetwork::Mainnet;
-        assert!(wrong_profile.scan_public_regtest(&[0]).is_err());
+        assert!(wrong_profile.scan_public_regtest(&[0], schedule()).is_err());
     }
 }

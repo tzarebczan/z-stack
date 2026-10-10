@@ -20,6 +20,15 @@ pub struct PaymentReceipt {
 fn failed(code: &str) -> EngineError {
     EngineError::Message(code.into())
 }
+
+fn submission_acknowledged(result: Result<String>) -> Result<bool> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(error) if already_known_transaction(&error) => Ok(true),
+        Err(EngineError::Transport(_) | EngineError::BroadcastFailed(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
 fn clock() -> Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -79,6 +88,37 @@ mod tests {
     use super::super::tests::{fixture_account, fixture_wallet};
     use super::*;
     const ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn submission_keeps_rejections_distinct_from_lost_replies() {
+        assert!(submission_acknowledged(Ok(ID.into())).unwrap());
+        assert!(
+            !submission_acknowledged(Err(EngineError::Transport("lost reply".into()))).unwrap()
+        );
+        for message in [
+            "transaction already exists in mempool",
+            "transaction dropped because it is already queued for download",
+        ] {
+            assert!(submission_acknowledged(Err(EngineError::BroadcastRejected {
+                code: 1,
+                message: message.into()
+            }))
+            .unwrap());
+        }
+        for message in ["transaction expired", "inputs already spent"] {
+            assert!(matches!(
+                submission_acknowledged(Err(EngineError::BroadcastRejected {
+                    code: 1,
+                    message: message.into()
+                })),
+                Err(EngineError::BroadcastRejected { .. })
+            ));
+        }
+        assert!(matches!(
+            submission_acknowledged(Err(EngineError::WalletDb("missing bytes".into()))),
+            Err(EngineError::WalletDb(_))
+        ));
+    }
     fn prepare(conn: &rusqlite::Connection) {
         conn.execute("INSERT INTO ext_native_payments_v1 VALUES (?1,x'00',10000,1,121,1,zeroblob(32),'prepared','[]')", [ID]).unwrap();
     }
@@ -423,7 +463,8 @@ impl NativeWallet {
     }
 
     /// Submit ONLY the already-saved signed bytes. Retrying this operation cannot
-    /// create a replacement payment. Transport refusal/loss remains unknown.
+    /// create a replacement payment. Lost replies remain unknown; explicit node
+    /// rejections surface as errors while the signed receipt remains recoverable.
     pub async fn submit_payment(&self, id: &str) -> Result<PaymentReceipt> {
         let conn = connection(self)?;
         let receipt = self.payment_receipt(id)?;
@@ -442,15 +483,8 @@ impl NativeWallet {
         let mut client = None;
         for id in &receipt.txids {
             let txid = TxId::from_hex(id).ok_or_else(|| failed("payment_storage_failed"))?;
-            match self.broadcast_one(&mut client, &mut db, txid).await {
-                Ok(_) => {}
-                Err(e) if already_known_transaction(&e) => {}
-                Err(
-                    EngineError::Transport(_)
-                    | EngineError::BroadcastRejected { .. }
-                    | EngineError::BroadcastFailed(_),
-                ) => return self.payment_receipt(&receipt.id),
-                Err(error) => return Err(error),
+            if !submission_acknowledged(self.broadcast_one(&mut client, &mut db, txid).await)? {
+                return self.payment_receipt(&receipt.id);
             }
         }
         conn.execute(
