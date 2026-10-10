@@ -167,6 +167,17 @@ refuse changed native scope/scanner state until another independently anchored
 sync reconciles it. Every committed journal mutation after a final report
 invalidates the current completion; a failed later attempt cannot restore it.
 Journal replay and its head use one read snapshot.
+Before network work, sync captures native scope and scanner state in one read
+transaction. The final report transaction revalidates chain height, fully/max
+scanned block hashes, the accepted-anchor hash and scan ranges. Concurrent native
+advancement, rewind or same-height fork replacement refuses that report without
+changing the journal or its in-memory state. Already committed PIR history and
+coverage remain durable, with current completion absent until a successful sync.
+The report persists a digest of that full scanner snapshot; status also refuses
+later partial-island or queue changes. Older reports without this digest require
+fresh reconciliation, while their committed ledger remains replayable. The
+report's `native_scanned_height` is the backend's fully scanned frontier; the
+wallet's existing last-filled-island status and balances are unchanged.
 `RegtestAcceptedChain::with_context_identity` binds a canonical application
 enrollment digest and the full independently accepted snapshot to the persisted
 report. Call `regtest_pir_discovery_for` with the current enrolled chain/context;

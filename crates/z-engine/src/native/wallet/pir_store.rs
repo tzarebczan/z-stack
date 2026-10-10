@@ -1,6 +1,6 @@
 //! Bounded qualification journal. The pinned upstream store defines semantics;
 //! each accepted operation commits through the wallet's extension transaction.
-use super::pir::{native_scope, NativeScope, PirDiscoveryReport};
+use super::pir::{native_scope, NativeScanSnapshot, NativeScope, PirDiscoveryReport};
 use super::*;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -383,14 +383,25 @@ impl<'a> NativePirStore<'a> {
     pub(super) fn persist_report(
         &mut self,
         report: PirDiscoveryReport,
+        expected: &NativeScanSnapshot,
     ) -> std::result::Result<(), StoreError> {
-        self.write(Operation::Report(
-            report,
-            self.scope.clone().ok_or_else(corrupt)?,
-        ))
+        if report.native_scanner_identity != Some(expected.identity()?) {
+            return Err(StoreError::Io("native_pir_reconciliation_required".into()));
+        }
+        self.write_at(
+            Operation::Report(report, self.scope.clone().ok_or_else(corrupt)?),
+            Some(expected),
+        )
         .map(|_| ())
     }
     fn write(&mut self, op: Operation) -> std::result::Result<u64, StoreError> {
+        self.write_at(op, None)
+    }
+    fn write_at(
+        &mut self,
+        op: Operation,
+        expected_snapshot: Option<&NativeScanSnapshot>,
+    ) -> std::result::Result<u64, StoreError> {
         if self.cancel.load(Ordering::Acquire) {
             return Err(StoreError::Io("native_pir_cancelled".into()));
         }
@@ -434,6 +445,16 @@ impl<'a> NativePirStore<'a> {
                     if &actual != expected {
                         return Err(JournalError(StoreError::Io(
                             "native_pir_scope_changed".into(),
+                        )));
+                    }
+                }
+                if let Some(expected) = expected_snapshot {
+                    if NativeScanSnapshot::capture(wdb, expected.anchor_height)
+                        .map_err(JournalError)?
+                        != *expected
+                    {
+                        return Err(JournalError(StoreError::Io(
+                            "native_pir_reconciliation_required".into(),
                         )));
                     }
                 }

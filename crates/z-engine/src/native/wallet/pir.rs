@@ -127,6 +127,9 @@ pub struct PirDiscoveryReport {
     pub native_scanned_height: u32,
     pub native_chain_height: Option<u32>,
     pub native_anchor_hash: Option<String>,
+    /// Missing on older reports, which require a fresh successful reconciliation.
+    #[serde(default)]
+    pub native_scanner_identity: Option<String>,
     pub publication_start: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +219,59 @@ pub(super) fn native_scope<D: WalletRead<AccountId = AccountUuid>>(
         return Err(invalid());
     }
     Ok(NativeScope(scope))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(super) struct NativeScanSnapshot {
+    anchor_height: u32,
+    anchor_hash: Option<String>,
+    chain_height: Option<u32>,
+    fully_scanned: Option<(u32, String)>,
+    max_scanned: Option<(u32, String)>,
+    scan_ranges: Vec<(u32, u32, String)>,
+}
+impl NativeScanSnapshot {
+    pub(super) fn capture<D: WalletRead>(
+        db: &D,
+        anchor_height: u32,
+    ) -> std::result::Result<Self, StoreError> {
+        let invalid = || StoreError::Io("native_pir_database_failed".into());
+        let block = |b: zcash_client_backend::data_api::BlockMetadata| {
+            (u32::from(b.block_height()), b.block_hash().to_string())
+        };
+        let mut scan_ranges = db
+            .suggest_scan_ranges()
+            .map_err(|_| invalid())?
+            .into_iter()
+            .map(|r| {
+                (
+                    u32::from(r.block_range().start),
+                    u32::from(r.block_range().end),
+                    format!("{:?}", r.priority()),
+                )
+            })
+            .collect::<Vec<_>>();
+        scan_ranges.sort();
+        Ok(Self {
+            anchor_height,
+            anchor_hash: db
+                .get_block_hash(anchor_height.into())
+                .map_err(|_| invalid())?
+                .map(|h| h.to_string()),
+            chain_height: db.chain_height().map_err(|_| invalid())?.map(u32::from),
+            fully_scanned: db.block_fully_scanned().map_err(|_| invalid())?.map(block),
+            max_scanned: db.block_max_scanned().map_err(|_| invalid())?.map(block),
+            scan_ranges,
+        })
+    }
+    fn scanned_height(&self) -> u32 {
+        self.fully_scanned.as_ref().map(|b| b.0).unwrap_or(0)
+    }
+    pub(super) fn identity(&self) -> std::result::Result<String, StoreError> {
+        let bytes = serde_json::to_vec(self)
+            .map_err(|_| StoreError::Io("native_pir_database_failed".into()))?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
 }
 
 struct Cancelled;
@@ -339,17 +395,16 @@ impl NativeWallet {
             return Err(failed("native_pir_publication_invalid"));
         }
         let geometry = parse_init(&init).map_err(|_| failed("native_pir_publication_invalid"))?;
-        let db = self.open_db()?;
-        let scope = native_scope(&db, map.start_height).map_err(store_failed)?;
-        let native_chain_height = db
-            .chain_height()
-            .map_err(|_| failed("native_pir_database_failed"))?
-            .map(u32::from);
-        let native_scanned_height = self.scanned_height()?;
-        let native_anchor_hash = db
-            .get_block_hash((chain.target.height as u32).into())
-            .map_err(|_| failed("native_pir_database_failed"))?
-            .map(|h| h.to_string());
+        let mut db = self.open_db()?;
+        let (scope, native_snapshot) = db
+            .transactionally(|wdb| -> anyhow::Result<_> {
+                Ok((
+                    native_scope(wdb, map.start_height).map_err(store_failed)?,
+                    NativeScanSnapshot::capture(wdb, chain.target.height as u32)
+                        .map_err(store_failed)?,
+                ))
+            })
+            .map_err(EngineError::from)?;
         drop(db);
         let mut store = store::NativePirStore::open(self, cancel).map_err(store_failed)?;
         store
@@ -417,12 +472,15 @@ impl NativeWallet {
                 .collect(),
             pending_pages: store.pending().map_err(store_failed)?.len(),
             unresolved_spends: report.ledger.unresolved().len(),
-            native_scanned_height,
-            native_chain_height,
-            native_anchor_hash,
+            native_scanned_height: native_snapshot.scanned_height(),
+            native_chain_height: native_snapshot.chain_height,
+            native_anchor_hash: native_snapshot.anchor_hash.clone(),
+            native_scanner_identity: Some(native_snapshot.identity().map_err(store_failed)?),
             publication_start: map.start_height,
         };
-        store.persist_report(result.clone()).map_err(store_failed)?;
+        store
+            .persist_report(result.clone(), &native_snapshot)
+            .map_err(store_failed)?;
         Ok(result)
     }
     /// Only return a result for this exact independently accepted chain and enrollment.
@@ -451,24 +509,26 @@ impl NativeWallet {
         let Some((report, scope)) = store.report() else {
             return Ok(None);
         };
-        let db = self.open_db()?;
-        let native_anchor_hash = report
+        let height = report
             .accepted_anchor
             .as_ref()
-            .map(|a| db.get_block_hash((a.height as u32).into()))
-            .transpose()
-            .map_err(|_| failed("native_pir_database_failed"))?
-            .flatten()
-            .map(|h| h.to_string());
-        if native_anchor_hash != report.native_anchor_hash
-            || native_scope(&db, report.publication_start).map_err(store_failed)? != *scope
+            .ok_or_else(|| failed("native_pir_store_invalid"))?
+            .height as u32;
+        let mut db = self.open_db()?;
+        let (snapshot, actual_scope) = db
+            .transactionally(|wdb| -> anyhow::Result<_> {
+                Ok((
+                    NativeScanSnapshot::capture(wdb, height).map_err(store_failed)?,
+                    native_scope(wdb, report.publication_start).map_err(store_failed)?,
+                ))
+            })
+            .map_err(EngineError::from)?;
+        if snapshot.anchor_hash != report.native_anchor_hash
+            || snapshot.scanned_height() != report.native_scanned_height
+            || snapshot.chain_height != report.native_chain_height
+            || report.native_scanner_identity != Some(snapshot.identity().map_err(store_failed)?)
+            || actual_scope != *scope
             || report.scope_identity != scope.identity()?
-            || self.scanned_height()? != report.native_scanned_height
-            || db
-                .chain_height()
-                .map_err(|_| failed("native_pir_database_failed"))?
-                .map(u32::from)
-                != report.native_chain_height
         {
             return Err(failed("native_pir_reconciliation_required"));
         }
@@ -516,6 +576,7 @@ mod tests {
         .is_err());
     }
     fn make_report(wallet: &NativeWallet, scope: &NativeScope) -> PirDiscoveryReport {
+        let snapshot = NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 1).unwrap();
         PirDiscoveryReport {
             completion: "complete-for-enrolled-scope".into(),
             reconciled: true,
@@ -533,14 +594,10 @@ mod tests {
             history: vec![],
             pending_pages: 0,
             unresolved_spends: 0,
-            native_scanned_height: wallet.scanned_height().unwrap(),
-            native_chain_height: wallet
-                .open_db()
-                .unwrap()
-                .chain_height()
-                .unwrap()
-                .map(u32::from),
-            native_anchor_hash: None,
+            native_scanned_height: snapshot.scanned_height(),
+            native_chain_height: snapshot.chain_height,
+            native_anchor_hash: snapshot.anchor_hash.clone(),
+            native_scanner_identity: Some(snapshot.identity().unwrap()),
             publication_start: 1,
         }
     }
@@ -552,7 +609,12 @@ mod tests {
         let scope = native_scope(&wallet.open_db().unwrap(), 1).unwrap();
         store.enroll(scope.clone(), 1).unwrap();
         let report = make_report(&wallet, &scope);
-        store.persist_report(report.clone()).unwrap();
+        store
+            .persist_report(
+                report.clone(),
+                &NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 1).unwrap(),
+            )
+            .unwrap();
         drop(store);
         assert_eq!(wallet.regtest_pir_discovery().unwrap(), Some(report));
         let mut db = wallet.open_db().unwrap();
@@ -562,7 +624,12 @@ mod tests {
         let mut store = store::NativePirStore::open(&wallet, &cancel).unwrap();
         let report = make_report(&wallet, &scope);
         store.enroll(scope.clone(), 1).unwrap();
-        store.persist_report(report).unwrap();
+        store
+            .persist_report(
+                report,
+                &NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 1).unwrap(),
+            )
+            .unwrap();
         let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
         conn.execute("UPDATE accounts SET uuid=?1", [vec![8; 16]])
             .unwrap();
@@ -607,7 +674,12 @@ mod tests {
         store.enroll(scope.clone(), 1).unwrap();
         let mut report = make_report(&wallet, &scope);
         report.context_identity = chain.context_identity.clone();
-        store.persist_report(report.clone()).unwrap();
+        store
+            .persist_report(
+                report.clone(),
+                &NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 1).unwrap(),
+            )
+            .unwrap();
         drop(store);
         assert_eq!(
             wallet.regtest_pir_discovery_for(&chain).unwrap(),
@@ -634,7 +706,12 @@ mod tests {
         let mut store = store::NativePirStore::open(&wallet, &cancel).unwrap();
         let scope = native_scope(&wallet.open_db().unwrap(), 1).unwrap();
         store.enroll(scope.clone(), 1).unwrap();
-        store.persist_report(make_report(&wallet, &scope)).unwrap();
+        store
+            .persist_report(
+                make_report(&wallet, &scope),
+                &NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 1).unwrap(),
+            )
+            .unwrap();
         assert!(wallet.regtest_pir_discovery().unwrap().is_some());
         let commit = ShardCommit {
             shard_id: 0,
@@ -657,6 +734,188 @@ mod tests {
         assert_eq!(store.ledger().unwrap().confirmed_balance(), 10_000);
     }
     #[test]
+    fn report_commit_refuses_concurrent_native_advance_rewind_and_anchor_change() {
+        use prost::Message;
+        use zcash_client_backend::{
+            data_api::{chain::ChainState, WalletWrite},
+            proto::compact_formats::*,
+        };
+        use zcash_primitives::block::BlockHash;
+
+        let schedule = RegtestScanSchedule {
+            nu6_3_height: crate::regtest_nu6_3_height(),
+            nu7_height: crate::regtest_nu7_height(),
+        };
+        let mut genesis = crate::web::from_hex(GENESIS).unwrap();
+        genesis.reverse();
+        let blocks: Vec<_> = (1..=3)
+            .map(|height| CompactBlock {
+                height,
+                hash: vec![height as u8; 32],
+                prev_hash: if height == 1 {
+                    genesis.clone()
+                } else {
+                    vec![(height - 1) as u8; 32]
+                },
+                chain_metadata: Some(ChainMetadata::default()),
+                ..Default::default()
+            })
+            .collect();
+        let encode = |blocks: &[CompactBlock]| {
+            blocks
+                .iter()
+                .flat_map(Message::encode_length_delimited_to_vec)
+                .collect::<Vec<_>>()
+        };
+        for change in ["advance", "rewind", "anchor", "partial", "queue"] {
+            let (dir, wallet) = fixture();
+            let (key, _) = fixture_account();
+            wallet
+                .replace_scan_db(
+                    &key,
+                    &AccountBirthday::from_parts(
+                        ChainState::empty(0.into(), BlockHash::from_slice(&genesis)),
+                        None,
+                    ),
+                )
+                .unwrap();
+            wallet
+                .scan_public_regtest_incremental(&encode(&blocks[..2]), schedule)
+                .unwrap();
+            if change == "partial" || change == "queue" {
+                wallet
+                    .open_db()
+                    .unwrap()
+                    .update_chain_tip(5.into())
+                    .unwrap();
+            }
+            let cancel = AtomicBool::new(false);
+            let mut store = store::NativePirStore::open(&wallet, &cancel).unwrap();
+            let scope = native_scope(&wallet.open_db().unwrap(), 1).unwrap();
+            store.enroll(scope.clone(), 1).unwrap();
+            let expected = NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 2).unwrap();
+            let mut report = make_report(&wallet, &scope);
+            report.accepted_anchor = Some(Anchor {
+                height: 2,
+                hash: "02".repeat(32),
+            });
+            report.native_scanned_height = expected.scanned_height();
+            report.native_chain_height = expected.chain_height;
+            report.native_anchor_hash = expected.anchor_hash.clone();
+            report.native_scanner_identity = Some(expected.identity().unwrap());
+            store.persist_report(report.clone(), &expected).unwrap();
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            let head = || {
+                conn.query_row(
+                    "SELECT generation,bytes,digest FROM ext_coffer_pir_head WHERE id=1",
+                    [],
+                    |r| {
+                        Ok((
+                            r.get::<_, u64>(0)?,
+                            r.get::<_, u64>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .unwrap()
+            };
+            // A second handle changes the native scanner while the PIR operation is outstanding.
+            std::thread::scope(|threads| {
+                threads
+                    .spawn(|| {
+                        let other = NativeWallet::open(dir.path()).unwrap();
+                        match change {
+                            "advance" => {
+                                other
+                                    .scan_public_regtest_incremental(&encode(&blocks), schedule)
+                                    .unwrap();
+                            }
+                            "rewind" => {
+                                other
+                                    .open_db()
+                                    .unwrap()
+                                    .truncate_to_height(1.into())
+                                    .unwrap();
+                            }
+                            "anchor" => {
+                                other
+                                    .open_db()
+                                    .unwrap()
+                                    .truncate_to_height(1.into())
+                                    .unwrap();
+                                let mut fork = blocks[..2].to_vec();
+                                fork[1].hash = vec![22; 32];
+                                other
+                                    .scan_public_regtest_incremental(&encode(&fork), schedule)
+                                    .unwrap();
+                            }
+                            "partial" => {
+                                // Model a separately scanned island beyond the unchanged fully-scanned prefix.
+                                let conn = rusqlite::Connection::open(&other.paths.data_db).unwrap();
+                                conn.execute("INSERT INTO blocks (height,hash,time,sapling_tree,sapling_commitment_tree_size,orchard_commitment_tree_size,ironwood_commitment_tree_size) SELECT 4,?1,time,sapling_tree,sapling_commitment_tree_size,orchard_commitment_tree_size,ironwood_commitment_tree_size FROM blocks WHERE height=2", [vec![4; 32]]).unwrap();
+                                conn.execute_batch("DELETE FROM scan_queue WHERE block_range_start>=3; INSERT INTO scan_queue (block_range_start,block_range_end,priority) VALUES (3,4,50),(4,5,10),(5,6,50);").unwrap();
+                            }
+                            "queue" => {
+                                let conn = rusqlite::Connection::open(&other.paths.data_db).unwrap();
+                                assert!(conn.execute("UPDATE scan_queue SET priority=CASE WHEN priority=60 THEN 40 ELSE 60 END WHERE priority>10", []).unwrap()>0);
+                            }
+                            _ => unreachable!(),
+                        }
+                    })
+                    .join()
+                    .unwrap();
+            });
+            let changed = NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 2).unwrap();
+            assert_ne!(expected, changed, "{change}");
+            if change == "anchor" {
+                assert_eq!(expected.scanned_height(), changed.scanned_height());
+                assert_eq!(expected.chain_height, changed.chain_height);
+                assert_ne!(expected.anchor_hash, changed.anchor_hash);
+            }
+            if change == "partial" || change == "queue" {
+                assert_eq!(expected.fully_scanned, changed.fully_scanned);
+                assert_eq!(expected.chain_height, changed.chain_height);
+                assert_eq!(expected.anchor_hash, changed.anchor_hash);
+                if change == "partial" {
+                    assert_ne!(expected.max_scanned, changed.max_scanned);
+                } else {
+                    assert_eq!(expected.max_scanned, changed.max_scanned);
+                    assert_ne!(expected.scan_ranges, changed.scan_ranges);
+                }
+            }
+            assert!(NativeWallet::open(dir.path())
+                .unwrap()
+                .regtest_pir_discovery()
+                .is_err());
+            store
+                .commit_shard(ShardCommit {
+                    shard_id: 0,
+                    revision_digest: "r0".into(),
+                    sealed: true,
+                    start_height: 1,
+                    end_height: 2,
+                    terminal_block_hash: "02".repeat(32),
+                    events: vec![transparent_wallet::testing::receive(1, 0, 10_000, 2)],
+                    covered_scripts: vec![transparent_wallet::testing::script(1)],
+                    ..Default::default()
+                })
+                .unwrap();
+            let before = head();
+            assert!(matches!(
+                store.persist_report(report, &expected),
+                Err(StoreError::Io(code)) if code == "native_pir_reconciliation_required"
+            ));
+            assert_eq!(before, head(), "failed report must not advance its journal");
+            assert!(store.report().is_none());
+            assert_eq!(store.ledger().unwrap().confirmed_balance(), 10_000);
+            drop(store);
+            let reopened = NativeWallet::open(dir.path()).unwrap();
+            assert!(reopened.regtest_pir_discovery().unwrap().is_none());
+            let store = store::NativePirStore::open(&reopened, &cancel).unwrap();
+            assert_eq!(store.ledger().unwrap().confirmed_balance(), 10_000);
+        }
+    }
+    #[test]
     fn unique_script_count_retains_every_account_binding_in_identity() {
         let (_dir, wallet) = fixture();
         let scope = native_scope(&wallet.open_db().unwrap(), 1).unwrap();
@@ -668,6 +927,29 @@ mod tests {
         assert_eq!(two.unique_script_count(), 1);
         assert_ne!(one.identity().unwrap(), two.identity().unwrap());
         assert!(!one.continues(&two));
+    }
+    #[test]
+    fn legacy_report_without_scanner_identity_requires_fresh_reconciliation() {
+        let (_dir, wallet) = fixture();
+        let cancel = AtomicBool::new(false);
+        let mut store = store::NativePirStore::open(&wallet, &cancel).unwrap();
+        let scope = native_scope(&wallet.open_db().unwrap(), 1).unwrap();
+        store.enroll(scope.clone(), 1).unwrap();
+        let snapshot = NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 1).unwrap();
+        let mut value = serde_json::to_value(make_report(&wallet, &scope)).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("native_scanner_identity");
+        let legacy: PirDiscoveryReport = serde_json::from_value(value).unwrap();
+        assert!(legacy.native_scanner_identity.is_none());
+        assert!(store.persist_report(legacy, &snapshot).is_err());
+        assert!(store.report().is_none());
+        store
+            .persist_report(make_report(&wallet, &scope), &snapshot)
+            .unwrap();
+        drop(store);
+        assert!(wallet.regtest_pir_discovery().unwrap().is_some());
     }
     #[test]
     fn scope_is_native_owned_and_missing_prehistory_is_refused() {
