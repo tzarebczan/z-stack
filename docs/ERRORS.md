@@ -9,7 +9,7 @@ message and cause remain available for private debugging.
 | Code | Next action |
 | --- | --- |
 | `cancelled`, `hardware_cancelled` | Keep the last committed state; let the user retry |
-| `sync_required` | Complete the first scan before enabling payment review |
+| `sync_required` | Complete the first scan before enabling payment review. A send also needs the wallet within 10 blocks of the tip; sync before proving |
 | `seed_locked` | Ask for local reauthentication from a user action |
 | `invalid_birthday` | Correct the height/date before clearing secret inputs |
 | `rescan_later_birthday` | Use a birthday at or before the current one |
@@ -18,7 +18,7 @@ message and cause remain available for private debugging.
 | `busy` | Await the current operation or the previous client's close |
 | `closed` | Stop using this handle; await teardown before creating a new one |
 | `already_exists` | Load the saved wallet; require deliberate backup/replacement |
-| `wallet_changed` | Refresh state and review again; another tab committed first |
+| `wallet_changed` | Refresh state and review again; another tab committed first. Its fixed copy names another tab, so use your own error for an expired payment review |
 | `transport` | Retain activity, show a connection indicator, retry sync explicitly |
 | `storage_full` | Keep site data and recovery backups; free space, then retry saving |
 | `broadcast_rejected` | The node explicitly rejected this transaction; review before retrying |

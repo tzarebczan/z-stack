@@ -215,7 +215,7 @@ async function start() {
     catch (error) {
       const safe = WalletError.fromUnknown(error);
       console.warn("Wallet action failed", { code: safe.code });
-      output.textContent = output === sendStatus ? paymentErrorMessage(safe, latestSnapshot, unit) : safe.userMessage();
+      output.textContent = output === sendStatus ? paymentErrorMessage(error, latestSnapshot, unit) : safe.userMessage();
       if (output === sendStatus) {
         const fields: Partial<Record<WalletError["code"], string>> = { invalid_address: "send-to", invalid_amount: "send-amount", invalid_memo: "send-memo", invalid_recovery_phrase: "send-words", seed_mismatch: "send-words" };
         const field = fields[safe.code];
@@ -298,7 +298,7 @@ async function start() {
           receipt = { txid: error.txid, state: "unknown" }; showReceipt(receipt);
         }
         const safe = WalletError.fromUnknown(error);
-        sendStatus.textContent = paymentErrorMessage(safe, latestSnapshot, unit);
+        sendStatus.textContent = paymentErrorMessage(error, latestSnapshot, unit);
         if (safe.code === "invalid_recovery_phrase" || safe.code === "seed_mismatch") sendWords.setAttribute("aria-invalid", "true");
       } finally { wallet.lock(); sending = undefined; cancelSend.hidden = true; }
     }, sendStatus);

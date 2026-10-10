@@ -21,11 +21,19 @@ export async function reviewSend(wallet: Wallet, draft: SendDraft): Promise<Send
     walletAddress: snapshot.unifiedAddress, reviewedAt: Date.now() });
 }
 
+/** App-owned: the SDK's `wallet_changed` copy describes another tab, not a stale review. */
+export class ReviewOutdatedError extends Error {
+  override readonly name = "ReviewOutdatedError";
+}
+
 export async function recheckReview(wallet: Wallet, review: SendReview): Promise<void> {
+  if (Date.now() - review.reviewedAt > 5 * 60_000) throw new ReviewOutdatedError("review expired");
+  // The SDK refuses a send more than 10 blocks behind the tip; entering the
+  // phrase can take that long on a fast chain.
+  await wallet.sync();
   const current = await reviewSend(wallet, review);
-  if (current.walletAddress !== review.walletAddress || current.feeZat !== review.feeZat ||
-    Date.now() - review.reviewedAt > 5 * 60_000) {
-    throw new WalletError("wallet_changed", "Review the updated wallet and fee before sending.");
+  if (current.walletAddress !== review.walletAddress || current.feeZat !== review.feeZat) {
+    throw new ReviewOutdatedError("wallet or fee changed");
   }
 }
 

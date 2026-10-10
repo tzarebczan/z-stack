@@ -191,7 +191,7 @@ Continue after incoming funds are available, or in the isolated regtest fixture.
 
 Enter a shielded recipient address, a positive test-coin amount and an optional memo.
 Review the exact recipient, amount, memo and estimated fee. The demo freezes this
-review, refreshes the balance and fee before proving, and expires review after
+review, syncs and refreshes the balance and fee before proving, and expires review after
 five minutes. Fee estimates are not a cryptographically binding fee cap.
 
 Enter the phrase for this payment; it is cleared from the input before any

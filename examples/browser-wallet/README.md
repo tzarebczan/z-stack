@@ -33,7 +33,7 @@ builds production assets. Hosting still needs the
 ## Sending
 
 The form reviews a shielded address, exact decimal amount, memo and estimated
-fee. It rechecks balance/fee before proving and rejects expired review before
+fee. It syncs, then rechecks balance/fee before proving and rejects expired review before
 submission. A phrase unlocks this payment only; its DOM input is cleared before
 awaiting the SDK. Cancel prevents submission after the current proof finishes.
 The submitted receipt is retained while syncing and becomes confirmed when mined.

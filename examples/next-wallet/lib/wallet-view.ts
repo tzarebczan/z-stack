@@ -39,6 +39,9 @@ export function activityMovement(entry: HistoryEntry, unit: string): string {
 }
 
 export function paymentErrorMessage(error: unknown, snapshot: WalletSnapshot | undefined, unit: string): string {
+  if (error instanceof Error && error.name === "ReviewOutdatedError") {
+    return "This review is out of date. Choose Edit and review the payment again.";
+  }
   const safe = WalletError.fromUnknown(error);
   if (safe.code === "insufficient_funds" && snapshot && pendingFunds(snapshot) > 0n) {
     return `Not enough available funds for the amount and fee. ${formatZatoshis(pendingFunds(snapshot))} ${unit} is still confirming. ${confirmationPolicyText(snapshot.confirmations)}`;

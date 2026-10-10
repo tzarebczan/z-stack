@@ -67,6 +67,11 @@ for (const [name, view] of views) {
     assert.equal(view.confirmationPolicyText(undefined),'Sync to update.');
     assert.match(view.syncedWalletStatus({...snapshot,scannedHeight:101}),/block 101.*payments mined later/);
   });
+  test(`${name}: an outdated payment review is not described as another tab's change`, () => {
+    const outdated=Object.assign(new Error('review expired'),{name:'ReviewOutdatedError'});
+    assert.equal(view.paymentErrorMessage(outdated,undefined,'TAZ'),'This review is out of date. Choose Edit and review the payment again.');
+    assert.match(view.paymentErrorMessage(new Error('changed in another tab'),undefined,'TAZ'),/another tab/);
+  });
 }
 
 for (const [name, view] of views) {

@@ -86,7 +86,7 @@ Create/restore check the chain tip; sync downloads compact blocks. Memo queries
 stay on-demand. **Load memos and details** explicitly requests activity transaction
 IDs from the light server and decrypts memos locally. This recovers precise
 self-send labels and fees after restore; compact history first shows wallet movement. The chain provider can see
-your IP and request timing. Payment review is frozen, fee/balance are checked again before proving, and a
+your IP and request timing. Payment review is frozen, the wallet syncs and fee/balance are checked again before proving, and a
 five-minute review deadline is checked before broadcast. Receipts preserve
 unknown submission outcomes; do not automatically send the payment again.
 The app locks spending after every send attempt.
