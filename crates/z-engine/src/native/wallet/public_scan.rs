@@ -97,6 +97,13 @@ impl NativeWallet {
             }
         }
         db.transactionally(|wdb| -> anyhow::Result<()> {
+            // Recheck under the write transaction if another client advanced it.
+            if wdb
+                .chain_height()?
+                .is_some_and(|height| u32::from(height) > tip)
+            {
+                anyhow::bail!("public_scan_invalid");
+            }
             wdb.update_chain_tip(tip.into())?;
             scan_cached_blocks(
                 &self.network,
