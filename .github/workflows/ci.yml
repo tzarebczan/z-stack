@@ -19,7 +19,42 @@ env:
   CARGO_BUILD_JOBS: "2"
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.changes.outputs.full }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.3"
+      - id: changes
+        name: Select required verification
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: node scripts/ci-changes.mjs
+
+  docs:
+    needs: changes
+    if: needs.changes.outputs.full == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.3"
+      - run: node scripts/check-docs.mjs
+      - run: node --test scripts/ci.test.mjs scripts/consumer-archives.test.mjs
+
   native:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     # Forks can run release checks without a third-party runner installation.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -36,9 +71,15 @@ jobs:
           components: rustfmt, clippy
       # PRs restore main's cache; only main saves, so PRs cannot evict it.
       # target/vendor-tests is inside target/ and is cached with it.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - id: rust-cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Record exact Rust cache hit
+        env:
+          EXACT_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: |
+          printf '%s\n' "Exact Rust cache hit: ${EXACT_CACHE_HIT:-unavailable}" >> "$GITHUB_STEP_SUMMARY"
       - name: Rust formatting
         run: cargo fmt --all -- --check
       # Dependencies (proving, curves) are optimized for the test builds only;
@@ -46,14 +87,14 @@ jobs:
       # checks stay on. Measured: the engine tests run about 2x faster.
       - name: Engine check + tests
         run: |
-          cargo check -p z-engine --features native,cli
-          cargo test --config 'profile.dev.package."*".opt-level=2' -p z-engine --features native --lib
+          cargo test --config 'profile.dev.package."*".opt-level=2' -p z-engine --features native,cli --lib
+          cargo check --config 'profile.dev.package."*".opt-level=2' -p z-engine --features native,cli --bins
       - name: Desktop check
-        run: cargo check -p z-desktop
+        run: cargo check --config 'profile.dev.package."*".opt-level=2' -p z-desktop
       - name: Node launcher check
-        run: cargo check -p z-node-launcher
+        run: cargo check --config 'profile.dev.package."*".opt-level=2' -p z-node-launcher
       - name: Wasm target (engine default-features off)
-        run: cargo check -p z-wasm --target wasm32-unknown-unknown
+        run: cargo check --config 'profile.dev.package."*".opt-level=2' -p z-wasm --target wasm32-unknown-unknown
       - name: Patched field crates (wasm32 backend tests run natively too)
         run: |
           for c in zakura-pasta-curves zakura-bls12-381 zakura-jubjub; do
@@ -63,6 +104,8 @@ jobs:
         run: cargo test --config 'profile.dev.package."*".opt-level=2' -p z-engine --test regtest --no-run
 
   sdk:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -75,10 +118,16 @@ jobs:
         run: |
           rustup toolchain install "$Z_STACK_WASM_MT_TOOLCHAIN" --profile minimal --component rust-src
           rustup target add wasm32-unknown-unknown --toolchain "$Z_STACK_WASM_MT_TOOLCHAIN"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - id: rust-cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ env.Z_STACK_WASM_MT_TOOLCHAIN }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Record exact Rust cache hit
+        env:
+          EXACT_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: |
+          printf '%s\n' "Exact Rust cache hit: ${EXACT_CACHE_HIT:-unavailable}" >> "$GITHUB_STEP_SUMMARY"
       # Prebuilt, checksum-verified binary instead of compiling it every run.
       - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
@@ -103,6 +152,12 @@ jobs:
           pnpm --filter @z-stack/passkey build
           pnpm --filter @z-stack/sdk build
           pnpm --filter @z-stack/base build
+      - name: Prepare consumer archives once
+        run: |
+          pnpm pack:sdk
+          pnpm pack:base
+          cd artifacts
+          sha256sum *.tgz > SHA256SUMS
       - name: SDK, core, and passkey types and regression tests
         run: |
           pnpm --filter @z-stack/core typecheck
@@ -114,16 +169,11 @@ jobs:
           pnpm docs:api
           pnpm check:patches
           pnpm check:licenses
-          pnpm test:packages
-          pnpm test:base:package
-          pnpm test:combined:package
+          node scripts/test-packages.mjs --archives=artifacts
+          node scripts/test-base-package.mjs --archives=artifacts
+          node scripts/test-combined-package.mjs --archives=artifacts
       - name: Browser diagnostic app production build
         run: pnpm web:build
-      - name: Chromium, Firefox and WebKit packaged consumers
-        run: |
-          pnpm exec playwright install --with-deps chromium firefox webkit
-          pnpm test:packages:browser
-          pnpm test:base:browser
       - name: Reviewable API reference
         uses: actions/upload-artifact@v4
         with:
@@ -131,28 +181,59 @@ jobs:
           path: docs/api/
           retention-days: 14
           if-no-files-found: error
-      - name: Preview archives
-        run: |
-          pnpm pack:sdk
-          pnpm pack:base
       - uses: actions/upload-artifact@v4
         with:
           name: sdk-preview-${{ github.sha }}
-          path: artifacts/*.tgz
+          path: |
+            artifacts/*.tgz
+            artifacts/SHA256SUMS
           retention-days: 14
           if-no-files-found: error
 
-  # Branch protection requires a check named "rust". This gate keeps that name
-  # and passes only when every job above passed (a cancel or skip fails it).
+  browser:
+    needs: [changes, sdk]
+    if: needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.3"
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sdk-preview-${{ github.sha }}
+          path: artifacts
+      - name: Verify the shared package set
+        working-directory: artifacts
+        run: sha256sum --check --quiet SHA256SUMS
+      - name: Install the selected browser
+        env:
+          BROWSER: ${{ matrix.browser }}
+        run: pnpm exec playwright install --with-deps "$BROWSER"
+      - name: Installed SDK and optional Base consumers
+        env:
+          BROWSER: ${{ matrix.browser }}
+        run: |
+          node scripts/test-packages.mjs --browser --browsers="$BROWSER" --archives=artifacts
+          node scripts/test-base-package.mjs --browser --browsers="$BROWSER" --archives=artifacts
+
+  # Keep the required check on every run, including intentional docs-only routes.
+  # Failures, cancellations and unexpected skips still fail this gate.
   rust:
     if: always()
-    needs: [native, sdk]
+    needs: [changes, native, sdk, browser, docs]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: All CI jobs passed
+      - uses: actions/checkout@v4
+      - name: All required CI jobs passed
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
-        run: |
-          echo "native/sdk: $RESULTS"
-          for r in $RESULTS; do test "$r" = success; done
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/ci-gate.mjs

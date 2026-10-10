@@ -15,10 +15,10 @@ function documents(directory) {
   });
 }
 const entries = ["README.md", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", "AGENTS.md", ...documents("docs"), "infra/compose/README.md",
-  "packages/sdk/README.md", "packages/core/README.md", "packages/passkey/README.md", "packages/base/README.md", ...readdirSync(join(root, "examples")).filter(name => existsSync(join(root, "examples", name, "README.md"))).map(name => `examples/${name}/README.md`), "vendor/zakura/README.md"];
+  "packages/sdk/README.md", "packages/core/README.md", "packages/passkey/README.md", "packages/base/README.md", ...readdirSync(join(root, "examples")).filter(name => existsSync(join(root, "examples", name, "README.md"))).flatMap(name => ["README.md", "HOW-IT-WORKS.md"].filter(file => existsSync(join(root, "examples", name, file))).map(file => `examples/${name}/${file}`)), "vendor/zakura/README.md"];
 let count = 0;
 const portable = new Set([...['sdk', 'core', 'passkey', 'base'].map(name => `packages/${name}/README.md`),
-  ...Object.keys(JSON.parse(readFileSync(join(root, 'examples/templates.json'), 'utf8'))).map(name => `examples/${name}/README.md`)]);
+  ...Object.keys(JSON.parse(readFileSync(join(root, 'examples/templates.json'), 'utf8'))).flatMap(name => ["README.md", "HOW-IT-WORKS.md"].filter(file => existsSync(join(root, "examples", name, file))).map(file => `examples/${name}/${file}`))]);
 for (const name of entries) {
   const path = join(root, name);
   const text = readFileSync(path, "utf8");
