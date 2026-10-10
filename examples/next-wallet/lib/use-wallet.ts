@@ -218,7 +218,7 @@ export function useWallet() {
     }),
     loadDetails: () => run("Loading details", async wallet => {
       const entries = await refresh(wallet, await wallet.fetchMemos());
-      if (owner.current === wallet) setStatus(entries?.every(entry => entry.historyMetadataComplete)
+      if (owner.current === wallet) setStatus(entries?.every(entry => entry.historyMetadataComplete !== false)
         ? "Memos and transaction details loaded." : "Some details are unavailable. Try again later.");
     }),
     cancel: () => { owner.current?.cancelSync(); },

@@ -349,7 +349,7 @@ export async function verifyExampleRecovery(app, chromium) {
       assert.match(await page.locator("#history").innerText(), height < 102 ? new RegExp(`Confirming · ${height-99}/3 confirmations`) : /Mined · 3 confirmations/);
       assert.match(await page.locator("#send-confirming").innerText(), /Only available funds can be spent/);
       await page.locator("#review-send").click();
-      await page.locator("#send-status").filter({hasText:"0.12500000 TAZ is still confirming. Incoming shielded funds need 3 confirmations"}).waitFor();
+      await page.locator("#send-status").filter({hasText:"0.12500000 TAZ is still confirming. Incoming payments need 3 confirmations; your change needs 1 confirmation"}).waitFor();
     }
     await page.evaluate(() => { delete window.fixtureFundingHeight; });
     await page.locator("#sync").click();

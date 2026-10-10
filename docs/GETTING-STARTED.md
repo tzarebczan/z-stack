@@ -4,7 +4,7 @@ Start with a working app, then replace its screens one step at a time. The walle
 engine runs locally. Accounts, cloud backups and payment integrations are optional
 application services; they are not needed for this walkthrough.
 
-An external alpha.7 integration completed a Valar-funded receive and a mined
+An external alpha.7 integration reported a Valar-funded receive and a mined
 shielded self-send through ChainSafe. Both demos also pass funded NU7 regtest
 checks. Public services and faucet capacity can change; use disposable test funds.
 

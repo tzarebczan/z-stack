@@ -7,7 +7,7 @@ import { useWallet } from "../lib/use-wallet";
 import { SecretForm } from "./SecretForm";
 import { SetupChecks } from "./SetupChecks";
 import { BaseWallet } from "./BaseWallet";
-import { pendingFunds, confirmationLabel, activityMovement } from "../lib/wallet-view";
+import { pendingFunds, confirmationLabel, activityMovement, confirmationPolicyText } from "../lib/wallet-view";
 import { ScanDetails } from "./ScanDetails";
 import { SendPayment } from "./SendPayment";
 
@@ -39,7 +39,7 @@ export function WalletScreen() {
             <span>{unit}</span></p>
           {confirming > 0n && <div className="pending-balance">
             <p id="pending-balance" role="status">Confirming · {formatZatoshis(confirming)} {unit}</p>
-            <p className="hint">Confirming funds cannot be spent yet.{wallet.snapshot?.confirmations && ` Incoming shielded funds need ${wallet.snapshot.confirmations.untrusted} ${wallet.snapshot.confirmations.untrusted === 1 ? "confirmation" : "confirmations"}.`} Sync to update.</p>
+            <p className="hint">Confirming funds cannot be spent yet. {confirmationPolicyText(wallet.snapshot?.confirmations)}</p>
           </div>}
         </div>
         <div className="wallet-state">{wallet.snapshot && !backup && <span>{wallet.spending ? "Spending unlocked" : "Spending locked"}</span>}

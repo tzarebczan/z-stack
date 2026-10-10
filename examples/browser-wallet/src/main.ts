@@ -1,7 +1,7 @@
 import { SDK_VERSION, classifyHistory, createWallet, validateBirthdayInput, formatZatoshis, WalletError, type WalletSnapshot } from "@z-stack/sdk";
 import "./style.css";
 import buildInfo from "../sdk-build.json";
-import { pendingFunds, confirmationLabel, loadedWalletStatus, activityMovement, paymentErrorMessage, syncedWalletStatus } from "./wallet-view";
+import { pendingFunds, confirmationLabel, loadedWalletStatus, activityMovement, paymentErrorMessage, syncedWalletStatus, confirmationPolicyText } from "./wallet-view";
 import { drawReceiveQr } from "./receive-qr";
 import { attachBase } from "./base";
 import { connection } from "./connection";
@@ -67,7 +67,7 @@ async function start() {
   let identity: string | undefined;
   let hasScanned = false;
   let latestSnapshot: WalletSnapshot | undefined;
-  let incomingConfirmations: number | undefined;
+  let confirmationPolicy: WalletSnapshot["confirmations"];
   let pendingPayment = false;
   let recoveryPhrase = "";
   const sendWords = element<HTMLTextAreaElement>("send-words");
@@ -97,18 +97,17 @@ async function start() {
   wallet.on("sync", progress => {
     status.textContent = progress.stage === "synced" ? `Synced through block ${progress.scanned?.toLocaleString() ?? "unknown"}. Sync again for payments mined later.` : `Syncing · ${Math.round(progress.percent ?? 0)}%`;
   });
-  function showBalance(available: bigint, pending: bigint, required?: number) {
+  function showBalance(available: bigint, pending: bigint, policy?: WalletSnapshot["confirmations"]) {
     balance.textContent = `${formatZatoshis(available)} ${unit}`;
     element("pending-balance").hidden = pending === 0n;
     const pendingText = `Confirming · ${formatZatoshis(pending)} ${unit}`;
     if (element("pending-balance").textContent !== pendingText) element("pending-balance").textContent = pendingText;
     element("pending-help").hidden = pending === 0n;
-    element("pending-help").textContent = required === undefined ? "Confirming funds cannot be spent yet. Sync to update."
-      : `Incoming shielded funds need ${required} ${required === 1 ? "confirmation" : "confirmations"}. Sync to update.`;
+    element("pending-help").textContent = `Confirming funds cannot be spent yet. ${confirmationPolicyText(policy)}`;
     element("send-confirming").hidden = pending === 0n;
     element("send-confirming").textContent = `${formatZatoshis(pending)} ${unit} is still confirming. Only available funds can be spent.`;
   }
-  wallet.on("balance", value => showBalance(BigInt(value.availableZat), BigInt(value.pendingZat ?? 0), incomingConfirmations));
+  wallet.on("balance", value => showBalance(BigInt(value.availableZat), BigInt(value.pendingZat ?? 0), confirmationPolicy));
 
 
   async function render(snapshot: WalletSnapshot) {
@@ -116,7 +115,7 @@ async function start() {
     identity = snapshot.unifiedAddress;
     element("balance-panel").hidden = false;
     element("activity-panel").hidden = false;
-    incomingConfirmations = snapshot.confirmations?.untrusted;
+    confirmationPolicy = snapshot.confirmations;
     pendingPayment = (await wallet.pending(1)).length > 0;
     showRuntime();
     element("receive-panel").hidden = false;
@@ -131,7 +130,7 @@ async function start() {
       receipt = await refreshReceipt(wallet, receipt);
       showReceipt(receipt);
     }
-    showBalance(BigInt(snapshot.balance.totalAvailable), pendingFunds(snapshot), snapshot.confirmations?.untrusted);
+    showBalance(BigInt(snapshot.balance.totalAvailable), pendingFunds(snapshot), snapshot.confirmations);
     const entries = await wallet.history(20);
     const rows = entries.map(entry => {
       const row = document.createElement("li");
@@ -379,7 +378,7 @@ async function start() {
   element("load-details").addEventListener("click", () => void run(async () => {
     const snapshot = await wallet.fetchMemos();
     const entries = await render(snapshot);
-    status.textContent = entries.every(entry => entry.historyMetadataComplete) ? "Memos and transaction details loaded." : "Some details are unavailable. Try again later.";
+    status.textContent = entries.every(entry => entry.historyMetadataComplete !== false) ? "Memos and transaction details loaded." : "Some details are unavailable. Try again later.";
   }));
 
   restoreForm.addEventListener("submit", event => {

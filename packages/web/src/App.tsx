@@ -1920,12 +1920,21 @@ export function App() {
                   }
                   onChange={(e) => {
                     const v = e.target.value;
-                    if (v === "regtest") setLwdUrl("http://127.0.0.1:28137");
-                    else if (v === "local-mainnet") setLwdUrl(LOCAL_ZAINO_GRPC_MAINNET);
-                    else if (v === "local") setLwdUrl(LOCAL_ZAINO_GRPC);
-                    else if (v === "grpcweb") setLwdUrl(LOCAL_GRPC_WEB);
-                    else if (v === "testnet") { setLwdUrl("https://zcash-testnet.chainsafe.dev"); setTransportKind("grpc-web"); }
-                    else if (v === "mainnet") setLwdUrl("https://zec.rocks:443");
+                    const endpoints: Record<string, { url: string; kind: TransportKind }> = {
+                      regtest: { url: "http://127.0.0.1:28137", kind: "proxy" },
+                      "local-mainnet": { url: LOCAL_ZAINO_GRPC_MAINNET, kind: defaultTransportKind(network, LOCAL_ZAINO_GRPC_MAINNET) },
+                      local: { url: LOCAL_ZAINO_GRPC, kind: defaultTransportKind(network, LOCAL_ZAINO_GRPC) },
+                      grpcweb: { url: LOCAL_GRPC_WEB, kind: "grpc-web" },
+                      testnet: { url: "https://zcash-testnet.chainsafe.dev", kind: "grpc-web" },
+                      // zec.rocks is native gRPC; the loopback pipe reaches it.
+                      mainnet: { url: "https://zec.rocks:443", kind: "pipe" },
+                    };
+                    const endpoint = endpoints[v];
+                    if (endpoint) {
+                      setLwdUrl(endpoint.url);
+                      setTransportKind(endpoint.kind);
+                      setProxyUrl(proxyForTransport(endpoint.kind, NATIVE_BRIDGE_URL));
+                    }
                   }}
                   disabled={!!busy}
                 >
@@ -1934,7 +1943,7 @@ export function App() {
                   <option value="local">local testnet Zaino (127.0.0.1:8137)</option>
                   <option value="grpcweb">local gRPC-Web (127.0.0.1:1238)</option>
                   <option value="testnet">ChainSafe testnet (gRPC-Web)</option>
-                  <option value="mainnet">zec.rocks (shield-only)</option>
+                  <option value="mainnet">zec.rocks (native gRPC)</option>
                   <option value="custom">custom</option>
                 </select>
                 <input
