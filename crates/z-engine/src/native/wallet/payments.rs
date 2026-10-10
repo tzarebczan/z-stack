@@ -114,6 +114,58 @@ mod tests {
         }
     }
     #[test]
+    fn reviewed_payments_reject_uris_before_selecting_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = fixture_wallet(dir.path());
+        for to in ["zcash:example", " ZCASH:example", "\t zcash:example "] {
+            assert_eq!(
+                wallet
+                    .prepare_payment(to, 10000, None)
+                    .unwrap_err()
+                    .to_string(),
+                "payment_plain_address_required"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_signed_bytes_are_a_storage_error_not_an_unknown_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = fixture_wallet(dir.path());
+        let (ufvk, birthday) = fixture_account();
+        wallet.replace_scan_db(&ufvk, &birthday).unwrap();
+        let mut db = wallet.open_db().unwrap();
+        let txid = TxId::from_bytes([0xaa; 32]);
+        let mut client = None;
+        assert!(matches!(
+            wallet.broadcast_one(&mut client, &mut db, txid).await,
+            Err(EngineError::WalletDb(_))
+        ));
+        assert!(client.is_none(), "missing bytes must not reach a server");
+    }
+
+    #[test]
+    fn signed_receipts_require_their_wallet_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = fixture_wallet(dir.path());
+        let (ufvk, birthday) = fixture_account();
+        wallet.replace_scan_db(&ufvk, &birthday).unwrap();
+        let conn = connection(&wallet).unwrap();
+        prepare(&conn);
+        for phase in ["signed", "unknown", "accepted"] {
+            conn.execute(
+                "UPDATE ext_native_payments_v1 SET phase=?1, txids=?2",
+                params![phase, serde_json::to_string(&vec![ID]).unwrap()],
+            )
+            .unwrap();
+            assert_eq!(
+                wallet.payment_receipt(ID).unwrap_err().to_string(),
+                "payment_storage_failed"
+            );
+        }
+    }
+
+    #[test]
     fn wallet_state_and_receipt_roll_back_together_and_reopen_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let wallet = fixture_wallet(dir.path());
@@ -217,7 +269,7 @@ impl NativeWallet {
         amount: u64,
         memo: Option<&str>,
     ) -> Result<PaymentReceipt> {
-        if to.to_ascii_lowercase().starts_with("zcash:") {
+        if to.trim().to_ascii_lowercase().starts_with("zcash:") {
             return Err(failed("payment_plain_address_required"));
         }
         let request = self.send_request(to, amount, memo)?;
@@ -356,14 +408,15 @@ impl NativeWallet {
     pub fn payment_receipt(&self, id: &str) -> Result<PaymentReceipt> {
         let conn = connection(self)?;
         let mut receipt = read(&conn, id)?;
-        if !receipt.txids.is_empty()
-            && receipt.txids.iter().all(|txid| {
-                self.transaction(txid)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|t| t.mined_height.is_some())
-            })
-        {
+        let mut all_mined = !receipt.txids.is_empty();
+        for txid in &receipt.txids {
+            let transaction = self
+                .transaction(txid)
+                .map_err(|_| failed("payment_storage_failed"))?
+                .ok_or_else(|| failed("payment_storage_failed"))?;
+            all_mined &= transaction.mined_height.is_some();
+        }
+        if all_mined {
             receipt.phase = "mined".into();
         }
         Ok(receipt)
@@ -392,7 +445,12 @@ impl NativeWallet {
             match self.broadcast_one(&mut client, &mut db, txid).await {
                 Ok(_) => {}
                 Err(e) if already_known_transaction(&e) => {}
-                Err(_) => return self.payment_receipt(&receipt.id),
+                Err(
+                    EngineError::Transport(_)
+                    | EngineError::BroadcastRejected { .. }
+                    | EngineError::BroadcastFailed(_),
+                ) => return self.payment_receipt(&receipt.id),
+                Err(error) => return Err(error),
             }
         }
         conn.execute(
