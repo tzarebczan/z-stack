@@ -68,3 +68,14 @@ for (const [name, view] of views) {
     assert.match(view.syncedWalletStatus({...snapshot,scannedHeight:101}),/block 101.*payments mined later/);
   });
 }
+
+for (const [name, view] of views) {
+  test(`${name}: a complete visible page cannot hide remaining memo batches`, () => {
+    const visible = Array.from({length:20}, () => ({...mined,historyMetadataComplete:true}));
+    assert.match(view.memoDetailsMessage({memoFetchStatus:"scanning"},visible),/Load again for remaining/);
+    assert.equal(view.memoDetailsMessage({memoFetchStatus:"complete"},visible),"Memos and transaction details loaded.");
+    assert.match(view.memoDetailsMessage({memoFetchStatus:"unavailable"},visible),/Try again later/);
+    assert.match(view.memoDetailsMessage({},visible),/check remaining details/);
+    assert.match(view.memoDetailsMessage({memoFetchStatus:"unsupported"},visible),/cannot load/);
+  });
+}

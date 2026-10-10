@@ -57,3 +57,14 @@ export function confirmationPolicyText(policy: WalletSnapshot["confirmations"]):
     ? `Funds need ${count(policy.untrusted)}. Sync to update.`
     : `Incoming payments need ${count(policy.untrusted)}; your change needs ${count(policy.trusted)}. Sync to update.`;
 }
+
+/** Use the full enhancement queue status, not just the visible history page. */
+export function memoDetailsMessage(snapshot: WalletSnapshot, entries: HistoryEntry[]): string {
+  if (snapshot.memoFetchStatus === "scanning") return "This batch is loaded. Load again for remaining memos and details.";
+  if (snapshot.memoFetchStatus === "unsupported") return "This connection cannot load memos and transaction details.";
+  if (snapshot.memoFetchStatus === "unavailable" || entries.some(entry => entry.historyMetadataComplete === false)) {
+    return "Some details are unavailable. Try again later.";
+  }
+  return snapshot.memoFetchStatus === "complete" ? "Memos and transaction details loaded."
+    : "Recent activity refreshed. Load again to check remaining details.";
+}

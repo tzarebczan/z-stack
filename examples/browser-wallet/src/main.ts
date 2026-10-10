@@ -1,7 +1,7 @@
 import { SDK_VERSION, classifyHistory, createWallet, validateBirthdayInput, formatZatoshis, WalletError, type WalletSnapshot } from "@z-stack/sdk";
 import "./style.css";
 import buildInfo from "../sdk-build.json";
-import { pendingFunds, confirmationLabel, loadedWalletStatus, activityMovement, paymentErrorMessage, syncedWalletStatus, confirmationPolicyText } from "./wallet-view";
+import { pendingFunds, confirmationLabel, loadedWalletStatus, activityMovement, paymentErrorMessage, syncedWalletStatus, confirmationPolicyText, memoDetailsMessage } from "./wallet-view";
 import { drawReceiveQr } from "./receive-qr";
 import { attachBase } from "./base";
 import { connection } from "./connection";
@@ -378,7 +378,7 @@ async function start() {
   element("load-details").addEventListener("click", () => void run(async () => {
     const snapshot = await wallet.fetchMemos();
     const entries = await render(snapshot);
-    status.textContent = entries.every(entry => entry.historyMetadataComplete !== false) ? "Memos and transaction details loaded." : "Some details are unavailable. Try again later.";
+    status.textContent = memoDetailsMessage(snapshot, entries);
   }));
 
   restoreForm.addEventListener("submit", event => {

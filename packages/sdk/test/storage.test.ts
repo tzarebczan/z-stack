@@ -1232,3 +1232,20 @@ test("guarded deletion cannot erase a competing save committed after inspection"
   assert.equal(db.records.has("seed.enc"), false);
   assert.equal(db.records.has("passkey.v1"), false);
 });
+
+test("on-demand reports a remaining 505-transaction queue without automatic requests", async t => {
+  installDb(t); const worker = new MemoWorker();
+  worker.candidates = Array.from({length:505}, (_, i) => `tx${i}`);
+  await restartScanWorker(() => worker as unknown as Worker);
+  let calls = 0;
+  const client = createWasmClient({unlockPolicy:"session", memoFetch:"on-demand", network:"regtest", autoShield:false,
+    transport:{kind:"mock",label:"mock",tip:async()=>10,blocks:async()=>new Uint8Array(),tx:async id=>{calls++; return id;}}});
+  assert.equal((await client.restore("test-only worker fixture","regtest",1)).memoFetchStatus,"off");
+  await client.sync(); assert.equal(calls,0);
+  assert.equal((await client.fetchMemos()).memoFetchStatus,"scanning"); assert.equal(calls,500);
+  assert.equal((await client.sync()).memoFetchStatus,"scanning"); assert.equal(calls,500,"sync must not fetch the remaining IDs");
+  assert.equal((await client.fetchMemos()).memoFetchStatus,"complete"); assert.equal(calls,505);
+  await client.fetchMemos(); assert.equal(calls,505,"completed IDs are not requested again");
+  client.setMemoFetch("auto"); client.setMemoFetch("on-demand");
+  assert.equal((await client.getWallet()).memoFetchStatus,"off");
+});

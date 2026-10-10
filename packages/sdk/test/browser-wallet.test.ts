@@ -931,7 +931,7 @@ for (const memoFetch of ["shared", "auto", "on-demand"] as const) {
     const before = await wallet.getWallet();
     assert.equal(before.transparentScanStatus, transparentScan === "compact" ? "complete" : "off");
     assert.equal(before.sharedMemoStatus, memoFetch === "shared" ? "complete" : "off");
-    assert.equal(before.memoFetchStatus, memoFetch === "on-demand" ? "off" : "complete");
+    assert.equal(before.memoFetchStatus, "complete");
     const saved = await readSavedSnapshotRecord();
     // Fail after the engine has cleared coverage, not during the preceding save.
     f.onRescan(() => { resets++; failWrites = true; });

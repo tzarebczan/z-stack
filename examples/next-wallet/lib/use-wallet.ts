@@ -1,5 +1,5 @@
 "use client";
-import { loadedWalletStatus } from "./wallet-view";
+import { loadedWalletStatus, memoDetailsMessage } from "./wallet-view";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createWallet, WalletError, walletErrorMessage, type HistoryEntry,
   type Wallet, type WalletSnapshot } from "@z-stack/sdk";
@@ -217,9 +217,9 @@ export function useWallet() {
       }
     }),
     loadDetails: () => run("Loading details", async wallet => {
-      const entries = await refresh(wallet, await wallet.fetchMemos());
-      if (owner.current === wallet) setStatus(entries?.every(entry => entry.historyMetadataComplete !== false)
-        ? "Memos and transaction details loaded." : "Some details are unavailable. Try again later.");
+      const updated = await wallet.fetchMemos();
+      const entries = await refresh(wallet, updated);
+      if (owner.current === wallet && entries) setStatus(memoDetailsMessage(updated, entries));
     }),
     cancel: () => { owner.current?.cancelSync(); },
     unlock: (words: string) => run("Unlocking", async wallet => {

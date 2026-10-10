@@ -2,6 +2,7 @@
 
 ## 0.1.0-alpha.8
 
+- On-demand memo retrieval reports remaining batches; a completed visible history page no longer claims the whole queue is loaded.
 - Recognize Zebra's already-mined broadcast response as delivered in browser and native wallets.
 - Put recovery words before acknowledgement and hide unused wallet panels during backup.
 - Explain confirming funds on the send form and keep payment errors beside the fields.

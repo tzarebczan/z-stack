@@ -103,7 +103,7 @@ export function createWasmClient(
 
   let prewarmProvingKey = opts.prewarmProvingKey !== false;
 
-  let selectiveMemoStatus: PublicDataStatus = "scanning";
+  let selectiveMemoStatus: PublicDataStatus = memoFetch === "on-demand" ? "off" : "scanning";
 
   let memoAbort: AbortController | null = null;
 
@@ -240,7 +240,7 @@ export function createWasmClient(
     w.unlockPolicy = unlockPolicy;
     w.transparentScanStatus = transparentScanStatus;
     w.sharedMemoStatus = memoFetch === "shared" ? sharedMemoStatus : "off";
-    w.memoFetchStatus = memoFetch === "auto" ? selectiveMemoStatus : memoFetch === "shared" ? sharedMemoStatus : "off";
+    w.memoFetchStatus = memoFetch === "shared" ? sharedMemoStatus : selectiveMemoStatus;
     return w;
   }
 
@@ -918,7 +918,7 @@ export function createWasmClient(
     setMemoFetch: (mode) => {
       if (mode !== memoFetch) {
         memoAbort?.abort();
-        selectiveMemoStatus = "scanning";
+        selectiveMemoStatus = mode === "on-demand" ? "off" : "scanning";
         sharedMemoStatus = mode === "shared" ? "scanning" : "off";
       }
       memoFetch = mode;
@@ -1052,7 +1052,7 @@ export function createWasmClient(
             // the previous session's completion statuses during rollback.
             transparentScanStatus = transparentScan === "compact" ? "scanning" : "off";
             sharedMemoStatus = memoFetch === "shared" ? "scanning" : "off";
-            selectiveMemoStatus = "scanning";
+            selectiveMemoStatus = memoFetch === "on-demand" ? "off" : "scanning";
           } catch (error) {
             // wallet_changed already adopted the other tab's committed snapshot.
             // Close/forget/replacement have retired this source; never revive it.
