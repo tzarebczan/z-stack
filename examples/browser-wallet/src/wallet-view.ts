@@ -62,8 +62,8 @@ export function syncProgressLabel(progress: SyncEvent): string {
     return `Synced through block ${progress.scanned?.toLocaleString() ?? "unknown"}. Sync again for payments mined later.`;
   }
   // load() also reports snapshot hydration through the sync event.
-  if (progress.heading === "Restoring snapshot") return "Opening saved wallet…";
-  if (progress.heading === "Waiting for light server") return "Light server unreachable · retrying. Cancel sync to stop.";
+  if (progress.activity === "loading") return "Opening saved wallet…";
+  if (progress.activity === "waiting_for_server") return "Light server unreachable · retrying. Cancel sync to stop.";
   return `Syncing · ${Math.round(progress.percent ?? 0)}%`;
 }
 

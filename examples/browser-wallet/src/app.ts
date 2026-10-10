@@ -86,7 +86,7 @@ export async function startApp() {
     element("remove-pending").hidden = !removalBlocked;
     element("create", HTMLButtonElement).disabled = busy || exists;
     for (const id of ["sync", "lock", "copy-address", "load-details"]) element(id, HTMLButtonElement).disabled = busy || !exists;
-    element("review-send", HTMLButtonElement).disabled = busy || !exists || !app.hasScanned;
+    for (const id of ["review-send", "max-send"]) element(id, HTMLButtonElement).disabled = busy || !exists || !app.hasScanned;
     element("send-readiness").hidden = app.hasScanned;
   }
   async function perform<T>(action: () => Promise<T>): Promise<T> {
@@ -110,11 +110,11 @@ export async function startApp() {
   async function showSavedWallet() {
     const saved = await perform(async () => {
       const current = await wallet.load();
+      app.reset();
       if (current) await app.render(current);
       return current;
     }).catch(() => undefined);
     if (saved === null) {
-      app.reset();
       updateControls();
       status.textContent = "This wallet was removed in another tab. Create or restore to continue.";
     }

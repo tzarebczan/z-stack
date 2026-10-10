@@ -7,7 +7,7 @@ import {
   type UnlockPolicy,
   type WalletSnapshot
 } from "@z-stack/core";
-import type { ChainTip, CreationResult, EngineHealth, WaitOpts } from "./engine";
+import type { BirthdayInput, ChainTip, CreationResult, EngineHealth, WaitOpts } from "./engine";
 import { balanceEvent, createEventBus } from "./events";
 import { observeWasmRuntime, wasmRuntime } from "./runtime";
 import type { WalletEventHandler } from "./events";
@@ -67,6 +67,13 @@ export function createWasmClient(
 
   // A new wallet's first sync starts at its birthday. Saving one this client
   // would refuse to sync leaves no recovery path: rescan cannot raise a birthday.
+  function validateRestoreBirthday(birthday: BirthdayInput | undefined) {
+    if (typeof birthday === "string" && (!birthday.trim() || birthday.trim().toLowerCase() === "auto")) {
+      throw new WalletError("invalid_birthday", "Restore needs a height or date before the first deposit; auto can skip funds.");
+    }
+    if (birthday !== undefined) runtime.validateBirthdayInput(birthday);
+  }
+
   function assertFirstSyncAllowed(birthday: number, tip: number) {
     if (tip - birthday + 1 > runtime.MAX_GAP && !opts.allowDeepSync) {
       throw new WalletError("deep_sync_rejected", "restore birthday needs deep sync; pass a later birthday or set deepSync: true (createWallet)");
@@ -708,7 +715,7 @@ export function createWasmClient(
       }
     },
     restore: async (mnemonic, net, birthday, restoreOpts) => {
-      if (birthday !== undefined) runtime.validateBirthdayInput(birthday);
+      validateRestoreBirthday(birthday);
       const words = mnemonic.trim();
       if (/^uview/i.test(words)) {
         return client.restoreUfvk(words, net, birthday, restoreOpts);
@@ -732,13 +739,14 @@ export function createWasmClient(
           tip = await transport.tip();
           operation.assertCurrent();
         } catch (e) {
+          operation.assertCurrent();
           throw new WalletError(
             "transport",
             `light server tip failed (${transport.label}): ${e instanceof Error ? e.message : e}`,
             e,
           );
         }
-        const bday = await runtime.resolveBirthday(birthday, tip, net === "regtest" ? 1 : 1, { network: net, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
+        const bday = await runtime.resolveBirthday(birthday, tip, 1, { network: net, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
         if (bday > tip) throw new Error(`birthday ${bday} is above tip ${tip}`);
         assertFirstSyncAllowed(bday, tip);
         operation.assertCurrent();
@@ -773,7 +781,7 @@ export function createWasmClient(
       }
     },
     restoreUfvk: async (ufvk, net, birthday, restoreOpts) => {
-      if (birthday !== undefined) runtime.validateBirthdayInput(birthday);
+      validateRestoreBirthday(birthday);
       runtime.assertViewingKey(ufvk.trim(), net);
       if (opts.requireExplicitReplacement && !restoreOpts?.replace && await runtime.peekWasmWallet()) {
         throw new WalletError("already_exists", "A saved wallet exists. Confirm replacement explicitly.");
@@ -801,7 +809,7 @@ export function createWasmClient(
             e,
           );
         }
-        const bday = await runtime.resolveBirthday(birthday, tip, net === "regtest" ? 1 : 1, { network: net, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
+        const bday = await runtime.resolveBirthday(birthday, tip, 1, { network: net, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
         if (bday > tip) throw new Error(`birthday ${bday} is above tip ${tip}`);
         assertFirstSyncAllowed(bday, tip);
         operation.assertCurrent();
@@ -843,7 +851,7 @@ export function createWasmClient(
       }
     },
     restoreHardware: async (account: HardwareAccount, net, birthday, restoreOpts) => {
-      if (birthday !== undefined) runtime.validateBirthdayInput(birthday);
+      validateRestoreBirthday(birthday);
       const ufvk = account.ufvk.trim();
       runtime.assertViewingKey(ufvk, net);
       const fromHardware = runtime.requireBindings().WasmWallet.fromHardware;
@@ -860,6 +868,7 @@ export function createWasmClient(
         tip = await transport.tip();
         operation.assertCurrent();
       } catch (e) {
+        operation.assertCurrent();
         throw new WalletError(
           "transport",
           `light server tip failed (${transport.label}): ${e instanceof Error ? e.message : e}`,

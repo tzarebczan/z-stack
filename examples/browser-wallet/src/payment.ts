@@ -125,6 +125,7 @@ export function attachPayments(app: WalletApp) {
           showReceipt(receipt);
         }
         const safe = WalletError.fromUnknown(error);
+        if (safe.code === "wallet_changed") throw error;
         status.textContent = paymentErrorMessage(error, app.snapshot, app.unit);
         if (safe.code === "invalid_recovery_phrase" || safe.code === "seed_mismatch") words.setAttribute("aria-invalid", "true");
       } finally {
@@ -134,6 +135,16 @@ export function attachPayments(app: WalletApp) {
       }
     }, status);
   });
+  element("max-send", HTMLButtonElement).addEventListener("click", () => void app.run(async () => {
+    const to = element("send-to", HTMLTextAreaElement).value.trim();
+    if (to.toLowerCase().startsWith("zcash:")) throw new WalletError("unsupported_payment_uri", "Paste the recipient address itself.");
+    const maximum = await app.wallet.maxSend(to || undefined);
+    const amount = formatZatoshis(BigInt(maximum.maxSendZat));
+    element("send-amount", HTMLInputElement).value = amount;
+    status.textContent = maximum.maxSendZat > 0
+      ? `Available after the estimated fee: ${amount} ${app.unit}. Review before sending.`
+      : "No funds are available after the estimated fee.";
+  }, status));
   element("edit-send").addEventListener("click", () => {
     review = undefined;
     clearWords();

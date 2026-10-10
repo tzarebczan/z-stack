@@ -234,6 +234,7 @@ export function createStorageController(ctx: Pick<WasmClientContext, "savedRevis
     ctx.report({
       stage: "connecting",
       heading: "Restoring snapshot",
+      activity: "loading",
       message:
         peeked && (peeked.balance.totalAvailable ?? 0) > 0
           ? "available balance from decrypted notes"
@@ -295,6 +296,7 @@ export function createStorageController(ctx: Pick<WasmClientContext, "savedRevis
         await ctx.paintNoteBalance({
           stage: "connecting",
           heading: "Restoring snapshot",
+          activity: "loading",
           message: "available balance from decrypted notes",
           scanned: got,
           tip: 0,
@@ -327,6 +329,7 @@ export function createStorageController(ctx: Pick<WasmClientContext, "savedRevis
     await ctx.paintNoteBalance({
       stage: "connecting",
       heading: "Restoring snapshot",
+      activity: "loading",
       message: "available balance from decrypted notes",
       scanned: got,
       tip: 0,

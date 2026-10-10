@@ -75,6 +75,15 @@ export async function verifyVitePreview(app) {
       }
     }
     const missing = await get('/assets/missing-AbCd1234.js');
+    assert.equal(missing.status, 404);
+    for (const path of ['/missing.wasm', '/assets/missing-AbCd1234.wasm', '/assets/missing-worker-AbCd1234.js']) {
+      for (const method of ['GET', 'HEAD']) {
+        const absent = await fetch(origin + path, {method, signal:AbortSignal.timeout(5000)});
+        assert.equal(absent.status, 404, `Missing ${path} must not return HTML`);
+        assert.doesNotMatch(absent.headers.get('content-type') ?? '', /text\/html/);
+        assert.equal(absent.headers.get('cache-control'), 'no-store');
+      }
+    }
     assert.doesNotMatch(missing.headers.get('cache-control') ?? '', /immutable/,
       'Missing assets or their HTML fallback must not be cached as immutable');
     const fallbackEtag = missing.headers.get('etag');

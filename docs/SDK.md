@@ -100,7 +100,7 @@ they can be cached forever.
 |---|---|
 | `wallet.load()` | Returns the saved wallet on this device, or `null`. It makes no network request. |
 | `wallet.create({ birthday?, replace?, beforeCommit? })` | Creates a wallet and returns `{ wallet, recoveryPhrase }`. Optional preparation confirms recovery before saving. |
-| `wallet.restore(mnemonic, { birthday?, replace? })` | Restores from a recovery phrase. Pass a height or date before the first deposit: an omitted birthday means height 1, and `"auto"` (tip − 100) skips earlier history. A future date rejects with `birthday_above_tip`. A birthday beyond the deep-sync limit rejects with `deep_sync_rejected` before anything is saved unless `deepSync` is enabled. |
+| `wallet.restore(mnemonic, { birthday?, replace? })` | Restores from a recovery phrase. Pass a height or date before the first deposit: an omitted birthday means height 1, and `"auto"` or a blank string is refused because it can skip earlier history. A future date rejects with `birthday_above_tip`. A birthday beyond the deep-sync limit rejects with `deep_sync_rejected` before anything is saved unless `deepSync` is enabled. |
 | `wallet.restoreUfvk(ufvk, { birthday?, replace?, signal?, assertCurrent?, beforeCommit? })` | Creates a view-only wallet. `unlock` enables spending later. |
 | `wallet.sync()` | Catches up to the chain tip. Progress arrives through `on("sync")`, and `onProgress` gives scan detail. |
 | `wallet.getWallet()` | Returns the snapshot: addresses, per-pool balances, scanned height and recent history. |
@@ -419,3 +419,23 @@ The repository diagnostic app accepts `?regtestNu63=150&regtestNu7=250` for a
 matching custom fixture. Both runtime initialization and birthday previews use
 those heights. Reload after changing the query settings; configure the selected
 loopback transport separately.
+
+
+## Browser sync status and outage policy
+
+`wallet.on("sync", event => ...)` includes `activity` for browser operations:
+`loading`, `syncing`, or `waiting_for_server`. These typed values are independent
+of native scan stages and display headings. Use them for loading and reconnecting
+copy; keep existing activity visible during scans. Native bridge events may omit
+this browser-only field.
+
+`createWallet({ ..., lightServerGraceMs: 15000 })` changes the transient sync
+outage grace, measured from the first failed request. The default is 90,000 ms;
+zero stops after the first failure. This is not an overall deadline or an override
+of transport request timeouts. `wallet.cancelSync()` interrupts both retry waits
+and supported transport requests without discarding committed progress.
+
+An additional client in the same page rejects with `owner_conflict`. Reuse the
+owner or await its `close()` before opening another. A competing action on that
+client still uses `busy`. The React example serializes StrictMode teardown and
+remount rather than creating overlapping owners.

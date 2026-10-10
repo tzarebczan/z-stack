@@ -381,6 +381,7 @@ export type WasmClientOpts = {
   /** Compact-block light URL (Zaino / LWD). Drives batch size; t-scan stays loopback-only. */
   lightUrl?: string;
   allowDeepSync?: boolean;
+  lightServerGraceMs?: number;
   /** Opt-in shielding after sync while unlocked. Default false; consumes an each-spend unlock. */
   autoShield?: boolean;
   /** Build the proving key after a funded sync. False disables automatic background builds. Default true. */
@@ -422,6 +423,8 @@ export type WasmClient = EngineClient & {
 };
 
 export type WasmProgress = {
+  /** Typed UI state, independent of native scan stages and display headings. */
+  activity?: "loading" | "syncing" | "waiting_for_server";
   stage: "connecting" | "downloading" | "scanning" | "enhancing" | "synced";
   scanned: number;
   downloaded?: number;

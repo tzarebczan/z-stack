@@ -7,6 +7,7 @@ export type WalletErrorCode =
   | "unknown"
   | "cancelled"
   | "busy"
+  | "owner_conflict"
   | "closed"
   | "not_initialized"
   | "not_found"
@@ -54,6 +55,7 @@ export const WALLET_ERROR_MESSAGES: Record<WalletErrorCode, string> = {
   unknown: "Something went wrong.",
   cancelled: "Wallet operation cancelled.",
   busy: "Another wallet operation is in progress.",
+  owner_conflict: "A wallet client is already open in this page. Close it before opening another.",
   closed: "This wallet client is closed.",
   not_initialized: "Initialize the wallet engine first.",
   not_found: "No wallet on this device.",
@@ -77,7 +79,7 @@ export const WALLET_ERROR_MESSAGES: Record<WalletErrorCode, string> = {
   birthday_above_tip: "Birthday is above the current chain tip.",
   broadcast_rejected: "The network rejected this transaction.",
   broadcast_failed: "Submission may have succeeded. Check the transaction ID before sending another payment.",
-  wallet_changed: "The wallet was updated in another tab and has been reloaded. Try again.",
+  wallet_changed: "The saved wallet changed in another tab. Reload it before continuing.",
   reorg: "The chain reorganized. Rescan to continue.",
   transport: "Could not reach the light server.",
   wallet_db: "Could not read or update wallet data. Keep your recovery backup and try again.",

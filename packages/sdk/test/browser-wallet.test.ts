@@ -341,7 +341,7 @@ test("replacement requires consent, close releases handles but preserves data, a
   const initial = await wallet.create({ birthday: 1 });
   await assert.rejects(wallet.create({ birthday: 1 }), code("already_exists"));
   assert.equal((await wallet.getWallet()).unifiedAddress, initial.wallet.unifiedAddress);
-  await assert.rejects(createWallet({ network: "regtest", server: "https://unused.invalid" }), code("busy"));
+  await assert.rejects(createWallet({ network: "regtest", server: "https://unused.invalid" }), code("owner_conflict"));
   await wallet.create({ birthday: 1, replace: true });
   const address = (await wallet.getWallet()).unifiedAddress;
   await wallet.unlock(words);
@@ -1231,3 +1231,40 @@ for (const status of ["scanning", "unavailable"] as const) {
     await clock.tick(); assert.equal(syncs,4,"transparent automatic work is independent of the manual memo policy");
   });
 }
+
+
+test("automatic restore birthdays reject before fetching or modifying saved state", async t => {
+  const f = fixture(t);
+  let tips = 0;
+  const wallet = await f.open({ deepSync: true, server: {
+    kind: "fixture", label: "offline", tip: async () => { tips++; return 200000; }, blocks: async () => new Uint8Array(),
+  } });
+  for (const birthday of ["auto", " AUTO ", "", "  "]) {
+    await assert.rejects(wallet.restore(words, { birthday }), code("invalid_birthday"));
+  }
+  assert.equal(tips, 0);
+  assert.equal(await wallet.load(), null);
+});
+
+test("configured zero outage grace stops after the first failed tip and keeps saved state", async t => {
+  const f = fixture(t);
+  let tips = 0;
+  const wallet = await f.open({ lightServerGraceMs: 0, server: {
+    kind: "fixture", label: "offline", tip: async () => { tips++; throw new TypeError("SYNTHETIC_PRIVATE_PROVIDER_DETAIL"); },
+    blocks: async () => new Uint8Array(),
+  } });
+  const created = await wallet.create({ birthday: 1 });
+  const before = await readSavedSnapshotRecord();
+  await assert.rejects(wallet.sync(), code("transport"));
+  assert.equal(tips, 1);
+  assert.deepEqual(await readSavedSnapshotRecord(), before);
+  assert.equal((await wallet.getWallet()).unifiedAddress, created.wallet.unifiedAddress);
+});
+
+test("invalid outage configuration releases the owner for a later client", async t => {
+  for (const lightServerGraceMs of [-1, Infinity, 0.5, 2_147_483_648]) {
+    await assert.rejects(createWallet({ network: "regtest", storage: memoryWalletStorage(), server: "https://unused.invalid", lightServerGraceMs }), code("unknown"));
+  }
+  const f = fixture(t);
+  assert.ok(await f.open());
+});

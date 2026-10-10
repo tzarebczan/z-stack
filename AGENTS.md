@@ -54,6 +54,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup and checks, and
 
 ## Cursor Cloud specific instructions
 
+- Start with the installed browser example in [the walkthrough](docs/GETTING-STARTED.md) for public testnet integration. `pnpm web:dev` is a source diagnostic tool, not that walkthrough.
 - The diagnostic bench is `pnpm web:dev` (Vite on port 5174). Key derivation
   runs locally in the browser. Restore also queries the light server; Create does too with an automatic or date-based birthday. Only Create
   with an explicit block height can run offline. Sync always needs the configured

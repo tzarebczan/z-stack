@@ -26,11 +26,12 @@ fixed expired-review copy; the SDK does not manage application review deadlines.
 | `rescan_later_birthday` | Use a birthday at or before the current one |
 | `rescan_pending` | Sync to confirm or expire the outgoing payment before rescanning |
 | `unsupported_payment_uri` | Paste the recipient address; payment links need a separate review UI |
-| `busy` | Await the current operation or the previous client's close |
+| `busy` | Await the current operation |
+| `owner_conflict` | Reuse the page's client, or await its close before creating another |
 | `closed` | Stop using this handle; await teardown before creating a new one |
 | `already_exists` | Load the saved wallet; require deliberate backup/replacement |
 | `wallet_changed` | Refresh state and review again; another tab committed first. Its fixed copy names another tab, so use your own error for an expired payment review |
-| `transport` | Retain activity, show a connection indicator, retry sync explicitly. Sync rejects with this code after the light server stays unreachable for 90 seconds |
+| `transport` | Retain activity, show a connection indicator, retry sync explicitly. Sync rejects with this code after the configured outage grace, 90 seconds by default |
 | `storage_full` | Keep site data and recovery backups; free space, then retry saving |
 | `broadcast_rejected` | The node explicitly rejected this transaction; review before retrying |
 | `broadcast_failed` | Submission may have succeeded; reconcile its receipt before another payment |

@@ -81,6 +81,8 @@ export type WalletOptions = {
    * servers, where such a restore fails with `deep_sync_rejected`.
    */
   deepSync?: boolean;
+  /** Retry transient sync outages for this many milliseconds after the first failure. Default 90,000; zero disables retry. Transport request timeouts are separate. */
+  lightServerGraceMs?: number;
   /**
    * `"each-spend"` (default): unlock before every spend. `"session"` keeps
    * the seed in memory until lock/close; reload always locks. Neither writes
@@ -175,11 +177,14 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
   if (!["mainnet", "testnet", "regtest"].includes(opts.network)) throw new WalletError("invalid_network", "Choose mainnet, testnet or regtest.");
   if (opts.unlockPolicy !== undefined && !["session", "each-spend"].includes(opts.unlockPolicy)) throw new WalletError("unknown", "Invalid browser unlock policy.");
   const claimed = claimWalletOwner();
-  if (!claimed) throw new WalletError("busy", "Only one browser wallet client can own the engine. Close it before creating another.");
+  if (!claimed) throw new WalletError("owner_conflict", "Only one browser wallet client can own the engine. Close it before creating another.");
   const lease = claimed;
   let offLoadProgress = () => {};
   let createdClient: WasmClient | undefined;
   try {
+    if (opts.lightServerGraceMs !== undefined && (!Number.isSafeInteger(opts.lightServerGraceMs) || opts.lightServerGraceMs < 0 || opts.lightServerGraceMs > 2_147_483_647)) {
+      throw new WalletError("unknown", "lightServerGraceMs must be a nonnegative integer below 2,147,483,648.");
+    }
     useWalletStorage(opts.storage);
     const onLoadProgress = opts.onLoadProgress;
     if (onLoadProgress) offLoadProgress = observeEngineProgress(onLoadProgress);
@@ -211,6 +216,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
         requirePersistence: true,
         ...(lightUrl ? { lightUrl } : {}),
         allowDeepSync: opts.deepSync ?? transport.kind === "lwd-pipe",
+        ...(opts.lightServerGraceMs !== undefined ? { lightServerGraceMs: opts.lightServerGraceMs } : {}),
         ...(opts.autoShield !== undefined ? { autoShield: opts.autoShield } : {}),
         ...(opts.prewarmProvingKey !== undefined ? { prewarmProvingKey: opts.prewarmProvingKey } : {}),
         ...(opts.memoFetch !== undefined ? { memoFetch: opts.memoFetch } : {}),
