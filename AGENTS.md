@@ -54,9 +54,10 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup and checks, and
 
 ## Cursor Cloud specific instructions
 
-- The diagnostic bench is `pnpm web:dev` (Vite on port 5174). Create and restore
-  run in the browser engine. Sync needs a loopback light server and is not
-  started with the bench.
+- The diagnostic bench is `pnpm web:dev` (Vite on port 5174). Key derivation
+  runs locally in the browser. Restore also queries the light server; Create does too with an automatic or date-based birthday. Only Create
+  with an explicit block height can run offline. Sync always needs the configured
+  server. For regtest, start the matching loopback fixture separately.
 - `pnpm test`, package builds, and the bench need both WASM engines from
   `pnpm build:sdk`. Keep `CARGO_BUILD_JOBS` at 1 so release compiles stay within
   this VM's memory. The environment start script enables an 8G `/swapfile`.
