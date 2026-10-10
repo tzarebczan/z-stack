@@ -1,17 +1,15 @@
 import { launchBrowser } from "./browser-launch.mjs";
 import { verifyReceiveQr } from "./verify-receive-qr.mjs";
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { buildConsumer } from "./build-consumer.mjs";
 import { createRequire } from "node:module";
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 
 function build(app, isolated) {
-  const result = spawnSync("npm", ["run", "build"], { cwd: app, stdio: "inherit",
-    shell: process.platform === "win32", env: { ...process.env, NEXT_TELEMETRY_DISABLED: "1",
-      Z_STACK_ISOLATION: isolated ? "on" : "off" } });
-  assert.equal(result.status, 0, "Next.js production build failed");
+  buildConsumer(app, { env: { NEXT_TELEMETRY_DISABLED: "1", Z_STACK_ISOLATION: isolated ? "on" : "off" } });
 }
 async function start(app) {
   const reservation = createServer();
@@ -96,7 +94,7 @@ export async function GET(request: Request) {
 }
 `;
 
-export async function verifyNextWallet(app, browsers, browserNames = []) {
+export async function verifyNextWallet(app, browsers, browserNames = [], options = {}) {
   // The initial build is the unmodified demo, with no test-only route or transport.
   const production = await start(app);
   try {
@@ -128,7 +126,7 @@ export async function verifyNextWallet(app, browsers, browserNames = []) {
     }
     console.log("Next.js production shell/headers/404: verified; wallet initialization remains client-only");
   } finally { await production.stop(); }
-  if (!browsers) return;
+  if (!browsers && !options.prepareOnly) return;
 
   const path = join(app, "lib", "connection.ts");
   const original = readFileSync(path);
@@ -138,6 +136,7 @@ export async function verifyNextWallet(app, browsers, browserNames = []) {
   try {
     for (const isolated of [true, false]) {
       build(app, isolated);
+      if (options.prepareOnly) continue;
       const server = await start(app);
       try { for (const name of browserNames) await flows(server.origin, browsers[name], name, isolated, app); }
       finally { await server.stop(); }

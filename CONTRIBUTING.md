@@ -41,6 +41,20 @@ links are never substituted for the packaged SDK. Browser jobs verify the
 archive checksums before installing. The remote-backup virtual-authenticator
 scenario runs in Chromium, where Playwright exposes the required CDP interface.
 
+The SDK job compiles the production examples and their browser fixtures once.
+Browser jobs install fresh archive consumers, verify their inputs and compiled
+file checksums, and reuse those same-run builds. Missing or changed builds fail;
+they never trigger an unnoticed rebuild. Local checks compile normally unless
+the CI-only `Z_STACK_CONSUMER_BUILD_MODE` and `Z_STACK_CONSUMER_BUILDS` are set.
+
+Production ST/MT engines can be reused when all Rust inputs, both compiler builds
+and wasm-pack match exactly. CI verifies the source fingerprint, module bytes
+and generated bindings before package builds, then runs the full SDK and browser
+tests. Only `main` runs passing every required job write engine caches. A Rust or compiler
+change requires a rebuild. Native dependency caches include the hash of
+`.github/ci/native-profile.toml`, so profile changes create a fresh cache. The
+first successful `main` run fills new cache entries for subsequent runs.
+
 To reuse an already-built matching archive set locally:
 
 ```sh

@@ -1,0 +1,4 @@
+# Optimize proving dependencies without changing z-engine's debug assertions.
+# CI hashes this file into its native cache key.
+[profile.dev.package."*"]
+opt-level = 2

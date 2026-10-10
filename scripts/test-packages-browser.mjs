@@ -2,7 +2,7 @@ import { launchBrowser } from "./browser-launch.mjs";
 import { verifyReceiveQr } from "./verify-receive-qr.mjs";
 import assert from "node:assert/strict";
 import { assertSavedHide, verifyBackForward } from "./browser-hide-lifecycle.mjs";
-import { spawnSync } from "node:child_process";
+import { buildConsumer } from "./build-consumer.mjs";
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
@@ -99,15 +99,15 @@ Object.assign(window, { packageReplace: async () => {
 } });
 `;
 
-export async function verifyBrowserPackages(app, browsers, browserName = "chromium") {
-  const chromium = browsers[browserName];
-  assert.ok(chromium, "unsupported browser engine");
+export async function verifyBrowserPackages(app, browsers, browserName = "chromium", options = {}) {
+  const chromium = browsers?.[browserName];
+  assert.ok(options.prepareOnly || chromium, "unsupported browser engine");
   const originalIndex = readFileSync(join(app, "index.html"));
-  await verifyExampleRecovery(app, chromium);
+  await verifyExampleRecovery(app, chromium, options);
   writeFileSync(join(app, "src", "package-check.ts"), fixture);
   writeFileSync(join(app, "index.html"), '<!doctype html><html><head><link rel="icon" href="data:,"></head><body><script type="module" src="/src/package-check.ts"></script></body></html>');
-  const built = spawnSync("npm", ["run", "build"], { cwd: app, stdio: "inherit", shell: process.platform === "win32" });
-  assert.equal(built.status, 0, "browser fixture failed to typecheck/build");
+  buildConsumer(app);
+  if (options.prepareOnly) { writeFileSync(join(app, "index.html"), originalIndex); return; }
   const browser = await launchBrowser(chromium, { headless: true });
   try {
     for (const isolated of [false, true]) {
@@ -172,7 +172,7 @@ export async function verifyBrowserPackages(app, browsers, browserName = "chromi
   }
 }
 
-export async function verifyExampleRecovery(app, chromium) {
+export async function verifyExampleRecovery(app, chromium, options = {}) {
   const factoryPath = join(app, "src", "app.ts");
   const source = readFileSync(factoryPath, "utf8");
   // Preserve the example's UI code. Only its SDK factory is wrapped in this
@@ -233,8 +233,8 @@ export async function verifyExampleRecovery(app, chromium) {
       });
     }
   `);
-  const built = spawnSync("npm", ["run", "build"], { cwd: app, stdio: "inherit", shell: process.platform === "win32" });
-  assert.equal(built.status, 0, "example recovery fixture failed to build");
+  buildConsumer(app);
+  if (options.prepareOnly) { writeFileSync(factoryPath, source); return; }
   const dist = resolve(app, "dist");
   const server = createServer((req, res) => {
     const pathname = new URL(req.url, "http://localhost").pathname;
