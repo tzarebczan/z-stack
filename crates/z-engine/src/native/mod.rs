@@ -21,7 +21,8 @@ pub use rpc::{pick_local_validator, probe_validator, ValidatorProbe};
 pub use seed::{SeedStore, SeedUnlock, UnlockPolicy};
 pub use verify::{TreeReport, TreeRootCheck, WitnessCheck};
 pub use wallet::{
-    CreatedWallet, LightProbe, NativeWallet, SeedAuth, WalletPaths, BATCH_SIZE, MAX_MEM_SYNC_BLOCKS,
+    CreatedWallet, LightProbe, NativeWallet, PaymentReceipt, SeedAuth, WalletPaths, BATCH_SIZE,
+    MAX_MEM_SYNC_BLOCKS,
 };
 
 /// Replace `path` with `bytes` so a crash leaves the old file or the new one,
