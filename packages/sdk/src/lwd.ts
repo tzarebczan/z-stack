@@ -43,7 +43,12 @@ export type BlockTransport = {
   mine?: (blocks: number) => Promise<{ mined: number }>;
   /** Loopback-only raw mempool txs (hex). WASM trial-decrypts; no t-addrs sent. */
   mempool?: () => Promise<Array<{ txid?: string; hex: string }>>;
-  /** Full tx hex for memo enhance (`GET /lwd/tx` or gRPC-Web GetTransaction). */
+  /**
+   * Full transaction hex for memo enhancement. `txid` is the 64-character
+   * explorer/display-order hex ID, as returned by wallet history. Built-in
+   * transports handle wire byte order; callers must not reverse it.
+   * Fetches `GET /lwd/tx` or gRPC-Web GetTransaction.
+   */
   tx?: (txid: string, signal?: AbortSignal) => Promise<string>;
   /** Birthday-1 `GetTreeState` (frontiers for spend witnesses). */
   treeState?: (height: number, signal?: AbortSignal) => Promise<{
@@ -430,6 +435,9 @@ export function isBroadcastRejection(error: unknown): error is BroadcastRejectio
  * Zebra wraps an already-mined transaction as
  * "any transaction with the same effects …: transaction was committed to the best chain".
  * That whole reason is a duplicate. A different suffix is still a refusal.
+ * Zebra also suppresses duplicate submissions already in its mempool or
+ * download queue. Queued means delivery is underway, not that validation or
+ * mining succeeded. Keep the same pending receipt and reconcile it by syncing.
  */
 const ZEBRA_ALREADY_MINED =
   "any transaction with the same effects will be rejected from the mempool until a chain reset: transaction was committed to the best chain";
@@ -437,7 +445,7 @@ const ZEBRA_ALREADY_MINED =
 export function isDuplicateBroadcast(reason: string): boolean {
   const text = reason.trim();
   if (text.toLowerCase() === ZEBRA_ALREADY_MINED) return true;
-  return /^(?:txn-already-(?:in-mempool|known)|transaction is already in the mempool|transaction already in mempool|transaction already in (?:the )?block ?chain|already exists in (?:the )?mempool|already in (?:the )?(?:mempool|block ?chain)|transaction was committed to the best chain)\b/i
+  return /^(?:txn-already-(?:in-mempool|known)|transaction is already in the mempool|transaction already in mempool|transaction already exists in (?:the )?mempool|transaction dropped because it is already queued for download|transaction already in (?:the )?block ?chain|already exists in (?:the )?mempool|already in (?:the )?(?:mempool|block ?chain)|transaction was committed to the best chain)\b/i
     .test(text);
 }
 

@@ -1,4 +1,11 @@
-import { classifyHistory, formatZatoshis, parseZecToZatoshis, WalletError, type HistoryEntry, type WalletSnapshot } from "@z-stack/sdk";
+import { classifyHistory, formatZatoshis, parseZecToZatoshis, WalletError, type HistoryEntry, type WalletSnapshot, type Wallet } from "@z-stack/sdk";
+
+export function scannerLabel(runtime: Wallet["runtime"]): string {
+  if (runtime.scanner === "starting") return "Starting scanner…";
+  if (runtime.scanner === "main-thread") return "Scanner starts when you create or restore";
+  return runtime.mode === "multi-thread"
+    ? `Threaded scanner · ${runtime.threads} threads` : "Single-thread scanner";
+}
 
 export function pendingFunds(snapshot: WalletSnapshot): bigint {
   return snapshot.balance.totalPending !== undefined
@@ -39,6 +46,9 @@ export function activityMovement(entry: HistoryEntry, unit: string): string {
 }
 
 export function paymentErrorMessage(error: unknown, snapshot: WalletSnapshot | undefined, unit: string): string {
+  if (error instanceof Error && error.name === "ReviewOutdatedError") {
+    return "This review is out of date. Choose Edit and review the payment again.";
+  }
   const safe = WalletError.fromUnknown(error);
   if (safe.code === "insufficient_funds" && snapshot && pendingFunds(snapshot) > 0n) {
     return `Not enough available funds for the amount and fee. ${formatZatoshis(pendingFunds(snapshot))} ${unit} is still confirming. ${confirmationPolicyText(snapshot.confirmations)}`;

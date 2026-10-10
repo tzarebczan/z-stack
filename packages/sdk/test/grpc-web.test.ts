@@ -405,6 +405,10 @@ test("a node's explicit answer to a broadcast is told apart from an unknown outc
   assert.equal(submitVerdict(node(-1, "any transaction with the same effects will be rejected from the mempool until a chain reset: transaction was committed to the best chain")), "accepted");
   assert.equal(submitVerdict(node(-1, "any transaction with the same effects will be rejected from the mempool until a chain reset: expired")), "rejected");
   assert.equal(submitVerdict(node(-27, "txn-already-known")), "accepted");
+  // Zebra's mempool replies for a transaction it already holds unmined.
+  assert.equal(submitVerdict(node(-1, "transaction already exists in mempool")), "accepted");
+  assert.equal(submitVerdict(node(-1, "transaction dropped because it is already queued for download")), "accepted");
+  assert.equal(submitVerdict(node(-1, "transaction dropped because the queue is full")), "rejected");
   assert.equal(submitVerdict(node(-26, "bad-txns-nullifier-conflict")), "rejected");
   // "already" or "committed" alone is no duplicate: these are refusals.
   assert.equal(submitVerdict(node(-26, "nullifier already spent")), "rejected");
@@ -417,6 +421,14 @@ test("a node's explicit answer to a broadcast is told apart from an unknown outc
   assert.equal(submitVerdict(new Error("SendTransaction ended without a gRPC status")), null);
   assert.equal(submitVerdict(new Error("SendTransaction rejected (-26): bad-txns-nullifier-conflict")), null);
   assert.equal(submitVerdict(new TypeError("fetch failed")), null);
+});
+
+test("a rebroadcast of a transaction still in Zebra's mempool is not reported as a rejection", async () => {
+  const { isDuplicateBroadcastError } = await import("../src/wasm-client.ts");
+  const inMempool = new BroadcastRejection(-1, "transaction already exists in mempool");
+  assert.ok(isDuplicateBroadcastError(inMempool));
+  assert.ok(isDuplicateBroadcastError(new Error("SendTransaction rejected (-1): transaction already exists in mempool")));
+  assert.ok(!isDuplicateBroadcastError(new Error("SendTransaction rejected (-26): bad-txns-nullifier-conflict")));
 });
 
 test("gRPC-Web and the loopback bridge both report the node's refusal as a BroadcastRejection", async () => {

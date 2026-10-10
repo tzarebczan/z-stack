@@ -16,7 +16,17 @@
     "src/receive-qr.ts",
     "sdk-build.json",
     "scripts/check-setup.mjs",
-    "src/wallet-view.ts"
+    "src/wallet-view.ts",
+    "src/dom.ts",
+    "src/app-context.ts",
+    "src/app.ts",
+    "src/screen.ts",
+    "src/recovery.ts",
+    "src/create.ts",
+    "src/restore.ts",
+    "src/payment.ts",
+    "src/sync.ts",
+    "src/remove.ts"
   ],
   "next-wallet": [
     ".gitignore",

@@ -10,11 +10,11 @@ import * as playwright from 'playwright';
 import { launchBrowser } from './browser-launch.mjs';
 import { verifyReceiveQr } from './verify-receive-qr.mjs';
 import { baseDemoFixture, exerciseCombinedBase } from './base-demo-fixture.mjs';
-import { createExample } from './create-example.mjs';
 import { regtestBrowserGateway } from './regtest-browser-gateway.mjs';
 import { generate, zebraRpc } from './regtest-rpc.mjs';
 import { assertLocalRegtestChain } from './sdk-harness.mjs';
 import { ZEBRA_RPC } from './regtest-rpc.mjs';
+import { grpcWebTransport } from '../packages/sdk/dist/index.js';
 
 const withBase = process.argv.includes('--with-base');
 const baseOnly = process.argv.includes('--base-only');
@@ -34,8 +34,7 @@ const run = (command, args, cwd) => {
   assert.equal(result.status, 0, `${command} failed`);
 };
 for (const [name, app] of [['browser-wallet', vite], ['next-wallet', next]]) {
-  createExample(name, app, join(root, 'artifacts'), {withBase});
-  run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'], app);
+  run(process.execPath, ['scripts/create-example.mjs', name, app, '--install', ...(withBase ? ['--with-base'] : [])], root);
 }
 const staticRoot = resolve(vite, 'dist');
 const server = createServer((req, res) => {
@@ -110,6 +109,43 @@ try {
     await page.getByRole('button',{name:kind === 'vite' ? 'Sync' : 'Sync wallet',exact:true}).waitFor();
     await page.waitForFunction(() => !document.querySelector('#sync')?.disabled && ![...document.querySelectorAll('button')].some(button => button.textContent === 'Sync wallet' && button.disabled),null,{timeout:180_000});
   }
+  // Exercise the example's UI acknowledgement gate, not only the SDK callback.
+  if (!process.argv.includes('--next-only')) {
+    const creationContext = await browser.newContext();
+    const creation = await creationContext.newPage();
+    creation.on('dialog', dialog => dialog.accept());
+    const errors = [];
+    creation.on('pageerror', error => errors.push(error.message));
+    try {
+      await creation.goto(viteOrigin);
+      await creation.getByText('Create a wallet or restore one.', {exact:true}).waitFor();
+      await creation.locator('#create').click();
+      await creation.locator('#phrase li').nth(23).waitFor();
+      assert.equal(await creation.locator('#phrase li').count(), 24);
+      assert.equal(await creation.locator('#balance-panel').isVisible(), false);
+      assert.equal(await creation.locator('#restore-form').isVisible(), false);
+      await creation.reload();
+      await creation.getByText('Create a wallet or restore one.', {exact:true}).waitFor();
+      assert.equal(await creation.locator('#backup-panel').isVisible(), false, 'Leaving before acknowledgement must not save a wallet');
+      await creation.locator('#create').click();
+      await creation.locator('#phrase li').nth(23).waitFor();
+      await creation.locator('#hide-phrase').click();
+      await creation.getByText('Wallet created. Sync when ready.', {exact:true}).waitFor();
+      const address = await creation.locator('#address').innerText();
+      assert.ok(address.startsWith('uregtest'));
+      assert.equal(await creation.locator('#phrase').innerText(), '', 'Acknowledgement clears words before commit');
+      await creation.reload();
+      await creation.getByText(/Wallet opened/).waitFor();
+      assert.equal(await creation.locator('#address').innerText(), address);
+      await creation.getByText('Remove local wallet', {exact:true}).click();
+      await creation.locator('#remove-confirm').check();
+      await creation.locator('#remove').click();
+      await creation.getByText('Local wallet removed. You can create or restore.', {exact:true}).waitFor();
+      await creation.getByText('Scanner starts when you create or restore', {exact:true}).waitFor();
+      assert.equal(errors.length, 0, errors.join('\n'));
+      console.log('Vite creation: acknowledgement, cancelled backup, reload and local removal passed');
+    } finally { await creationContext.close(); }
+  }
   for (const [kind, origin] of (process.argv.includes('--next-only') ? [['next', nextOrigin]] : [['vite', viteOrigin], ['next', nextOrigin]])) {
     const context = await browser.newContext(); const ui = await context.newPage(); const errors=[];
     ui.on('pageerror', error=>errors.push(error.message));
@@ -152,9 +188,35 @@ try {
       assert.equal(await staleRemoval.getByRole('button',{name:'Remove from this browser',exact:true}).isEnabled(),true);
     }
     if (!uncertain) {
+      // Reproduce typing long enough to exceed the SDK's ten-block spend lag.
+      await generate(11);
+      const syncedHeight=(await zebraRpc('getblockchaininfo')).blocks;
+      const light=grpcWebTransport(gateway.url);
+      for (let attempt=0;attempt<180 && await light.tip()<syncedHeight;attempt++) await ui.waitForTimeout(100);
+      assert.ok(await light.tip()>=syncedHeight,'light server must index the newly mined review-delay blocks');
+      // A held light-server request must not keep Cancel busy or unlock spending.
+      let releaseCheck, checking;
+      const heldCheck = new Promise(resolve => { releaseCheck = resolve; });
+      const checkStarted = new Promise(resolve => { checking = resolve; });
+      const holdCheck = async route => { checking(); await heldCheck; await route.continue().catch(() => {}); };
+      await ui.route('**/GetLatestBlock', holdCheck);
+      try {
+        await ui.getByLabel('Recovery phrase for this payment',{exact:true}).fill(faucetWords);
+        await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).click();
+        await checkStarted;
+        await ui.getByRole('button',{name:'Cancel before submission',exact:true}).click();
+        await ui.getByText('Wallet operation cancelled.',{exact:true}).waitFor({timeout:15_000});
+        assert.equal(await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).isEnabled(),true);
+        assert.equal(await ui.locator('#send-words').inputValue(),'');
+      } finally { releaseCheck(); await ui.unroute('**/GetLatestBlock', holdCheck); }
       await ui.getByLabel('Recovery phrase for this payment',{exact:true}).fill('not a phrase');
       await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).click();
       await ui.getByText('Those words are not a valid recovery phrase.',{exact:true}).waitFor({timeout:60_000});
+      if (kind==='vite') {
+        const details=await ui.locator('#scan-details').innerText();
+        assert.ok(details.includes(syncedHeight.toLocaleString()),`fresh pre-send scan should show ${syncedHeight}; got ${details}`);
+      }
+      else await ui.getByText(`Scanned to ${syncedHeight.toLocaleString()}`,{exact:true}).waitFor();
       if (kind === 'vite') assert.equal(await ui.locator('#send-words').getAttribute('aria-invalid'), 'true');
     }
     await ui.getByLabel('Recovery phrase for this payment',{exact:true}).fill(faucetWords);

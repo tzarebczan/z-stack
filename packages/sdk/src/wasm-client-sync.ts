@@ -536,6 +536,12 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     // hashed the open shard live. Do not walk sapling+ironwood+all orchard
     // from empty (the 5-minute redo) until this session actually finished a
     // far-from-tip restore.
+    // Live trees need only their note/history aggregates refreshed. Do this
+    // once per completed scan, not once per compact-block page during catch-up.
+    if (treesLive && (notesFound > 0 || spendsFound > 0)) {
+      await source.recomputePools();
+      if (cancelled()) throw new Error("sync cancelled");
+    }
     if (!followOn && !treesLive) {
       await paintNoteBalance({
         stage: "scanning",

@@ -25,7 +25,7 @@ and [funded regtest](#reproducible-funded-regtest) are separate troubleshooting 
 
 ## 1. Get matching archives
 
-The published **alpha.8** preview includes NU7 support. Use Node 22.18+ and npm;
+The published **alpha.9** preview includes NU7 support. Use Node 22.18+ and npm;
 no Rust toolchain or npm account is needed for these built archives. The SDK
 archive includes compiled single-threaded and threaded WASM engines, bindings,
 workers, integrity manifests, and bundled core and passkey helpers. Building
@@ -35,20 +35,20 @@ per-file lines (including the offline API files); a zero exit status means the
 check passed. Mismatches still print an error:
 
 ```sh
-gh release download v0.1.0-alpha.8 --repo tzarebczan/z-stack --dir sdk-alpha \
-  --pattern 'z-stack-preview-0.1.0-alpha.8.tgz*'
+gh release download v0.1.0-alpha.9 --repo tzarebczan/z-stack --dir sdk-alpha \
+  --pattern 'z-stack-preview-0.1.0-alpha.9.tgz*'
 cd sdk-alpha
-sha256sum --quiet -c z-stack-preview-0.1.0-alpha.8.tgz.sha256 # macOS: shasum -q -a 256 -c z-stack-preview-0.1.0-alpha.8.tgz.sha256
-tar -xzf z-stack-preview-0.1.0-alpha.8.tgz
+sha256sum --quiet -c z-stack-preview-0.1.0-alpha.9.tgz.sha256 # macOS: shasum -q -a 256 -c z-stack-preview-0.1.0-alpha.9.tgz.sha256
+tar -xzf z-stack-preview-0.1.0-alpha.9.tgz
 cd z-stack-preview
 sha256sum --quiet -c SHA256SUMS # macOS: shasum -q -a 256 -c SHA256SUMS
 ```
 
 The bundle's `.sha256` file checks only the preview download. The separate
-`SHA256SUMS-alpha.8` asset covers all five archives if you download the full set.
+`SHA256SUMS-alpha.9` asset covers all five archives if you download the full set.
 
-Without GitHub CLI, open the [release downloads](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.8),
-choose `z-stack-preview-0.1.0-alpha.8.tgz` and its `.sha256` file, and verify both checksum layers as above.
+Without GitHub CLI, open the [release downloads](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.9),
+choose `z-stack-preview-0.1.0-alpha.9.tgz` and its `.sha256` file, and verify both checksum layers as above.
 The [README](../README.md#run-the-published-preview) also provides curl commands.
 
 Continue from **inside the extracted bundle**, using its scripts and matching
@@ -191,7 +191,7 @@ Continue after incoming funds are available, or in the isolated regtest fixture.
 
 Enter a shielded recipient address, a positive test-coin amount and an optional memo.
 Review the exact recipient, amount, memo and estimated fee. The demo freezes this
-review, refreshes the balance and fee before proving, and expires review after
+review, syncs and refreshes the balance and fee before proving, and expires review after
 five minutes. Fee estimates are not a cryptographically binding fee cap.
 
 Enter the phrase for this payment; it is cleared from the input before any

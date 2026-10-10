@@ -173,11 +173,12 @@ export async function verifyBrowserPackages(app, browsers, browserName = "chromi
 }
 
 export async function verifyExampleRecovery(app, chromium) {
-  const mainPath = join(app, "src", "main.ts");
-  const main = readFileSync(mainPath, "utf8");
+  const factoryPath = join(app, "src", "app.ts");
+  const source = readFileSync(factoryPath, "utf8");
   // Preserve the example's UI code. Only its SDK factory is wrapped in this
   // temporary consumer to inject a history-read failure after real persistence.
-  writeFileSync(mainPath, main.replace('from "@z-stack/sdk";', 'from "./recovery-fixture";'));
+  assert.match(source, /createWallet.*from "@z-stack\/sdk";/, "recovery fixture must wrap the SDK factory");
+  writeFileSync(factoryPath, source.replace('from "@z-stack/sdk";', 'from "./recovery-fixture";'));
   writeFileSync(join(app, "src", "recovery-fixture.ts"), `
     import { createWallet as realCreateWallet, type BlockTransport } from '@z-stack/sdk';
     export * from '@z-stack/sdk';
@@ -450,6 +451,6 @@ export async function verifyExampleRecovery(app, chromium) {
   } finally {
     if (browser) await browser.close();
     await new Promise(resolve => server.close(resolve));
-    writeFileSync(mainPath, main);
+    writeFileSync(factoryPath, source);
   }
 }

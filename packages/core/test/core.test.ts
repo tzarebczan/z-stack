@@ -394,6 +394,8 @@ test("WalletError maps known engine strings and leaves unknown intact", () => {
   );
   assert.equal(classifyWalletError("ledger_status_6a80: Ledger rejected the PCZT data or key path"), "hardware_rejected");
   assert.equal(classifyWalletError("some novel engine panic"), "unknown");
+  assert.equal(classifyWalletError("sync cancelled"), "cancelled");
+  assert.equal(WalletError.fromMessage("sync cancelled").userMessage(), "Wallet operation cancelled.");
   const e = WalletError.fromMessage("insufficient funds");
   assert.equal(e.code, "insufficient_funds");
   assert.equal(e.name, "WalletError");

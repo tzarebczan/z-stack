@@ -3,11 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host localhost",
-    "check": "tsc --noEmit",
-    "build": "tsc --noEmit && vite build",
+    "dev": "node scripts/check-setup.mjs && vite --host localhost",
+    "check": "node scripts/check-setup.mjs && tsc --noEmit",
+    "build": "node scripts/check-setup.mjs && tsc --noEmit && vite build",
     "preview": "vite preview --host localhost",
-    "preinstall": "node scripts/check-setup.mjs"
+    "preinstall": "node scripts/check-setup.mjs",
+    "setup:check": "node scripts/check-setup.mjs"
   },
   "devDependencies": {
     "typescript": "5.9.3",

@@ -134,6 +134,15 @@ impl WebWallet {
     }
 
     fn apply_mined_raw_tx_inner(&mut self, raw: &[u8], time: u32) -> Result<ScanDelta> {
+        let block = self.mined_raw_tx_block(raw, time)?;
+        let d = self.apply_decoded(block)?;
+        self.assert_consistent_leaf_hashes()?;
+        self.recompute_pool_fields();
+        Ok(d)
+    }
+
+    /// The compact block `apply_mined_raw_tx` would scan at the next height.
+    pub(crate) fn mined_raw_tx_block(&self, raw: &[u8], time: u32) -> Result<CompactBlock> {
         use zcash_primitives::transaction::Transaction;
         use zcash_protocol::consensus::{BlockHeight, BranchId};
 
@@ -174,7 +183,7 @@ impl WebWallet {
         hash[0] = (height & 0xff) as u8;
         hash[1] = 0x4d;
         hash[2] = ((height >> 8) & 0xff) as u8;
-        let block = CompactBlock {
+        Ok(CompactBlock {
             height: u64::from(height),
             hash,
             prev_hash,
@@ -182,11 +191,7 @@ impl WebWallet {
             header: vec![],
             vtx: vec![vtx],
             chain_metadata: None,
-        };
-        let d = self.apply_decoded(block)?;
-        self.assert_consistent_leaf_hashes()?;
-        self.recompute_pool_fields();
-        Ok(d)
+        })
     }
 
     fn ensure_chain(&mut self, block: &CompactBlock) -> Result<Option<u32>> {

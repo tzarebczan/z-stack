@@ -1,12 +1,12 @@
 "use client";
-import { loadedWalletStatus, memoDetailsMessage } from "./wallet-view";
+import { loadedWalletStatus, memoDetailsMessage, scannerLabel } from "./wallet-view";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createWallet, WalletError, walletErrorMessage, type HistoryEntry,
   type Wallet, type WalletSnapshot } from "@z-stack/sdk";
 import { connection } from "./connection";
 import { walletLifetime } from "./lifetime";
 import { pendingRecovery } from "./recovery-memory";
-import { reviewSend, recheckReview, refreshReceipt, type SendDraft, type SendReview, type SendReceipt } from "./send";
+import { reviewSend, syncForReview, recheckReview, assertReviewCurrent, refreshReceipt, type SendDraft, type SendReview, type SendReceipt } from "./send";
 
 const acquire = walletLifetime(() => createWallet({ ...connection, autoSync: false,
   autoShield: false, memoFetch: "on-demand", unlockPolicy: "each-spend", threads: 2 }));
@@ -48,7 +48,7 @@ export function useWallet() {
   }, [phrase, busy]);
 
   function updateRuntime(wallet: Wallet) {
-    setRuntime(wallet.runtime.scanner === "starting" ? "Starting scanner…" : wallet.runtime.mode === "multi-thread" ? `${wallet.runtime.threads} threads` : "Single thread");
+    setRuntime(scannerLabel(wallet.runtime));
     setSpending(wallet.hasSpendingSeed());
   }
   async function refresh(wallet: Wallet, value: WalletSnapshot) {
@@ -137,13 +137,18 @@ export function useWallet() {
       const operation = new AbortController(); sendOperation.current = operation; setCanCancelPayment(true);
       try {
         setStatus("Checking payment…");
-        await recheckReview(wallet, review);
+        await refresh(wallet, await syncForReview(wallet, review, operation.signal));
+        await recheckReview(wallet, review, operation.signal);
+        operation.signal.throwIfAborted();
         await wallet.unlock(words);
         operation.signal.throwIfAborted();
         setStatus("Proving payment · this can take a moment…");
         const sent = await wallet.send(review.to, review.amount, review.memo || undefined, {
-          signal: operation.signal, beforeBroadcast: () => owner.current === wallet && !operation.signal.aborted &&
-            Date.now() - review.reviewedAt < 5 * 60_000,
+          signal: operation.signal, beforeBroadcast: () => {
+            if (owner.current !== wallet || operation.signal.aborted) return false;
+            assertReviewCurrent(review);
+            return true;
+          },
         });
         if (!sent.txid) throw new Error("Missing receipt");
         if (owner.current !== wallet) return;

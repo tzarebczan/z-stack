@@ -6,6 +6,8 @@ It demonstrates SDK integration, not a production recovery or login flow.
 
 Prefer [the guided setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md). Source compilation is optional; for custom engines follow the [root instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md).
 
+`npm run setup:check` checks the SDK dependency. Dev, build and type checking also run this guard, including after an install with lifecycle scripts disabled.
+
 For manual setup, use the SDK archive inside the verified preview bundle’s
 `artifacts/` directory. Copy this directory outside the workspace, then install the
 downloaded archive. A fresh clone has no `artifacts/` directory; plain
@@ -13,7 +15,7 @@ downloaded archive. A fresh clone has no `artifacts/` directory; plain
 
 ```sh
 cd /path/to/copied/browser-wallet
-npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.8.tgz
+npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.9.tgz
 npm run dev
 ```
 
@@ -33,7 +35,7 @@ builds production assets. Hosting still needs the
 ## Sending
 
 The form reviews a shielded address, exact decimal amount, memo and estimated
-fee. It rechecks balance/fee before proving and rejects expired review before
+fee. It syncs, then rechecks balance/fee before proving and rejects expired review before
 submission. A phrase unlocks this payment only; its DOM input is cleared before
 awaiting the SDK. Cancel prevents submission after the current proof finishes.
 The submitted receipt is retained while syncing and becomes confirmed when mined.
@@ -105,3 +107,16 @@ amount and confirmation count; the send form explains waiting funds. These views
 use the SDK balance and confirmation policy without changing spending rules.
 New wallets generate 24 words. Restore accepts valid BIP39 phrases of 12, 15, 18,
 21 or 24 words; a valid shorter phrase is not a validation failure.
+
+## Read the example
+
+Start at `src/main.ts`, then `src/app.ts` for wallet options, action coordination and page lifecycle. Each flow uses the public SDK directly:
+
+- `create.ts` creates the wallet; `recovery.ts` waits for phrase acknowledgement before the SDK commits it.
+- `restore.ts` validates inputs, preserves words on failure and imports into an empty local slot.
+- `sync.ts` handles scanning, rescans and explicit memo retrieval.
+- `payment.ts` owns forms and receipts; `send.ts` validates amounts, freezes reviews and checks them before proving and broadcast.
+- `remove.ts` confirms local deletion and respects pending-payment guards.
+- `screen.ts` renders balances, receive addresses and activity. `wallet-view.ts` formats SDK data without changing balances or confirmation policy.
+
+`app-context.ts` contains the small shared coordination contract. The flow modules keep recovery words, payment reviews and other transient state local to their own closures. `dom.ts` checks template elements at lookup and handles explicit clipboard writes. The optional `base.ts` adapter remains separate.

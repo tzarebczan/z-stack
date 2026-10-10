@@ -195,6 +195,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       const result = spawnSync('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'], {
         cwd: target, stdio: 'inherit', shell: process.platform === 'win32' });
       assert.equal(result.status, 0, 'Install failed; the generated app is preserved. Retry npm install there.');
+      // Dependency lifecycle scripts stay disabled. Run only our copied guard.
+      const setup = join(target, 'scripts/check-setup.mjs');
+      if (existsSync(setup)) {
+        const checked = spawnSync(process.execPath, [setup], { cwd: target, stdio: 'inherit' });
+        assert.equal(checked.status, 0, 'Setup check failed; the generated app is preserved. Run npm run setup:check there.');
+      }
       const readme = join(target, 'README.md');
       writeFileSync(readme, generatedReadme(readFileSync(readme, 'utf8'), true));
     }

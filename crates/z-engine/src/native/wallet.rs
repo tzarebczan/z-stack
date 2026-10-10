@@ -3310,6 +3310,9 @@ fn already_known_transaction(error: &EngineError) -> bool {
         "txn-already-known",
         "transaction is already in the mempool",
         "transaction already in mempool",
+        // Zebra's replies for a transaction it holds unmined.
+        "transaction already exists in mempool",
+        "transaction dropped because it is already queued for download",
         "transaction already in block chain",
         "transaction already in the block chain",
         "already exists in the mempool",
@@ -3900,6 +3903,8 @@ mod tests {
             "transaction is already in the mempool",
             "txn-already-in-mempool",
             "transaction already in block chain",
+            "transaction already exists in mempool",
+            "transaction dropped because it is already queued for download",
             "any transaction with the same effects will be rejected from the mempool until a chain reset: transaction was committed to the best chain",
         ] {
             assert!(already_known_transaction(&EngineError::BroadcastRejected {

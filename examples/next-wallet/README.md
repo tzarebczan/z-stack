@@ -12,11 +12,13 @@ The Next CLI wrapper disables its telemetry during dev/build/start.
 Use [the setup helper](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md), or download and verify its preview bundle. Only custom engine
 builds need the [SDK build instructions](https://github.com/tzarebczan/z-stack/blob/main/README.md).
 
+`npm run setup:check` checks the SDK dependency. Dev, build and type checking also run this guard, including after an install with lifecycle scripts disabled.
+
 For manual setup, use the SDK archive in the verified preview’s `artifacts/` directory; a fresh clone has no archives.
 Copy this directory outside the SDK checkout. From your copy:
 
 ```sh
-npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.8.tgz
+npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.9.tgz
 npm run build
 npm run start
 ```
@@ -86,7 +88,7 @@ Create/restore check the chain tip; sync downloads compact blocks. Memo queries
 stay on-demand. **Load memos and details** explicitly requests activity transaction
 IDs from the light server and decrypts memos locally. This recovers precise
 self-send labels and fees after restore; compact history first shows wallet movement. The chain provider can see
-your IP and request timing. Payment review is frozen, fee/balance are checked again before proving, and a
+your IP and request timing. Payment review is frozen, the wallet syncs and fee/balance are checked again before proving, and a
 five-minute review deadline is checked before broadcast. Receipts preserve
 unknown submission outcomes; do not automatically send the payment again.
 The app locks spending after every send attempt.

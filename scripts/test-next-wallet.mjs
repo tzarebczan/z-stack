@@ -139,13 +139,13 @@ export async function verifyNextWallet(app, browsers, browserNames = []) {
     for (const isolated of [true, false]) {
       build(app, isolated);
       const server = await start(app);
-      try { for (const name of browserNames) await flows(server.origin, browsers[name], name, isolated); }
+      try { for (const name of browserNames) await flows(server.origin, browsers[name], name, isolated, app); }
       finally { await server.stop(); }
     }
   } finally { writeFileSync(path, original); rmSync(route, {recursive:true, force:true}); }
 }
 
-async function flows(origin, engine, name, isolated) {
+async function flows(origin, engine, name, isolated, app) {
   const browser = await launchBrowser(engine);
   const context = await browser.newContext({ viewport: name === "chromium" ? {width:390,height:844} : {width:1280,height:900} });
   const page = await context.newPage();
@@ -173,12 +173,16 @@ async function flows(origin, engine, name, isolated) {
     await configure({tip:"1"});
     await page.goto(origin);
     await status("Ready to create or restore.").waitFor({timeout:90_000});
-    assert.equal(await page.locator('.sdk-build').innerText(), `SDK ${JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).version} · local archives`);
+    const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).version;
+    const receipt = JSON.parse(readFileSync(join(app, 'sdk-build.json')));
+    const provenance = receipt.version === version && typeof receipt.revision === 'string'
+      ? 'source ' + receipt.revision.slice(0, 12) : 'local archives';
+    assert.equal(await page.locator('.sdk-build').innerText(), `SDK ${version} · ${provenance}`);
     console.log(`Next.js ${name}: browser ready (${isolated ? "isolated" : "non-isolated"})`);
     // A warm worker may already report its real mode. The key loader alone
     // must not label an isolated, MT-capable deployment as single-threaded.
-    await page.getByText(isolated ? /^(Scan engine starts on sync|2 threads)$/
-      : /^(Scan engine starts on sync|Single thread)$/, {exact:true}).waitFor();
+    await page.getByText(isolated ? /^(Scanner starts when you create or restore|Threaded scanner · 2 threads)$/
+      : /^(Scanner starts when you create or restore|Single-thread scanner)$/, {exact:true}).waitFor();
     assert.equal((await page.request.get(`${origin}/favicon.svg`)).status(), 200);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "demo overflows the viewport");
     await page.getByRole("button", {name:"Create wallet",exact:true}).click();
@@ -214,7 +218,7 @@ async function flows(origin, engine, name, isolated) {
     await page.getByRole("button", {name:"Sync wallet",exact:true}).click();
     await status("Synced through block 1. Sync again for payments mined later.").waitFor({timeout:90_000});
     await page.getByText("Scanned to 1", {exact:true}).waitFor();
-    await page.getByText(isolated ? "2 threads" : "Single thread", {exact:true}).waitFor();
+    await page.getByText(isolated ? "Threaded scanner · 2 threads" : "Single-thread scanner", {exact:true}).waitFor();
     console.log(`Next.js ${name}: initial sync and runtime validated`);
     assert.equal(await page.getByRole("button", {name:"Review payment",exact:true}).isEnabled(), true);
     assert.ok(workers.length >= 1, "scanner did not run in a worker");

@@ -1,4 +1,4 @@
-import { parseZecToZatoshis, formatZatoshis, WalletError, type Wallet } from "@z-stack/sdk";
+import { parseZecToZatoshis, formatZatoshis, WalletError, type Wallet, type WalletSnapshot } from "@z-stack/sdk";
 
 export type SendDraft = Readonly<{ to: string; amount: string; memo: string }>;
 export type SendReview = SendDraft & Readonly<{ feeZat: number; walletAddress: string; reviewedAt: number }>;
@@ -21,11 +21,44 @@ export async function reviewSend(wallet: Wallet, draft: SendDraft): Promise<Send
     walletAddress: snapshot.unifiedAddress, reviewedAt: Date.now() });
 }
 
-export async function recheckReview(wallet: Wallet, review: SendReview): Promise<void> {
+/** App-owned: the SDK's `wallet_changed` copy describes another tab, not a stale review. */
+export class ReviewOutdatedError extends WalletError {
+  override readonly name = "ReviewOutdatedError";
+
+  constructor() {
+    super("cancelled", "This payment review is out of date.");
+  }
+}
+
+/** Also call immediately before broadcast: sync and proving can outlast a review. */
+export function assertReviewCurrent(review: SendReview): void {
+  if (Date.now() - review.reviewedAt >= 5 * 60_000) throw new ReviewOutdatedError();
+}
+
+/** Return fresh state so the UI can render it even if payment validation fails. */
+export async function syncForReview(wallet: Wallet, review: SendReview, signal?: AbortSignal): Promise<WalletSnapshot> {
+  signal?.throwIfAborted();
+  assertReviewCurrent(review);
+  const cancelSync = () => wallet.cancelSync();
+  signal?.addEventListener("abort", cancelSync, { once: true });
+  try {
+    // Entering the phrase can leave the wallet more than 10 blocks behind.
+    const snapshot = await wallet.sync();
+    signal?.throwIfAborted();
+    return snapshot;
+  } finally {
+    signal?.removeEventListener("abort", cancelSync);
+  }
+}
+
+export async function recheckReview(wallet: Wallet, review: SendReview, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  assertReviewCurrent(review);
   const current = await reviewSend(wallet, review);
-  if (current.walletAddress !== review.walletAddress || current.feeZat !== review.feeZat ||
-    Date.now() - review.reviewedAt > 5 * 60_000) {
-    throw new WalletError("wallet_changed", "Review the updated wallet and fee before sending.");
+  signal?.throwIfAborted();
+  assertReviewCurrent(review);
+  if (current.walletAddress !== review.walletAddress || current.feeZat !== review.feeZat) {
+    throw new ReviewOutdatedError();
   }
 }
 

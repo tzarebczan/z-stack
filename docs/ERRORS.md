@@ -6,10 +6,19 @@ Use fixed application copy or `walletErrorMessage(code)` without a raw fallback.
 `WalletError.userMessage()` also returns fixed copy for unknown errors; the raw
 message and cause remain available for private debugging.
 
+Before signing, sync and render the returned snapshot, then revalidate the
+approved amount, fee and review deadline. A payment that fails validation or
+unlocking must still show the confirmations and history found by that sync.
+Tie payment cancellation to `wallet.cancelSync()` during this check.
+
+A `WalletError` subclass thrown by `beforeBroadcast` survives spending rollback
+and SDK normalization. The examples use an app-owned `ReviewOutdatedError` for
+fixed expired-review copy; the SDK does not manage application review deadlines.
+
 | Code | Next action |
 | --- | --- |
 | `cancelled`, `hardware_cancelled` | Keep the last committed state; let the user retry |
-| `sync_required` | Complete the first scan before enabling payment review |
+| `sync_required` | Complete the first scan before enabling payment review. A send also needs the wallet within 10 blocks of the tip; sync before proving |
 | `seed_locked` | Ask for local reauthentication from a user action |
 | `invalid_birthday` | Correct the height/date before clearing secret inputs |
 | `rescan_later_birthday` | Use a birthday at or before the current one |
@@ -18,7 +27,7 @@ message and cause remain available for private debugging.
 | `busy` | Await the current operation or the previous client's close |
 | `closed` | Stop using this handle; await teardown before creating a new one |
 | `already_exists` | Load the saved wallet; require deliberate backup/replacement |
-| `wallet_changed` | Refresh state and review again; another tab committed first |
+| `wallet_changed` | Refresh state and review again; another tab committed first. Its fixed copy names another tab, so use your own error for an expired payment review |
 | `transport` | Retain activity, show a connection indicator, retry sync explicitly |
 | `storage_full` | Keep site data and recovery backups; free space, then retry saving |
 | `broadcast_rejected` | The node explicitly rejected this transaction; review before retrying |
