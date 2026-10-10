@@ -3,11 +3,13 @@ import { appendFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const entrypoints = new Set(["README.md", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md"]);
+// test-packages compiles these guides' marked examples against installed exports.
+const executableGuides = new Set(["docs/SDK.md", "docs/SERVICES.md"]);
 export function docsOnly(paths) {
-  return paths.length > 0 && paths.every(path => entrypoints.has(path)
+  return paths.length > 0 && paths.every(path => !executableGuides.has(path) && (entrypoints.has(path)
     || (/^docs\/.+\.md$/.test(path) && !path.startsWith("docs/api/"))
     || /^packages\/(sdk|core|passkey|base)\/README\.md$/.test(path)
-    || /^examples\/[^/]+\/(README|HOW-IT-WORKS)\.md$/.test(path));
+    || /^examples\/[^/]+\/(README|HOW-IT-WORKS)\.md$/.test(path)));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

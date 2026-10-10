@@ -57,8 +57,10 @@ Without `--archives=DIR`, each check packs its own set as before. An incomplete
 or mismatched-version set fails instead of rebuilding silently.
 
 PRs confined to maintained public Markdown run documentation checks without
-Rust or browser builds. Code, dependencies, workflow files, unknown paths and
-code-to-docs renames select the full route. Pushes to `main` always run the full
+Rust or browser builds. The executable guides in `docs/SDK.md` and
+`docs/SERVICES.md` always select the full route so their marked examples compile
+against installed packages. Code, dependencies, workflow files, unknown paths and
+code-to-docs renames also select the full route. Pushes to `main` always run the full
 suite and can populate the Rust caches; PRs only restore them. The required
 `rust` check runs on either route and rejects failures, cancellations and
 unexpected skips.

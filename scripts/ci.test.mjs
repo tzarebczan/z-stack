@@ -18,10 +18,17 @@ function results(full) {
 }
 
 test("only maintained public prose selects the lightweight route", () => {
-  assert.equal(docsOnly(["README.md", "docs/SDK.md", "examples/browser-wallet/HOW-IT-WORKS.md", "packages/sdk/README.md"]), true);
+  assert.equal(docsOnly(["README.md", "docs/ERRORS.md", "examples/browser-wallet/HOW-IT-WORKS.md", "packages/sdk/README.md"]), true);
   for (const path of ["Cargo.lock", "Cargo.toml", ".github/workflows/ci.yml", "scripts/check-docs.mjs", "crates/z-engine/src/lib.rs", "packages/sdk/src/wallet.ts", "examples/browser-wallet/src/main.ts", "docs/api/generated.md", "AGENTS.md", "vendor/zakura/README.md", "unknown.md"])
     assert.equal(docsOnly(["README.md", path]), false, path);
   assert.equal(docsOnly([]), false);
+});
+
+test("executable guides require installed-package compilation even without other code changes", () => {
+  for (const path of ["docs/SDK.md", "docs/SERVICES.md"]) {
+    assert.equal(docsOnly([path]), false, path);
+    assert.equal(docsOnly(["README.md", path]), false, path);
+  }
 });
 
 test("a code-to-docs rename cannot hide a removed engine source file", t => {
@@ -52,6 +59,12 @@ test("a code-to-docs rename cannot hide a removed engine source file", t => {
   git("add", "docs/engine.md"); git("-c", "commit.gpgsign=false", "commit", "-m", "Fixture docs");
   assert.equal(classify("pull_request", docsBase), "full=false\n");
   assert.equal(classify("push", docsBase), "full=true\n");
+  for (const guide of ["SDK.md", "SERVICES.md"]) {
+    const guideBase = git("rev-parse", "HEAD");
+    writeFileSync(join(root, "docs", guide), "Executable guide changed");
+    git("add", `docs/${guide}`); git("-c", "commit.gpgsign=false", "commit", "-m", "Fixture guide");
+    assert.equal(classify("pull_request", guideBase), "full=true\n", guide);
+  }
 });
 
 test("the required gate accepts completed full and intentionally docs-only routes", () => {
