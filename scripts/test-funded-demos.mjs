@@ -14,6 +14,7 @@ import { regtestBrowserGateway } from './regtest-browser-gateway.mjs';
 import { generate, zebraRpc } from './regtest-rpc.mjs';
 import { assertLocalRegtestChain } from './sdk-harness.mjs';
 import { ZEBRA_RPC } from './regtest-rpc.mjs';
+import { grpcWebTransport } from '../packages/sdk/dist/index.js';
 
 const withBase = process.argv.includes('--with-base');
 const baseOnly = process.argv.includes('--base-only');
@@ -189,6 +190,10 @@ try {
     if (!uncertain) {
       // Reproduce typing long enough to exceed the SDK's ten-block spend lag.
       await generate(11);
+      const syncedHeight=(await zebraRpc('getblockchaininfo')).blocks;
+      const light=grpcWebTransport(gateway.url);
+      for (let attempt=0;attempt<180 && await light.tip()<syncedHeight;attempt++) await ui.waitForTimeout(100);
+      assert.ok(await light.tip()>=syncedHeight,'light server must index the newly mined review-delay blocks');
       // A held light-server request must not keep Cancel busy or unlock spending.
       let releaseCheck, checking;
       const heldCheck = new Promise(resolve => { releaseCheck = resolve; });
@@ -207,8 +212,10 @@ try {
       await ui.getByLabel('Recovery phrase for this payment',{exact:true}).fill('not a phrase');
       await ui.getByRole('button',{name:'Send 0.00050000 ZEC',exact:true}).click();
       await ui.getByText('Those words are not a valid recovery phrase.',{exact:true}).waitFor({timeout:60_000});
-      const syncedHeight=(await zebraRpc('getblockchaininfo')).blocks;
-      if (kind==='vite') assert.ok((await ui.locator('#scan-details').innerText()).includes(syncedHeight.toLocaleString()));
+      if (kind==='vite') {
+        const details=await ui.locator('#scan-details').innerText();
+        assert.ok(details.includes(syncedHeight.toLocaleString()),`fresh pre-send scan should show ${syncedHeight}; got ${details}`);
+      }
       else await ui.getByText(`Scanned to ${syncedHeight.toLocaleString()}`,{exact:true}).waitFor();
       if (kind === 'vite') assert.equal(await ui.locator('#send-words').getAttribute('aria-invalid'), 'true');
     }
