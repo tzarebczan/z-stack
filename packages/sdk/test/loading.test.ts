@@ -89,6 +89,7 @@ test("auto-sync retries unavailable ranges and selective memos without waiting f
   wallet.startAutoSync();
   const runTick = async () => { tick(); for (let i = 0; i < 10; i++) await turn(); };
   for (const feature of ["transparentScanStatus", "sharedMemoStatus", "memoFetchStatus"] as const) {
+    wallet.setMemoFetch(feature === "sharedMemoStatus" ? "shared" : feature === "memoFetchStatus" ? "auto" : "on-demand");
     snapshot[feature] = "unavailable";
     const before = synced;
     await runTick();

@@ -166,7 +166,7 @@ try {
     await txidElement.waitFor({timeout:300_000}); txid=await txidElement.innerText(); assert.match(txid,/^[a-f0-9]{64}$/);
     console.log(`Funded ${kind}: ${uncertain ? 'lost acknowledgement' : 'submitted'} receipt ${txid}`);
     if (uncertain) {
-      console.log('Receipt state',kind,await ui.locator(kind==='vite'?'#receipt-state':'.receipt [role=status]').innerText());
+      console.log('Receipt state',kind,await ui.locator(kind==='vite'?'#receipt-state':'.receipt [data-testid=receipt-state]').innerText());
       await ui.getByText(/Submission not confirmed/).waitFor({timeout:30_000});
       assert.equal(await ui.getByRole('button',{name:'Review payment',exact:true}).isVisible().catch(()=>false),false, 'Unknown submission must block a second payment');
     }
@@ -224,12 +224,49 @@ try {
     assert.equal(await ui.getByLabel('I want to rebuild scan history',{exact:true}).isChecked(), false, 'Each rescan needs a new confirmation');
     assert.equal(await ui.locator('#address').innerText(), address, 'Rescan must preserve receiving identity');
     if (txid) await ui.locator(kind==='vite'?'#history':'.activity').getByText(txid,{exact:kind==='next'}).waitFor({timeout:60_000});
+    if (!baseOnly && txid) {
+      await ui.getByRole('button',{name:'Load memos and details',exact:true}).click();
+      const activity=ui.locator(kind==='vite'?'#history':'.activity');
+      await activity.getByText(`funded-${kind}-UI`,{exact:true}).first().waitFor({timeout:60_000});
+      await activity.getByText(/^Self send · Fee/).first().waitFor({timeout:60_000});
+      assert.doesNotMatch(await activity.innerText(),/Sent · −0\.00010000/);
+    }
     if (withBase) await exerciseCombinedBase(ui, baseFixture, faucetWords);
     await ui.setViewportSize({width:390,height:844});
     assert.equal(await ui.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'Mobile layout overflows');
     await ui.screenshot({path:join(scratch,`${kind}-mobile.png`),fullPage:true});
     await ui.reload(); await ui.getByRole('button',{name:kind==='vite'?'Sync':'Sync wallet',exact:true}).waitFor({timeout:120_000});
     if (txid) await ui.locator(kind==='vite'?'#history':'.activity').getByText(txid,{exact:kind==='next'}).waitFor({timeout:60_000});
+    if (!baseOnly && txid) {
+      // A separate browser profile proves classification from chain data, not
+      // retained send metadata. Selective transaction retrieval stays explicit.
+      const restoredContext = await browser.newContext();
+      try {
+        const restored = await restoredContext.newPage();
+        let detailRequests = 0;
+        restored.on('request', request => { if (request.url().includes('/GetTransaction')) detailRequests++; });
+        await restored.goto(origin);
+        if (kind === 'next') await restored.getByText('Restore an existing wallet',{exact:true}).click();
+        await restored.getByLabel('Recovery phrase',{exact:true}).fill(faucetWords);
+        await restored.getByLabel(kind==='vite'?'Birthday height or date':'Wallet birthday',{exact:true}).fill('1');
+        await restored.getByRole('button',{name:'Restore wallet',exact:true}).click();
+        await restored.waitForFunction(() => !document.querySelector('#sync')?.disabled &&
+          [...document.querySelectorAll('button')].some(button => ['Sync','Sync wallet'].includes(button.textContent) && !button.disabled),null,{timeout:120_000});
+        await syncUi(restored,kind);
+        assert.equal(await restored.locator('#address').innerText(),address);
+        const activity=restored.locator(kind==='vite'?'#history':'.activity');
+        await activity.getByText(txid,{exact:kind==='next'}).waitFor({timeout:60_000});
+        assert.equal(detailRequests,0,'Restore/sync silently fetched owned transaction IDs');
+        await activity.getByText(/^Wallet change/).first().waitFor();
+        await restored.getByRole('button',{name:'Load memos and details',exact:true}).click();
+        await activity.getByText(/^Self send · Fee/).first().waitFor({timeout:60_000});
+        await activity.getByText(`funded-${kind}-UI`,{exact:true}).first().waitFor();
+        assert.ok(detailRequests>0,'Explicit detail retrieval did not query the light server');
+        await restored.reload();
+        await restored.locator(kind==='vite'?'#history':'.activity').getByText(/^Self send · Fee/).first().waitFor({timeout:60_000});
+        console.log(`Funded ${kind}: fresh restore, explicit memos/details, self-send fee and reload passed`);
+      } finally { await restoredContext.close(); }
+    }
     assert.equal(errors.length,0,errors.join('\n')); await context.close();
     console.log(`Funded ${kind}: ${baseOnly ? "shared-wallet restore/sync/Base/reload/mobile" : "Zcash review/prove/pending/confirmed/reload/mobile"} passed`);
   }

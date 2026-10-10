@@ -43,3 +43,5 @@ input:user-invalid, textarea:user-invalid { border-color: #a52424; }
 #history li { display: grid; gap: 6px; padding-block: 12px; }
 #history span { color: #465f55; font-size: 14px; }
 [aria-invalid="true"] { border-color: #a32929; }
+
+.memo { white-space: pre-wrap; overflow-wrap: anywhere; margin-block: 8px; }

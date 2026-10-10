@@ -126,7 +126,7 @@ export type WalletSnapshot = {
   transparentScanComplete?: boolean;
   memoScanHeight?: number | null;
   transparentScanStatus?: "off" | "unsupported" | "scanning" | "complete" | "unavailable";
-  /** Current memo policy progress, including selective retrieval retries at an unchanged tip. */
+  /** Memo retrieval progress. On-demand starts off; after fetchMemos(), scanning means another batch remains. */
   memoFetchStatus?: "off" | "unsupported" | "scanning" | "complete" | "unavailable";
   sharedMemoStatus?: "off" | "unsupported" | "scanning" | "complete" | "unavailable";
   /** Birthday frontier / subtree roots are installed (witnesses can be built). */

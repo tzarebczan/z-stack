@@ -16,7 +16,7 @@ For manual setup, use the SDK archive in the verified preview’s `artifacts/` d
 Copy this directory outside the SDK checkout. From your copy:
 
 ```sh
-npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.7.tgz
+npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.8.tgz
 npm run build
 npm run start
 ```
@@ -83,7 +83,9 @@ gRPC-Web and your app’s CORS origin. `NEXT_PUBLIC_ZSTACK_SERVER`
 can select another public testnet endpoint at build time; never place credentials
 in public environment variables. Opening the app contacts no chain server.
 Create/restore check the chain tip; sync downloads compact blocks. Memo queries
-stay on-demand and this demo does not request them. The chain provider can see
+stay on-demand. **Load memos and details** explicitly requests activity transaction
+IDs from the light server and decrypts memos locally. This recovers precise
+self-send labels and fees after restore; compact history first shows wallet movement. The chain provider can see
 your IP and request timing. Payment review is frozen, fee/balance are checked again before proving, and a
 five-minute review deadline is checked before broadcast. Receipts preserve
 unknown submission outcomes; do not automatically send the payment again.

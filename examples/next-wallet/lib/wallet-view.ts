@@ -1,4 +1,4 @@
-import { classifyHistory, parseZecToZatoshis, type HistoryEntry, type WalletSnapshot } from "@z-stack/sdk";
+import { classifyHistory, formatZatoshis, parseZecToZatoshis, WalletError, type HistoryEntry, type WalletSnapshot } from "@z-stack/sdk";
 
 export function pendingFunds(snapshot: WalletSnapshot): bigint {
   return snapshot.balance.totalPending !== undefined
@@ -22,4 +22,49 @@ export function loadedWalletStatus(snapshot: WalletSnapshot): string {
   return snapshot.scannedHeight !== undefined && snapshot.scannedHeight >= snapshot.birthdayHeight
     ? `Wallet opened · scanned through block ${snapshot.scannedHeight.toLocaleString()}. Sync to check for new blocks.`
     : "Wallet opened · not scanned yet. Sync to find activity.";
+}
+
+// Compact history gives account movement; only full transaction details give
+// exact fees and distinguish a small external send from a fee-only self send.
+export function activityMovement(entry: HistoryEntry, unit: string): string {
+  const item = classifyHistory(entry);
+  if (entry.historyMetadataComplete === false && entry.feeZat == null && entry.spentZat > 0) {
+    const sign = item.netZat < 0n ? "−" : item.netZat > 0n ? "+" : "";
+    const amount = item.netZat < 0n ? -item.netZat : item.netZat;
+    return `Wallet change · ${sign}${formatZatoshis(amount)} ${unit} · load details for the payment amount`;
+  }
+  if (item.action === "internal" && item.feeZec) return `Self send · Fee ${item.feeZec} ${unit}`;
+  const sign = item.action === "received" ? "+" : item.action === "sent" ? "−" : "";
+  return `${item.label} · ${sign}${item.displayZec} ${unit}`;
+}
+
+export function paymentErrorMessage(error: unknown, snapshot: WalletSnapshot | undefined, unit: string): string {
+  const safe = WalletError.fromUnknown(error);
+  if (safe.code === "insufficient_funds" && snapshot && pendingFunds(snapshot) > 0n) {
+    return `Not enough available funds for the amount and fee. ${formatZatoshis(pendingFunds(snapshot))} ${unit} is still confirming. ${confirmationPolicyText(snapshot.confirmations)}`;
+  }
+  return safe.userMessage();
+}
+
+export function syncedWalletStatus(snapshot: WalletSnapshot): string {
+  return `Synced through block ${snapshot.scannedHeight?.toLocaleString() ?? "unknown"}. Sync again for payments mined later.`;
+}
+
+export function confirmationPolicyText(policy: WalletSnapshot["confirmations"]): string {
+  if (!policy) return "Sync to update.";
+  const count = (value: number) => `${value} ${value === 1 ? "confirmation" : "confirmations"}`;
+  return policy.trusted === policy.untrusted
+    ? `Funds need ${count(policy.untrusted)}. Sync to update.`
+    : `Incoming payments need ${count(policy.untrusted)}; your change needs ${count(policy.trusted)}. Sync to update.`;
+}
+
+/** Use the full enhancement queue status, not just the visible history page. */
+export function memoDetailsMessage(snapshot: WalletSnapshot, entries: HistoryEntry[]): string {
+  if (snapshot.memoFetchStatus === "scanning") return "This batch is loaded. Load again for remaining memos and details.";
+  if (snapshot.memoFetchStatus === "unsupported") return "This connection cannot load memos and transaction details.";
+  if (snapshot.memoFetchStatus === "unavailable" || entries.some(entry => entry.historyMetadataComplete === false)) {
+    return "Some details are unavailable. Try again later.";
+  }
+  return snapshot.memoFetchStatus === "complete" ? "Memos and transaction details loaded."
+    : "Recent activity refreshed. Load again to check remaining details.";
 }

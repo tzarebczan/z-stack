@@ -15,15 +15,25 @@
       <p id="runtime" class="hint">Preparing engine…</p>
       <p id="engine-progress" class="hint" role="status"></p>
       <progress id="engine-progress-bar" aria-label="Loading wallet engine" hidden></progress>
-      <details id="chain-warning" class="notice" aria-label="Testnet funding limitation">
+      <section id="backup-panel" hidden aria-label="Recovery backup" tabindex="-1">
+        <h2>Save your recovery phrase</h2>
+        <p>Keep these words in order, somewhere private.</p>
+        <ol id="phrase" hidden></ol>
+        <button id="copy-phrase" type="button" hidden>Copy recovery phrase</button>
+        <p id="phrase-copy-status" role="status" hidden></p>
+        <button id="hide-phrase" hidden>I saved these words — finish</button>
+      </section>
+      <details id="chain-warning" open class="notice" aria-label="Testnet funding">
         <summary>Testnet funding status</summary>
-        <p>Request test coins from the <a href="https://faucet.testnet.valargroup.dev/">Valar faucet</a>, then sync. Daily limits apply. A public testnet receive has been reported; outgoing spending remains unverified.</p>
+        <p>Request test coins from the <a href="https://faucet.testnet.valargroup.dev/">Valar faucet</a>, then sync. Daily limits apply. Public receive and a mined self-send have been reported. Faucet capacity varies; sync again after the payment is mined.</p>
         <a href="https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing">Funded testing options</a>
       </details>
+      <section id="balance-panel" hidden aria-label="Balance">
       <p class="hint">Available</p>
       <p id="balance">— TAZ</p>
       <p id="pending-balance" role="status" hidden></p>
       <p id="pending-help" class="hint" hidden></p>
+      </section>
       <section id="scan-panel" hidden aria-label="Scan details">
         <p id="scan-details"></p>
         <p>Missing a deposit? Confirm it on this server’s chain. Deposits below the birthday need an earlier scan. Rescanning cannot find a payment on another chain.</p>
@@ -35,7 +45,7 @@
           <button>Rescan wallet</button>
         </form></details>
       </section>
-      <section id="receive-panel" hidden aria-label="Receive"><h2>Receive ZEC</h2>
+      <section id="receive-panel" hidden aria-label="Receive"><h2>Receive TAZ</h2>
       <canvas id="receive-qr" role="img" aria-label="Receive address QR code">Use Copy address to receive.</canvas>
       <p id="address"></p>
       <button id="copy-address" type="button" hidden>Copy address</button>
@@ -50,11 +60,7 @@
       <div class="actions">
         <button id="sync" disabled>Sync</button>
         <button id="lock" disabled>Lock</button>
-        <button id="hide-phrase" hidden>I saved these words — finish</button>
       </div>
-      <ol id="phrase" hidden></ol>
-      <button id="copy-phrase" type="button" hidden>Copy recovery phrase</button>
-      <p id="phrase-copy-status" role="status" hidden></p>
       <form id="restore-form" aria-describedby="restore-help status">
         <h2>Restore a wallet</h2>
         <p id="restore-help" class="hint">Use a height or date before your first deposit. Restore accepts valid 12-, 15-, 18-, 21- or 24-word phrases; new wallets use 24.</p>
@@ -65,12 +71,12 @@
         <input id="birthday" aria-describedby="status" required placeholder="Height or YYYY-MM-DD" />
         <button id="restore" disabled>Restore wallet</button>
       </form>
-      <section id="send-panel" hidden aria-label="Send ZEC">
-        <h2>Send ZEC</h2>
+      <section id="send-panel" hidden aria-label="Send TAZ">
+        <h2>Send TAZ</h2>
         <form id="send-form">
           <label for="send-to">Recipient address</label>
           <textarea id="send-to" name="recipient" aria-describedby="send-status" required rows="2" autocomplete="off" autocapitalize="none" spellcheck="false"></textarea>
-          <label for="send-amount">Amount (ZEC)</label>
+          <label for="send-amount">Amount (TAZ)</label>
           <input id="send-amount" name="amount" aria-describedby="send-status" required inputmode="decimal" autocomplete="off" />
           <label for="send-memo">Memo (optional)</label>
           <textarea id="send-memo" name="memo" aria-describedby="send-status" rows="2" maxlength="512"></textarea>
@@ -102,9 +108,13 @@
           <p id="remove-status" role="status"></p>
         </form>
       </details>
+      <section id="activity-panel" hidden aria-label="Activity">
       <h2>Activity</h2>
+      <button id="load-details" type="button" disabled>Load memos and details</button>
+      <p class="hint">Sends your activity’s transaction IDs to the light server. Memos are decrypted locally.</p>
       <ul id="history"></ul>
-      <p id="history-empty">Create or restore a wallet to see activity.</p>
+      <p id="history-empty">Sync to look for activity.</p>
+      </section>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>
