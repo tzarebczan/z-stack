@@ -413,7 +413,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
 /** Delete a local wallet without loading WASM. Use the owning client's forget() when it is open. */
 export async function forgetWallet(options: { storage?: WalletStorage; passkey?: boolean } = {}): Promise<void> {
   const claimed = claimWalletOwner();
-  if (!claimed) throw new WalletError("busy", "Use the open wallet client's forget() before closing it.");
+  if (!claimed) throw new WalletError("owner_conflict", "Use the open wallet client's forget() before closing it.");
   const lease = claimed;
   useWalletStorage(options.storage);
   try {

@@ -1,4 +1,4 @@
-import { formatZatoshis, WalletError } from "@z-stack/sdk";
+import { formatZatoshis, WalletError, type WalletSnapshot } from "@z-stack/sdk";
 import type { WalletApp } from "./app-context";
 import { element } from "./dom";
 import { reviewSend, syncForReview, recheckReview, assertReviewCurrent, refreshReceipt, type SendReview, type SendReceipt } from "./send";
@@ -13,7 +13,27 @@ export function attachPayments(app: WalletApp) {
   const cancel = element("cancel-send", HTMLButtonElement);
   let review: SendReview | undefined;
   let receipt: SendReceipt | undefined;
+  let receiptOwner: string | undefined;
+  const previousReceipts: Array<{ owner: string; receipt: SendReceipt }> = [];
   let operation: AbortController | undefined;
+
+  // The viewing key identifies an account even when its receive address changes.
+  // It stays in memory and is never rendered or saved by this example.
+  function account(snapshot: WalletSnapshot | null | undefined): string | undefined {
+    return snapshot ? `${snapshot.network}:${snapshot.ufvk ?? snapshot.unifiedAddress}` : undefined;
+  }
+  function showPreviousReceipts() {
+    element("previous-payments").hidden = previousReceipts.length === 0;
+    const list = element("previous-payment-list");
+    list.replaceChildren();
+    for (const { receipt: previous } of previousReceipts) {
+      const item = document.createElement("li");
+      const id = document.createElement("code");
+      id.textContent = previous.txid;
+      item.append(id, ` · ${previous.state === "unknown" ? "Submission not confirmed" : "Awaiting confirmation"}`);
+      list.append(item);
+    }
+  }
 
   function clearWords() {
     words.value = "";
@@ -92,7 +112,8 @@ export function attachPayments(app: WalletApp) {
     const mnemonic = words.value.trim();
     words.value = "";
     const approved = review;
-    if (!approved || operation) return;
+    const owner = account(app.snapshot);
+    if (!approved || !owner || operation) return;
     void app.run(async () => {
       const sending = new AbortController();
       operation = sending;
@@ -116,12 +137,14 @@ export function attachPayments(app: WalletApp) {
         });
         if (!sent.txid) throw new Error("Missing receipt");
         receipt = { txid: sent.txid, state: "pending" };
+        receiptOwner = owner;
         showReceipt(receipt);
         status.textContent = "Payment submitted. Sync to check confirmation.";
         await app.render(sent);
       } catch (error) {
         if (error instanceof WalletError && error.code === "broadcast_failed" && error.txid) {
           receipt = { txid: error.txid, state: "unknown" };
+          receiptOwner = owner;
           showReceipt(receipt);
         }
         const safe = WalletError.fromUnknown(error);
@@ -160,6 +183,7 @@ export function attachPayments(app: WalletApp) {
   });
   element("another-send").addEventListener("click", () => {
     receipt = undefined;
+    receiptOwner = undefined;
     form.reset();
     receiptPanel.hidden = true;
     form.hidden = false;
@@ -170,19 +194,33 @@ export function attachPayments(app: WalletApp) {
     clearWords,
     abort: () => operation?.abort(),
     async refresh() {
-      if (!receipt) return;
+      if (!receipt || receiptOwner !== account(app.snapshot)) return;
       receipt = await refreshReceipt(app.wallet, receipt);
       showReceipt(receipt);
     },
-    reset({ preserveReceipt = false }: { preserveReceipt?: boolean } = {}) {
+    reset(options?: { savedWallet: WalletSnapshot | null }) {
       review = undefined;
-      if (!preserveReceipt) receipt = undefined;
+      const nextOwner = account(options?.savedWallet);
+      if (receipt && receiptOwner !== nextOwner) {
+        if (receiptOwner && (receipt.state === "pending" || receipt.state === "unknown")) {
+          previousReceipts.push({ owner: receiptOwner, receipt });
+        }
+        receipt = undefined;
+        receiptOwner = undefined;
+      }
+      const previous = previousReceipts.findIndex(entry => entry.owner === nextOwner);
+      if (!receipt && previous >= 0) {
+        const restored = previousReceipts.splice(previous, 1)[0]!;
+        receipt = restored.receipt;
+        receiptOwner = restored.owner;
+      }
       clearWords();
       form.reset();
       reviewPanel.hidden = true;
       receiptPanel.hidden = true;
       form.hidden = false;
       status.textContent = "";
+      showPreviousReceipts();
       if (receipt) showReceipt(receipt);
     },
   };

@@ -110,7 +110,7 @@ export async function startApp() {
   async function showSavedWallet() {
     const saved = await perform(async () => {
       const current = await wallet.load();
-      app.reset({ preserveReceipt: current !== null });
+      app.reset({ savedWallet: current });
       if (current) await app.render(current);
       return current;
     }).catch(() => undefined);

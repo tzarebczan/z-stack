@@ -182,7 +182,7 @@ export async function verifyExampleRecovery(app, chromium) {
   writeFileSync(join(app, "src", "recovery-fixture.ts"), `
     import { createWallet as realCreateWallet, WalletError, type BlockTransport } from '@z-stack/sdk';
     export * from '@z-stack/sdk';
-    declare global { interface Window { fixtureTipRequests?: number; fixtureTipUnavailable?: boolean; fixtureForgetWallet?: () => Promise<void>; fixtureFundingHeight?: number; fixturePaymentReview?: boolean; fixtureBroadcastUnknown?: boolean; } }
+    declare global { interface Window { fixtureTipRequests?: number; fixtureTipUnavailable?: boolean; fixtureForgetWallet?: () => Promise<void>; fixtureReplaceWallet?: () => Promise<void>; fixtureRestoreWallet?: (words: string) => Promise<void>; fixtureFundingHeight?: number; fixturePaymentReview?: boolean; fixtureBroadcastUnknown?: boolean; } }
     export async function createWallet(options: Parameters<typeof realCreateWallet>[0]) {
       const transport: BlockTransport = {
         kind: 'recovery-test', label: 'Offline recovery fixture', tip: async () => {
@@ -199,6 +199,10 @@ export async function verifyExampleRecovery(app, chromium) {
       };
       const wallet = await realCreateWallet({ ...options, network: "regtest", server: transport, prewarmProvingKey: false });
       Object.assign(window, {fixtureForgetWallet: () => wallet.forget({passkey:true})});
+      Object.assign(window, {
+        fixtureReplaceWallet: async () => { await wallet.load(); await wallet.create({birthday:1,replace:true}); },
+        fixtureRestoreWallet: async (words: string) => { await wallet.load(); await wallet.restore(words,{birthday:1,replace:true}); },
+      });
       let failHistory = true;
       return new Proxy(wallet, {
         get(target, key) {
@@ -465,6 +469,21 @@ export async function verifyExampleRecovery(app, chromium) {
       assert.match(await page.locator("#receipt-state").textContent(), /Submission not confirmed/);
       assert.equal(await page.locator("#another-send").isVisible(), false);
       assert.equal(await page.locator("#send-form").isVisible(), false);
+      await checkpointTab.evaluate(() => window.fixtureReplaceWallet());
+      await page.locator("#sync").click();
+      await page.locator("#previous-payments").waitFor({state:"visible"});
+      await page.locator("#previous-payments summary").click();
+      assert.match(await page.locator("#previous-payment-list").textContent(), /b{64}/);
+      assert.equal(await page.locator("#send-form").isVisible(), true);
+      assert.equal(await page.locator("#send-receipt").isVisible(), false);
+      await page.locator("#sync").click();
+      await page.waitForFunction(() => !document.getElementById("review-send").disabled);
+      await checkpointTab.evaluate(words => window.fixtureRestoreWallet(words), confirmedPhrase);
+      await page.locator("#sync").click();
+      await page.locator("#send-receipt").waitFor({state:"visible"});
+      assert.equal(await page.locator("#receipt-txid").textContent(), "b".repeat(64));
+      assert.equal(await page.locator("#send-form").isVisible(), false);
+      assert.equal(await page.locator("#previous-payments").isVisible(), false);
     } finally { await checkpointTab.close(); }
     await page.reload();
     await page.waitForFunction(() => !document.getElementById("sync").disabled);

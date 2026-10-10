@@ -49,6 +49,12 @@ keeps its receipt and known transaction ID. Check that transaction before anothe
 payment; the example never retries a new payment blindly. Synced receipts become
 confirmed or expired. Pending history also blocks local removal after reload.
 
+Cross-tab reloads keep receipts bound to their originating account. Replacing the
+wallet moves an unresolved receipt to the previous-wallet list; it does not block
+the new account. Opening the original account restores its active receipt.
+These UI receipts stay in memory, so keep their transaction IDs before closing
+the page. The SDK's saved pending transactions remain in wallet storage.
+
 Compact scan history describes wallet movement. **Load memos and details** sends
 activity transaction IDs to the light server, which can associate them with the
 requester. Memos are decrypted locally. Exact fee metadata distinguishes a

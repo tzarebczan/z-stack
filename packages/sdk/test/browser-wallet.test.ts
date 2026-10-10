@@ -342,6 +342,8 @@ test("replacement requires consent, close releases handles but preserves data, a
   await assert.rejects(wallet.create({ birthday: 1 }), code("already_exists"));
   assert.equal((await wallet.getWallet()).unifiedAddress, initial.wallet.unifiedAddress);
   await assert.rejects(createWallet({ network: "regtest", server: "https://unused.invalid" }), code("owner_conflict"));
+  await assert.rejects(forgetWallet({ storage: f.storage }), code("owner_conflict"));
+  assert.equal((await wallet.getWallet()).unifiedAddress, initial.wallet.unifiedAddress);
   await wallet.create({ birthday: 1, replace: true });
   const address = (await wallet.getWallet()).unifiedAddress;
   await wallet.unlock(words);

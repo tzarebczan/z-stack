@@ -101,6 +101,10 @@
         <button id="cancel-send" type="button" hidden>Cancel before submission</button>
         <section id="send-receipt" hidden aria-label="Payment receipt"><h3>Payment receipt</h3><p id="receipt-state" role="status"></p><code id="receipt-txid"></code><button id="another-send" type="button">New payment</button></section>
       </section>
+      <details id="previous-payments" hidden><summary>Payments from another wallet</summary>
+        <p>Keep these transaction IDs before closing this page. Open the original wallet to check them.</p>
+        <ul id="previous-payment-list"></ul>
+      </details>
       <details id="remove-panel" hidden><summary>Remove local wallet</summary>
         <p>Deletes this browser’s saved wallet and local backup. Your funds stay on-chain. Save your recovery phrase and any pending payment receipts first.</p>
         <p id="remove-pending" role="status" hidden>Sync to confirm or expire pending payments before removing this wallet.</p>
