@@ -426,10 +426,19 @@ export function isBroadcastRejection(error: unknown): error is BroadcastRejectio
  * The node already has *this* transaction. Matched from the start of the
  * reason so "nullifier already known" and "conflicts with a transaction
  * already in the mempool" stay rejections.
+ *
+ * Zebra wraps an already-mined transaction as
+ * "any transaction with the same effects …: transaction was committed to the best chain".
+ * That whole reason is a duplicate. A different suffix is still a refusal.
  */
+const ZEBRA_ALREADY_MINED =
+  "any transaction with the same effects will be rejected from the mempool until a chain reset: transaction was committed to the best chain";
+
 export function isDuplicateBroadcast(reason: string): boolean {
+  const text = reason.trim();
+  if (text.toLowerCase() === ZEBRA_ALREADY_MINED) return true;
   return /^(?:txn-already-(?:in-mempool|known)|transaction is already in the mempool|transaction already in mempool|transaction already in (?:the )?block ?chain|already exists in (?:the )?mempool|already in (?:the )?(?:mempool|block ?chain)|transaction was committed to the best chain)\b/i
-    .test(reason.trim());
+    .test(text);
 }
 
 /** A loopback bridge's `/lwd/sendraw` error body: the node's refusal, if it is one. */

@@ -3290,13 +3290,21 @@ fn unmined_sends(db_path: &Path, tip: u32) -> Result<Vec<(TxId, Vec<u8>)>> {
 }
 
 /// A node that already holds *this* transaction. The reason has to start with
-/// one of these phrases. "nullifier already known" and "conflicts with a
-/// transaction already in the mempool" are real rejections.
+/// one of these phrases, or be Zebra's full already-mined sentence. "nullifier
+/// already known" and "conflicts with a transaction already in the mempool" are
+/// real rejections.
 fn already_known_transaction(error: &EngineError) -> bool {
     let EngineError::BroadcastRejected { message, .. } = error else {
         return false;
     };
     let message = message.trim().to_ascii_lowercase();
+    // Zebra reports an already-mined transaction with this whole sentence.
+    // A different suffix after the same prefix is still a real refusal.
+    if message
+        == "any transaction with the same effects will be rejected from the mempool until a chain reset: transaction was committed to the best chain"
+    {
+        return true;
+    }
     const PREFIXES: &[&str] = &[
         "txn-already-in-mempool",
         "txn-already-known",
@@ -3892,6 +3900,7 @@ mod tests {
             "transaction is already in the mempool",
             "txn-already-in-mempool",
             "transaction already in block chain",
+            "any transaction with the same effects will be rejected from the mempool until a chain reset: transaction was committed to the best chain",
         ] {
             assert!(already_known_transaction(&EngineError::BroadcastRejected {
                 code: -27,
@@ -3914,6 +3923,13 @@ mod tests {
             &EngineError::BroadcastRejected {
                 code: -26,
                 message: "conflicts with a transaction already in the mempool".into(),
+            }
+        ));
+        assert!(!already_known_transaction(
+            &EngineError::BroadcastRejected {
+                code: -1,
+                message: "any transaction with the same effects will be rejected from the mempool until a chain reset: expired"
+                    .into(),
             }
         ));
         assert!(!already_known_transaction(&EngineError::Transport(

@@ -402,6 +402,8 @@ test("a node's explicit answer to a broadcast is told apart from an unknown outc
   const node = (code: number, reason: string) => new BroadcastRejection(code, reason);
   assert.equal(submitVerdict(node(-27, "transaction already in mempool")), "accepted");
   assert.equal(submitVerdict(node(-25, "transaction was committed to the best chain")), "accepted");
+  assert.equal(submitVerdict(node(-1, "any transaction with the same effects will be rejected from the mempool until a chain reset: transaction was committed to the best chain")), "accepted");
+  assert.equal(submitVerdict(node(-1, "any transaction with the same effects will be rejected from the mempool until a chain reset: expired")), "rejected");
   assert.equal(submitVerdict(node(-27, "txn-already-known")), "accepted");
   assert.equal(submitVerdict(node(-26, "bad-txns-nullifier-conflict")), "rejected");
   // "already" or "committed" alone is no duplicate: these are refusals.
