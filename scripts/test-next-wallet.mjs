@@ -195,7 +195,9 @@ async function flows(origin, engine, name, isolated) {
     await page.getByRole("button", {name:"Copy recovery phrase",exact:true}).click();
     await status("Could not copy. Save the numbered words in order.").waitFor();
     await page.evaluate(() => { window.rejectCopy = false; });
-    assert.equal(await page.getByRole("button", {name:"Sync wallet",exact:true}).isDisabled(), true);
+    assert.equal(await page.getByRole("button", {name:"Sync wallet",exact:true,includeHidden:true}).isDisabled(), true);
+    assert.equal(await page.locator("#balance").isVisible(), false);
+    assert.equal(await page.locator(".activity").isVisible(), false);
     await page.getByRole("link", {name:"How it works",exact:true}).click();
     await status("Save your recovery phrase before leaving.").waitFor();
     assert.equal(await page.locator(".words li").count(), 24, "navigation hid the one-time phrase");
@@ -210,7 +212,7 @@ async function flows(origin, engine, name, isolated) {
     assert.equal(await status("Phrase copied.").count(), 0);
     assert.equal(await page.getByRole("button", {name:"Review payment",exact:true}).isDisabled(), true);
     await page.getByRole("button", {name:"Sync wallet",exact:true}).click();
-    await status("Scanned through block 1.").waitFor({timeout:90_000});
+    await status("Synced through block 1. Sync again for payments mined later.").waitFor({timeout:90_000});
     await page.getByText("Scanned to 1", {exact:true}).waitFor();
     await page.getByText(isolated ? "2 threads" : "Single thread", {exact:true}).waitFor();
     console.log(`Next.js ${name}: initial sync and runtime validated`);
@@ -222,7 +224,7 @@ async function flows(origin, engine, name, isolated) {
     await page.getByRole("button", {name:"Stop sync",exact:true}).waitFor();
     assert.equal(await page.locator("#balance").textContent(), balance);
     assert.equal(await page.getByText("No activity yet.", {exact:true}).isVisible(), true);
-    await status("Scanned through block 2.").waitFor({timeout:90_000});
+    await status("Synced through block 2. Sync again for payments mined later.").waitFor({timeout:90_000});
     await page.getByText("Scanned to 2", {exact:true}).waitFor();
     await configure({tip:"2",fail:"1"});
     await page.getByRole("button", {name:"Sync wallet",exact:true}).click();
@@ -262,11 +264,11 @@ async function flows(origin, engine, name, isolated) {
     await page.waitForFunction(() => !document.querySelector(".sync-actions button").disabled);
     assert.equal(await page.locator("#balance").textContent(), balance, "cancelled sync cleared balance");
     await page.getByText("Scanned to 2", {exact:true}).waitFor();
-    assert.doesNotMatch(await page.locator(".wallet-main > .status").innerText(), /Scanned through block 3/,
+    assert.doesNotMatch(await page.locator(".wallet-main > .status").innerText(), /Synced through block 3/,
       "cancelled scan must not claim the target was reached");
     await configure({tip:"3"});
     await page.getByRole("button", {name:"Sync wallet",exact:true}).click();
-    await status("Scanned through block 3.").waitFor({timeout:90_000});
+    await status("Synced through block 3. Sync again for payments mined later.").waitFor({timeout:90_000});
     await page.getByText("Scanned to 3", {exact:true}).waitFor();
     assert.equal(await page.locator("#address").textContent(), address, "resumed sync replaced the wallet");
     await configure({tip:"2"});

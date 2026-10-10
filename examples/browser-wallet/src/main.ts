@@ -1,7 +1,7 @@
 import { SDK_VERSION, classifyHistory, createWallet, validateBirthdayInput, formatZatoshis, WalletError, type WalletSnapshot } from "@z-stack/sdk";
 import "./style.css";
 import buildInfo from "../sdk-build.json";
-import { pendingFunds, confirmationLabel, loadedWalletStatus } from "./wallet-view";
+import { pendingFunds, confirmationLabel, loadedWalletStatus, activityMovement, paymentErrorMessage, syncedWalletStatus } from "./wallet-view";
 import { drawReceiveQr } from "./receive-qr";
 import { attachBase } from "./base";
 import { connection } from "./connection";
@@ -49,7 +49,7 @@ async function start() {
   element("title").textContent = `${connection.network[0].toUpperCase()}${connection.network.slice(1)} wallet`;
   balance.textContent = `— ${unit}`;
   element("send-panel").setAttribute("aria-label", `Send ${unit}`);
-  for (const el of document.querySelectorAll("h2, label")) if (el.textContent?.includes("ZEC")) el.textContent = el.textContent.replace("ZEC", unit);
+  for (const el of document.querySelectorAll("h2, label")) if (/ZEC|TAZ/.test(el.textContent ?? "")) el.textContent = el.textContent!.replace(/ZEC|TAZ/g, unit);
   let server = "Configured transport";
   try { if (typeof connection.server === "string") server = new URL(connection.server, window.location.href).host; } catch { /* Keep a fixed label; never render credential-bearing URLs. */ }
   element("chain-warning").hidden = connection.network !== "testnet";
@@ -66,6 +66,7 @@ async function start() {
   let busy = false;
   let identity: string | undefined;
   let hasScanned = false;
+  let latestSnapshot: WalletSnapshot | undefined;
   let incomingConfirmations: number | undefined;
   let pendingPayment = false;
   let recoveryPhrase = "";
@@ -94,7 +95,7 @@ async function start() {
   let cancelRecovery: (() => void) | undefined;
 
   wallet.on("sync", progress => {
-    status.textContent = progress.stage === "synced" ? "Up to date" : `Syncing · ${Math.round(progress.percent ?? 0)}%`;
+    status.textContent = progress.stage === "synced" ? `Synced through block ${progress.scanned?.toLocaleString() ?? "unknown"}. Sync again for payments mined later.` : `Syncing · ${Math.round(progress.percent ?? 0)}%`;
   });
   function showBalance(available: bigint, pending: bigint, required?: number) {
     balance.textContent = `${formatZatoshis(available)} ${unit}`;
@@ -111,7 +112,10 @@ async function start() {
 
 
   async function render(snapshot: WalletSnapshot) {
+    latestSnapshot = snapshot;
     identity = snapshot.unifiedAddress;
+    element("balance-panel").hidden = false;
+    element("activity-panel").hidden = false;
     incomingConfirmations = snapshot.confirmations?.untrusted;
     pendingPayment = (await wallet.pending(1)).length > 0;
     showRuntime();
@@ -133,17 +137,20 @@ async function start() {
       const row = document.createElement("li");
       const item = classifyHistory(entry);
       const movement = document.createElement("strong"), confirmations = document.createElement("span"), txid = document.createElement("code");
-      const sign = item.action === "received" ? "+" : item.action === "sent" ? "−" : "";
-      movement.textContent = `${item.label} · ${sign}${item.displayZec} ${unit}`;
+      movement.textContent = activityMovement(entry, unit);
       confirmations.textContent = confirmationLabel(entry, snapshot);
       txid.textContent = entry.txid;
       row.append(movement, confirmations, txid);
+      for (const memo of item.memos) {
+        const text = document.createElement("p"); text.className = "memo"; text.textContent = memo; row.append(text);
+      }
       return row;
     });
     history.replaceChildren(...rows);
     element("history-empty").hidden = rows.length > 0;
     element("history-empty").textContent = hasScanned ? "No activity yet." : "Sync to look for activity.";
     updateControls();
+    return entries;
   }
 
   function clearPhrase() {
@@ -154,6 +161,7 @@ async function start() {
     element("phrase-copy-status").hidden = true;
     restoreForm.hidden = !!identity || creating;
     phrase.hidden = true;
+    element("backup-panel").hidden = true;
     hidePhrase.hidden = true;
     words.value = "";
     sendWords.value = "";
@@ -174,6 +182,7 @@ async function start() {
     element<HTMLButtonElement>("review-send").disabled = busy || !identity || !hasScanned;
     element("send-readiness").hidden = hasScanned;
     copyAddress.disabled = busy || !identity;
+    element<HTMLButtonElement>("load-details").disabled = busy || !identity;
   }
 
   async function copy(text: string, output: HTMLElement, secret = false) {
@@ -207,7 +216,7 @@ async function start() {
     catch (error) {
       const safe = WalletError.fromUnknown(error);
       console.warn("Wallet action failed", { code: safe.code });
-      output.textContent = safe.userMessage();
+      output.textContent = output === sendStatus ? paymentErrorMessage(safe, latestSnapshot, unit) : safe.userMessage();
       if (output === sendStatus) {
         const fields: Partial<Record<WalletError["code"], string>> = { invalid_address: "send-to", invalid_amount: "send-amount", invalid_memo: "send-memo", invalid_recovery_phrase: "send-words", seed_mismatch: "send-words" };
         const field = fields[safe.code];
@@ -290,7 +299,7 @@ async function start() {
           receipt = { txid: error.txid, state: "unknown" }; showReceipt(receipt);
         }
         const safe = WalletError.fromUnknown(error);
-        sendStatus.textContent = safe.userMessage();
+        sendStatus.textContent = paymentErrorMessage(safe, latestSnapshot, unit);
         if (safe.code === "invalid_recovery_phrase" || safe.code === "seed_mismatch") sendWords.setAttribute("aria-invalid", "true");
       } finally { wallet.lock(); sending = undefined; cancelSend.hidden = true; }
     }, sendStatus);
@@ -336,6 +345,8 @@ async function start() {
           copyPhrase.hidden = false;
           element("phrase-copy-status").hidden = false;
           phrase.hidden = false;
+          element("backup-panel").hidden = false;
+          element("backup-panel").focus();
           hidePhrase.hidden = false;
           status.textContent = "Save these words, then finish creating your wallet.";
           return new Promise<void>((resolve, reject) => {
@@ -362,6 +373,13 @@ async function start() {
     // Retain the previous balance and history while syncing.
     const snapshot = await wallet.sync();
     await render(snapshot);
+    status.textContent = syncedWalletStatus(snapshot);
+  }));
+
+  element("load-details").addEventListener("click", () => void run(async () => {
+    const snapshot = await wallet.fetchMemos();
+    const entries = await render(snapshot);
+    status.textContent = entries.every(entry => entry.historyMetadataComplete) ? "Memos and transaction details loaded." : "Some details are unavailable. Try again later.";
   }));
 
   restoreForm.addEventListener("submit", event => {
@@ -412,7 +430,7 @@ async function start() {
     });
   });
   function clearLocalWalletView() {
-    identity = undefined; hasScanned = false; pendingPayment = false; review = undefined; receipt = undefined;
+    latestSnapshot = undefined; identity = undefined; hasScanned = false; pendingPayment = false; review = undefined; receipt = undefined;
     disposeBase(); disposeBase = attachBase(wallet, perform, () => identity);
     clearPhrase(); restoreForm.reset(); birthday.setCustomValidity("");
     createBirthday.value = ""; createBirthday.setCustomValidity("");
@@ -421,7 +439,7 @@ async function start() {
     element("remove-status").textContent = ""; removeConfirm.checked = false;
     address.textContent = ""; balance.textContent = `— ${unit}`; history.replaceChildren();
     for (const id of ["pending-balance", "pending-help", "send-confirming"]) element(id).hidden = true;
-    for (const id of ["receive-panel", "scan-panel", "send-panel"]) element(id).hidden = true;
+    for (const id of ["receive-panel", "scan-panel", "send-panel", "balance-panel", "activity-panel"]) element(id).hidden = true;
     element("history-empty").hidden = false;
     element("history-empty").textContent = "Create or restore a wallet to see activity.";
     element<HTMLDetailsElement>("remove-panel").open = false;

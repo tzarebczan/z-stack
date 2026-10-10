@@ -118,9 +118,11 @@ function asNetwork(v: unknown): Network | null {
 }
 
 function asTransport(v: unknown, lwdUrl: string, proxyUrl?: string): TransportKind {
+  // An explicit direct transport must survive an old, unused pipe URL.
+  if (v === "grpc-web") return "grpc-web";
   if (v === "pipe" || looksLikeLwdPipe(lwdUrl) || looksLikeLwdPipe(proxyUrl ?? "")) return "pipe";
   if (looksLikeGrpcWeb(lwdUrl)) return "grpc-web";
-  return v === "grpc-web" ? "grpc-web" : "proxy";
+  return "proxy";
 }
 
 function asUnlock(v: unknown): UnlockPolicy {
@@ -1910,7 +1912,7 @@ export function App() {
                           ? "local"
                           : lwdUrl === LOCAL_GRPC_WEB
                             ? "grpcweb"
-                            : lwdUrl === "https://testnet.zec.rocks:443"
+                            : lwdUrl === "https://zcash-testnet.chainsafe.dev"
                               ? "testnet"
                               : lwdUrl === "https://zec.rocks:443"
                                 ? "mainnet"
@@ -1922,7 +1924,7 @@ export function App() {
                     else if (v === "local-mainnet") setLwdUrl(LOCAL_ZAINO_GRPC_MAINNET);
                     else if (v === "local") setLwdUrl(LOCAL_ZAINO_GRPC);
                     else if (v === "grpcweb") setLwdUrl(LOCAL_GRPC_WEB);
-                    else if (v === "testnet") setLwdUrl("https://testnet.zec.rocks:443");
+                    else if (v === "testnet") { setLwdUrl("https://zcash-testnet.chainsafe.dev"); setTransportKind("grpc-web"); }
                     else if (v === "mainnet") setLwdUrl("https://zec.rocks:443");
                   }}
                   disabled={!!busy}
@@ -1931,7 +1933,7 @@ export function App() {
                   <option value="local-mainnet">local mainnet Zaino (127.0.0.1:8138)</option>
                   <option value="local">local testnet Zaino (127.0.0.1:8137)</option>
                   <option value="grpcweb">local gRPC-Web (127.0.0.1:1238)</option>
-                  <option value="testnet">testnet.zec.rocks (shield-only)</option>
+                  <option value="testnet">ChainSafe testnet (gRPC-Web)</option>
                   <option value="mainnet">zec.rocks (shield-only)</option>
                   <option value="custom">custom</option>
                 </select>

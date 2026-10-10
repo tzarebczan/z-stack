@@ -5,7 +5,7 @@ scanning, and proofs run on the device. The same package includes a client for
 the native loopback engine.
 
 **Alpha:** download the prebuilt archives from the
-[alpha.7 release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.7).
+[alpha.7 release](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.8).
 Both WASM engines, bindings, workers and integrity manifests are included; no
 Rust build is needed. For custom source builds, `pnpm pack:sdk` produces the
 same archive layout. The SDK bundles its matching core and passkey helpers; it

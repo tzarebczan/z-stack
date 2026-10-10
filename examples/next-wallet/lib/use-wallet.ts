@@ -57,6 +57,7 @@ export function useWallet() {
     // A failed optional read must never undo creation or hide its one-time phrase.
     const entries = await wallet.history(20);
     if (owner.current === wallet) setHistory(entries);
+    return entries;
   }
   useEffect(() => {
     setReady(false); setBusy(""); setSpending(false); setStatus("Opening local wallet…");
@@ -131,7 +132,7 @@ export function useWallet() {
   return { ready, busy, status, snapshot, history, phrase, spending, runtime, progress, receipt, canCancelPayment, baseAction,
     clearReceipt: () => { setReceipt(undefined); },
     clearStatus: (expected?: string) => { if (!running.current && (expected === undefined || expected === status)) setStatus(""); },
-    reviewPayment: (draft: SendDraft) => run("Reviewing", wallet => reviewSend(wallet, draft)),
+    reviewPayment: (draft: SendDraft) => run("Reviewing", wallet => reviewSend(wallet, draft), true),
     sendPayment: (review: SendReview, words: string) => run("Sending", async wallet => {
       const operation = new AbortController(); sendOperation.current = operation; setCanCancelPayment(true);
       try {
@@ -159,7 +160,7 @@ export function useWallet() {
         if (sendOperation.current === operation) sendOperation.current = undefined;
         if (owner.current === wallet) setCanCancelPayment(false);
       }
-    }),
+    }, true),
     cancelPayment: () => { sendOperation.current?.abort(); setStatus("Stopping before submission · waiting for proof cleanup…"); },
     network: connection.network,
     server: serverName,
@@ -200,7 +201,7 @@ export function useWallet() {
       }
       if (owner.current === wallet) {
         const tip = await wallet.tip();
-        setStatus(tip.behind === 0 ? `Scanned through block ${tip.scanned.toLocaleString()}.` : `Scan stopped · ${tip.behind.toLocaleString()} blocks remaining.`);
+        setStatus(tip.behind === 0 ? `Synced through block ${tip.scanned.toLocaleString()}. Sync again for payments mined later.` : `Scan stopped · ${tip.behind.toLocaleString()} blocks remaining.`);
       }
     }),
     rescan: (birthday: string) => run("Rescanning", async wallet => {
@@ -212,8 +213,13 @@ export function useWallet() {
       await refresh(wallet, await wallet.sync());
       if (owner.current === wallet) {
         const tip = await wallet.tip();
-        setStatus(tip.behind === 0 ? `Scanned through block ${tip.scanned.toLocaleString()}.` : `Scan stopped · ${tip.behind.toLocaleString()} blocks remaining.`);
+        setStatus(tip.behind === 0 ? `Synced through block ${tip.scanned.toLocaleString()}. Sync again for payments mined later.` : `Scan stopped · ${tip.behind.toLocaleString()} blocks remaining.`);
       }
+    }),
+    loadDetails: () => run("Loading details", async wallet => {
+      const entries = await refresh(wallet, await wallet.fetchMemos());
+      if (owner.current === wallet) setStatus(entries?.every(entry => entry.historyMetadataComplete)
+        ? "Memos and transaction details loaded." : "Some details are unavailable. Try again later.");
     }),
     cancel: () => { owner.current?.cancelSync(); },
     unlock: (words: string) => run("Unlocking", async wallet => {

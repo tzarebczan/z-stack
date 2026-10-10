@@ -280,6 +280,9 @@ export async function verifyExampleRecovery(app, chromium) {
     await page.locator("#create").click();
     await page.locator("#phrase").waitFor({state:"visible"});
     assert.equal(await page.locator("#restore-form").isVisible(), false);
+    assert.equal(await page.locator("#balance-panel").isVisible(), false);
+    assert.equal(await page.locator("#activity-panel").isVisible(), false);
+    assert.equal(await page.evaluate(() => !!(document.getElementById("phrase").compareDocumentPosition(document.getElementById("hide-phrase")) & Node.DOCUMENT_POSITION_FOLLOWING)),true);
     assert.equal(await page.locator("#copy-phrase").isEnabled(), true);
     const phrase = await page.locator("#phrase").textContent();
     assert.equal(phrase.trim().split(/\s+/).length, 24);
@@ -345,6 +348,8 @@ export async function verifyExampleRecovery(app, chromium) {
       assert.match(await page.locator("#history").innerText(), /Received · \+0.12500000 TAZ/);
       assert.match(await page.locator("#history").innerText(), height < 102 ? new RegExp(`Confirming · ${height-99}/3 confirmations`) : /Mined · 3 confirmations/);
       assert.match(await page.locator("#send-confirming").innerText(), /Only available funds can be spent/);
+      await page.locator("#review-send").click();
+      await page.locator("#send-status").filter({hasText:"0.12500000 TAZ is still confirming. Incoming shielded funds need 3 confirmations"}).waitFor();
     }
     await page.evaluate(() => { delete window.fixtureFundingHeight; });
     await page.locator("#sync").click();

@@ -7,7 +7,7 @@ import { useWallet } from "../lib/use-wallet";
 import { SecretForm } from "./SecretForm";
 import { SetupChecks } from "./SetupChecks";
 import { BaseWallet } from "./BaseWallet";
-import { pendingFunds, confirmationLabel } from "../lib/wallet-view";
+import { pendingFunds, confirmationLabel, activityMovement } from "../lib/wallet-view";
 import { ScanDetails } from "./ScanDetails";
 import { SendPayment } from "./SendPayment";
 
@@ -27,23 +27,23 @@ export function WalletScreen() {
     <p className="sdk-build">SDK {SDK_VERSION} · {sdkBuild.version === SDK_VERSION && sdkBuild.revision ? "source " + sdkBuild.revision.slice(0,12) : "local archives"}</p>
     <div className="title-row"><div><p className="eyebrow">Your local wallet</p><h1>A little pocket of privacy.</h1></div>
       <span className="network">{wallet.network === "testnet" ? "Testnet" : "Regtest fixture"}</span></div>
-    {wallet.network === "testnet" && <details className="funding-notice" aria-label="Testnet funding limitation">
+    {wallet.network === "testnet" && <details open className="funding-notice" aria-label="Testnet funding">
       <summary>Testnet funding status</summary>
-      <p>Request test coins from the <a href="https://faucet.testnet.valargroup.dev/">Valar faucet</a>, then sync. Daily limits apply. A public testnet receive has been reported; outgoing spending remains unverified.</p>
+      <p>Request test coins from the <a href="https://faucet.testnet.valargroup.dev/">Valar faucet</a>, then sync. Daily limits apply. Public receive and a mined self-send have been reported. Faucet capacity varies; sync again after the payment is mined.</p>
       <a href="https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing">Funded testing options</a>
     </details>}
     <div className="workspace">
       <section className="wallet-main" aria-label="Wallet">
-        <div className="balance-block"><p className="eyebrow">Available balance</p>
+        <div className="balance-block" hidden={!wallet.snapshot || backup}><p className="eyebrow">Available balance</p>
           <p className="balance" id="balance">{wallet.snapshot ? formatZatoshis(BigInt(wallet.snapshot.balance?.totalAvailable ?? 0)) : "—"}
             <span>{unit}</span></p>
           {confirming > 0n && <div className="pending-balance">
             <p id="pending-balance" role="status">Confirming · {formatZatoshis(confirming)} {unit}</p>
             <p className="hint">Confirming funds cannot be spent yet.{wallet.snapshot?.confirmations && ` Incoming shielded funds need ${wallet.snapshot.confirmations.untrusted} ${wallet.snapshot.confirmations.untrusted === 1 ? "confirmation" : "confirmations"}.`} Sync to update.</p>
           </div>}
-          <div className="wallet-state"><span>{wallet.spending ? "Spending unlocked" : "Spending locked"}</span>
-            <span>{wallet.runtime}</span></div>
         </div>
+        <div className="wallet-state">{wallet.snapshot && !backup && <span>{wallet.spending ? "Spending unlocked" : "Spending locked"}</span>}
+          <span>{wallet.runtime}</span></div>
         <p role="status" className="status">{wallet.status}</p>
         {!wallet.snapshot ? <div className="welcome">
           <h2>Start with test funds.</h2><p>Create a wallet or bring your saved phrase. No sign-up needed.</p>
@@ -53,7 +53,7 @@ export function WalletScreen() {
           <details><summary>Restore an existing wallet</summary>
             <SecretForm restore disabled={disabled} clearStatus={wallet.clearStatus} submit={wallet.restore} /></details>
         </div> : <>
-          <div className="actions sync-actions"><button className="primary" disabled={disabled || backup}
+          <div className="actions sync-actions" hidden={backup}><button className="primary" disabled={disabled || backup}
             onClick={() => void wallet.sync()}>Sync wallet</button>
             {wallet.busy === "Syncing" && <button onClick={wallet.cancel}>Stop sync</button>}
             <button disabled={disabled || backup || !wallet.spending} onClick={wallet.lock}>Lock spending</button>
@@ -75,23 +75,26 @@ export function WalletScreen() {
             <button disabled={!saved} onClick={() => { setPhraseCopied(""); wallet.hidePhrase(); }}>Done, hide phrase</button></section>}
           {!backup && !wallet.spending && <details><summary>Unlock with your recovery phrase</summary>
             <SecretForm disabled={disabled} clearStatus={wallet.clearStatus} submit={words => wallet.unlock(words)} /></details>}
-          {!backup && <SendPayment unit={unit} pendingAmount={confirming > 0n ? formatZatoshis(confirming) : undefined} key={wallet.snapshot.unifiedAddress} disabled={disabled} canReview={(wallet.snapshot.scannedHeight ?? 0) >= wallet.snapshot.birthdayHeight}
+          {!backup && <SendPayment snapshot={wallet.snapshot} unit={unit} pendingAmount={confirming > 0n ? formatZatoshis(confirming) : undefined} key={wallet.snapshot.unifiedAddress} disabled={disabled} canReview={(wallet.snapshot.scannedHeight ?? 0) >= wallet.snapshot.birthdayHeight}
             clearStatus={wallet.clearStatus} canCancel={wallet.canCancelPayment}
             receipt={wallet.receipt} reviewPayment={wallet.reviewPayment} sendPayment={wallet.sendPayment}
             cancelPayment={wallet.cancelPayment} clearReceipt={wallet.clearReceipt} />}
           {!backup && <BaseWallet identity={wallet.snapshot.unifiedAddress} disabled={disabled} withWallet={wallet.baseAction} />}
-          <section className="activity" aria-label="Activity"><div className="section-title"><h2>Activity</h2>
+          <section className="activity" aria-label="Activity" hidden={backup}><div className="section-title"><h2>Activity</h2>
             <span className="hint">{wallet.snapshot.scannedHeight ? `Scanned to ${wallet.snapshot.scannedHeight.toLocaleString()}` : "Sync to update"}</span></div>
+            <button disabled={disabled} onClick={() => void wallet.loadDetails()}>Load memos and details</button>
+            <p className="hint">Sends your activity’s transaction IDs to the light server. Memos are decrypted locally.</p>
             {wallet.history.length ? <ul>{wallet.history.map(entry => <li key={entry.txid}>
-              <strong>{classifyHistory(entry).label} · {classifyHistory(entry).action === "received" ? "+" : classifyHistory(entry).action === "sent" ? "−" : ""}{classifyHistory(entry).displayZec} {unit}</strong>
-              <span>{confirmationLabel(entry, wallet.snapshot!)}</span><code>{entry.txid}</code></li>)}</ul>
+              <strong>{activityMovement(entry, unit)}</strong>
+              <span>{confirmationLabel(entry, wallet.snapshot!)}</span><code>{entry.txid}</code>
+              {classifyHistory(entry).memos.map((memo, index) => <p className="memo" key={index}>{memo}</p>)}</li>)}</ul>
               : <div className="empty"><span className="empty-mark" aria-hidden="true">↗</span><p>No activity yet.</p>
                 <p className="hint">Receive {unit}, then sync to see it here.</p></div>}
           </section>
         </>}
       </section>
       <aside>
-        <section className="receive"><p className="eyebrow">Receive</p><h2>Your private address</h2>
+        <section className="receive" hidden={backup}><p className="eyebrow">Receive</p><h2>Your private address</h2>
           {wallet.snapshot ? <><p className="hint">Use this unified address for shielded test deposits.</p>
             <ReceiveQr address={wallet.snapshot.unifiedAddress} /><code id="address">{wallet.snapshot.unifiedAddress}</code>
             {!backup && <><button onClick={() => {

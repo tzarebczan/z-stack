@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0-alpha.8
+
+- Recognize Zebra's already-mined broadcast response as delivered in browser and native wallets.
+- Put recovery words before acknowledgement and hide unused wallet panels during backup.
+- Explain confirming funds on the send form and keep payment errors beside the fields.
+- Add explicit activity detail/memo retrieval, accurate self-send fee labels, and compact-history movement copy.
+- Document a reported public testnet receive/self-send and shorten the first-session walkthrough.
+- Use ChainSafe's browser gRPC-Web origin in the diagnostic testnet preset.
+
+
 ## 0.1.0-alpha.7
 
 - Separate available and confirming balances in Vite and Next demos; show activity amounts and confirmation counts.

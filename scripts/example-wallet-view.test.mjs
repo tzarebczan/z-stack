@@ -46,3 +46,20 @@ for (const [name, view] of views) {
     assert.match(view.loadedWalletStatus({...snapshot,scannedHeight:105}),/scanned through block 105/);
   });
 }
+
+for (const [name, view] of views) {
+  test(`${name}: compact self-send movement does not pretend to know its payment amount`, () => {
+    const compact = {...mined,accountDeltaZat:-10000,spentZat:12500000,receivedZat:12490000,
+      orchardSpent:12500000,orchardReceived:12490000,sentNoteCount:1,feeZat:null};
+    assert.equal(view.activityMovement(compact,'TAZ'),'Wallet change · −0.00010000 TAZ · load details for the payment amount');
+    assert.equal(view.activityMovement({...compact,historyMetadataComplete:true,feeZat:10000},'TAZ'),'Self send · Fee 0.00010000 TAZ');
+    assert.match(view.activityMovement(mined,'TAZ'),/Received · \+0.12500000 TAZ/);
+  });
+  test(`${name}: only an insufficient-funds error adds the pending-funds explanation`, () => {
+    const snapshot={birthdayHeight:100,balance:{totalPending:12500000},confirmations:{untrusted:3}};
+    assert.match(view.paymentErrorMessage(new Error('insufficient funds'),snapshot,'TAZ'),/0.12500000 TAZ is still confirming\. Incoming shielded funds need 3 confirmations/);
+    assert.equal(view.paymentErrorMessage(new Error('invalid recovery phrase: secret words'),snapshot,'TAZ'),'Those words are not a valid recovery phrase.');
+    assert.match(view.paymentErrorMessage(new Error('insufficient funds'),{...snapshot,balance:{totalPending:0}},'TAZ'),/Not enough shielded funds/);
+    assert.match(view.syncedWalletStatus({...snapshot,scannedHeight:101}),/block 101.*payments mined later/);
+  });
+}

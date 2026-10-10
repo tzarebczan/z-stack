@@ -4,14 +4,28 @@ Start with a working app, then replace its screens one step at a time. The walle
 engine runs locally. Accounts, cloud backups and payment integrations are optional
 application services; they are not needed for this walkthrough.
 
-The preview supports NU7 testnet create, restore and sync. Payment review is
-verified on the isolated regtest fixture.
-An external alpha.6 run reported a Valar-funded public receive; outgoing public
-spending remains unverified. [Funded testing](#funded-testing) explains the current faucet results and the reproducible regtest alternative.
+An external alpha.7 integration completed a Valar-funded receive and a mined
+shielded self-send through ChainSafe. Both demos also pass funded NU7 regtest
+checks. Public services and faucet capacity can change; use disposable test funds.
+
+## First session
+
+1. Download the preview and verify both checksum layers below.
+2. Run the bundle's scaffolder with `--install`, then `npm run dev` in your app.
+3. Create a wallet, save the numbered recovery words privately, then finish.
+4. Copy the receive address into the [Valar faucet](https://faucet.testnet.valargroup.dev/).
+5. Sync after the payment is mined. Incoming funds become available after three
+   confirmations by default; sync again as new blocks arrive.
+6. Review a small self-send, enter your phrase for that payment, then sync until
+   it is mined. Keep the receipt. **Load memos and details** restores precise
+   activity labels and memos; the light server sees those transaction IDs.
+
+The sections below explain each step. [Chain diagnostics](#chain-diagnostics)
+and [funded regtest](#reproducible-funded-regtest) are separate troubleshooting paths.
 
 ## 1. Get matching archives
 
-The published **alpha.7** preview includes NU7 support. Use Node 22.18+ and npm;
+The published **alpha.8** preview includes NU7 support. Use Node 22.18+ and npm;
 no Rust toolchain or npm account is needed for these built archives. The SDK
 archive includes compiled single-threaded and threaded WASM engines, bindings,
 workers, integrity manifests, and bundled core and passkey helpers. Building
@@ -21,20 +35,20 @@ per-file lines (including the offline API files); a zero exit status means the
 check passed. Mismatches still print an error:
 
 ```sh
-gh release download v0.1.0-alpha.7 --repo tzarebczan/z-stack --dir sdk-alpha \
-  --pattern 'z-stack-preview-0.1.0-alpha.7.tgz*'
+gh release download v0.1.0-alpha.8 --repo tzarebczan/z-stack --dir sdk-alpha \
+  --pattern 'z-stack-preview-0.1.0-alpha.8.tgz*'
 cd sdk-alpha
-sha256sum --quiet -c z-stack-preview-0.1.0-alpha.7.tgz.sha256 # macOS: shasum -q -a 256 -c z-stack-preview-0.1.0-alpha.7.tgz.sha256
-tar -xzf z-stack-preview-0.1.0-alpha.7.tgz
+sha256sum --quiet -c z-stack-preview-0.1.0-alpha.8.tgz.sha256 # macOS: shasum -q -a 256 -c z-stack-preview-0.1.0-alpha.8.tgz.sha256
+tar -xzf z-stack-preview-0.1.0-alpha.8.tgz
 cd z-stack-preview
 sha256sum --quiet -c SHA256SUMS # macOS: shasum -q -a 256 -c SHA256SUMS
 ```
 
 The bundle's `.sha256` file checks only the preview download. The separate
-`SHA256SUMS-alpha.7` asset covers all five archives if you download the full set.
+`SHA256SUMS-alpha.8` asset covers all five archives if you download the full set.
 
-Without GitHub CLI, open the [release downloads](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.7),
-choose `z-stack-preview-0.1.0-alpha.7.tgz` and its `.sha256` file, and verify both checksum layers as above.
+Without GitHub CLI, open the [release downloads](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.8),
+choose `z-stack-preview-0.1.0-alpha.8.tgz` and its `.sha256` file, and verify both checksum layers as above.
 The [README](../README.md#run-the-published-preview) also provides curl commands.
 
 Continue from **inside the extracted bundle**, using its scripts and matching
@@ -70,6 +84,9 @@ by the base wallet. [Examples](../examples/README.md) explains their boundaries.
 cd /path/to/my-wallet
 npm run dev
 ```
+
+Vite dev serves the uncompressed engines. The production preview enables WASM
+compression; its transfer sizes are smaller than a first dev load.
 
 Open the localhost URL. Both wallet demos default to testnet. Never enter a
 mainnet recovery phrase in an example. The Next demo's setup checks deliberately
@@ -117,27 +134,21 @@ posted to Next or a backend.
 ### Public testnet status
 
 SDK NU7 support is implemented; public testnet activated at block **4,465,026**.
-An external alpha.6 integration reported a **0.125 TAZ receive** from the Valar
-faucet at block **4,482,837** through ChainSafe. Its transaction ID was
-`bf822338ef93a10be7494b465d541010613f40a5b2452ebb3a5b0548f9d62a03`.
-The selected light server also returned that transaction during our follow-up.
-The integrator discarded the recovery phrase, so this did not exercise an outgoing
-public payment. Public proving, broadcast and mined send confirmation remain
-unverified; this is not an established SDK send failure.
+An external **alpha.7** integration reported a **0.125 TAZ receive** from the
+[Valar faucet](https://faucet.testnet.valargroup.dev/) and a mined **0.01 TAZ
+shielded self-send**, using the published preview and ChainSafe gRPC-Web server.
+Receive transaction: `8acfec53963c663ada8debe080a69cd48075a7c5435af04ea13874af6b9b48b7`.
+Send transaction: `a4682e4717c5e9fc7a875276f609ba5d7abb7f82ed8b0e3b45819f42f29bc013`.
+A fresh restore scanned through block **4,483,478**, showing the send with four
+confirmations and **0.12490000 TAZ** remaining after a **0.0001 TAZ** fee.
+This is a reported integration run, not certification of every provider or device.
+[The integration fix](https://github.com/tzarebczan/z-stack/pull/13) records the run
+and corrects an already-mined rebroadcast response that was logged as rejection.
 
-Checked on **2026-10-09**: ChainSafe and [Zecblock](https://testnet.zecblock.com/block/4465026)
-report activation hash `000089ba27100beede16d64b34e3d1b626b428cb7ee9fe6dcfdc217ce24e78af`;
-[Zexplorer](https://zexplorer.app/) reports `0713a6429dc1cef50224668082022ca8881593e09a3170717e6a725491c03b96`.
-Provider disagreement alone does not prove that a faucet payment cannot arrive.
-A faucet's explorer link also does not identify its underlying node's chain.
-
-Use the [Valar testnet faucet](https://faucet.testnet.valargroup.dev/). It sends
-from a shielded wallet to Zakura nodes and provides a transaction receipt. Check
-its availability and daily limits before requesting coins. On **2026-10-09**, its
-status reported a synced wallet, but our disposable-wallet claim returned HTTP 429:
-“The faucet has reached its daily payout cap.” That earlier claim sent no coins. The later external integration above received
-funds, but did not test sending. Respect the retry time; do not resubmit to bypass
-limits. Do not reuse a mainnet phrase for this test.
+Faucet capacity and daily limits vary. Keep the receipt and wait for its payment
+to be mined before expecting activity. Do not bypass payout limits or reuse a
+mainnet phrase. **Synced through block N** describes the last scanned block; a
+payment mined later needs another Sync.
 
 ### Try a funded public walkthrough
 
@@ -173,6 +184,56 @@ limits. Do not reuse a mainnet phrase for this test.
    with a small amount. Keep the outgoing receipt and sync until confirmation.
    A self-send to the same disposable wallet is sufficient to exercise local proving
    and broadcast without giving another party funds. Reload and check identity/history.
+
+## 5. Review and send
+
+Continue after incoming funds are available, or in the isolated regtest fixture.
+
+Enter a shielded recipient address, a positive test-coin amount and an optional memo.
+Review the exact recipient, amount, memo and estimated fee. The demo freezes this
+review, refreshes the balance and fee before proving, and expires review after
+five minutes. Fee estimates are not a cryptographically binding fee cap.
+
+Enter the phrase for this payment; it is cleared from the input before any
+await. The app unlocks for one spend, proves locally, saves the pending transaction
+before submission, and shows its transaction ID. Cancel before submission prevents
+a later broadcast; an already-running proof may finish before cleanup completes.
+After submission, cancellation is no longer offered. Sync to see confirmation.
+If funds are still confirming, the send form explains the wait; lowering the
+amount can still use any funds already available.
+
+A lost submission acknowledgement is **unknown**, not rejection. The receipt
+keeps its transaction ID and directs the user to check activity. Do not silently
+resend the payment. A node's explicit rejection is a separate SDK error. The SDK
+preserves pending reservations and reconciles them against later chain data.
+
+Compact scan history shows wallet movement. **Load memos and details** explicitly
+requests full transactions by ID from the light server and decrypts their memos
+locally. This supplies exact fee metadata and restores the **Self send** label.
+A self-send changes your balance only by its fee; after restore the display shows
+that fee rather than guessing the original amount from change notes. Before
+details are loaded, a debit is labeled **Wallet change**, not a precise payment.
+
+## 6. Replace the example UI
+
+Keep one client owner per page and await `close()` before opening another.
+Subscribe before actions; unsubscribe during teardown. Leave cryptography in
+Rust. Keep inputs, recovery confirmation, network choice and receipts in your
+application. The examples' `send.ts` is app code, not a required SDK UI abstraction.
+
+Use [the API guide](SDK.md), [framework integration](INTEGRATION.md),
+[storage contracts](STORAGE.md) and [optional services](SERVICES.md) while replacing
+one concern at a time. Applications can add an iframe API around their wallet;
+that API and any account or fiat services stay outside z-stack.
+
+## Chain diagnostics
+
+Provider disagreement is separate from install success or wallet spending. On
+2026-10-09, ChainSafe and Zecblock reported the published NU7 activation hash
+`000089ba27100beede16d64b34e3d1b626b428cb7ee9fe6dcfdc217ce24e78af`, while Zexplorer
+reported `0713a6429dc1cef50224668082022ca8881593e09a3170717e6a725491c03b96`.
+The later public receive/self-send report succeeded through ChainSafe. An
+explorer link does not identify the faucet’s underlying node or chain.
 
 ChainSafe's root website redirects to `testnet.zec.rocks`, but its gRPC-Web RPC
 paths still respond. Keep the configured ChainSafe origin; the redirect target's
@@ -218,36 +279,3 @@ A loopback regtest fixture is used by our funded acceptance tests. Its public
 fixture phrases and tiny activation heights are for that isolated chain only.
 Do not change a running wallet's network or reuse its storage with another chain.
 Use a separate origin/profile or [your own namespace](STORAGE.md).
-
-## 5. Review and send
-
-Continue only after the chain/funding check above, or in the isolated regtest
-fixture. The public outgoing-send path remains unverified; the source regtest fixture verifies this step.
-
-Enter a shielded recipient address, a positive test-coin amount and an optional memo.
-Review the exact recipient, amount, memo and estimated fee. The demo freezes this
-review, refreshes the balance and fee before proving, and expires review after
-five minutes. Fee estimates are not a cryptographically binding fee cap.
-
-Enter the phrase for this payment; it is cleared from the input before any
-await. The app unlocks for one spend, proves locally, saves the pending transaction
-before submission, and shows its transaction ID. Cancel before submission prevents
-a later broadcast; an already-running proof may finish before cleanup completes.
-After submission, cancellation is no longer offered. Sync to see confirmation.
-
-A lost submission acknowledgement is **unknown**, not rejection. The receipt
-keeps its transaction ID and directs the user to check activity. Do not silently
-resend the payment. A node's explicit rejection is a separate SDK error. The SDK
-preserves pending reservations and reconciles them against later chain data.
-
-## 6. Replace the example UI
-
-Keep one client owner per page and await `close()` before opening another.
-Subscribe before actions; unsubscribe during teardown. Leave cryptography in
-Rust. Keep inputs, recovery confirmation, network choice and receipts in your
-application. The examples' `send.ts` is app code, not a required SDK UI abstraction.
-
-Use [the API guide](SDK.md), [framework integration](INTEGRATION.md),
-[storage contracts](STORAGE.md) and [optional services](SERVICES.md) while replacing
-one concern at a time. Applications can add an iframe API around their wallet;
-that API and any account or fiat services stay outside z-stack.

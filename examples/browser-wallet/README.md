@@ -13,7 +13,7 @@ downloaded archive. A fresh clone has no `artifacts/` directory; plain
 
 ```sh
 cd /path/to/copied/browser-wallet
-npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.7.tgz
+npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.8.tgz
 npm run dev
 ```
 
@@ -65,13 +65,22 @@ uses roughly 30 MB of uncompressed WASM across its two engine variants
 10.9 MB single-thread engine; scanning then uses one thread. Both modes keep
 integrity checks and run scanning in a worker.
 
-The funding warning is visible before Create and Send. Empty testnet sync
-verifies only the selected light server. An external alpha.6 run reported a Valar-funded receive; public outgoing sending
-has not yet been verified. Use the [Valar faucet](https://faucet.testnet.valargroup.dev/)
-for test coins; daily limits apply. A previous claim reached its daily payout cap.
+The funding notice is open before Create and Send. An external alpha.7 run
+reported a Valar-funded receive and a mined shielded self-send through ChainSafe.
+Use the [Valar faucet](https://faucet.testnet.valargroup.dev/) for test coins;
+capacity and daily limits vary. Sync after the payment is mined and again as
+confirmations arrive. Confirming funds are separate from the available balance;
+payment errors explain that wait beside the form.
 [Funded testing](https://github.com/tzarebczan/z-stack/blob/main/docs/GETTING-STARTED.md#funded-testing)
-explains the chain check and the separate source-checkout regtest runner. Payment
-errors stay beside the payment form; engine details are not display copy.
+records the public run and the separate source-checkout regtest runner.
+
+Recovery words appear before their acknowledgement button. Balance and activity
+are hidden until creation finishes. **Load memos and details** explicitly sends
+activity transaction IDs to the light server; memos are decrypted locally.
+Before retrieval, compact history labels debits as wallet movement. Exact fee
+metadata restores the **Self send** label and fee; it does not guess the original
+self-send amount from change notes. Vite dev serves uncompressed WASM; compression
+starts with the production `npm run preview` server.
 
 Local removal is disabled while payment history contains pending transactions.
 Sync until they confirm or expire before removing the browser’s saved wallet.
