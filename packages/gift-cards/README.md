@@ -6,6 +6,13 @@ Its root has no runtime dependencies or browser initialization. Native applicati
 can use those helpers with their own engine adapter. The `/browser` entry uses an
 optional matching `@z-stack/sdk` peer and a dedicated gift wallet worker.
 
+The codec supports Vizor v3 links, which current Vizor shares by default. Configure
+the exact `https://link.vizor.cash/payment-links/open` endpoint to accept them.
+Older v1/v2 links are unsupported. Messages use `Intl.Segmenter` to enforce Vizor's
+128-grapheme and 512-byte limits. Labels retain trimmed and empty values within
+the 16 KiB link bound. See the integration guide for the separate Vizor recovery
+size limit and network compatibility.
+
 ## Build and install the optional archive
 
 The published alpha.9 preview predates gift cards. Build a source checkout that

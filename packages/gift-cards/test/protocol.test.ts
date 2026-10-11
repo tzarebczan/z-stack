@@ -29,3 +29,49 @@ test("strict bounded secret parser rejects redirected endpoints, malformed entro
   assert.throws(() => giftFundingAmount({ amountZat: 2_100_000_000_000_000n }));
   assert.throws(() => encodeGiftLink({ ...card, network: "mainnet" }, "http://localhost/gift"));
 });
+
+test("documented public unfunded Vizor v3 vector decodes and encodes exactly", () => {
+  const vizorEndpoint = "https://link.vizor.cash/payment-links/open";
+  // Public zero-entropy vector from Vizor's compact-gift-links.md. Never fund it.
+  const link = vizorEndpoint + "#v3=WyJtYWluIiwiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsMzQ4MzE0MSwiMTAwMDAwMCIsImtuaWdodE1hZ2ljIiwxMS4xNzQ3LCJJdCdzIGEgZ3JlYXQgZGF5IHRvIHNoaWVsZCB5b3VyIFpFQyDwn5uh77iPIl0";
+  const decoded = parseGiftLink(link, { endpoints: [vizorEndpoint], network: "mainnet" });
+  assert.deepEqual(decoded, { network: "mainnet", entropy: new Uint8Array(32),
+    birthdayHeight: 3_483_141, amountZat: 1_000_000n, artworkId: "knightMagic",
+    fiatUsd: 11.1747, message: "It's a great day to shield your ZEC 🛡️", label: undefined });
+  assert.equal(link.length, 233);
+  assert.equal(encodeGiftLink(decoded, vizorEndpoint), link);
+});
+
+test("Vizor messages count trimmed grapheme clusters and UTF-8 bytes", () => {
+  for (const message of ["e\u0301".repeat(128), "👨‍💻".repeat(46), "😀".repeat(128)]) {
+    const link = encodeGiftLink({ ...card, message: `  ${message}  ` }, endpoint);
+    assert.equal(read(link).message, message);
+  }
+  for (const message of ["e\u0301".repeat(129), "👨‍💻".repeat(47), "x" + "\u0301".repeat(256)])
+    assert.throws(() => encodeGiftLink({ ...card, message }, endpoint));
+  assert.equal(read(encodeGiftLink({ ...card, message: "   " }, endpoint)).message, undefined);
+});
+
+test("Vizor labels preserve empty values and have only the bounded link envelope limit", () => {
+  for (const label of ["", " ", "long label ".repeat(600)]) {
+    const decoded = read(encodeGiftLink({ ...card, label }, endpoint));
+    assert.equal(decoded.label, label.trim());
+  }
+  const normalized = read(encodeGiftLink({ ...card, artworkId: "  unknown-art  " }, endpoint));
+  assert.equal(normalized.artworkId, "unknown-art");
+  assert.throws(() => encodeGiftLink({ ...card, artworkId: "x".repeat(65) }, endpoint));
+  assert.throws(() => encodeGiftLink({ ...card, label: "x".repeat(16_384) }, endpoint));
+  assert.throws(() => encodeGiftLink({ ...card, label: "\u0001".repeat(3_000) }, endpoint));
+  const payload = [" regtest ", encodeBase64Url(card.entropy), 150, "2100000000000000", null, null, null, ""];
+  const decoded = read(endpoint + "#v3=" + encodeBase64Url(new TextEncoder().encode(JSON.stringify(payload))));
+  assert.equal(decoded.network, "regtest");
+  assert.equal(decoded.amountZat, 2_100_000_000_000_000n);
+  assert.equal(decoded.label, "");
+  assert.throws(() => giftFundingAmount(decoded), "creation still requires room for the claim reserve");
+});
+
+test("legacy Vizor envelopes remain explicitly unsupported", () => {
+  const link = encodeGiftLink(card, endpoint);
+  for (const version of ["v1", "v2"])
+    assert.throws(() => read(link.replace("#v3=", `#${version}=`)));
+});

@@ -6,6 +6,27 @@ helpers, recovery store contract, and coordinator. Import `/browser` only when
 opening isolated browser gift wallets. Native applications supply an adapter
 around their own engine, durable payment receipts, and encrypted seed storage.
 
+## Vizor link compatibility
+
+The codec reads and writes Vizor's positional JSON `#v3=` format. Current Vizor
+shares v3 by default. To accept those links, configure the exact endpoint
+`https://link.vizor.cash/payment-links/open` alongside your application's share
+endpoint. Mainnet and explicitly configured regtest links follow the Vizor
+format; `test` is this package's testnet extension.
+
+Messages are trimmed and limited to 128 grapheme clusters and 512 UTF-8 bytes,
+using the runtime's `Intl.Segmenter`. Artwork identifiers are trimmed ASCII
+identifiers of at most 64 characters. Labels are trimmed, preserve an explicit
+empty label, and fit within the complete 16 KiB link bound. This package retains
+the bounded v3 representation directly. Vizor additionally limits its expanded
+v2 recovery representation to 16 KiB, so unusually large labels accepted here
+may exceed that recovery bound when imported into Vizor.
+
+Older Vizor v1 and v2 links are unsupported. Vizor still reads those versions and
+may share v2 for a legacy phrase with alternate whitespace. This package does
+not convert or reinterpret such legacy secrets. The codec needs `Intl.Segmenter`
+when validating messages, including in standalone Node 22 consumers.
+
 ## Install and configure
 
 The published alpha.9 preview predates gift cards. Use a source checkout that

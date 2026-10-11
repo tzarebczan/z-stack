@@ -66,20 +66,37 @@ export function decodeBase64Url(encoded: string, maxLength = MAX_GIFT_LINK_LENGT
   } catch { throw new GiftError("invalid_link"); }
 }
 
-function presentationString(value: unknown, limit: number): string | undefined {
+function presentationString(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string" || Array.from(value).length > limit || new TextEncoder().encode(value).length > 512) throw new GiftError("invalid_link");
+  if (typeof value !== "string" || value.length > MAX_GIFT_LINK_LENGTH) throw new GiftError("invalid_link");
   return value.trim() || undefined;
+}
+
+function giftMessage(value: unknown): string | undefined {
+  const message = presentationString(value);
+  if (message === undefined) return undefined;
+  if (new TextEncoder().encode(message).length > 512) throw new GiftError("invalid_link");
+  const segments = new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(message);
+  let count = 0;
+  for (const _segment of segments) if (++count > 128) throw new GiftError("invalid_link");
+  return message;
+}
+
+function giftLabel(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || value.length > MAX_GIFT_LINK_LENGTH) throw new GiftError("invalid_link");
+  return value.trim();
 }
 
 export function validateGiftCard(card: GiftCard): void {
   if (!["mainnet", "testnet", "regtest"].includes(card.network) ||
     !(card.entropy instanceof Uint8Array) || ![16, 20, 24, 28, 32].includes(card.entropy.length) ||
     !Number.isInteger(card.birthdayHeight) || card.birthdayHeight < 1 || card.birthdayHeight > 0xffffffff) throw new GiftError("invalid_link");
-  giftFundingAmount(card);
-  if (card.artworkId !== undefined && !/^[a-zA-Z0-9_-]{1,64}$/.test(card.artworkId)) throw new GiftError("invalid_link");
-  presentationString(card.label, 128);
-  presentationString(card.message, 128);
+  if (typeof card.amountZat !== "bigint" || card.amountZat <= 0n || card.amountZat > MAX_MONEY) throw new GiftError("invalid_amount");
+  const artwork = presentationString(card.artworkId);
+  if (artwork !== undefined && !/^[a-zA-Z0-9_-]{1,64}$/.test(artwork)) throw new GiftError("invalid_link");
+  giftLabel(card.label);
+  giftMessage(card.message);
   if (card.fiatUsd !== undefined && (!Number.isFinite(card.fiatUsd) || card.fiatUsd < 0)) throw new GiftError("invalid_link");
 }
 
@@ -97,7 +114,7 @@ export function encodeGiftLink(card: GiftCard, endpoint: string): string {
   const url = endpointUrl(endpoint);
   if (card.network === "mainnet" && url.protocol !== "https:") throw new GiftError("invalid_link");
   const payload: unknown[] = [wireNetwork[card.network], encodeBase64Url(card.entropy), card.birthdayHeight,
-    card.amountZat.toString(), card.artworkId ?? null, card.fiatUsd ?? null, card.message ?? null, card.label ?? null];
+    card.amountZat.toString(), presentationString(card.artworkId) ?? null, card.fiatUsd ?? null, giftMessage(card.message) ?? null, giftLabel(card.label) ?? null];
   while (payload.length > 4 && payload.at(-1) === null) payload.pop();
   url.hash = `v3=${encodeBase64Url(new TextEncoder().encode(JSON.stringify(payload)))}`;
   if (url.href.length > MAX_GIFT_LINK_LENGTH) throw new GiftError("invalid_link");
@@ -117,13 +134,14 @@ export function parseGiftLink(raw: string, options: { endpoints: readonly string
     const payload: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(decodeBase64Url(url.hash.slice(4))));
     if (!Array.isArray(payload) || payload.length < 4 || payload.length > 8) throw new GiftError("invalid_link");
     const [net, encodedEntropy, height, amount, artwork, fiat, message, label] = payload;
-    const network = net === "main" ? "mainnet" : net === "test" ? "testnet" : net === "regtest" ? "regtest" : undefined;
+    const normalizedNetwork = typeof net === "string" ? net.trim() : undefined;
+    const network = normalizedNetwork === "main" ? "mainnet" : normalizedNetwork === "test" ? "testnet" : normalizedNetwork === "regtest" ? "regtest" : undefined;
     if (!network || typeof encodedEntropy !== "string" || encodedEntropy.length > 43 || typeof height !== "number" ||
       typeof amount !== "string" || !/^[1-9]\d{0,15}$/.test(amount)) throw new GiftError("invalid_link");
     if (network !== options.network) throw new GiftError("wrong_network");
     if (fiat !== undefined && fiat !== null && typeof fiat !== "number") throw new GiftError("invalid_link");
     const card: GiftCard = { network, entropy: decodeBase64Url(encodedEntropy), birthdayHeight: height, amountZat: BigInt(amount),
-      artworkId: presentationString(artwork, 64), message: presentationString(message, 128), label: presentationString(label, 128),
+      artworkId: presentationString(artwork), message: giftMessage(message), label: giftLabel(label),
       ...(typeof fiat === "number" ? { fiatUsd: fiat } : {}) };
     validateGiftCard(card);
     return card;
