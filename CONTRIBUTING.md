@@ -62,6 +62,13 @@ Use both to distinguish compilation from test execution; CPU seconds and
 elapsed seconds are different measurements. Timing does not change profiles,
 features or which checks run.
 
+Native CI also uses a bounded, content-based compiler cache for patched path
+dependencies and their downstream crates. Cargo still checks inputs, builds
+each feature configuration and runs the tests. Compiler statistics show hits,
+misses and non-cacheable work separately. PRs only read saved caches; successful
+native runs on `main` publish new snapshots. Source or CI changes select a new
+snapshot and may reuse matching compiler entries from the preceding snapshot.
+
 To reuse an already-built matching archive set locally:
 
 ```sh
