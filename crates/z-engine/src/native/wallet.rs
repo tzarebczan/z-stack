@@ -2410,33 +2410,40 @@ impl NativeWallet {
         let scanned = self.scanned_height()?;
         let tip = Self::fetch_tip(&self.server).await?;
         if scanned >= tip {
-            // Older sparse scans could persist notes/rows without a usable
-            // checkpoint. A caught-up wallet must recover those anchors too.
-            self.recover_spend_checkpoints(scanned).await?;
-            #[cfg(feature = "transparent-inputs")]
-            {
-                let mut db = self.open_db()?;
-                self.classify_balance_funding(&mut db).await?;
-            }
-            // The web bridge syncs through here: resubmit unmined sends even
-            // when no block arrived.
-            let _ = tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip)).await;
-            return Ok((
-                scanned,
-                SyncProgress {
-                    stage: SyncStage::Synced,
-                    percent: 100.0,
-                    message: format!("already at {scanned}"),
-                    tip_height: Some(u64::from(tip)),
-                    scanned_height: Some(u64::from(scanned)),
-                    ..Default::default()
-                },
-                false,
-            ));
+            return self.finish_caught_up(scanned, tip).await;
         }
         drop(lease);
         let (h, p) = self.sync().await?;
         Ok((h, p, true))
+    }
+
+    // Caller retains the ordinary scan lease for the entire maintenance pass.
+    async fn finish_caught_up(&self, scanned: u32, tip: u32) -> Result<(u32, SyncProgress, bool)> {
+        // Older sparse scans could persist notes/rows without a usable
+        // checkpoint. A caught-up wallet must recover those anchors too.
+        self.recover_spend_checkpoints(scanned).await?;
+        let mut db = self.open_db()?;
+        // Raw enhancement can be deferred while scanning succeeds. Retry its
+        // bounded queue even when no new compact block arrived.
+        let _ = tokio::time::timeout(ENHANCE_BUDGET, self.enhance_memos(&mut db)).await;
+        #[cfg(feature = "transparent-inputs")]
+        self.classify_balance_funding(&mut db).await?;
+        drop(db);
+        // The web bridge syncs through here: resubmit unmined sends even
+        // when no block arrived.
+        let _ = tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip)).await;
+        Ok((
+            scanned,
+            SyncProgress {
+                stage: SyncStage::Synced,
+                percent: 100.0,
+                message: format!("already at {scanned}"),
+                tip_height: Some(u64::from(tip)),
+                scanned_height: Some(u64::from(scanned)),
+                ..Default::default()
+            },
+            false,
+        ))
     }
 
     #[cfg(feature = "transparent-inputs")]
@@ -4131,6 +4138,175 @@ mod tests {
         );
         drop(shared);
         assert!(writer.ordinary_scan_lease().is_ok());
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    #[tokio::test]
+    async fn caught_up_maintenance_retries_a_delayed_parent_and_persists_the_child_fee() {
+        use prost::Message;
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let mut wallet = fixture_wallet(dir.path());
+        let (key, _) = fixture_account();
+        let mut genesis = crate::web::from_hex(
+            "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327",
+        )
+        .unwrap();
+        genesis.reverse();
+        wallet
+            .replace_scan_db(
+                &key,
+                &AccountBirthday::from_parts(
+                    zcash_client_backend::data_api::chain::ChainState::empty(
+                        0.into(),
+                        zcash_primitives::block::BlockHash::from_slice(&genesis),
+                    ),
+                    None,
+                ),
+            )
+            .unwrap();
+        let mut publication = Vec::new();
+        let mut previous = genesis;
+        for height in 1..=8 {
+            let mut block = crate::native::selective_scan::tests::compact_at(height);
+            block.prev_hash = previous;
+            block.chain_metadata = Some(
+                zcash_client_backend::proto::compact_formats::ChainMetadata {
+                    sapling_commitment_tree_size: 0,
+                    orchard_commitment_tree_size: 0,
+                    ironwood_commitment_tree_size: 0,
+                },
+            );
+            previous = block.hash.clone();
+            block.encode_length_delimited(&mut publication).unwrap();
+        }
+        wallet
+            .scan_public_regtest(
+                &publication,
+                RegtestScanSchedule {
+                    nu6_3_height: crate::regtest_nu6_3_height(),
+                    nu7_height: crate::regtest_nu7_height(),
+                },
+            )
+            .unwrap();
+        let mut db = wallet.open_db().unwrap();
+        let account = NativeWallet::primary_account_id(&db).unwrap();
+        let address = db
+            .get_transparent_receivers(account, true, true)
+            .unwrap()
+            .into_keys()
+            .next()
+            .unwrap();
+        let script: transparent::address::Script = address.script().into();
+        let raw = |prevout: [u8; 32], index: u32, value: u64| {
+            let mut raw = 1u32.to_le_bytes().to_vec();
+            raw.push(1);
+            raw.extend(prevout);
+            raw.extend(index.to_le_bytes());
+            raw.extend([2, 1, 1]);
+            raw.extend(u32::MAX.to_le_bytes());
+            raw.push(1);
+            raw.extend(value.to_le_bytes());
+            script.write(&mut raw).unwrap();
+            raw.extend(0u32.to_le_bytes());
+            raw
+        };
+        let parent_raw = raw([0; 32], u32::MAX, 50_000);
+        let parent = Transaction::read(&parent_raw[..], BranchId::Sprout).unwrap();
+        let child_raw = raw(*parent.txid().as_ref(), 0, 40_000);
+        let child = Transaction::read(&child_raw[..], BranchId::Sprout).unwrap();
+        decrypt_and_store_transaction(&wallet.network, &mut db, &child, Some(2.into())).unwrap();
+        drop(db);
+        let fee = || {
+            rusqlite::Connection::open(&wallet.paths.data_db)
+                .unwrap()
+                .query_row(
+                    "SELECT fee FROM transactions WHERE txid=?1",
+                    [child.txid().as_ref().as_slice()],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(fee(), None);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        wallet.meta.validator_rpc = Some(format!("http://{}", listener.local_addr().unwrap()));
+        let parent_id = parent.txid().to_string();
+        let parent_hex = crate::web::to_hex(&parent_raw);
+        let server = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut buf = [0; 1024];
+                    let n = stream.read(&mut buf).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = std::str::from_utf8(&request[..end]).unwrap();
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("Content-Length: "))
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&request[end + 4..]).unwrap();
+                            assert_eq!(body["params"][0], parent_id);
+                            break;
+                        }
+                    }
+                }
+                let body = if attempt == 0 {
+                    serde_json::json!({"error":{"code":-28,"message":"fixture not ready"}})
+                } else {
+                    serde_json::json!({"result":{"hex":parent_hex,"height":1}})
+                }
+                .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        let lease = wallet.ordinary_scan_lease().unwrap();
+        let first = wallet.finish_caught_up(8, 8).await.unwrap();
+        assert_eq!(first.0, 8);
+        assert!(!first.2);
+        assert_eq!(fee(), None);
+        assert!(!wallet
+            .open_db()
+            .unwrap()
+            .transaction_enhancement_work()
+            .unwrap()
+            .is_empty());
+        let second = wallet.finish_caught_up(8, 8).await.unwrap();
+        assert_eq!(second.0, 8);
+        assert!(!second.2);
+        assert_eq!(fee(), Some(10_000));
+        assert!(wallet
+            .open_db()
+            .unwrap()
+            .transaction_enhancement_work()
+            .unwrap()
+            .is_empty());
+        drop(lease);
+        server.join().unwrap();
+        assert_eq!(
+            NativeWallet::open_offline(dir.path())
+                .unwrap()
+                .transaction(&child.txid().to_string())
+                .unwrap()
+                .unwrap()
+                .fee_zat,
+            Some(10_000)
+        );
     }
 
     #[tokio::test]
