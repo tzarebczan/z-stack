@@ -345,6 +345,17 @@ pub(super) mod tests {
         count: u32,
         extra: Option<Transaction>,
     ) -> (Vec<u8>, RegtestAcceptedChain) {
+        fixture_prefix_with_transactions(
+            script,
+            count,
+            extra.into_iter().map(|tx| (count, tx)).collect(),
+        )
+    }
+    pub(in crate::native::wallet) fn fixture_prefix_with_transactions(
+        script: &[u8],
+        count: u32,
+        extra: Vec<(u32, Transaction)>,
+    ) -> (Vec<u8>, RegtestAcceptedChain) {
         use transparent::{
             address::Script,
             bundle::{Authorized as TransparentAuthorized, Bundle, OutPoint, TxIn, TxOut},
@@ -420,17 +431,14 @@ pub(super) mod tests {
                 .freeze()
                 .unwrap()
             };
+            let other = extra.iter().find(|(h, _)| *h == height).map(|(_, t)| t);
             let header = BlockHeaderData {
                 version: 4,
                 prev_block: BlockHash::from_slice(&parent),
-                merkle_root: transaction_root(if height == count {
-                    extra.as_ref().map_or_else(
-                        || vec![*tx.txid().as_ref()],
-                        |other| vec![*tx.txid().as_ref(), *other.txid().as_ref()],
-                    )
-                } else {
-                    vec![*tx.txid().as_ref()]
-                })
+                merkle_root: transaction_root(other.map_or_else(
+                    || vec![*tx.txid().as_ref()],
+                    |t| vec![*tx.txid().as_ref(), *t.txid().as_ref()],
+                ))
                 .unwrap(),
                 final_sapling_root: [0; 32],
                 time: height,
@@ -442,16 +450,10 @@ pub(super) mod tests {
             .unwrap();
             let mut raw = vec![];
             header.write(&mut raw).unwrap();
-            raw.push(if height == count && extra.is_some() {
-                2
-            } else {
-                1
-            });
+            raw.push(if other.is_some() { 2 } else { 1 });
             tx.write(&mut raw).unwrap();
-            if height == count {
-                if let Some(other) = &extra {
-                    other.write(&mut raw).unwrap();
-                }
+            if let Some(other) = other {
+                other.write(&mut raw).unwrap();
             }
             headers.push((height, header.hash().to_string()));
             parent = header.hash().0.to_vec();

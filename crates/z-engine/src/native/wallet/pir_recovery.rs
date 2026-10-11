@@ -27,9 +27,206 @@ struct Receipt {
     discovery_scope_identity: Option<String>,
     scanner_identity: String,
     #[serde(default)]
+    effect_identity: Option<String>,
+    #[serde(default)]
     journal_head: Option<(u64, String)>,
     anchor: Anchor,
 }
+// Raw authorizing data is not authenticated by accepted-header effect inclusion.
+// Keep the wallet's saved bytes, but require an exact canonical encoding of the
+// independently matched transaction identity before using its effects.
+fn saved_transaction(
+    raw: &[u8],
+    txid: &[u8],
+    branch: zcash_protocol::consensus::BranchId,
+) -> anyhow::Result<zcash_primitives::transaction::Transaction> {
+    let mut remaining = raw;
+    let tx = zcash_primitives::transaction::Transaction::read(&mut remaining, branch)
+        .map_err(|_| anyhow::anyhow!("native_recovery_raw_conflict"))?;
+    let mut canonical = Vec::new();
+    tx.write(&mut canonical)?;
+    if !remaining.is_empty() || canonical != raw || tx.txid().as_ref().as_slice() != txid {
+        anyhow::bail!("native_recovery_raw_conflict");
+    }
+    Ok(tx)
+}
+
+// Bind verified mined effects, while allowing native signing to add actual
+// pending reservations. Each pending association must name an input in its
+// saved canonical transaction; arbitrary extra relations are never exempted.
+fn effect_identity(
+    mut query: impl FnMut(&str) -> rusqlite::Result<String>,
+    network: ZNetwork,
+    height: u32,
+) -> anyhow::Result<String> {
+    let mut hash = Sha256::new();
+    let mut authored = std::collections::BTreeSet::new();
+    if query("SELECT CAST(EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_native_payments_v1') AS TEXT)")? == "1" {
+        let rows = query("SELECT coalesce(group_concat(txids,'|'),'') FROM ext_native_payments_v1 WHERE phase != 'prepared'")?;
+        for row in rows.split('|').filter(|r| !r.is_empty()) {
+            authored.extend(serde_json::from_str::<Vec<String>>(row)?);
+        }
+    }
+    for id in &authored {
+        let mut bytes = crate::web::from_hex(id)
+            .map_err(|_| anyhow::anyhow!("native_recovery_reconciliation_required"))?;
+        if bytes.len() != 32 {
+            anyhow::bail!("native_recovery_reconciliation_required");
+        }
+        bytes.reverse();
+        if query(&format!("SELECT CAST(EXISTS(SELECT 1 FROM transactions WHERE txid=x'{}' AND raw IS NOT NULL) AS TEXT)",crate::web::to_hex(&bytes)))? != "1" { anyhow::bail!("native_recovery_reconciliation_required"); }
+    }
+    let rows=query("SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT hex(txid)||':'||hex(raw)||':'||(created IS NOT NULL) AS entry FROM transactions WHERE mined_height IS NULL ORDER BY txid)")?;
+    for row in rows.split('|').filter(|r| !r.is_empty()) {
+        let fields: Vec<_> = row.split(':').collect();
+        if fields.len() != 3 {
+            anyhow::bail!("native_recovery_reconciliation_required");
+        }
+        let decode = |s: &str| {
+            crate::web::from_hex(s)
+                .map_err(|_| anyhow::anyhow!("native_recovery_reconciliation_required"))
+        };
+        let id = decode(fields[0])?;
+        let mut display = id.clone();
+        display.reverse();
+        if fields[2] != "1" && !authored.contains(&crate::web::to_hex(&display)) {
+            continue;
+        }
+        let tx = saved_transaction(
+            &decode(fields[1])?,
+            &id,
+            zcash_protocol::consensus::BranchId::for_height(&network, height.into()),
+        )?;
+        let mut inputs = Vec::new();
+        if let Some(bundle) = tx.sapling_bundle() {
+            inputs.extend(
+                bundle
+                    .shielded_spends()
+                    .iter()
+                    .map(|s| ("sapling", s.nullifier().0)),
+            );
+        }
+        if let Some(bundle) = tx.orchard_bundle() {
+            inputs.extend(
+                bundle
+                    .actions()
+                    .iter()
+                    .map(|a| ("orchard", a.nullifier().to_bytes())),
+            );
+        }
+        if let Some(bundle) = tx.ironwood_bundle() {
+            inputs.extend(
+                bundle
+                    .actions()
+                    .iter()
+                    .map(|a| ("ironwood", a.nullifier().to_bytes())),
+            );
+        }
+        for (pool, nf) in inputs {
+            let sql=format!("SELECT CAST(NOT EXISTS(SELECT 1 FROM {pool}_received_notes n WHERE n.nf=x'{}' AND NOT EXISTS(SELECT 1 FROM {pool}_received_note_spends s JOIN transactions t ON s.transaction_id=t.id_tx WHERE s.{pool}_received_note_id=n.id AND t.txid=x'{}')) AS TEXT)",crate::web::to_hex(&nf),crate::web::to_hex(&id));
+            if query(&sql)? != "1" {
+                anyhow::bail!("native_recovery_reconciliation_required");
+            }
+        }
+        if let Some(bundle) = tx.transparent_bundle() {
+            for input in &bundle.vin {
+                let outpoint = input.prevout();
+                let sql=format!("SELECT CAST(NOT EXISTS(SELECT 1 FROM transparent_received_outputs n JOIN transactions parent ON n.transaction_id=parent.id_tx WHERE parent.txid=x'{}' AND n.output_index={} AND NOT EXISTS(SELECT 1 FROM transparent_received_output_spends s JOIN transactions t ON s.transaction_id=t.id_tx WHERE s.transparent_received_output_id=n.id AND t.txid=x'{}')) AS TEXT)",crate::web::to_hex(outpoint.hash()),outpoint.n(),crate::web::to_hex(&id));
+                if query(&sql)? != "1" {
+                    anyhow::bail!("native_recovery_reconciliation_required");
+                }
+            }
+        }
+    }
+    for pool in ["sapling", "orchard", "ironwood"] {
+        let index = if pool == "sapling" {
+            "output_index"
+        } else {
+            "action_index"
+        };
+        for sql in [
+            format!("SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT hex(t.txid)||':'||n.{index}||':'||n.value||':'||hex(n.nf)||':'||coalesce(n.commitment_tree_position,-1) AS entry FROM {pool}_received_notes n JOIN transactions t ON n.transaction_id=t.id_tx WHERE t.mined_height IS NOT NULL ORDER BY t.txid,n.{index})"),
+            format!("SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT hex(n.nf)||':'||hex(t.txid) AS entry FROM {pool}_received_note_spends s JOIN {pool}_received_notes n ON s.{pool}_received_note_id=n.id JOIN transactions t ON s.transaction_id=t.id_tx WHERE t.mined_height IS NOT NULL ORDER BY n.nf,t.txid)"),
+        ] { hash.update(query(&sql)?.as_bytes()); hash.update([0]); }
+        let pending = query(&format!("SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT hex(t.txid)||':'||hex(t.raw)||':'||hex(n.nf)||':'||(t.created IS NOT NULL) AS entry FROM {pool}_received_note_spends s JOIN {pool}_received_notes n ON s.{pool}_received_note_id=n.id JOIN transactions t ON s.transaction_id=t.id_tx WHERE t.mined_height IS NULL ORDER BY t.txid,n.nf)"))?;
+        for row in pending.split('|').filter(|r| !r.is_empty()) {
+            let fields: Vec<_> = row.split(':').collect();
+            if fields.len() != 4 {
+                anyhow::bail!("native_recovery_reconciliation_required");
+            }
+            let id = crate::web::from_hex(fields[0])
+                .map_err(|_| anyhow::anyhow!("native_recovery_reconciliation_required"))?;
+            let raw = crate::web::from_hex(fields[1])
+                .map_err(|_| anyhow::anyhow!("native_recovery_reconciliation_required"))?;
+            let nf = crate::web::from_hex(fields[2])
+                .map_err(|_| anyhow::anyhow!("native_recovery_reconciliation_required"))?;
+            let tx = saved_transaction(
+                &raw,
+                &id,
+                zcash_protocol::consensus::BranchId::for_height(&network, height.into()),
+            )?;
+            if fields[3] != "1" && !authored.contains(&tx.txid().to_string()) {
+                anyhow::bail!("native_recovery_reconciliation_required");
+            }
+            let matches = match pool {
+                "sapling" => tx.sapling_bundle().is_some_and(|b| {
+                    b.shielded_spends()
+                        .iter()
+                        .any(|s| s.nullifier().0.as_slice() == nf)
+                }),
+                "orchard" => tx.orchard_bundle().is_some_and(|b| {
+                    b.actions()
+                        .iter()
+                        .any(|a| a.nullifier().to_bytes().as_slice() == nf)
+                }),
+                _ => tx.ironwood_bundle().is_some_and(|b| {
+                    b.actions()
+                        .iter()
+                        .any(|a| a.nullifier().to_bytes().as_slice() == nf)
+                }),
+            };
+            if !matches {
+                anyhow::bail!("native_recovery_reconciliation_required");
+            }
+        }
+    }
+    let transparent = query("SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT hex(parent.txid)||':'||n.output_index||':'||hex(t.txid) AS entry FROM transparent_received_output_spends s JOIN transparent_received_outputs n ON s.transparent_received_output_id=n.id JOIN transactions parent ON n.transaction_id=parent.id_tx JOIN transactions t ON s.transaction_id=t.id_tx WHERE t.mined_height IS NOT NULL ORDER BY parent.txid,n.output_index,t.txid)")?;
+    hash.update(transparent.as_bytes());
+    hash.update([0]);
+    let pending = query("SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT hex(t.txid)||':'||hex(t.raw)||':'||hex(parent.txid)||':'||n.output_index||':'||(t.created IS NOT NULL) AS entry FROM transparent_received_output_spends s JOIN transparent_received_outputs n ON s.transparent_received_output_id=n.id JOIN transactions parent ON n.transaction_id=parent.id_tx JOIN transactions t ON s.transaction_id=t.id_tx WHERE t.mined_height IS NULL ORDER BY t.txid,parent.txid,n.output_index)")?;
+    for row in pending.split('|').filter(|r| !r.is_empty()) {
+        let fields: Vec<_> = row.split(':').collect();
+        if fields.len() != 5 {
+            anyhow::bail!("native_recovery_reconciliation_required");
+        }
+        let decode = |s: &str| {
+            crate::web::from_hex(s)
+                .map_err(|_| anyhow::anyhow!("native_recovery_reconciliation_required"))
+        };
+        let tx = saved_transaction(
+            &decode(fields[1])?,
+            &decode(fields[0])?,
+            zcash_protocol::consensus::BranchId::for_height(&network, height.into()),
+        )?;
+        let parent = decode(fields[2])?;
+        let index: u32 = fields[3].parse()?;
+        if (fields[4] != "1" && !authored.contains(&tx.txid().to_string()))
+            || !tx.transparent_bundle().is_some_and(|b| {
+                b.vin.iter().any(|input| {
+                    input.prevout().hash().as_slice() == parent && input.prevout().n() == index
+                })
+            })
+        {
+            anyhow::bail!("native_recovery_reconciliation_required");
+        }
+    }
+    for sql in [
+        "SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT spend_pool||':'||hex(nf)||':'||block_height||':'||tx_index AS entry FROM nullifier_map ORDER BY spend_pool,nf)",
+        "SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT block_height||':'||tx_index||':'||hex(txid) AS entry FROM tx_locator_map ORDER BY block_height,tx_index)",
+    ] { hash.update(query(sql)?.as_bytes()); hash.update([0]); }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
 fn require_journal_head(
     ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
     expected: Option<&(u64, String)>,
@@ -196,6 +393,18 @@ pub(in crate::native::wallet) fn ensure_transaction_receipt<
         anyhow::bail!("native_recovery_reconciliation_required");
     }
     require_journal_head(ext, receipt.journal_head.as_ref())?;
+    if receipt.effect_identity.as_deref()
+        != Some(
+            effect_identity(
+                |sql| ext.query_row(sql, [], |r| r.get(0)),
+                ZNetwork::Regtest,
+                receipt.report.accepted_height,
+            )?
+            .as_str(),
+        )
+    {
+        anyhow::bail!("native_recovery_reconciliation_required");
+    }
     let snapshot =
         NativeScanSnapshot::capture(db, receipt.report.accepted_height).map_err(store_failed)?;
     if receipt.report.selection_blocked
@@ -265,6 +474,16 @@ impl NativeWallet {
             || snapshot.identity().map_err(store_failed)? != receipt.scanner_identity
             || self.recovery_scope()?.identity()? != receipt.scope_identity
             || !receipt_journal_matches(&conn, &receipt)
+            || receipt.effect_identity.as_deref()
+                != Some(
+                    effect_identity(
+                        |sql| conn.query_row(sql, [], |r| r.get(0)),
+                        self.network,
+                        receipt.report.accepted_height,
+                    )
+                    .map_err(|_| failed("native_recovery_reconciliation_required"))?
+                    .as_str(),
+                )
         {
             return Err(failed("native_recovery_reconciliation_required"));
         }
@@ -331,6 +550,8 @@ impl NativeWallet {
         .map_err(|_| failed("native_recovery_chain_invalid"))?;
         genesis.reverse();
         let mut recovered_outputs = 0usize;
+        let mut before = 0usize;
+        let mut saved = BTreeMap::new();
         cancel.transaction(|| {
             db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<()> {
                 let current: u64 = ext.query_row(
@@ -341,7 +562,7 @@ impl NativeWallet {
                 if current != generation {
                     anyhow::bail!("native_recovery_generation_changed");
                 }
-                let before: usize = ext.query_row(
+                before = ext.query_row(
                     "SELECT count(*) FROM transparent_received_outputs",
                     [],
                     |r| r.get(0),
@@ -357,14 +578,21 @@ impl NativeWallet {
                             .optional()?
                             .flatten();
                         if let Some(raw) = raw {
+                            let retained = saved_transaction(
+                                &raw,
+                                tx.txid().as_ref().as_slice(),
+                                tx.consensus_branch_id(),
+                            )?;
                             let mut incoming = Vec::new();
                             tx.write(&mut incoming)?;
                             if raw != incoming {
-                                anyhow::bail!("native_recovery_raw_conflict");
+                                saved.insert(tx.txid(), retained);
                             }
                         }
                     }
                 }
+                // Retained chain/hash/root overlap is checked before any cleanup.
+                // A changed overlap still requires an explicit native rewind.
                 super::super::public_scan::scan_in_transaction(
                     wdb,
                     self.network,
@@ -372,6 +600,21 @@ impl NativeWallet {
                     true,
                     BlockHash::from_slice(&genesis),
                 )?;
+                Ok(())
+            })
+            .map_err(EngineError::from)
+        })?;
+        let pending = self.reset_verified_spend_effects(generation, &evidence, cancel)?;
+        cancel.transaction(|| {
+            db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<()> {
+                let current: u64 = ext.query_row(
+                    "SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if current != generation {
+                    anyhow::bail!("native_recovery_generation_changed");
+                }
                 super::super::public_scan::scan_in_transaction(
                     wdb,
                     self.network,
@@ -389,7 +632,7 @@ impl NativeWallet {
                             decrypt_and_store_transaction(
                                 &self.network,
                                 wdb,
-                                tx,
+                                saved.get(&tx.txid()).unwrap_or(tx),
                                 Some(block.claimed_height()),
                             )?;
                             if wdb.get_tx_height(tx.txid())?.is_some() {
@@ -407,6 +650,9 @@ impl NativeWallet {
                                 wdb.put_tx_meta(&observed, block.claimed_height())?;
                             }
                         }
+                    }
+                    for tx in &pending {
+                        decrypt_and_store_transaction(&self.network, wdb, tx, None)?;
                     }
                     let scope = native_scope_in_transaction(wdb, ext, 1)?;
                     if scope == prior {
@@ -508,6 +754,11 @@ impl NativeWallet {
                     scope_identity: scope.identity()?,
                     discovery_scope_identity: Some(discovery.scope_identity.clone()),
                     scanner_identity: snapshot.identity().map_err(store_failed)?,
+                    effect_identity: Some(effect_identity(
+                        |sql| ext.query_row(sql, [], |r| r.get(0)),
+                        self.network,
+                        chain.target_height(),
+                    )?),
                     journal_head: Some(journal_head.clone()),
                     anchor: chain.target.clone(),
                 };
@@ -525,6 +776,58 @@ impl NativeWallet {
         })?;
         Ok(report)
     }
+    fn reset_verified_spend_effects(
+        &self,
+        generation: u64,
+        evidence: &VerifiedRegtestRecoveryBlocks,
+        cancel: &RecoveryCancellation,
+    ) -> Result<Vec<zcash_primitives::transaction::Transaction>> {
+        cancel.transaction(|| {
+            (|| -> anyhow::Result<Vec<zcash_primitives::transaction::Transaction>> {
+            let mut conn = rusqlite::Connection::open(&self.paths.data_db)?;
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            conn.pragma_update(None, "synchronous", "FULL")?;
+            conn.pragma_update(None, "foreign_keys", true)?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let state: (u64, bool) = tx.query_row("SELECT generation,blocked FROM ext_coffer_pir_recovery_v1 WHERE id=1", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            if state != (generation, true) { anyhow::bail!("native_recovery_generation_changed"); }
+            let verified: std::collections::BTreeSet<Vec<u8>> = evidence.blocks.iter().flat_map(|b| b.vtx()).map(|t| t.txid().as_ref().to_vec()).collect();
+            let mut authored = std::collections::BTreeSet::new();
+            let intents: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_native_payments_v1')", [], |r| r.get(0))?;
+            if intents {
+                let mut stmt = tx.prepare("SELECT txids FROM ext_native_payments_v1 WHERE phase != 'prepared'")?;
+                for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+                    for id in serde_json::from_str::<Vec<String>>(&row?)? { authored.insert(id); }
+                }
+            }
+            let mut pending = Vec::new();
+            {
+                let mut stmt = tx.prepare("SELECT txid,raw,created IS NOT NULL FROM transactions WHERE mined_height IS NULL")?;
+                for row in stmt.query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?,r.get::<_, Option<Vec<u8>>>(1)?,r.get::<_, bool>(2)?)))? {
+                    let (id, raw, created) = row?;
+                    if verified.contains(&id) { continue; }
+                    let mut display = id.clone(); display.reverse();
+                    if created || authored.contains(&crate::web::to_hex(&display)) {
+                        let raw = raw.ok_or_else(|| anyhow::anyhow!("native_recovery_raw_conflict"))?;
+                        pending.push(saved_transaction(&raw, &id, zcash_protocol::consensus::BranchId::for_height(&self.network, evidence.target_height().into()))?);
+                    }
+                }
+            }
+            // Typed extension writers intentionally cannot mutate native tables.
+            // This FULL cleanup has its own exact Pending epoch and cancellation
+            // commit fence. A crash before typed replay cannot publish Complete.
+            for pool in ["sapling", "orchard", "ironwood"] {
+                tx.execute(&format!("DELETE FROM {pool}_received_note_spends"), [])?;
+            }
+            tx.execute("DELETE FROM transparent_received_output_spends", [])?;
+            tx.execute("DELETE FROM tx_locator_map", [])?;
+            if cancel.is_cancelled() { anyhow::bail!("native_recovery_cancelled"); }
+            tx.commit()?;
+            Ok::<_, anyhow::Error>(pending)
+            })().map_err(EngineError::from)
+        })
+    }
+
     /// Atomically rewind native canonical state and staged discovery to the
     /// highest retained independently accepted overlap; preserve Pending on fork.
     pub fn rewind_regtest_pir(
@@ -621,12 +924,737 @@ impl NativeWallet {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::native::wallet) mod tests {
     use super::*;
     use crate::native::wallet::recovery_blocks::{
         tests::fixture_with_script, verify_regtest_recovery_blocks,
     };
     use crate::native::wallet::tests::{fixture_account, fixture_wallet};
+    use zcash_client_backend::data_api::WalletCommitmentTrees;
+    #[test]
+    #[ignore = "private offline categorical diagnostic"]
+    fn retained_fork_raw_categories() {
+        use zcash_primitives::{block::Block, transaction::Transaction};
+        use zcash_protocol::consensus::BranchId;
+        let root = std::path::PathBuf::from(std::env::var("COFFER_PRIVATE_FIXTURE").unwrap());
+        let conn = rusqlite::Connection::open_with_flags(
+            root.join("canonical-target/data.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut identical = 0usize;
+        let mut auth_variant = 0usize;
+        let mut malformed = 0usize;
+        for entry in std::fs::read_dir(root.join("fork/canonical-blocks")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|s| s.to_str()) != Some("bin") {
+                continue;
+            }
+            let bytes = std::fs::read(path).unwrap();
+            let mut cursor = &bytes[b"COFFER-REGTEST-BLOCKS-V1\n".len()..];
+            let _start = u32::from_le_bytes(cursor[..4].try_into().unwrap());
+            cursor = &cursor[4..];
+            let count = u32::from_le_bytes(cursor[..4].try_into().unwrap());
+            cursor = &cursor[4..];
+            for _ in 0..count {
+                let len = u32::from_le_bytes(cursor[..4].try_into().unwrap()) as usize;
+                cursor = &cursor[4..];
+                let block = Block::read(&cursor[..len], &ZNetwork::Regtest).unwrap();
+                cursor = &cursor[len..];
+                for tx in block.vtx() {
+                    let raw: Option<Vec<u8>> = conn
+                        .query_row(
+                            "SELECT raw FROM transactions WHERE txid=?1",
+                            [tx.txid().as_ref().as_slice()],
+                            |r| r.get(0),
+                        )
+                        .optional()
+                        .unwrap()
+                        .flatten();
+                    if let Some(raw) = raw {
+                        let mut incoming = vec![];
+                        tx.write(&mut incoming).unwrap();
+                        if raw == incoming {
+                            identical += 1;
+                            continue;
+                        }
+                        let mut remaining = &raw[..];
+                        match Transaction::read(&mut remaining, BranchId::Nu6_3) {
+                            Ok(saved) if remaining.is_empty() && saved.txid() == tx.txid() => {
+                                let mut canonical = vec![];
+                                saved.write(&mut canonical).unwrap();
+                                if canonical == raw {
+                                    auth_variant += 1;
+                                } else {
+                                    malformed += 1;
+                                }
+                            }
+                            _ => malformed += 1,
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("retained raw categories: identical={identical}, canonical_same_effect_auth_variants={auth_variant}, malformed_or_effect_conflicts={malformed}");
+        assert_eq!(malformed, 0);
+    }
+    #[test]
+    #[ignore = "private retained fork replay diagnostic"]
+    fn retained_fork_replay_preserves_saved_raw_and_reaches_verified_native_tip() {
+        let root = std::path::PathBuf::from(std::env::var("COFFER_PRIVATE_FIXTURE").unwrap());
+        let stage = tempfile::tempdir().unwrap();
+        for name in ["wallet.json", "seed.enc", "data.sqlite"] {
+            std::fs::copy(
+                root.join("canonical-target").join(name),
+                stage.path().join(name),
+            )
+            .unwrap();
+        }
+        let trust: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("fork/accepted-headers.json")).unwrap(),
+        )
+        .unwrap();
+        let headers: Vec<(u32, String)> = serde_json::from_value(trust["headers"].clone()).unwrap();
+        let chain = RegtestAcceptedChain::from_local_node(
+            crate::native::RegtestScanSchedule {
+                nu6_3_height: 150,
+                nu7_height: None,
+            },
+            headers,
+        )
+        .unwrap();
+        let mut batches = BTreeMap::new();
+        for entry in std::fs::read_dir(root.join("fork/canonical-blocks")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|p| p.to_str()) != Some("bin") {
+                continue;
+            }
+            let bytes = std::fs::read(path).unwrap();
+            let offset = b"COFFER-REGTEST-BLOCKS-V1\n".len();
+            let start = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            batches.insert(start, bytes[offset + 8..].to_vec());
+        }
+        let mut bytes = b"COFFER-REGTEST-BLOCKS-V1\n".to_vec();
+        bytes.extend(1u32.to_le_bytes());
+        bytes.extend(chain.target_height().to_le_bytes());
+        for body in batches.values() {
+            bytes.extend(body);
+        }
+        let evidence = verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false))
+            .unwrap_or_else(|_| panic!("offline_verified_prefix_invalid"));
+        let conn = rusqlite::Connection::open(stage.path().join("data.sqlite")).unwrap();
+        let saved = conn
+            .prepare("SELECT txid,raw FROM transactions WHERE raw IS NOT NULL")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let wallet = NativeWallet::open(stage.path())
+            .unwrap_or_else(|_| panic!("offline_native_open_failed"));
+        let error = wallet
+            .recover_regtest_pir(
+                &chain,
+                evidence,
+                &mut Unavailable,
+                &mut Unavailable,
+                WorkLimits {
+                    max_queries: Some(1),
+                    max_private_bytes: Some(1024),
+                },
+                &RecoveryCancellation::new(),
+            )
+            .err();
+        assert!(error
+            .as_ref()
+            .is_none_or(|e| !e.to_string().contains("native_recovery_raw_conflict")));
+        assert!(error
+            .as_ref()
+            .is_none_or(|e| !e.to_string().contains("public_scan")));
+        assert_eq!(wallet.scanned_height().unwrap(), chain.target_height());
+        for (id, raw) in &saved {
+            assert!(
+                conn.query_row("SELECT raw FROM transactions WHERE txid=?1", [id], |r| r
+                    .get::<_, Vec<u8>>(0))
+                    .unwrap()
+                    == *raw
+            );
+        }
+        assert!(effect_identity(
+            |sql| conn.query_row(sql, [], |r| r.get(0)),
+            wallet.network,
+            chain.target_height()
+        )
+        .is_ok());
+        eprintln!("retained fork offline replay reached verified tip and preserved all saved raw rows; transport remains unavailable and receipt remains Pending");
+        assert!(wallet.ensure_pir_recovery_ready().is_err());
+    }
+    fn encrypted_orchard_transaction(
+        key: &zcash_keys::keys::UnifiedFullViewingKey,
+        seed: u8,
+        spend: [u8; 32],
+    ) -> zcash_primitives::transaction::Transaction {
+        use orchard::{
+            note::{ExtractedNoteCommitment, NoteVersion, RandomSeed, Rho},
+            note_encryption::{OrchardDomain, OrchardNoteEncryption},
+            value::NoteValue,
+            Note,
+        };
+        use zcash_note_encryption::Domain;
+        use zcash_primitives::transaction::{Authorized, Transaction, TransactionData, TxVersion};
+        use zcash_protocol::consensus::BranchId;
+        let rho = Rho::from_bytes(&spend).unwrap();
+        let note = Note::from_parts(
+            key.orchard()
+                .unwrap()
+                .address_at(0u32, zip32::Scope::External),
+            NoteValue::from_raw(50_000),
+            rho,
+            RandomSeed::from_bytes([seed; 32], &rho).unwrap(),
+            NoteVersion::V2,
+        )
+        .unwrap();
+        let cmx = ExtractedNoteCommitment::from(note.commitment()).to_bytes();
+        let enc = OrchardNoteEncryption::new(None, note, [0; 512]);
+        let epk = OrchardDomain::epk_bytes(enc.epk()).0;
+        let empty = TransactionData::<Authorized>::from_parts(
+            TxVersion::V5,
+            BranchId::Nu6_2,
+            0,
+            0.into(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        let mut raw = vec![];
+        empty.write(&mut raw).unwrap();
+        raw.pop();
+        raw.push(1);
+        raw.extend([0; 32]);
+        raw.extend(spend);
+        raw.extend(epk);
+        raw.extend(cmx);
+        raw.extend(epk);
+        raw.extend(enc.encrypt_note_plaintext());
+        raw.extend([0; 80]);
+        raw.push(3);
+        raw.extend(0i64.to_le_bytes());
+        raw.extend([0; 32]);
+        let length = orchard::Proof::expected_proof_size(1);
+        raw.push(253);
+        raw.extend((length as u16).to_le_bytes());
+        raw.extend(vec![0; length]);
+        raw.extend([0; 128]);
+        // Effects/encryption fixture only: dummy proofs/signatures do not claim
+        // consensus-valid authorization. Accepted fixture headers bind its txid.
+        Transaction::read(&raw[..], BranchId::Nu6_2).unwrap()
+    }
+    fn finish_fixture_recovery(wallet: &NativeWallet, bytes: &[u8], chain: &RegtestAcceptedChain) {
+        let cancel = RecoveryCancellation::new();
+        let evidence =
+            verify_regtest_recovery_blocks(bytes, chain, &AtomicBool::new(false)).unwrap();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let generation = conn
+            .query_row(
+                "SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let scope = wallet.recovery_scope().unwrap();
+        assert!(expected_events(&evidence, &scope).unwrap().is_empty());
+        let snapshot =
+            NativeScanSnapshot::capture(&wallet.open_db().unwrap(), chain.target_height()).unwrap();
+        let discovery = PirDiscoveryReport {
+            completion: "complete-for-enrolled-scope".into(),
+            reconciled: true,
+            accepted_anchor: Some(chain.target.clone()),
+            source_identity: "fixture".into(),
+            context_identity: chain.context_identity.clone(),
+            scope_identity: scope.identity().unwrap(),
+            enrolled_script_count: scope.0.len(),
+            covered_through: u64::from(chain.target_height()),
+            settled_through: u64::from(chain.target_height()),
+            confirmed_ledger_zat: 0,
+            history: vec![],
+            pending_pages: 0,
+            unresolved_spends: 0,
+            native_scanned_height: chain.target_height(),
+            native_chain_height: Some(chain.target_height()),
+            native_anchor_hash: Some(chain.target.hash.clone()),
+            native_scanner_identity: Some(snapshot.identity().unwrap()),
+            publication_start: 1,
+        };
+        assert!(
+            wallet
+                .finish_regtest_pir_recovery(chain, &evidence, generation, 0, discovery, &cancel)
+                .unwrap()
+                .scope_complete
+        );
+    }
+    fn assert_selected_orchard_witnesses(wallet: &NativeWallet, count: usize) {
+        use zcash_client_backend::data_api::{
+            wallet::input_selection::{LockFilter, LockedInputPolicy},
+            InputSource, TargetValue,
+        };
+        use zcash_protocol::{value::Zatoshis, ShieldedPool};
+        let mut db = wallet.open_db().unwrap();
+        let account = db.get_account_ids().unwrap()[0];
+        let (target, anchor) = db
+            .get_target_and_anchor_heights(std::num::NonZeroU32::MIN)
+            .unwrap()
+            .unwrap();
+        let notes = db
+            .select_spendable_notes(
+                account,
+                TargetValue::AtLeast(Zatoshis::from_u64(100_000).unwrap()),
+                &[ShieldedPool::Orchard],
+                target,
+                crate::confirmations_policy(ZNetwork::Regtest),
+                &[],
+                LockFilter::Policy(&LockedInputPolicy::Exclude),
+            )
+            .unwrap();
+        assert_eq!(notes.orchard().len(), count);
+        db.with_orchard_tree_mut::<_, _, anyhow::Error>(|tree| {
+            let root = tree.root_at_checkpoint_id(&anchor)?.unwrap();
+            for note in notes.orchard() {
+                let witness = tree
+                    .witness_at_checkpoint_id_caching(
+                        note.note_commitment_tree_position(),
+                        &anchor,
+                    )?
+                    .unwrap();
+                let leaf =
+                    orchard::tree::MerkleHashOrchard::from_cmx(&note.note().commitment().into());
+                assert_eq!(witness.root(leaf), root);
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+    #[test]
+    fn canonical_replay_removes_forged_nullifiers_and_preserves_verified_spends_and_witnesses() {
+        use crate::native::wallet::recovery_blocks::tests::fixture_prefix_with_transactions;
+        use prost::Message;
+        for genuinely_spent in [false, true] {
+            let (dir, wallet) = wallet();
+            let (key, _) = fixture_account();
+            let stranger = crate::native::selective_scan::tests::test_ufvk(8);
+            let payment = encrypted_orchard_transaction(&key, 7, [0; 32]);
+            let (prefix, _) = fixture_prefix_with_transactions(&[0x51], 3, vec![(3, payment)]);
+            let prefix_chain = fixture_prefix_with_transactions(
+                &[0x51],
+                3,
+                vec![(3, encrypted_orchard_transaction(&key, 7, [0; 32]))],
+            )
+            .1;
+            let initial =
+                verify_regtest_recovery_blocks(&prefix, &prefix_chain, &AtomicBool::new(false))
+                    .unwrap()
+                    .compact_blocks()
+                    .unwrap();
+            wallet
+                .scan_public_regtest(
+                    &initial
+                        .iter()
+                        .flat_map(Message::encode_length_delimited_to_vec)
+                        .collect::<Vec<_>>(),
+                    crate::native::RegtestScanSchedule {
+                        nu6_3_height: crate::regtest_nu6_3_height(),
+                        nu7_height: crate::regtest_nu7_height(),
+                    },
+                )
+                .unwrap();
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            let nf: Vec<u8> = conn
+                .query_row("SELECT nf FROM orchard_received_notes", [], |r| r.get(0))
+                .unwrap();
+            let spend = if genuinely_spent {
+                nf.clone().try_into().unwrap()
+            } else {
+                [0; 32]
+            };
+            let (bytes, chain) = fixture_prefix_with_transactions(
+                &[0x51],
+                8,
+                vec![
+                    (3, encrypted_orchard_transaction(&key, 7, [0; 32])),
+                    (6, encrypted_orchard_transaction(&stranger, 9, spend)),
+                ],
+            );
+            let verified = verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false))
+                .unwrap()
+                .compact_blocks()
+                .unwrap();
+            let mut forged = verified.clone();
+            forged[5].vtx[1].actions[0].nullifier = nf.clone();
+            assert_eq!(forged[5].hash, verified[5].hash);
+            assert_eq!(forged[5].chain_metadata, verified[5].chain_metadata);
+            assert_eq!(
+                forged[5].vtx[1].actions[0].cmx,
+                verified[5].vtx[1].actions[0].cmx
+            );
+            wallet
+                .scan_public_regtest(
+                    &forged
+                        .iter()
+                        .flat_map(Message::encode_length_delimited_to_vec)
+                        .collect::<Vec<_>>(),
+                    crate::native::RegtestScanSchedule {
+                        nu6_3_height: crate::regtest_nu6_3_height(),
+                        nu7_height: crate::regtest_nu7_height(),
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM orchard_received_note_spends",
+                    [],
+                    |r| r.get::<_, u32>(0)
+                )
+                .unwrap(),
+                1
+            );
+            // A provider can also leave a locator for the forged spend;
+            // cleanup must actually cascade it out of the nullifier map.
+            conn.execute(
+                "INSERT OR IGNORE INTO tx_locator_map(block_height,tx_index,txid) VALUES(6,1,?1)",
+                [forged[5].vtx[1].txid.as_slice()],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO nullifier_map(spend_pool,nf,block_height,tx_index) VALUES(3,?1,6,1) ON CONFLICT(spend_pool,nf) DO UPDATE SET block_height=6,tx_index=1",[&nf]).unwrap();
+            let _recovery_error = wallet
+                .recover_regtest_pir(
+                    &chain,
+                    verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false))
+                        .unwrap(),
+                    &mut Unavailable,
+                    &mut Unavailable,
+                    WorkLimits {
+                        max_queries: Some(1),
+                        max_private_bytes: Some(1024),
+                    },
+                    &RecoveryCancellation::new(),
+                )
+                .unwrap_err();
+
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM orchard_received_note_spends",
+                    [],
+                    |r| r.get::<_, u32>(0)
+                )
+                .unwrap(),
+                u32::from(genuinely_spent)
+            );
+            if !genuinely_spent {
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT count(*) FROM nullifier_map WHERE nf=?1",
+                        [&nf],
+                        |r| r.get::<_, u32>(0)
+                    )
+                    .unwrap(),
+                    0
+                );
+            }
+            let (_oracle_dir, oracle) = self::wallet();
+            oracle
+                .scan_public_regtest(
+                    &verified
+                        .iter()
+                        .flat_map(Message::encode_length_delimited_to_vec)
+                        .collect::<Vec<_>>(),
+                    crate::native::RegtestScanSchedule {
+                        nu6_3_height: crate::regtest_nu6_3_height(),
+                        nu7_height: crate::regtest_nu7_height(),
+                    },
+                )
+                .unwrap();
+            // Compare with an ordinary native scan enhanced from the same raw
+            // fixture, so its fee metadata is ready rather than still compact-only.
+            let verified_raw =
+                verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap();
+            oracle
+                .open_db()
+                .unwrap()
+                .transactionally(|wdb| {
+                    for block in &verified_raw.blocks {
+                        for tx in block.vtx() {
+                            decrypt_and_store_transaction(
+                                &oracle.network,
+                                wdb,
+                                tx,
+                                Some(block.claimed_height()),
+                            )?;
+                        }
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .unwrap();
+            assert!(
+                serde_json::to_value(wallet.history(100).unwrap()).unwrap()
+                    == serde_json::to_value(oracle.history(100).unwrap()).unwrap()
+            );
+            finish_fixture_recovery(&wallet, &bytes, &chain);
+            let cold = NativeWallet::open(dir.path()).unwrap();
+            cold.ensure_pir_recovery_ready().unwrap();
+            assert_selected_orchard_witnesses(&cold, usize::from(!genuinely_spent));
+            if !genuinely_spent {
+                conn.execute("INSERT INTO orchard_received_note_spends SELECT n.id,t.id_tx FROM orchard_received_notes n,transactions t WHERE t.mined_height=6 AND t.tx_index=1",[]).unwrap();
+                assert!(NativeWallet::open(dir.path())
+                    .unwrap()
+                    .ensure_pir_recovery_ready()
+                    .is_err());
+                let mut db = cold.open_db().unwrap();
+                assert!(db
+                    .transactionally_with_extension(|wdb, ext| ensure_transaction_receipt(wdb, ext))
+                    .is_err());
+            }
+        }
+    }
+    #[test]
+    fn canonical_replay_rebuilds_only_actual_saved_pending_reservations_and_refuses_malformed_intents(
+    ) {
+        use crate::native::wallet::recovery_blocks::tests::fixture_prefix_with_transactions;
+        use prost::Message;
+        let (dir, wallet) = wallet();
+        let (key, _) = fixture_account();
+        let stranger = crate::native::selective_scan::tests::test_ufvk(8);
+        let (bytes, chain) = fixture_prefix_with_transactions(
+            &[0x51],
+            8,
+            vec![
+                (3, encrypted_orchard_transaction(&key, 7, [0; 32])),
+                (4, encrypted_orchard_transaction(&key, 9, [0; 32])),
+            ],
+        );
+        let compact = verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false))
+            .unwrap()
+            .compact_blocks()
+            .unwrap();
+        wallet
+            .scan_public_regtest(
+                &compact
+                    .iter()
+                    .flat_map(Message::encode_length_delimited_to_vec)
+                    .collect::<Vec<_>>(),
+                crate::native::RegtestScanSchedule {
+                    nu6_3_height: crate::regtest_nu6_3_height(),
+                    nu7_height: crate::regtest_nu7_height(),
+                },
+            )
+            .unwrap();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let nf:Vec<u8>=conn.query_row("SELECT n.nf FROM orchard_received_notes n JOIN transactions t ON n.transaction_id=t.id_tx WHERE t.mined_height=3",[],|r|r.get(0)).unwrap();
+        let pending = encrypted_orchard_transaction(&stranger, 11, nf.try_into().unwrap());
+        let mut raw = vec![];
+        pending.write(&mut raw).unwrap();
+        let mut db = wallet.open_db().unwrap();
+        db.transactionally(|wdb| {
+            decrypt_and_store_transaction(&wallet.network, wdb, &pending, None)
+        })
+        .unwrap();
+        conn.execute_batch("CREATE TABLE ext_native_payments_v1(id TEXT PRIMARY KEY, proposal BLOB NOT NULL,fee INTEGER NOT NULL,created INTEGER NOT NULL,expires INTEGER NOT NULL,height INTEGER NOT NULL,block_hash BLOB NOT NULL,phase TEXT NOT NULL,txids TEXT NOT NULL)").unwrap();
+        let intent = serde_json::to_string(&vec![pending.txid().to_string()]).unwrap();
+        conn.execute("INSERT INTO ext_native_payments_v1 VALUES('saved',x'00',10000,1,2,8,x'00','unknown',?1)",[&intent]).unwrap();
+        conn.execute("UPDATE orchard_received_notes SET lock_owner=x'0102',lock_expiry_height=100 WHERE transaction_id IN(SELECT id_tx FROM transactions WHERE mined_height=3)",[]).unwrap();
+        conn.execute("INSERT INTO orchard_received_note_spends SELECT n.id,t.id_tx FROM orchard_received_notes n JOIN transactions parent ON n.transaction_id=parent.id_tx,transactions t WHERE parent.mined_height=4 AND t.txid=?1",[pending.txid().as_ref().as_slice()]).unwrap();
+        let recover = || {
+            wallet.recover_regtest_pir(
+                &chain,
+                verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+                &mut Unavailable,
+                &mut Unavailable,
+                WorkLimits {
+                    max_queries: Some(1),
+                    max_private_bytes: Some(1024),
+                },
+                &RecoveryCancellation::new(),
+            )
+        };
+        assert!(recover().is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM orchard_received_note_spends",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(conn.query_row("SELECT parent.mined_height FROM orchard_received_note_spends s JOIN orchard_received_notes n ON s.orchard_received_note_id=n.id JOIN transactions parent ON n.transaction_id=parent.id_tx",[],|r|r.get::<_,u32>(0)).unwrap(),3);
+        assert!(
+            conn.query_row(
+                "SELECT raw FROM transactions WHERE txid=?1",
+                [pending.txid().as_ref().as_slice()],
+                |r| r.get::<_, Vec<u8>>(0)
+            )
+            .unwrap()
+                == raw
+        );
+        assert!(
+            conn.query_row(
+                "SELECT phase||':'||txids FROM ext_native_payments_v1 WHERE id='saved'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap()
+                == format!("unknown:{intent}")
+        );
+        assert_eq!(conn.query_row("SELECT count(*) FROM orchard_received_notes WHERE lock_owner=x'0102' AND lock_expiry_height=100",[],|r|r.get::<_,u32>(0)).unwrap(),1);
+        finish_fixture_recovery(&wallet, &bytes, &chain);
+        let cold = NativeWallet::open(dir.path()).unwrap();
+        cold.ensure_pir_recovery_ready().unwrap();
+        assert_selected_orchard_witnesses(&cold, 1);
+        conn.execute("DELETE FROM orchard_received_note_spends WHERE transaction_id=(SELECT id_tx FROM transactions WHERE txid=?1)",[pending.txid().as_ref().as_slice()]).unwrap();
+        assert!(NativeWallet::open(dir.path())
+            .unwrap()
+            .ensure_pir_recovery_ready()
+            .is_err());
+        let mut writer = cold.open_db().unwrap();
+        assert!(writer
+            .transactionally_with_extension(|wdb, ext| ensure_transaction_receipt(wdb, ext))
+            .is_err());
+        writer
+            .transactionally(|wdb| {
+                decrypt_and_store_transaction(&wallet.network, wdb, &pending, None)
+            })
+            .unwrap();
+        NativeWallet::open(dir.path())
+            .unwrap()
+            .ensure_pir_recovery_ready()
+            .unwrap();
+        // A valid pending raw transaction cannot legitimize an extra unrelated
+        // association introduced after Complete, even though its txid is real.
+        conn.execute("INSERT INTO orchard_received_note_spends SELECT n.id,t.id_tx FROM orchard_received_notes n JOIN transactions parent ON n.transaction_id=parent.id_tx,transactions t WHERE parent.mined_height=4 AND t.txid=?1",[pending.txid().as_ref().as_slice()]).unwrap();
+        assert!(NativeWallet::open(dir.path())
+            .unwrap()
+            .ensure_pir_recovery_ready()
+            .is_err());
+        let before: u32 = conn
+            .query_row(
+                "SELECT count(*) FROM orchard_received_note_spends",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut malformed = raw;
+        malformed.push(0x42);
+        conn.execute(
+            "UPDATE transactions SET raw=?1 WHERE txid=?2",
+            rusqlite::params![malformed, pending.txid().as_ref().as_slice()],
+        )
+        .unwrap();
+        assert!(recover()
+            .unwrap_err()
+            .to_string()
+            .contains("native_recovery_raw_conflict"));
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM orchard_received_note_spends",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            before
+        );
+        assert!(
+            conn.query_row(
+                "SELECT raw FROM transactions WHERE txid=?1",
+                [pending.txid().as_ref().as_slice()],
+                |r| r.get::<_, Vec<u8>>(0)
+            )
+            .unwrap()
+                == malformed
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT phase FROM ext_native_payments_v1 WHERE id='saved'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "unknown"
+        );
+        assert!(NativeWallet::open(dir.path())
+            .unwrap()
+            .ensure_pir_recovery_ready()
+            .is_err());
+    }
+    #[test]
+    fn same_effect_authorization_variants_preserve_the_wallet_saved_raw_and_replay_metadata() {
+        use crate::native::wallet::recovery_blocks::tests::fixture_prefix_with_transactions;
+        let (_dir, wallet) = wallet();
+        let (key, _) = fixture_account();
+        let tx = encrypted_orchard_transaction(&key, 7, [0; 32]);
+        let id = tx.txid();
+        let (bytes, chain) = fixture_prefix_with_transactions(&[0x51], 8, vec![(3, tx)]);
+        let recover = || {
+            wallet.recover_regtest_pir(
+                &chain,
+                verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+                &mut Unavailable,
+                &mut Unavailable,
+                WorkLimits {
+                    max_queries: Some(1),
+                    max_private_bytes: Some(1024),
+                },
+                &RecoveryCancellation::new(),
+            )
+        };
+        assert!(recover().is_err());
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let original: Vec<u8> = conn
+            .query_row(
+                "SELECT raw FROM transactions WHERE txid=?1",
+                [id.as_ref().as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut saved = original.clone();
+        let end = saved.len() - 1;
+        saved[end] ^= 1;
+        // Binding-signature bytes are authorizing data excluded from ZIP244's
+        // effect txid. Neither the fixture nor evidence authenticates them.
+        assert!(saved_transaction(
+            &saved,
+            id.as_ref().as_slice(),
+            zcash_protocol::consensus::BranchId::Nu6_2
+        )
+        .is_ok());
+        conn.execute(
+            "UPDATE transactions SET raw=?1 WHERE txid=?2",
+            rusqlite::params![saved, id.as_ref().as_slice()],
+        )
+        .unwrap();
+        assert!(recover().is_err());
+        assert!(
+            conn.query_row(
+                "SELECT raw FROM transactions WHERE txid=?1",
+                [id.as_ref().as_slice()],
+                |r| r.get::<_, Vec<u8>>(0)
+            )
+            .unwrap()
+                == saved
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT mined_height,tx_index FROM transactions WHERE txid=?1",
+                [id.as_ref().as_slice()],
+                |r| Ok((r.get::<_, u32>(0)?, r.get::<_, u32>(1)?))
+            )
+            .unwrap(),
+            (3, 1)
+        );
+        assert_selected_orchard_witnesses(&wallet, 1);
+    }
     struct Unavailable;
     impl FilterSource for Unavailable {
         fn shard_map(&mut self) -> std::result::Result<(Vec<u8>, u64), BoxError> {
@@ -881,6 +1909,11 @@ mod tests {
             assert_eq!(reopened.ensure_pir_recovery_ready().is_ok(), variant == 2);
         }
     }
+    pub(in crate::native::wallet) fn completed_wallet_fixture(
+    ) -> (tempfile::TempDir, NativeWallet, RegtestAcceptedChain) {
+        let (dir, wallet, chain, _) = completed_fixture();
+        (dir, wallet, chain)
+    }
     fn completed_fixture() -> (
         tempfile::TempDir,
         NativeWallet,
@@ -903,6 +1936,7 @@ mod tests {
         let db = wallet.open_db().unwrap();
         // Install a correctly bound receipt to isolate the readiness race from
         // transport fixtures; no signing or balance assertion uses this receipt.
+        let db_conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
         let receipt = Receipt {
             report: PirRecoveryReport {
                 completion: "complete".into(),
@@ -915,6 +1949,14 @@ mod tests {
             chain_context: chain.context_identity.clone(),
             scope_identity: wallet.recovery_scope().unwrap().identity().unwrap(),
             discovery_scope_identity: Some(wallet.recovery_scope().unwrap().identity().unwrap()),
+            effect_identity: Some(
+                effect_identity(
+                    |sql| db_conn.query_row(sql, [], |r| r.get(0)),
+                    wallet.network,
+                    1,
+                )
+                .unwrap(),
+            ),
             scanner_identity: NativeScanSnapshot::capture(&db, 1)
                 .unwrap()
                 .identity()

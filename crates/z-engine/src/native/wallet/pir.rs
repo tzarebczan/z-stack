@@ -1,7 +1,7 @@
 //! Experimental regtest confirmed discovery. No event reaches native coin
 //! selection, signing, balances, history views or transparent fallback RPCs.
 #[path = "pir_recovery.rs"]
-mod recovery;
+pub(super) mod recovery;
 #[path = "pir_store.rs"]
 mod store;
 use super::*;
