@@ -80,6 +80,24 @@ fn event_key(script: &[u8], mut event: TransparentEvent) -> (Vec<u8>, Vec<u8>) {
     }
     (script.to_vec(), event.to_bytes())
 }
+fn events_disagree(
+    expected: &BTreeMap<(Vec<u8>, Vec<u8>), TransactionMetadata>,
+    events: Vec<StoredEvent>,
+) -> bool {
+    let mut actual = BTreeMap::new();
+    let mut discrepancy = false;
+    for event in events {
+        let key = event_key(&event.script, event.event);
+        match event.event.metadata() {
+            Some(metadata) if expected.get(&key) == Some(&metadata) => {}
+            _ => discrepancy = true,
+        }
+        if actual.insert(key, ()).is_some() {
+            discrepancy = true;
+        }
+    }
+    discrepancy || actual.len() != expected.len() || actual.keys().ne(expected.keys())
+}
 fn expected_events(
     evidence: &VerifiedRegtestRecoveryBlocks,
     scope: &NativeScope,
@@ -417,26 +435,29 @@ impl NativeWallet {
             cancel.flag(),
             Some(cancel),
         )?;
+        self.finish_regtest_pir_recovery(
+            chain,
+            &evidence,
+            generation,
+            recovered_outputs,
+            discovery,
+            cancel,
+        )
+    }
+    fn finish_regtest_pir_recovery(
+        &self,
+        chain: &RegtestAcceptedChain,
+        evidence: &VerifiedRegtestRecoveryBlocks,
+        generation: u64,
+        recovered_outputs: usize,
+        discovery: PirDiscoveryReport,
+        cancel: &RecoveryCancellation,
+    ) -> Result<PirRecoveryReport> {
         let mut db = self.open_recovery_db()?;
         let scope = self.recovery_scope()?;
-        let expected = expected_events(&evidence, &scope)?;
+        let expected = expected_events(evidence, &scope)?;
         let store = store::NativePirStore::open_recovery(self, cancel).map_err(store_failed)?;
-        let mut actual = BTreeMap::new();
-        let mut discrepancy = false;
-        for event in store.events().map_err(store_failed)? {
-            let key = event_key(&event.script, event.event);
-            if let Some(metadata) = event.event.metadata() {
-                if expected.get(&key) != Some(&metadata) {
-                    discrepancy = true;
-                }
-            }
-            if actual.insert(key, ()).is_some() {
-                discrepancy = true;
-            }
-        }
-        if actual.len() != expected.len() || actual.keys().ne(expected.keys()) {
-            discrepancy = true;
-        }
+        let discrepancy = events_disagree(&expected, store.events().map_err(store_failed)?);
         let journal_head = store.journal_head();
         drop(store);
         let complete = discovery.completion == "complete-for-enrolled-scope" && !discrepancy;
@@ -696,6 +717,127 @@ mod tests {
             .ensure_pir_recovery_ready()
             .is_err());
         assert!(wallet.prepare_payment("unused", 1, None).is_err());
+    }
+    #[test]
+    fn durable_discovery_events_require_verified_metadata_before_completion() {
+        for variant in 0..3 {
+            let (dir, wallet) = wallet();
+            let scope = wallet.recovery_scope().unwrap();
+            let script = scope.0[0].entry.script.clone();
+            let (bytes, chain) = fixture_with_script(&script);
+            let evidence =
+                verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap();
+            let expected = expected_events(&evidence, &scope).unwrap();
+            assert_eq!(expected.len(), 1);
+            let ((script, event_bytes), metadata) = expected.iter().next().unwrap();
+            let mut event = TransparentEvent::from_bytes(event_bytes).unwrap();
+            let mut supplied = *metadata;
+            if variant == 1 {
+                supplied.has_shielded_components = !supplied.has_shielded_components;
+            }
+            match &mut event {
+                TransparentEvent::Receive(e) => e.metadata = (variant != 0).then_some(supplied),
+                TransparentEvent::Spend(e) => e.metadata = (variant != 0).then_some(supplied),
+            }
+            let cancel = RecoveryCancellation::new();
+            // Replay independently verified native blocks through public recovery;
+            // transport failure leaves its actual durable Pending marker in place.
+            assert!(wallet
+                .recover_regtest_pir(
+                    &chain,
+                    verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false))
+                        .unwrap(),
+                    &mut Unavailable,
+                    &mut Unavailable,
+                    WorkLimits {
+                        max_queries: Some(1),
+                        max_private_bytes: Some(1024)
+                    },
+                    &cancel,
+                )
+                .is_err());
+            let generation: u64 = rusqlite::Connection::open(&wallet.paths.data_db)
+                .unwrap()
+                .query_row(
+                    "SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let mut store = store::NativePirStore::open_recovery(&wallet, &cancel).unwrap();
+            store
+                .add_scripts(&scope.0.iter().map(|s| s.entry.clone()).collect::<Vec<_>>())
+                .unwrap();
+            store
+                .commit_shard(ShardCommit {
+                    shard_id: 0,
+                    revision_digest: "metadata-fixture".into(),
+                    sealed: true,
+                    start_height: 1,
+                    end_height: 1,
+                    terminal_block_hash: chain.target.hash.clone(),
+                    events: vec![StoredEvent {
+                        script: script.clone(),
+                        event,
+                        shard_id: 0,
+                        revision_digest: "metadata-fixture".into(),
+                    }],
+                    covered_scripts: vec![script.clone()],
+                    ..Default::default()
+                })
+                .unwrap();
+            drop(store);
+            let cold = NativeWallet::open(dir.path()).unwrap();
+            let store = store::NativePirStore::open_recovery(&cold, &cancel).unwrap();
+            // Reconciliation reads the durable journal, not the verified native
+            // transaction metadata or an in-memory provider response.
+            assert_eq!(
+                events_disagree(&expected, store.events().unwrap()),
+                variant != 2
+            );
+            drop(store);
+            let snapshot = NativeScanSnapshot::capture(&cold.open_db().unwrap(), 1).unwrap();
+            let final_scope = cold.recovery_scope().unwrap();
+            // Isolate the production completion boundary from PIR transport: claim
+            // complete discovery while its journal is missing/wrong/correct metadata.
+            let discovery = PirDiscoveryReport {
+                completion: "complete-for-enrolled-scope".into(),
+                reconciled: true,
+                accepted_anchor: Some(chain.target.clone()),
+                source_identity: "fixture".into(),
+                context_identity: chain.context_identity.clone(),
+                scope_identity: final_scope.identity().unwrap(),
+                enrolled_script_count: final_scope.0.len(),
+                covered_through: 1,
+                settled_through: 1,
+                confirmed_ledger_zat: 0,
+                history: vec![],
+                pending_pages: 0,
+                unresolved_spends: 0,
+                native_scanned_height: 1,
+                native_chain_height: Some(1),
+                native_anchor_hash: Some(chain.target.hash.clone()),
+                native_scanner_identity: Some(snapshot.identity().unwrap()),
+                publication_start: 1,
+            };
+            let report = cold
+                .finish_regtest_pir_recovery(&chain, &evidence, generation, 1, discovery, &cancel)
+                .unwrap();
+            assert_eq!(report.scope_complete, variant == 2);
+            assert_eq!(report.selection_blocked, variant != 2);
+            assert_eq!(
+                report.completion,
+                if variant == 2 {
+                    "complete"
+                } else {
+                    "provider-discrepancy"
+                }
+            );
+            let reopened = NativeWallet::open(dir.path()).unwrap();
+            let receipt = reopened.regtest_pir_recovery_for(&chain).unwrap().unwrap();
+            assert_eq!(receipt.scope_complete, variant == 2);
+            assert_eq!(reopened.ensure_pir_recovery_ready().is_ok(), variant == 2);
+        }
     }
     fn completed_fixture() -> (
         tempfile::TempDir,
