@@ -113,3 +113,12 @@ metadata must call `NativeWallet::validate_regtest_offline_setup_resume(root)`
 first. Resume permits only an initial Pending setup with no scanned blocks,
 native transactions or durable payment intents. Metadata loss on a completed or
 used wallet requires recovery of its existing state instead of reinitialization.
+
+Canonical receipts bind the native scan, enrolled scope and private journal head
+(generation and digest) in the final SQLite writer. A later journal commit
+invalidates Complete atomically; persisted readiness and payment writers reject
+stale receipts after reopen. Rewind enters Pending before searching for an
+accepted overlap, retaining the barrier when no overlap exists, and refuses a
+non-genesis birthday before creating a recovery marker. Interrupted offline
+create authenticates and reuses its retained encrypted seed; a missing seed on
+an existing Pending database cannot be replaced during setup.

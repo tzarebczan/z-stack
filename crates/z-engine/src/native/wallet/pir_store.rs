@@ -411,6 +411,9 @@ impl<'a> NativePirStore<'a> {
     pub(super) fn report(&self) -> Option<&(PirDiscoveryReport, NativeScope)> {
         self.state.report.as_ref()
     }
+    pub(super) fn journal_head(&self) -> (u64, String) {
+        (self.generation, self.digest.clone())
+    }
     pub(super) fn persist_report(
         &mut self,
         report: PirDiscoveryReport,
@@ -526,6 +529,16 @@ impl<'a> NativePirStore<'a> {
                     "UPDATE ext_coffer_pir_head SET generation=?1,bytes=?2,digest=?3 WHERE id=1",
                     (generation + 1, bytes, &digest),
                 )?;
+                let recovery: bool = ext.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",
+                    [], |r| r.get(0),
+                )?;
+                if recovery {
+                    ext.execute(
+                        "UPDATE ext_coffer_pir_recovery_v1 SET blocked=1,generation=generation+1,receipt=NULL WHERE id=1 AND blocked=0",
+                        [],
+                    )?;
+                }
                 if cancel.load(Ordering::Acquire) {
                     return Err(JournalError(StoreError::Io("native_pir_cancelled".into())));
                 }
