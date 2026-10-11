@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { syncPublicData, supportsTransparentCompact } from "../src/public-data.ts";
 import type { ScanSession } from "../src/scan-host.ts";
+import { grpcWebTransport } from "../src/lwd.ts";
 import type { BlockTransport } from "../src/lwd.ts";
 
 function fixture(tip = 12) {
@@ -111,4 +112,28 @@ test("completed memo coverage retries a failed final checkpoint without refetchi
   assert.deepEqual(await syncPublicData(options), { memos: "complete" });
   assert.equal(persistedHeight, 9);
   assert.deepEqual(f.calls, [["memos", 1, 9]], "checkpoint retries disclose no additional request");
+});
+
+test("an overlong public compact response cannot apply deposits or advance coverage", async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  const f = fixture(1);
+  const transport = grpcWebTransport("https://gateway.example");
+  transport.info = f.transport.info;
+  let cancelled = false, positiveApplies = 0;
+  const checkpoints: Array<number | null> = [];
+  const bytes = new Uint8Array(10); // Two empty, well-framed gRPC data messages for a one-block request.
+  globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+    pull(controller) { controller.enqueue(bytes); },
+    cancel() { cancelled = true; },
+  }, { highWaterMark: 0 }))) as typeof fetch;
+  const apply = f.source.applyTransparentBlocks!;
+  f.source.applyTransparentBlocks = async (blob) => { if (blob.length) positiveApplies++; return apply(blob); };
+  await assert.rejects(syncPublicData({ ...f.opts, transport, memos: false,
+    checkpoint: async () => { checkpoints.push(f.state.transparentScanHeight); },
+  }), /message count limit/);
+  assert.equal(cancelled, true);
+  assert.equal(positiveApplies, 0);
+  assert.equal(f.state.transparentScanHeight, null);
+  assert.deepEqual(checkpoints, [null], "only the existing pre-download incomplete-coverage barrier is checkpointed");
 });

@@ -66,6 +66,54 @@ memos backfill. Coverage/status fields on WalletSnapshot distinguish complete,
 scanning, unsupported and temporarily unavailable; an unsupported service never
 causes an automatic address/transaction-ID fallback.
 
+## SDK transport bounds
+
+Compact HTTP and gRPC-Web responses are read incrementally. The SDK refuses a
+response above 32 MiB, a compact/data frame above 4 MiB, or a gRPC trailer above
+64 KiB. Content-Length is checked before reading, and actual streamed bytes are
+counted independently, including when that header is absent or incorrect. The
+4 MiB frame ceiling allows protobuf overhead beyond a serialized block; these
+are SDK resource limits, not new consensus limits or an exact heap-size bound.
+
+Each range must contain exactly its inclusive requested block count. Individual
+responses are limited to 8,000 data frames; normal shielded pages of 1,000 and
+combined pages of 500 remain within that ceiling. The loopback HTTP transport
+can page larger requests, but its combined return is still limited to 32 MiB.
+Unary gRPC calls accept at most one data message; subtree responses accept at
+most the requested count (or 8,000 when no count is supplied). Trailers must be
+final and appear at most once.
+
+Scan prefetch also enforces a 256 MiB aggregate reservation for in-flight,
+ready and currently applied compact ranges. Each in-flight request reserves
+64 MiB for a maximum-size response and parsing/conversion storage; completed
+buffers reserve their actual backing-store bytes. The applied range remains
+counted until the sequential consumer asks for the next one. Larger queue
+settings therefore permit at most four initial requests. Small completed ranges
+free reservations for subsequent requests; memory pressure pauses launches
+instead of discarding valid results. This trades some initial concurrency for
+bounded staging, including while birthday-tree setup delays Rust application.
+
+The 32 MiB ceiling leaves room above the approximately 14 MiB per 1,000 blocks
+that motivated the existing 500-block all-pool tuning, but is not a guarantee
+for every dense range. Oversized ranges require an explicit smaller request.
+These reservations bound SDK-owned staging; they are not a promise about total
+browser, WASM, network-stack or garbage-collector memory. Custom transports must
+also respect the range ceiling; an oversized returned backing buffer is refused
+and aborts the prefetch siblings before any result is handed to Rust.
+
+A limit violation cancels the reader/request and is not treated as a transient
+outage. No automatic smaller-range retry, alternate transaction-hash probe,
+selective lookup or retrieval-mode fallback follows it. Integrators can request
+a smaller range explicitly. gRPC deadlines and the HTTP block-download idle
+watchdog remain in effect; continued HTTP byte progress has no total deadline.
+
+The internal consumeDelimitedStream helper is not an installed-package entry
+point. It uses the same byte/frame ceilings and an 8,000-block ceiling. It awaits each page callback before continuing.
+Already completed callbacks remain applied if a later frame fails; buffered
+unapplied pages are discarded. Full-body range methods return no bytes until
+the complete response passes transport checks. Rust still validates protobuf
+contents, block heights, hashes and wallet effects before advancing coverage.
+
 ## Gateway protocol v1
 
 Run the local development adapter against native gRPC:

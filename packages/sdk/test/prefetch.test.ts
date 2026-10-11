@@ -6,6 +6,17 @@ import { createLightServerRecovery, LightServerUnavailableError } from "../src/l
 import { isTransientLightServerError, TransientLightServerError } from "../src/lwd.ts";
 import { setImmediate as turn } from "node:timers/promises";
 
+
+// Valid transport framing; individual payloads remain for Rust to validate.
+function compactRange(count: number, payload = 1): Uint8Array {
+  const bytes = new Uint8Array(count * 5);
+  for (let i = 0; i < count; i++) {
+    new DataView(bytes.buffer).setUint32(i * 5, 1);
+    bytes[i * 5 + 4] = payload;
+  }
+  return bytes;
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -225,23 +236,24 @@ test("HTTP block retries discard a truncated body and request identical bounds",
     if (calls.length === 1) {
       return new Response(new ReadableStream<Uint8Array>({
         start(stream) {
-          stream.enqueue(new Uint8Array([1, 2, 3, 4]));
-          // Fail after arrayBuffer has started consuming the response prefix.
+          stream.enqueue(new Uint8Array([0, 0, 0, 1]));
+          // Fail after the bounded reader has started consuming the response prefix.
           setTimeout(() => stream.error(new TypeError("upstream closed after prefix")), 0);
         },
       }));
     }
-    return new Response(new Uint8Array([9, 8, 7]));
+    return new Response(compactRange(1000, 7));
   });
   const transport = httpLwdTransport("http://127.0.0.1:1239", "regtest", undefined, undefined, "test-token");
-  assert.deepEqual(await transport.blocks(1001, 2000, controller.signal), new Uint8Array([9, 8, 7]));
+  assert.deepEqual(await transport.blocks(1001, 2000, controller.signal), compactRange(1000, 7));
   assert.equal(calls.length, 2);
   assert.equal(calls[0].url, calls[1].url);
   assert.equal(new URL(calls[1].url).searchParams.get("start"), "1001");
   assert.equal(new URL(calls[1].url).searchParams.get("end"), "2000");
   assert.ok(calls.every((call) => call.auth === "Bearer test-token"));
   // Each request follows the caller's cancellation (combined with the stall watchdog).
-  assert.ok(calls.every((call) => call.signal && !call.signal.aborted));
+  assert.equal(calls[0].signal?.aborted, true, "the failed request is explicitly cancelled before retry");
+  assert.equal(calls[1].signal?.aborted, false);
   controller.abort();
   assert.ok(calls.every((call) => call.signal?.aborted));
 });
@@ -262,13 +274,13 @@ test("HTTP block retries recover gateway failure but do not retry permanent stat
   let errorBody: unknown = { error: "upstream unavailable" };
   t.mock.method(globalThis, "fetch", async () => {
     calls++;
-    return status === 200 ? new Response(new Uint8Array([255])) : Response.json(errorBody, { status });
+    return status === 200 ? new Response(compactRange(1000, 255)) : Response.json(errorBody, { status });
   });
   const transport = httpLwdTransport("http://127.0.0.1:1239", "regtest");
   const recovering = transport.blocks(1, 1000);
   await turn();
   status = 200;
-  assert.deepEqual(await recovering, new Uint8Array([255]));
+  assert.deepEqual(await recovering, compactRange(1000, 255));
   assert.equal(calls, 2);
   for (status of [400, 401, 404, 429, 500]) {
     calls = 0;
@@ -283,7 +295,7 @@ test("HTTP block retries recover gateway failure but do not retry permanent stat
   }
   status = 200;
   calls = 0;
-  assert.deepEqual(await transport.blocks(1, 1000), new Uint8Array([255]));
+  assert.deepEqual(await transport.blocks(1, 1000), compactRange(1000, 255));
   assert.equal(calls, 1, "complete response bytes are validated once by Rust, never retried or altered here");
 });
 
@@ -310,8 +322,9 @@ test("HTTP block abort and timeout failures never retry even without an external
   t.mock.method(globalThis, "fetch", async () => {
     calls++;
     // Exercise the body-read rejection path, not only the fetch promise.
-    return { ok: !errorResponse, status: 503,
-      arrayBuffer: async () => { throw failure; }, json: async () => { throw failure; } } as Response;
+    return new Response(new ReadableStream<Uint8Array>({
+      pull(controller) { controller.error(failure); },
+    }, { highWaterMark: 0 }), { status: errorResponse ? 503 : 200 });
   });
   const transport = httpLwdTransport("http://127.0.0.1:1239", "regtest");
   for (const name of ["AbortError", "TimeoutError"]) {
@@ -415,12 +428,12 @@ test("prefetch starts HTTP during a delayed seed, before next()", async () => {
     fetch,
   });
   await delay(20);
-  assert.equal(started.length, 8, `seed overlap should already have 8 GETs; started ${started.join(",")}`);
+  assert.equal(started.length, 4, `seed overlap reserves at most four bounded GETs; started ${started.join(",")}`);
   assert.equal(started[0], 3_335_466);
   p.dispose();
 });
 
-test("prefetch 8 starts eight HTTP ranges before any apply", async () => {
+test("prefetch 8 starts four HTTP ranges within the working byte budget before any apply", async () => {
   let inFlight = 0;
   let max = 0;
   const started: number[] = [];
@@ -444,8 +457,8 @@ test("prefetch 8 starts eight HTTP ranges before any apply", async () => {
   });
   await delay(15);
   p.dispose();
-  assert.equal(max, 8, `expected 8 in-flight GETs, max ${max}, started ${started.join(",")}`);
-  assert.equal(started.length, 8);
+  assert.equal(max, 4, `expected four reserved in-flight GETs, max ${max}, started ${started.join(",")}`);
+  assert.equal(started.length, 4);
 });
 
 test("consumeDelimitedStream pages a chunked body", async () => {
@@ -478,5 +491,122 @@ test("blockStream rejects a short or overlong range instead of reporting success
   const block = new Uint8Array([0, 0, 0, 1, 7]);
   t.mock.method(globalThis, "fetch", async () => new Response(block));
   const transport = httpLwdTransport("http://127.0.0.1:1239", "regtest");
-  await assert.rejects(transport.blockStream!(1, 2, 10, async () => {}), /incomplete range/);
+  await assert.rejects(transport.blockStream!(1, 2, 10, async () => {}), /incomplete compact-block range/);
+});
+
+for (const kind of ["http", "grpc"] as const) test(`a ${kind} frame limit aborts prefetch siblings before any apply`, async (t) => {
+  const { httpLwdTransport, grpcWebTransport } = await import("../src/lwd.ts");
+  const header = new Uint8Array(kind === "grpc" ? 5 : 4);
+  new DataView(header.buffer).setUint32(kind === "grpc" ? 1 : 0, 4 * 1024 * 1024 + 1);
+  let requests = 0, cancelled = 0;
+  const bodies: ReadableStream<Uint8Array>[] = [];
+  t.mock.method(globalThis, "fetch", async () => {
+    const ordinal = requests++;
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (ordinal === 0) {
+          if (sent) controller.close(); else { sent = true; controller.enqueue(header); }
+        }
+      },
+      cancel() { cancelled++; },
+    }, { highWaterMark: 0 });
+    bodies.push(body);
+    return new Response(body);
+  });
+  const transport = kind === "grpc" ? grpcWebTransport("https://lwd.example") : httpLwdTransport("http://127.0.0.1:1239", "regtest");
+  const prefetch = createBlockPrefetch({ start: 1, tip: 4, batch: 1, prefetch: 2, buffer: 2,
+    fetch: (start, end, signal) => transport.blocks(start, end, signal),
+  });
+  t.after(() => prefetch.dispose());
+  await assert.rejects(prefetch.next(), /frame size limit/);
+  await turn();
+  assert.equal(requests, 2, "the first refusal stops refilling the prefetch window");
+  assert.equal(cancelled, 2, "both body readers are cancelled");
+  assert.equal(prefetch.buffered(), 0);
+  assert.equal(prefetch.inFlight(), 0);
+  assert(bodies.every(body => !body.locked));
+});
+
+test("prefetch accounts near-limit ready and in-flight buffers until the sequential consumer advances", async (t) => {
+  const MiB = 1024 * 1024;
+  // Reuse one immutable, correctly counted 500-frame response; only 31 MiB is allocated.
+  const blob = new Uint8Array(31 * MiB);
+  const payloadSize = Math.floor((blob.length - 500 * 4) / 500);
+  let offset = 0;
+  for (let i = 0; i < 500; i++) {
+    const length = i === 499 ? blob.length - offset - 4 : payloadSize;
+    new DataView(blob.buffer).setUint32(offset, length);
+    offset += 4 + length;
+  }
+  const pending = new Map<number, (bytes: Uint8Array) => void>();
+  const started: number[] = [];
+  const signals: AbortSignal[] = [];
+  const prefetch = createBlockPrefetch({ start: 1, tip: 10_000, batch: 500, prefetch: 8, buffer: 16,
+    fetch: (start, _end, signal) => {
+      const ordinal = (start - 1) / 500 + 1;
+      started.push(ordinal); signals.push(signal);
+      return new Promise<Uint8Array>((resolve, reject) => {
+        pending.set(ordinal, resolve);
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    },
+  });
+  t.after(() => prefetch.dispose());
+  const budget = (yielded = 0) => {
+    const bytes = (prefetch.buffered() + yielded) * blob.length + prefetch.inFlight() * 64 * MiB;
+    assert(bytes <= 256 * MiB, `reserved ${bytes} exceeds the aggregate budget`);
+  };
+  await turn();
+  assert.deepEqual(started, [1, 2, 3, 4]);
+  budget();
+  // Complete later ranges first: the head's reservation must survive pressure.
+  for (const start of [2, 3, 4, 5, 6]) {
+    assert(pending.has(start), `range ${start} was launched`);
+    pending.get(start)!(blob);
+    await turn(); budget();
+  }
+  assert.equal(started.length, 6);
+  assert.equal(prefetch.inFlight(), 1, "the slow head retains a working reservation");
+  pending.get(1)!(blob);
+  await turn(); budget();
+  assert.equal(started.length, 7, "completing the head releases its conversion reservation");
+  pending.get(7)!(blob);
+  await turn(); budget();
+  assert.equal(prefetch.buffered(), 7);
+  assert.equal(started.length, 7, "ready bytes prevent an eighth request before apply");
+  const first = await prefetch.next();
+  assert.equal(first?.start, 1, "the reserved head cannot be starved by later results");
+  await turn(); budget(1);
+  assert.equal(started.length, 7, "yielding does not drop the consumer's buffer reservation");
+  const second = await prefetch.next();
+  assert.equal(second?.start, 501);
+  await turn(); budget(1);
+  assert.equal(started.length, 8, "advancing acknowledges the prior apply and permits refill");
+  prefetch.dispose();
+  assert.equal(prefetch.buffered(), 0);
+  assert.equal(prefetch.inFlight(), 0);
+  assert(signals.every(signal => signal.aborted));
+});
+
+test("prefetch rejects an oversized custom backing buffer and cancels siblings before returning a range", async () => {
+  const backing = new Uint8Array(32 * 1024 * 1024 + 1);
+  let siblingCancelled = false, requests = 0;
+  const prefetch = createBlockPrefetch({ start: 1, tip: 10, batch: 1, prefetch: 2, buffer: 4,
+    fetch: (start, _end, signal) => {
+      requests++;
+      if (start === 1) return Promise.resolve(backing.subarray(0, 1));
+      return new Promise<Uint8Array>((_resolve, reject) => {
+        signal.addEventListener("abort", () => { siblingCancelled = true; reject(signal.reason); }, { once: true });
+      });
+    },
+  });
+  try {
+    await assert.rejects(prefetch.next(), /prefetch range size limit/);
+    await turn();
+    assert.equal(requests, 2, "no refill may follow the failed result");
+    assert.equal(siblingCancelled, true);
+    assert.equal(prefetch.buffered(), 0);
+    assert.equal(prefetch.inFlight(), 0);
+  } finally { prefetch.dispose(); }
 });
