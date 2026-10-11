@@ -1019,14 +1019,7 @@ impl NativeWallet {
         Self::check_sync_gap(birthday_h, tip, false)?;
 
         let prior_height = birthday_h.saturating_sub(1);
-        let treestate = client
-            .get_tree_state(BlockId {
-                height: u64::from(prior_height),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| EngineError::Transport(format!("GetTreeState: {e}")))?
-            .into_inner();
+        let treestate = super::tree_state::fetch(&mut client, prior_height, Some(network)).await?;
 
         let birthday = AccountBirthday::from_treestate(treestate, Some(BlockHeight::from(tip)))
             .map_err(|e| EngineError::WalletDb(format!("birthday: {e}")))?;
@@ -1151,14 +1144,7 @@ impl NativeWallet {
         Self::check_sync_gap(birthday_height, tip, true)?;
 
         let prior_height = birthday_height.saturating_sub(1);
-        let treestate = client
-            .get_tree_state(BlockId {
-                height: u64::from(prior_height),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| EngineError::Transport(format!("GetTreeState: {e}")))?
-            .into_inner();
+        let treestate = super::tree_state::fetch(&mut client, prior_height, Some(network)).await?;
         let birthday = AccountBirthday::from_treestate(treestate, Some(BlockHeight::from(tip)))
             .map_err(|e| EngineError::WalletDb(format!("birthday: {e}")))?;
 
@@ -1257,14 +1243,7 @@ impl NativeWallet {
         let deep = tip.saturating_sub(birthday_height) > MAX_MEM_SYNC_BLOCKS;
         Self::check_sync_gap(birthday_height, tip, true)?;
         let prior_height = birthday_height.saturating_sub(1);
-        let treestate = client
-            .get_tree_state(BlockId {
-                height: u64::from(prior_height),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| EngineError::Transport(format!("GetTreeState: {e}")))?
-            .into_inner();
+        let treestate = super::tree_state::fetch(&mut client, prior_height, Some(network)).await?;
         let birthday = AccountBirthday::from_treestate(treestate, Some(BlockHeight::from(tip)))
             .map_err(|e| EngineError::WalletDb(format!("birthday: {e}")))?;
 
@@ -2200,14 +2179,8 @@ impl NativeWallet {
             });
         }
         let prior_height = birthday_height.saturating_sub(1);
-        let treestate = client
-            .get_tree_state(BlockId {
-                height: u64::from(prior_height),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| EngineError::Transport(format!("GetTreeState: {e}")))?
-            .into_inner();
+        let treestate =
+            super::tree_state::fetch(&mut client, prior_height, Some(self.network)).await?;
         let birthday = AccountBirthday::from_treestate(treestate, Some(BlockHeight::from(tip)))
             .map_err(|e| EngineError::WalletDb(format!("birthday: {e}")))?;
 
@@ -2544,7 +2517,8 @@ impl NativeWallet {
             // never hold a SQLite connection/transaction over network I/O.
             let mut frontiers = Vec::with_capacity(missing.len());
             for height in missing {
-                let frontier = super::pipeline::fetch_tree_state(&mut client, height).await?;
+                let frontier =
+                    super::pipeline::fetch_tree_state(&mut client, height, self.network).await?;
                 if u32::from(frontier.block_height()) != height {
                     return Err(EngineError::Transport(
                         "checkpoint recovery returned a different tree-state height".into(),
@@ -3470,14 +3444,12 @@ impl NativeWallet {
         let skip =
             matches!(server, LightServer::LocalRegtest) || server.as_url().contains(":28137");
         let mut client = Self::connect_url(&server.as_url(), skip).await?;
-        let ts = client
-            .get_tree_state(BlockId {
-                height: u64::from(height),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| EngineError::Transport(format!("GetTreeState: {e}")))?
-            .into_inner();
+        let expected = match server {
+            LightServer::LocalRegtest => Some(ZNetwork::Regtest),
+            LightServer::LocalZaino => Some(ZNetwork::Testnet),
+            _ => None,
+        };
+        let ts = super::tree_state::fetch(&mut client, height, expected).await?;
         Ok(serde_json::json!({
             "network": ts.network,
             "height": ts.height,

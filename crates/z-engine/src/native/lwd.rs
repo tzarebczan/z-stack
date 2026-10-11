@@ -18,6 +18,69 @@ use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxS
 
 pub type LwdClient = CompactTxStreamerClient<LwdChannel>;
 
+const TREE_STATUS_ORIGIN: &str = "x-z-stack-tree-status-origin";
+
+fn eligible_status(code: tonic::Code) -> Option<&'static str> {
+    match code {
+        tonic::Code::Internal => Some("13"),
+        tonic::Code::Unavailable => Some("14"),
+        tonic::Code::Unknown => Some("2"),
+        tonic::Code::DeadlineExceeded => Some("4"),
+        _ => None,
+    }
+}
+
+pub(super) fn remote_tree_status(status: &tonic::Status) -> bool {
+    eligible_status(status.code()).is_some_and(|code| {
+        status
+            .metadata()
+            .get(TREE_STATUS_ORIGIN)
+            .is_some_and(|marker| marker.as_encoded_bytes() == code.as_bytes())
+    })
+}
+
+// Tonic uses INTERNAL for both remote errors and local protobuf/framing errors.
+// Only an observed remote status can authorize the tree-state compatibility
+// branch. Never trust the marker supplied by the server itself.
+fn mark_tree_status(headers: &mut http::HeaderMap) {
+    headers.remove(TREE_STATUS_ORIGIN);
+    let code = match headers.get("grpc-status").map(|value| value.as_bytes()) {
+        Some(b"13") => "13",
+        Some(b"14") => "14",
+        Some(b"2") => "2",
+        Some(b"4") => "4",
+        _ => return,
+    };
+    headers.insert(TREE_STATUS_ORIGIN, http::HeaderValue::from_static(code));
+}
+
+struct TreeStatusBody(Body);
+impl http_body::Body for TreeStatusBody {
+    type Data = Bytes;
+    type Error = tonic::Status;
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Frame<Bytes>, Self::Error>>> {
+        match Pin::new(&mut self.0).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => Poll::Ready(Some(Ok(match frame.into_trailers() {
+                Ok(mut trailers) => {
+                    mark_tree_status(&mut trailers);
+                    Frame::trailers(trailers)
+                }
+                Err(frame) => frame,
+            }))),
+            other => other,
+        }
+    }
+    fn is_end_stream(&self) -> bool {
+        self.0.is_end_stream()
+    }
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.0.size_hint()
+    }
+}
+
 #[derive(Clone)]
 pub struct LwdChannel {
     inner: Channel,
@@ -145,7 +208,16 @@ impl Service<http::Request<Body>> for LwdChannel {
                 }
                 return Ok(resp);
             }
-            ready_call(&mut inner, req).await
+            let response = ready_call(&mut inner, req).await?;
+            if path.ends_with("/GetTreeState") {
+                let (mut parts, body) = response.into_parts();
+                mark_tree_status(&mut parts.headers);
+                return Ok(http::Response::from_parts(
+                    parts,
+                    Body::new(TreeStatusBody(body)),
+                ));
+            }
+            Ok(response)
         })
     }
 }

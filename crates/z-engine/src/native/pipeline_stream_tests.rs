@@ -57,7 +57,7 @@ async fn shorter_chain_without_a_real_ancestor_preserves_saved_payment_data() {
     let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
     let mut client = LwdClient::new(super::super::lwd::LwdChannel::new(channel, true));
     assert!(matches!(
-        reconcile_chain_checkpoint(&mut client, &mut db, &path, 10).await,
+        reconcile_chain_checkpoint(&mut client, ZNetwork::Regtest, &mut db, &path, 10).await,
         Err(EngineError::Reorg { height: 20, .. })
     ));
     assert_eq!(
