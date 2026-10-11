@@ -48,11 +48,11 @@ selection blocked. `regtest_pir_recovery_for(&chain)` returns an exact context,
 anchor, scanner and scope receipt or a curated reconciliation error.
 
 The initial profile requires birthday 1 and the complete prefix. Allocated native
-external, internal and previously exposed ephemeral receivers are included after the verified scan
-establishes the chain tip required by the pinned ephemeral API. Discovery on an
-unscanned database cannot enumerate exposed ephemeral receivers and does not qualify
-canonical recovery. Unexposed ephemeral gap enumeration remains a qualification
-gate for the full recovery profile. Import-enabled builds are outside this initial feature set.
+external, internal and ephemeral receivers (including the allocated gap) are included after the verified scan
+establishes the chain tip required by the pinned ephemeral API. Canonical recovery enumerates the allocated ephemeral gap through bounded native
+read-only extension queries because the pinned WalletRead API exposes only
+previously exposed ephemeral receivers. The same scope is used for mandatory
+private discovery, fixed-point recovery and writer-bound readiness. Import-enabled builds are outside this initial feature set.
 
 `RecoveryCancellation::cancel()` serializes with the complete SQLite commit.
 Network fetches and pure parsing use its read-only flag; writers hold its commit
@@ -72,3 +72,15 @@ transport capability disabled. Stored endpoint metadata and endpoint edits canno
 re-enable it. Instance connection, validator lookup, enhancement and broadcast
 paths refuse before socket I/O. Existing static transport helpers still require
 explicit endpoints and must not be called by a cloud-only session adapter.
+
+Cloud-only setup uses `create_regtest_offline(root, &chain, auth, account_index)`
+or `restore_regtest_offline(root, words, &chain, auth, account_index)`. The typed
+accepted chain validates pinned regtest genesis/schedule; setup imports an HD
+account at birthday 1 with native genesis empty frontiers, encrypts the seed before
+creating the database, and writes Pending before returning an offline instance.
+No light-server probe, tree-state lookup or default network operation occurs.
+An interrupted seed-only setup refuses a different seed. Authenticated same-seed
+restore resumes while preserving the existing encrypted seed material. Finished
+wallets still refuse replacement. Standalone/foreign imported keys remain disabled
+in this initial build; native HD accounts and external/internal/ephemeral allocated
+receivers are supported within the bounded scope and gap fixed point.

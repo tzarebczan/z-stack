@@ -4,6 +4,8 @@ mod database_lease;
 #[cfg(feature = "native-pir")]
 mod recovery_blocks;
 #[cfg(feature = "native-pir")]
+mod recovery_bootstrap;
+#[cfg(feature = "native-pir")]
 mod recovery_cancellation;
 mod recovery_guard;
 #[cfg(feature = "native-pir")]

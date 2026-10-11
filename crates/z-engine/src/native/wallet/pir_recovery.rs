@@ -140,13 +140,19 @@ pub(in crate::native::wallet) fn ensure_transaction_receipt<
         || receipt.report.completion != "complete"
         || !snapshot.matches_anchor(&receipt.anchor)
         || snapshot.identity().map_err(store_failed)? != receipt.scanner_identity
-        || native_scope(db, 1).map_err(store_failed)?.identity()? != receipt.scope_identity
+        || native_scope_in_transaction(db, ext, 1)?.identity()? != receipt.scope_identity
     {
         anyhow::bail!("native_recovery_reconciliation_required");
     }
     Ok(())
 }
 impl NativeWallet {
+    fn recovery_scope(&self) -> Result<NativeScope> {
+        self.open_db()?
+            .transactionally_with_extension(|wdb, ext| native_scope_in_transaction(wdb, ext, 1))
+            .map_err(EngineError::from)
+    }
+
     pub(in crate::native::wallet) fn ensure_pir_recovery_ready(&self) -> Result<()> {
         let conn = rusqlite::Connection::open_with_flags(
             &self.paths.data_db,
@@ -194,7 +200,7 @@ impl NativeWallet {
             || receipt.report.completion != "complete"
             || !snapshot.matches_anchor(&receipt.anchor)
             || snapshot.identity().map_err(store_failed)? != receipt.scanner_identity
-            || native_scope(&db, 1).map_err(store_failed)?.identity()? != receipt.scope_identity
+            || self.recovery_scope()?.identity()? != receipt.scope_identity
         {
             return Err(failed("native_recovery_reconciliation_required"));
         }
@@ -303,7 +309,7 @@ impl NativeWallet {
                     BlockHash::from_slice(&genesis),
                 )?;
                 for _round in 0..32 {
-                    let prior = native_scope(wdb, 1).map_err(store_failed)?;
+                    let prior = native_scope_in_transaction(wdb, ext, 1)?;
                     for block in &evidence.blocks {
                         for (index, tx) in block.vtx().iter().enumerate() {
                             if cancel.is_cancelled() {
@@ -331,7 +337,7 @@ impl NativeWallet {
                             }
                         }
                     }
-                    let scope = native_scope(wdb, 1).map_err(store_failed)?;
+                    let scope = native_scope_in_transaction(wdb, ext, 1)?;
                     if scope == prior {
                         let after: usize = ext.query_row(
                             "SELECT count(*) FROM transparent_received_outputs",
@@ -352,7 +358,7 @@ impl NativeWallet {
         drop(db);
         let discovery = self.sync_regtest_pir(chain, filters, transport, limits, cancel.flag())?;
         let mut db = self.open_db()?;
-        let scope = native_scope(&db, 1).map_err(store_failed)?;
+        let scope = self.recovery_scope()?;
         let expected = expected_events(&evidence, &scope)?;
         let store = store::NativePirStore::open(self, cancel.flag()).map_err(store_failed)?;
         let mut actual = BTreeMap::new();
@@ -402,7 +408,7 @@ impl NativeWallet {
                 if !snapshot.matches_chain(chain)
                     || discovery.native_scanner_identity
                         != Some(snapshot.identity().map_err(store_failed)?)
-                    || native_scope(wdb, 1).map_err(store_failed)? != scope
+                    || native_scope_in_transaction(wdb, ext, 1)? != scope
                 {
                     anyhow::bail!("native_recovery_reconciliation_required");
                 }
@@ -513,7 +519,7 @@ impl NativeWallet {
             || receipt.chain_context != chain.context_identity
             || !snapshot.matches_chain(chain)
             || receipt.scanner_identity != snapshot.identity().map_err(store_failed)?
-            || receipt.scope_identity != native_scope(&db, 1).map_err(store_failed)?.identity()?
+            || receipt.scope_identity != self.recovery_scope()?.identity()?
         {
             return Err(failed("native_recovery_reconciliation_required"));
         }
@@ -650,7 +656,7 @@ mod tests {
                 selection_blocked: false,
             },
             chain_context: chain.context_identity.clone(),
-            scope_identity: native_scope(&db, 1).unwrap().identity().unwrap(),
+            scope_identity: wallet.recovery_scope().unwrap().identity().unwrap(),
             scanner_identity: NativeScanSnapshot::capture(&db, 1)
                 .unwrap()
                 .identity()
@@ -664,10 +670,30 @@ mod tests {
         )
         .unwrap();
         assert!(wallet.ensure_recovery_selection_ready().is_ok());
-        let account = db.get_account_ids().unwrap()[0];
         let mut concurrent = wallet.open_db().unwrap();
+        let seed = SecretVec::new(
+            Mnemonic::parse_normalized(crate::keys::REGTEST_FAUCET_MNEMONIC)
+                .unwrap()
+                .to_seed("")
+                .to_vec(),
+        );
+        let mut genesis = crate::web::from_hex(GENESIS).unwrap();
+        genesis.reverse();
+        let birthday = AccountBirthday::from_parts(
+            zcash_client_backend::data_api::chain::ChainState::empty(
+                0.into(),
+                BlockHash::from_slice(&genesis),
+            ),
+            None,
+        );
         concurrent
-            .reserve_next_n_ephemeral_addresses(account, 1)
+            .import_account_hd(
+                "second",
+                &seed,
+                Zip32AccountId::try_from(1).unwrap(),
+                &birthday,
+                None,
+            )
             .unwrap();
         // The same writer-bound check called by prepare/sign catches allocation
         // even though Pending stayed false and the chain anchor did not change.
@@ -735,7 +761,7 @@ mod tests {
         assert!(wallet.ensure_recovery_selection_ready().is_err());
     }
     #[test]
-    fn begin_is_durable_and_exposed_native_receiver_scopes_are_enrolled() {
+    fn begin_is_durable_and_all_allocated_native_receiver_scopes_are_enrolled() {
         let (_dir, wallet) = wallet();
         let (_, chain) = fixture_with_script(&[0x51]);
         let token = RecoveryCancellation::new();
@@ -763,7 +789,26 @@ mod tests {
             &token,
         );
         let db = wallet.open_db().unwrap();
-        let scope = native_scope(&db, 1).unwrap();
+        let scope = wallet.recovery_scope().unwrap();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let mut statement=conn.prepare("SELECT cached_transparent_receiver_address FROM addresses WHERE key_scope=2 AND cached_transparent_receiver_address IS NOT NULL").unwrap();
+        let allocated = statement
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(!allocated.is_empty());
+        for encoded in allocated {
+            let address = zcash_keys::address::Address::decode(&ZNetwork::Regtest, &encoded)
+                .unwrap()
+                .to_transparent_address()
+                .unwrap();
+            let script: transparent::address::Script = address.script().into();
+            assert!(scope
+                .0
+                .iter()
+                .any(|entry| entry.entry.script == script.0 .0));
+        }
         for account in db.get_account_ids().unwrap() {
             for address in db
                 .get_transparent_receivers(account, true, true)
