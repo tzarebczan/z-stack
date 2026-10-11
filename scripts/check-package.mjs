@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertReleaseVersions } from "./release-versions.mjs";
 import { engineSourceHash } from "./wasm-build-inputs.mjs";
+import { assertWasmVariant } from "./wasm-build-variant.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 assertReleaseVersions(root);
@@ -58,6 +59,9 @@ if (name === "sdk") {
     const wasm = readFileSync(join(generated, "z_wasm_bg.wasm"));
     assert.ok(wasm.byteLength > 1_000_000, "refusing a fixture/stub WASM artifact");
     const integrity = JSON.parse(readFileSync(join(generated, "integrity.json"), "utf8"));
+    const mode = kind === "generated" ? "single-thread" : "multi-thread";
+    assert.equal(integrity.mode, mode, `${kind} mode mismatch`);
+    assertWasmVariant(wasm, mode);
     assert.equal(createHash("sha256").update(wasm).digest("hex"), integrity.sha256, `${kind} integrity mismatch`);
     assert.equal(integrity.sourceSha256, engineSourceHash(), `${kind} source fingerprint is stale; run pnpm build:sdk`);
   }

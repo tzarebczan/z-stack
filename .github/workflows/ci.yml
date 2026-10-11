@@ -220,9 +220,8 @@ jobs:
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
           pnpm build:wasm
-          # The threaded build uses another toolchain and RUSTFLAGS; its own
-          # target directory stops the two builds invalidating each other.
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/wasm-mt" pnpm build:wasm:mt
+          # Both scripts own variant subdirectories of the cached target base.
+          pnpm build:wasm:mt
           node scripts/ci-wasm-cache.mjs record
       - name: Verify production engines before building packages
         run: node scripts/ci-wasm-cache.mjs verify

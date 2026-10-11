@@ -398,6 +398,11 @@ download and scan profiles unchanged.
 - **`@z-stack/sdk/lab`** holds lab and benchmark helpers: loopback endpoints, scan-worker controls and thread tuning. It is not a stable surface.
 - **Building from source:** in z-stack, run `pnpm build:wasm && pnpm build:wasm:mt`, then build `@z-stack/core`, `@z-stack/passkey`, and `@z-stack/sdk` in that order with `pnpm --filter <package> build`. Rebuild the WASM artifacts after Rust changes; the package build copies the existing artifacts.
 
+The WASM build scripts treat `CARGO_TARGET_DIR` as a cache base and own separate
+`wasm-st` and `wasm-mt` children beneath it, or beneath the repository's `target`
+directory when unset. They verify the emitted module's actual thread capabilities
+before recording build integrity.
+
 WASM seed sends emit `wallet.on("broadcast", ({ kind, txid }) => …)` immediately
 before submission, after the pending transaction has been saved. Consumers can
 keep uncertain sends pending even if a later snapshot refresh fails. Construction
