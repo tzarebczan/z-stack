@@ -42,7 +42,9 @@ justify a PIR-complete status or a production privacy claim.
 Canonical recovery (`native-pir`, regtest only)
 
 `begin_regtest_pir_recovery(&chain, &RecoveryCancellation)` durably sets Pending
-before transport starts. `recover_regtest_pir(&chain, verified_blocks, filters,
+before transport starts. Initial enrollment validates the allocated native scope
+in the same FULL writer before committing its marker; unsupported imports or
+malformed receivers leave an ordinary wallet unenrolled. `recover_regtest_pir(&chain, verified_blocks, filters,
 transport, limits, &token)` commits authenticated canonical effects behind that
 barrier, then reconciles mandatory private discovery against the exact native
 receiver scope and full-block transparent effects. Its receipt releases selection
@@ -185,7 +187,10 @@ transparent scripts to be present, and the final receipt writer rechecks that
 same scope. Receiver allocation during recovery can therefore require another
 verified replay; missing historical receipts never become Complete.
 Prepared payment reviews also bind the exact recovery generation; another
-recovery invalidates an earlier review even on the same accepted chain.
+recovery invalidates an earlier review even on the same accepted chain. Immediate
+send and shielding proposals capture the same generation with their selection
+snapshot, then require that generation and a valid receipt in the creation writer
+before signing or storing transactions.
 
 These checks are bounded recovery reconciliation, not arbitrary database repair
 or consensus proof. A stale spend association attached to a different mined

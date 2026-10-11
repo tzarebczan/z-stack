@@ -309,14 +309,6 @@ fn receipt_journal_matches(conn: &rusqlite::Connection, receipt: &Receipt) -> bo
         .is_ok_and(|actual| &actual == expected)
     })
 }
-fn schema(wallet: &NativeWallet) -> Result<()> {
-    let conn = rusqlite::Connection::open(&wallet.paths.data_db)
-        .map_err(|_| failed("native_recovery_storage_failed"))?;
-    conn.pragma_update(None, "synchronous", "FULL")
-        .map_err(|_| failed("native_recovery_storage_failed"))?;
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS ext_coffer_pir_recovery_v1(id INTEGER PRIMARY KEY CHECK(id=1), blocked INTEGER NOT NULL CHECK(blocked IN (0,1)), generation INTEGER NOT NULL, receipt BLOB);").map_err(|_| failed("native_recovery_storage_failed"))?;
-    Ok(())
-}
 fn event_key(script: &[u8], mut event: TransparentEvent) -> (Vec<u8>, Vec<u8>) {
     match &mut event {
         TransparentEvent::Receive(e) => e.metadata = None,
@@ -561,12 +553,36 @@ impl NativeWallet {
             return Err(failed("native_recovery_chain_invalid"));
         }
         let _lease = database_lease::shared(&self.paths.data_db)?;
-        cancel.transaction(|| schema(self))?;
-        let mut db = self.open_pir_db(Some(cancel))?;
-        cancel.transaction(||db.transactionally_with_extension(|_,ext|->anyhow::Result<u64>{
-            ext.execute("INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,1,1,NULL) ON CONFLICT(id) DO UPDATE SET blocked=1,generation=generation+1,receipt=NULL",[])?;
-            Ok(ext.query_row("SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",[],|r|r.get(0))?)
-        }).map_err(EngineError::from))
+        // Complete any native migrations under the cancellation gate before
+        // constructing a read facade over the enrollment's actual writer.
+        drop(self.open_pir_db(Some(cancel))?);
+        cancel.transaction(|| {
+            let mut conn = crate::native::wallet::open_wallet_connection_with_durability(
+                &self.paths.data_db, true,
+            )?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|_| failed("native_recovery_storage_failed"))?;
+            let generation = (|| -> anyhow::Result<u64> {
+                // Refusal must not leave even an empty marker table: ordinary
+                // scan/reset guards treat table existence as canonical ownership.
+                let foreign: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM addresses WHERE key_scope=-1)",
+                    [], |row| row.get(0),
+                )?;
+                if foreign { anyhow::bail!("native_recovery_imports_unsupported"); }
+                tx.execute_batch("CREATE TABLE IF NOT EXISTS ext_coffer_pir_recovery_v1(id INTEGER PRIMARY KEY CHECK(id=1), blocked INTEGER NOT NULL CHECK(blocked IN (0,1)), generation INTEGER NOT NULL, receipt BLOB);")?;
+                let db = WalletDb::from_connection(
+                    &*tx, self.network, SystemClock, new_rng(),
+                );
+                // Table creation is transaction-local. Validate the full allocated
+                // native scope before committing either schema or enrollment.
+                native_scope_in_connection(&db, &tx, 1)?.identity()?;
+                tx.execute("INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,1,1,NULL) ON CONFLICT(id) DO UPDATE SET blocked=1,generation=generation+1,receipt=NULL", [])?;
+                Ok(tx.query_row("SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1", [], |row| row.get(0))?)
+            })().map_err(EngineError::from)?;
+            tx.commit().map_err(|_| failed("native_recovery_storage_failed"))?;
+            Ok(generation)
+        })
     }
     pub fn recover_regtest_pir(
         &self,
@@ -605,7 +621,6 @@ impl NativeWallet {
             return Err(failed("native_recovery_regtest_only"));
         }
         let _lease = database_lease::shared(&self.paths.data_db)?;
-        cancel.transaction(|| schema(self))?;
         let generation = self.begin_regtest_pir_recovery(chain, cancel)?;
         let mut db = self.open_pir_db(Some(cancel))?;
         let compact = evidence.compact_blocks()?;
@@ -1367,7 +1382,11 @@ pub(in crate::native::wallet) mod tests {
         // consensus-valid authorization. Accepted fixture headers bind its txid.
         Transaction::read(&raw[..], BranchId::Nu6_2).unwrap()
     }
-    fn finish_fixture_recovery(wallet: &NativeWallet, bytes: &[u8], chain: &RegtestAcceptedChain) {
+    pub(in crate::native::wallet) fn finish_fixture_recovery(
+        wallet: &NativeWallet,
+        bytes: &[u8],
+        chain: &RegtestAcceptedChain,
+    ) {
         let cancel = RecoveryCancellation::new();
         let evidence =
             verify_regtest_recovery_blocks(bytes, chain, &AtomicBool::new(false)).unwrap();
@@ -2182,7 +2201,7 @@ pub(in crate::native::wallet) mod tests {
         );
         assert_selected_orchard_witnesses(&wallet, 1);
     }
-    struct Unavailable;
+    pub(in crate::native::wallet) struct Unavailable;
     impl FilterSource for Unavailable {
         fn shard_map(&mut self) -> std::result::Result<(Vec<u8>, u64), BoxError> {
             Err("fixture_unavailable".into())
@@ -2217,7 +2236,7 @@ pub(in crate::native::wallet) mod tests {
             Err("fixture_unavailable".into())
         }
     }
-    fn wallet() -> (tempfile::TempDir, NativeWallet) {
+    pub(in crate::native::wallet) fn wallet() -> (tempfile::TempDir, NativeWallet) {
         let dir = tempfile::tempdir().unwrap();
         let wallet = fixture_wallet(dir.path());
         let (key, _) = fixture_account();
@@ -3107,6 +3126,123 @@ pub(in crate::native::wallet) mod tests {
             .iter()
             .any(|entry| entry.entry.script == script.0 .0));
     }
+    fn retain_standalone_native_receiver(conn: &rusqlite::Connection) {
+        let (id, child): (i64, u32) = conn.query_row(
+            "SELECT id,transparent_child_index FROM addresses WHERE key_scope=0 AND cached_transparent_receiver_address IS NOT NULL ORDER BY id LIMIT 1", [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        let (key, _) = fixture_account();
+        let pubkey = key
+            .transparent()
+            .unwrap()
+            .derive_address_pubkey(
+                transparent::keys::TransparentKeyScope::EXTERNAL,
+                transparent::keys::NonHardenedChildIndex::from_index(child).unwrap(),
+            )
+            .unwrap()
+            .serialize();
+        conn.execute("UPDATE addresses SET key_scope=-1,diversifier_index_be=NULL,transparent_child_index=NULL,address=cached_transparent_receiver_address,imported_transparent_receiver_pubkey=?1 WHERE id=?2", rusqlite::params![pubkey.as_slice(), id]).unwrap();
+    }
+
+    #[test]
+    fn unsupported_initial_import_refuses_without_claiming_ordinary_wallet() {
+        let (_dir, wallet) = wallet();
+        let db = wallet.open_db().unwrap();
+        let account = db.get_account_ids().unwrap()[0];
+        let receivers: Vec<_> = db
+            .get_transparent_receivers(account, true, true)
+            .unwrap()
+            .into_keys()
+            .collect();
+        drop(db);
+        // The pinned native features do not expose the standalone-key import
+        // API. Preserve an actual native receiver in its standalone row shape.
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        retain_standalone_native_receiver(&conn);
+        let imported: u64 = conn
+            .query_row(
+                "SELECT count(*) FROM addresses WHERE key_scope=-1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(imported, 1);
+        let retained: Vec<_> = wallet
+            .open_db()
+            .unwrap()
+            .get_transparent_receivers(account, true, true)
+            .unwrap()
+            .into_keys()
+            .collect();
+        assert!(!retained.is_empty());
+        assert_eq!(retained.len() + 1, receivers.len());
+        assert!(retained.iter().all(|address| receivers.contains(address)));
+        let (bytes, chain) = fixture_with_script(&[0x51]);
+        for direct_recovery in [false, true] {
+            let result = if direct_recovery {
+                wallet
+                    .recover_regtest_pir(
+                        &chain,
+                        verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false))
+                            .unwrap(),
+                        &mut Unavailable,
+                        &mut Unavailable,
+                        WorkLimits {
+                            max_queries: Some(1),
+                            max_private_bytes: Some(1024),
+                        },
+                        &RecoveryCancellation::new(),
+                    )
+                    .map(|_| ())
+            } else {
+                wallet
+                    .begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
+                    .map(|_| ())
+            };
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("native_recovery_imports_unsupported"));
+            assert!(!crate::native::wallet::has_recovery_marker(&wallet.paths.data_db).unwrap());
+            wallet.ensure_recovery_selection_ready().unwrap();
+            drop(wallet.ordinary_scan_lease().unwrap());
+            let imported_after: u64 = conn
+                .query_row(
+                    "SELECT count(*) FROM addresses WHERE key_scope=-1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(imported_after, imported);
+            let after: Vec<_> = wallet
+                .open_db()
+                .unwrap()
+                .get_transparent_receivers(account, true, true)
+                .unwrap()
+                .into_keys()
+                .collect();
+            assert_eq!(after.len(), retained.len());
+            assert!(after.iter().all(|address| retained.contains(address)));
+        }
+        // The ordinary reset's common ownership guard remains eligible too;
+        // it shares the same marker predicate tested above.
+        assert!(wallet.history(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalid_allocated_scope_rolls_back_initial_marker_schema() {
+        let (_dir, wallet) = wallet();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let changed = conn.execute("UPDATE addresses SET cached_transparent_receiver_address='invalid' WHERE id=(SELECT min(id) FROM addresses WHERE key_scope=2)", []).unwrap();
+        assert_eq!(changed, 1);
+        let (_, chain) = fixture_with_script(&[0x51]);
+        assert!(wallet
+            .begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
+            .is_err());
+        assert!(!crate::native::wallet::has_recovery_marker(&wallet.paths.data_db).unwrap());
+        drop(wallet.ordinary_scan_lease().unwrap());
+    }
+
     #[test]
     fn foreign_imported_receiver_rows_are_hard_refused_by_initial_profile() {
         let (_dir, wallet) = wallet();
@@ -3115,12 +3251,26 @@ pub(in crate::native::wallet) mod tests {
             .begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
             .unwrap();
         let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
-        conn.execute("UPDATE addresses SET key_scope=-1,diversifier_index_be=NULL WHERE id=(SELECT min(id) FROM addresses WHERE key_scope=0)",[]).unwrap();
+        retain_standalone_native_receiver(&conn);
         assert!(wallet
             .recovery_scope()
             .unwrap_err()
             .to_string()
             .contains("native_recovery_imports_unsupported"));
+        assert!(wallet
+            .begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
+            .unwrap_err()
+            .to_string()
+            .contains("native_recovery_imports_unsupported"));
+        let state: (bool, u64) = conn
+            .query_row(
+                "SELECT blocked,generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (true, 1));
+        assert!(wallet.ensure_recovery_selection_ready().is_err());
     }
     #[test]
     fn conflicting_saved_raw_is_preserved_and_recovery_remains_pending() {

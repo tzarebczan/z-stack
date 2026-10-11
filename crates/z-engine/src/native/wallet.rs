@@ -2573,6 +2573,7 @@ impl NativeWallet {
     pub async fn shield(&self, auth: &SeedAuth, threshold_zat: u64) -> Result<Vec<String>> {
         self.require_network_access()?;
         self.ensure_recovery_selection_ready()?;
+        let _lease = database_lease::shared(&self.paths.data_db)?;
         let mut db = self.open_db()?;
         let account = Self::primary_account_id(&db)?;
         let seed = self.load_seed(auth)?;
@@ -2610,34 +2611,40 @@ impl NativeWallet {
             info!("classified recent transparent funding before shielding");
         }
 
-        let input_selector = GreedyInputSelector::new();
-        let change_strategy = SingleOutputChangeStrategy::new(
-            StandardFeeRule::Zip317,
-            None,
-            ShieldedPool::Orchard,
-            DustOutputPolicy::default(),
-        );
         let threshold = Zatoshis::from_u64(threshold_zat.max(1))
             .map_err(|_| EngineError::Message("bad threshold".into()))?;
 
-        let proposal = propose_shielding::<_, _, _, _, Infallible>(
-            &mut db,
-            &self.network,
-            &input_selector,
-            &change_strategy,
-            threshold,
-            &from_addrs,
-            account,
-            shield_confirmations(self.network),
-            CoinbaseFilter::AllTransparentOutputs,
-            None,
-        )
-        .map_err(|e| map_funds_err(format!("propose_shielding: {e}")))?;
+        let (proposal, selected_generation) = db
+            .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
+                let generation = recovery_guard::transaction_recovery_generation(wdb, ext)?;
+                let input_selector = GreedyInputSelector::new();
+                let change_strategy = SingleOutputChangeStrategy::new(
+                    StandardFeeRule::Zip317,
+                    None,
+                    ShieldedPool::Orchard,
+                    DustOutputPolicy::default(),
+                );
+                let proposal = propose_shielding::<_, _, _, _, Infallible>(
+                    wdb,
+                    &self.network,
+                    &input_selector,
+                    &change_strategy,
+                    threshold,
+                    &from_addrs,
+                    account,
+                    shield_confirmations(self.network),
+                    CoinbaseFilter::AllTransparentOutputs,
+                    None,
+                )
+                .map_err(|e| map_funds_err(format!("propose_shielding: {e}")))?;
+                Ok((proposal, generation))
+            })
+            .map_err(proposal_transaction_error)?;
 
-        let prover = crate::params::local_tx_prover()?;
         let txids = db
             .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
-                recovery_guard::transaction_recovery_ready(wdb, ext)?;
+                recovery_guard::transaction_proposal_binding(wdb, ext, selected_generation)?;
+                let prover = crate::params::local_tx_prover()?;
                 Ok(create_proposed_transactions::<
                     _,
                     _,
@@ -2984,6 +2991,7 @@ impl NativeWallet {
     ) -> Result<Vec<String>> {
         self.require_network_access()?;
         self.ensure_recovery_selection_ready()?;
+        let _lease = database_lease::shared(&self.paths.data_db)?;
         crate::keys::assert_shielded_send_dest(to, crate::keys::SendDestPolicy::Shielded)?;
         let db = self.open_db()?;
         let account = Self::primary_account_id(&db)?;
@@ -3037,6 +3045,7 @@ impl NativeWallet {
     ) -> Result<Vec<String>> {
         self.require_network_access()?;
         self.ensure_recovery_selection_ready()?;
+        let _lease = database_lease::shared(&self.paths.data_db)?;
         if payments.is_empty() {
             return Err(EngineError::Message("ZIP-321 URI has no payments".into()));
         }
@@ -3081,38 +3090,60 @@ impl NativeWallet {
 
     async fn finish_send(
         &self,
-        mut db: Db,
+        db: Db,
         account: AccountUuid,
         usk: UnifiedSpendingKey,
         request: TransactionRequest,
         policy: SpendPolicy,
     ) -> Result<Vec<String>> {
-        let input_selector = GreedyInputSelector::new();
-        let change_strategy = SingleOutputChangeStrategy::new(
-            StandardFeeRule::Zip317,
-            None,
-            ShieldedPool::Orchard,
-            DustOutputPolicy::default(),
-        );
+        self.finish_send_after_proposal(db, account, usk, request, policy, || {})
+            .await
+    }
 
-        let proposal = propose_transfer::<_, _, _, _, Infallible>(
-            &mut db,
-            &self.network,
-            account,
-            &input_selector,
-            &change_strategy,
-            request,
-            crate::confirmations_policy(self.network),
-            &policy,
-            None,
-            None,
-        )
-        .map_err(|e| map_funds_err(format!("propose_transfer: {e}")))?;
+    async fn finish_send_after_proposal(
+        &self,
+        mut db: Db,
+        account: AccountUuid,
+        usk: UnifiedSpendingKey,
+        request: TransactionRequest,
+        policy: SpendPolicy,
+        after_proposal: impl FnOnce(),
+    ) -> Result<Vec<String>> {
+        let _lease = database_lease::shared(&self.paths.data_db)?;
 
-        let prover = crate::params::local_tx_prover()?;
+        let (proposal, selected_generation) = db
+            .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
+                let generation = recovery_guard::transaction_recovery_generation(wdb, ext)?;
+                let input_selector = GreedyInputSelector::new();
+                let change_strategy = SingleOutputChangeStrategy::new(
+                    StandardFeeRule::Zip317,
+                    None,
+                    ShieldedPool::Orchard,
+                    DustOutputPolicy::default(),
+                );
+                let proposal = propose_transfer::<_, _, _, _, Infallible>(
+                    wdb,
+                    &self.network,
+                    account,
+                    &input_selector,
+                    &change_strategy,
+                    request,
+                    crate::confirmations_policy(self.network),
+                    &policy,
+                    None,
+                    None,
+                )
+                .map_err(|e| map_funds_err(format!("propose_transfer: {e}")))?;
+                Ok((proposal, generation))
+            })
+            .map_err(proposal_transaction_error)?;
+
+        after_proposal();
+
         let txids = db
             .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
-                recovery_guard::transaction_recovery_ready(wdb, ext)?;
+                recovery_guard::transaction_proposal_binding(wdb, ext, selected_generation)?;
+                let prover = crate::params::local_tx_prover()?;
                 Ok(create_proposed_transactions::<
                     _,
                     _,
@@ -4118,6 +4149,126 @@ mod tests {
             )
             .unwrap()
             == 1
+    }
+
+    #[cfg(feature = "native-pir")]
+    #[tokio::test]
+    async fn immediate_send_refuses_a_completed_new_recovery_epoch_before_creation() {
+        use super::pir::recovery::tests::{
+            encrypted_orchard_transaction, finish_fixture_recovery, wallet as recovery_wallet,
+            Unavailable,
+        };
+        use super::recovery_blocks::{
+            tests::fixture_prefix_with_transactions, verify_regtest_recovery_blocks,
+        };
+        use prost::Message;
+        use transparent_wallet::WorkLimits;
+        for previously_canonical in [false, true] {
+            let (dir, mut wallet) = recovery_wallet();
+            let (key, _) = fixture_account();
+            let (bytes, chain) = fixture_prefix_with_transactions(
+                &[0x51],
+                8,
+                vec![(3, encrypted_orchard_transaction(&key, 7, [0; 32]))],
+            );
+            let recover = |wallet: &NativeWallet| {
+                let _ = wallet.recover_regtest_pir(
+                    &chain,
+                    verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false))
+                        .unwrap(),
+                    &mut Unavailable,
+                    &mut Unavailable,
+                    WorkLimits {
+                        max_queries: Some(1),
+                        max_private_bytes: Some(1024),
+                    },
+                    &RecoveryCancellation::new(),
+                );
+                finish_fixture_recovery(wallet, &bytes, &chain);
+                wallet.ensure_pir_recovery_ready().unwrap();
+            };
+            if previously_canonical {
+                recover(&wallet);
+            } else {
+                let evidence =
+                    verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false))
+                        .unwrap();
+                let mut compact = Vec::new();
+                for block in evidence.compact_blocks().unwrap() {
+                    block.encode_length_delimited(&mut compact).unwrap();
+                }
+                wallet
+                    .scan_public_regtest(
+                        &compact,
+                        RegtestScanSchedule {
+                            nu6_3_height: crate::regtest_nu6_3_height(),
+                            nu7_height: crate::regtest_nu7_height(),
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(wallet.recovery_generation().unwrap(), None);
+            }
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            wallet
+                .set_validator_rpc(Some(format!("http://{}", listener.local_addr().unwrap())))
+                .unwrap();
+            let other = NativeWallet::open_offline(dir.path()).unwrap();
+            let before_generation = wallet.recovery_generation().unwrap();
+            let db = wallet.open_db().unwrap();
+            let account = NativeWallet::primary_account_id(&db).unwrap();
+            let usk =
+                UnifiedSpendingKey::from_seed(&ZNetwork::Regtest, &[7u8; 32], Zip32AccountId::ZERO)
+                    .unwrap();
+            let request = wallet
+                .send_request(&wallet.unified_address().unwrap(), 1, None)
+                .unwrap();
+            let error = wallet
+                .finish_send_after_proposal(
+                    db,
+                    account,
+                    usk,
+                    request,
+                    shielded_spend_policy(),
+                    || {
+                        other
+                            .begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
+                            .unwrap();
+                        recover(&other);
+                        assert_ne!(other.recovery_generation().unwrap(), before_generation);
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("native_recovery_proposal_expired"));
+            let cold = NativeWallet::open_offline(dir.path()).unwrap();
+            cold.ensure_pir_recovery_ready().unwrap();
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM transactions WHERE created IS NOT NULL",
+                    [],
+                    |r| r.get::<_, u32>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM orchard_received_notes WHERE lock_owner IS NOT NULL",
+                    [],
+                    |r| r.get::<_, u32>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
     }
 
     #[tokio::test]

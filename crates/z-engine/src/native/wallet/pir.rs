@@ -238,16 +238,36 @@ pub(super) fn native_scope_in_transaction<D: WalletRead<AccountId = AccountUuid>
     ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
     start: u64,
 ) -> anyhow::Result<NativeScope> {
+    native_scope_with_query(db, start, |sql, params| {
+        ext.query_row(sql, params, |r| r.get(0))
+    })
+}
+
+pub(super) fn native_scope_in_connection<D: WalletRead<AccountId = AccountUuid>>(
+    db: &D,
+    conn: &rusqlite::Connection,
+    start: u64,
+) -> anyhow::Result<NativeScope> {
+    native_scope_with_query(db, start, |sql, params| {
+        conn.query_row(sql, params, |r| r.get(0))
+    })
+}
+
+fn native_scope_with_query<D: WalletRead<AccountId = AccountUuid>>(
+    db: &D,
+    start: u64,
+    mut query: impl FnMut(&str, &[&dyn rusqlite::ToSql]) -> rusqlite::Result<String>,
+) -> anyhow::Result<NativeScope> {
     let mut scope = native_scope(db, start).map_err(store_failed)?;
-    let marker:bool=ext.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",[],|r|r.get(0))?;
-    if !marker {
+    let marker = query("SELECT CAST(EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1') AS TEXT)", &[])?;
+    if marker == "0" {
         return Ok(scope);
     }
-    let foreign: u64 = ext.query_row(
-        "SELECT count(*) FROM addresses WHERE key_scope=-1",
-        [],
-        |r| r.get(0),
-    )?;
+    let foreign: u64 = query(
+        "SELECT CAST(count(*) AS TEXT) FROM addresses WHERE key_scope=-1",
+        &[],
+    )?
+    .parse()?;
     if foreign != 0 {
         anyhow::bail!("native_recovery_imports_unsupported");
     }
@@ -261,12 +281,12 @@ pub(super) fn native_scope_in_transaction<D: WalletRead<AccountId = AccountUuid>
         ));
         let uuid = account.expose_uuid();
         // key_scope=2 is pinned sqlite KeyScope::Ephemeral encoding.
-        let count:u64=ext.query_row("SELECT count(*) FROM addresses a JOIN accounts c ON c.id=a.account_id WHERE c.uuid=?1 AND a.key_scope=2 AND a.cached_transparent_receiver_address IS NOT NULL",[uuid.as_bytes().as_slice()],|r|r.get(0))?;
+        let count: u64 = query("SELECT CAST(count(*) AS TEXT) FROM addresses a JOIN accounts c ON c.id=a.account_id WHERE c.uuid=?1 AND a.key_scope=2 AND a.cached_transparent_receiver_address IS NOT NULL", &[&uuid.as_bytes().as_slice()])?.parse()?;
         if count > 4096 {
             anyhow::bail!("native_pir_scope_invalid");
         }
         for offset in 0..count {
-            let encoded:String=ext.query_row("SELECT a.cached_transparent_receiver_address FROM addresses a JOIN accounts c ON c.id=a.account_id WHERE c.uuid=?1 AND a.key_scope=2 AND a.cached_transparent_receiver_address IS NOT NULL ORDER BY a.id LIMIT 1 OFFSET ?2",rusqlite::params![uuid.as_bytes().as_slice(),offset],|r|r.get(0))?;
+            let encoded = query("SELECT a.cached_transparent_receiver_address FROM addresses a JOIN accounts c ON c.id=a.account_id WHERE c.uuid=?1 AND a.key_scope=2 AND a.cached_transparent_receiver_address IS NOT NULL ORDER BY a.id LIMIT 1 OFFSET ?2", &[&uuid.as_bytes().as_slice(), &offset])?;
             let address = zcash_keys::address::Address::decode(&ZNetwork::Regtest, &encoded)
                 .and_then(|a| a.to_transparent_address())
                 .ok_or_else(|| failed("native_pir_scope_invalid"))?;

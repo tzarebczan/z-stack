@@ -16,6 +16,34 @@ pub(super) fn transaction_recovery_ready<D: WalletRead<AccountId = AccountUuid>>
         anyhow::bail!("native_recovery_profile_required");
     }
 }
+pub(super) fn transaction_recovery_generation<D: WalletRead<AccountId = AccountUuid>>(
+    db: &D,
+    ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
+) -> anyhow::Result<Option<u64>> {
+    transaction_recovery_ready(db, ext)?;
+    let marked: bool = ext.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')", [], |r| r.get(0))?;
+    if marked {
+        Ok(Some(ext.query_row(
+            "SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub(super) fn transaction_proposal_binding<D: WalletRead<AccountId = AccountUuid>>(
+    db: &D,
+    ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
+    selected: Option<u64>,
+) -> anyhow::Result<()> {
+    if transaction_recovery_generation(db, ext)? != selected {
+        anyhow::bail!("native_recovery_proposal_expired");
+    }
+    Ok(())
+}
+
 impl NativeWallet {
     pub(super) fn recovery_generation(&self) -> Result<Option<u64>> {
         (|| -> anyhow::Result<Option<u64>> {
