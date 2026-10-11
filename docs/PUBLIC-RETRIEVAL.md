@@ -114,6 +114,44 @@ unapplied pages are discarded. Full-body range methods return no bytes until
 the complete response passes transport checks. Rust still validates protobuf
 contents, block heights, hashes and wallet effects before advancing coverage.
 
+## Native accepted mainnet windows
+
+The native Rust API `z_engine::native::verify_mainnet_block_window` validates a
+fixed window without opening a wallet, modifying SQLite, querying a server or
+providing transactions for signing/broadcast. It is separate from regtest
+canonical recovery and does not enable mainnet Private Cloud wallet recovery.
+
+Construct `AcceptedMainnetWindow::from_local_node` with canonical mainnet
+genesis, a lower-case SHA256 source-policy/context digest and exactly seventeen
+ordered `(height, display_hash)` entries: one predecessor and sixteen blocks.
+The first block must be at height `1 mod 16`; checked arithmetic bounds the end.
+The caller must obtain hashes from its accepted node independently of candidate
+publication metadata, and recheck that snapshot before accepting the result.
+The constructor validates shape and genesis, not the node's trustworthiness.
+
+The candidate frame contains ASCII `COFFER-MAINNET-BLOCK-WINDOW-V1\n`, a little-endian
+u32 start and count of sixteen, then sixteen little-endian u32 lengths and full
+serialized blocks. Each block is limited to 2,000,000 bytes. Extra bytes,
+missing/extra blocks and noncanonical serialization are refused. Mainnet
+height-derived transaction branches, accepted header hashes, predecessor links
+and transaction-ID Merkle roots must match. Parsing retains one block at a time;
+cancellation discards the result without wallet changes.
+
+The opaque result exposes the range, predecessor/target hashes, source identity,
+accepted identity, candidate SHA256 and parser policy
+`z-stack-mainnet-accepted-block-window-v1`. The accepted identity hashes that
+policy's ASCII bytes, NUL, canonical genesis ASCII, NUL, source digest ASCII,
+then seventeen concatenated little-endian u32 heights and decoded 32-byte
+display-order hashes. Hash text case is normalized; the candidate digest covers
+the exact complete frame. Executable/source provenance remains the caller's
+responsibility.
+
+This verifies transaction-effect/txid inclusion against the supplied accepted
+headers. It does not validate consensus, ZIP244 authorizing-data commitments,
+shielded tree state, wallet coverage or production transport privacy. It does not
+relax regtest recovery or application spending gates. This API is native Rust
+only and adds no installed TypeScript SDK export.
+
 ## Gateway protocol v1
 
 Run the local development adapter against native gRPC:

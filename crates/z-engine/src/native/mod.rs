@@ -1,5 +1,6 @@
 //! Native (desktop/CLI) wallet backed by `zakura-client-sqlite` + lightwalletd/Zaino.
 
+mod accepted_blocks;
 mod block_cache;
 mod bridge;
 mod chain_identity;
@@ -16,6 +17,12 @@ mod transparent_refresh;
 mod tree_state;
 mod verify;
 mod wallet;
+
+pub use accepted_blocks::{
+    verify_mainnet_block_window, AcceptedMainnetWindow, VerifiedMainnetBlockWindow,
+    MAINNET_BLOCK_WINDOW_MAGIC, MAINNET_BLOCK_WINDOW_MAX_BYTES, MAINNET_BLOCK_WINDOW_POLICY,
+    MAINNET_BLOCK_WINDOW_WIDTH,
+};
 
 pub use bridge::{origin_allowed, parse_loopback_bind, Bridge};
 pub use lwd_pipe::{
