@@ -283,6 +283,47 @@ impl NativeWallet {
 mod tests {
     use super::super::recovery_blocks::tests::fixture_with_script;
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_metadata_and_retained_temp_publish_with_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (_, chain) = fixture_with_script(&[0x51]);
+        let auth = || SeedAuth::passphrase("fixture private bootstrap metadata passphrase");
+        let (wallet, created) =
+            NativeWallet::create_regtest_offline(dir.path(), &chain, auth(), 0).unwrap();
+        assert_eq!(
+            std::fs::metadata(&wallet.paths.meta_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let seed = std::fs::read(dir.path().join("seed.enc")).unwrap();
+        std::fs::remove_file(&wallet.paths.meta_path).unwrap();
+        let tmp = dir.path().join("wallet.json.tmp");
+        std::fs::write(&tmp, b"interrupted fixture metadata").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let (_, resumed) =
+            NativeWallet::create_regtest_offline(dir.path(), &chain, auth(), 0).unwrap();
+        assert!(resumed.mnemonic == created.mnemonic);
+        assert_eq!(resumed.unified_address, created.unified_address);
+        assert!(std::fs::read(dir.path().join("seed.enc")).unwrap() == seed);
+        assert!(!tmp.exists());
+        assert_eq!(
+            std::fs::metadata(&wallet.paths.meta_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let cold = NativeWallet::open_offline(dir.path()).unwrap();
+        assert!(cold.ensure_recovery_selection_ready().is_err());
+        assert!(cold.viewing_key().unwrap() == wallet.viewing_key().unwrap());
+    }
+
     #[tokio::test]
     async fn offline_create_restore_nonzero_account_encrypt_and_cold_reopen_without_network() {
         let source = tempfile::tempdir().unwrap();
