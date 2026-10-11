@@ -62,7 +62,14 @@ pub(super) async fn run(
     let tuning = sync_tuning(crate::uses_fast_sync(light_url));
     let skip_ironwood = super::wallet::NativeWallet::skip_ironwood_subtrees(network, light_url);
     super::wallet::validate_empty_walk_scan(db_path)?;
+    if let Some(height) = reconcile_chain_checkpoint(client, db, db_path, tip).await? {
+        cache
+            .truncate(BlockHeight::from_u32(height))
+            .await
+            .map_err(|e| EngineError::WalletDb(format!("cache truncate: {e}")))?;
+    }
     let island = super::wallet::last_filled_island_end(db_path, birthday, tip);
+    downloaded.store(island, Ordering::Relaxed);
     scanned.store(island, Ordering::Relaxed);
     if island < tip {
         // After `reset_scan` the blocks table is empty and island is birthday-1.
@@ -1757,6 +1764,57 @@ fn truncate_existing(
             "truncate_to_height at {h}: {e}"
         ))),
     }
+}
+
+// A clamped scan watermark cannot prove a shorter or same-height chain still
+// contains the wallet's mined transactions. Compare a real stored block before
+// the no-work path; preserve the database and its signed payment receipts.
+async fn reconcile_chain_checkpoint(
+    client: &mut LwdClient,
+    db: &mut super::wallet::SyncDb,
+    db_path: &Path,
+    tip: u32,
+) -> Result<Option<u32>> {
+    let Some(stored_tip) = super::wallet::rewind_target(db_path, u32::MAX)? else {
+        return Ok(None);
+    };
+    let mut requested = stored_tip.min(tip);
+    // Bound RPC work. A deeper or fully pruned fork requires explicit recovery;
+    // it must not succeed with stale mined history or replace the wallet DB.
+    for _ in 0..32 {
+        let Some(height) = super::wallet::rewind_target(db_path, requested)? else {
+            break;
+        };
+        let metadata = db
+            .block_metadata(BlockHeight::from_u32(height))
+            .map_err(|e| EngineError::WalletDb(format!("reorg checkpoint: {e}")))?
+            .ok_or_else(|| EngineError::WalletDb("missing reorg checkpoint".into()))?;
+        let actual = fetch_tree_state(client, height).await?;
+        if u32::from(actual.block_height()) != height {
+            return Err(EngineError::Transport(
+                "reorg checkpoint height mismatch".into(),
+            ));
+        }
+        if metadata.block_hash() == actual.block_hash() {
+            if height == stored_tip && stored_tip <= tip {
+                return Ok(None);
+            }
+            return truncate_existing(db, db_path, height)?
+                .map(Some)
+                .ok_or(EngineError::Reorg {
+                    height: stored_tip,
+                    next: height,
+                });
+        }
+        if height == 0 {
+            break;
+        }
+        requested = height - 1;
+    }
+    Err(EngineError::Reorg {
+        height: stored_tip,
+        next: requested,
+    })
 }
 
 fn extend_persist_range(prev: &ScanRange, next: &ScanRange) -> ScanRange {

@@ -25,7 +25,7 @@ test("only maintained public prose selects the lightweight route", () => {
 });
 
 test("executable guides require installed-package compilation even without other code changes", () => {
-  for (const path of ["docs/SDK.md", "docs/SERVICES.md"]) {
+  for (const path of ["docs/SDK.md", "docs/SERVICES.md", "docs/GIFT-CARDS.md"]) {
     assert.equal(docsOnly([path]), false, path);
     assert.equal(docsOnly(["README.md", path]), false, path);
   }
@@ -59,7 +59,7 @@ test("a code-to-docs rename cannot hide a removed engine source file", t => {
   git("add", "docs/engine.md"); git("-c", "commit.gpgsign=false", "commit", "-m", "Fixture docs");
   assert.equal(classify("pull_request", docsBase), "full=false\n");
   assert.equal(classify("push", docsBase), "full=true\n");
-  for (const guide of ["SDK.md", "SERVICES.md"]) {
+  for (const guide of ["SDK.md", "SERVICES.md", "GIFT-CARDS.md"]) {
     const guideBase = git("rev-parse", "HEAD");
     writeFileSync(join(root, "docs", guide), "Executable guide changed");
     git("add", `docs/${guide}`); git("-c", "commit.gpgsign=false", "commit", "-m", "Fixture guide");

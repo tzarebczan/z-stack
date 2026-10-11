@@ -16,6 +16,7 @@ the SDK checkout. The [support matrix](SUPPORT.md) lists tested paths and limits
 - [Accounts and backups](SERVICES.md): optional services supplied by your app.
 - [Passkey vaults](../packages/passkey/README.md): PRF and encrypted records.
 - [Base wallet](BASE-WALLET.md) and [swaps](SWAPS.md): optional integrations.
+- [Gift cards](GIFT-CARDS.md): optional bearer links, isolated wallets and encrypted recovery.
 - [Security and privacy](SECURITY.md): keys, metadata, locking and broadcasts.
 - [Public range retrieval](PUBLIC-RETRIEVAL.md): optional gateway extensions.
 

@@ -3,6 +3,7 @@
  * Apply runs off the UI thread so fetch + paint keep moving during catch-up.
  */
 
+import { minimumConfirmations } from "./confirmation-policy";
 import {
   runHardware,
   type HardwareAction,
@@ -58,12 +59,14 @@ export type ScanSession = {
   /** null only for older generated WASM without persisted enhancement state. */
   memoEnhancementTxids: (limit: number) => Promise<string[] | null>;
   rewindTo: (height: number) => Promise<number>;
+  rewindToChecked: (height: number) => Promise<number>;
   resetScan: () => Promise<void>;
   rescanFrom: (birthday: number) => Promise<void>;
   recomputePools: (onTick?: (p: { hashed: number; total: number; message: string }) => void) => Promise<void>;
   nextUnifiedAddress: () => Promise<void>;
   attachSeed: (mnemonic: string) => Promise<void>;
-  estimateFee: (to: string, amountZec: string, memo?: string) => Promise<string>;
+  balanceWithConfirmations: (minConfirmations: number) => Promise<string>;
+  estimateFee: (to: string, amountZec: string, memo?: string, minConfirmations?: number) => Promise<string>;
   estimateTransparentFee?: (to: string, amountZec: string) => Promise<string>;
   supportsTransparentSend?: () => Promise<boolean>;
   maxSend: (to?: string) => Promise<string>;
@@ -73,6 +76,7 @@ export type ScanSession = {
   /** Conservative session revision; undefined while a mutation is in flight. */
   persistenceRevision?: () => number | undefined;
   history: (limit: number) => Promise<string>;
+  historyQuery: (limit: number, status: string, txid: string) => Promise<string>;
   /** Raw hex of unmined, unexpired sends, for an idempotent rebroadcast. */
   pendingRawTxs: () => Promise<string[]>;
   scannedHeight: () => Promise<number>;
@@ -95,7 +99,7 @@ export type ScanSession = {
   prove?: (
     kind: "send" | "sendTransparent" | "shield",
     mnemonic: string,
-    args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; thresholdZat?: number },
+    args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; minConfirmations?: number; thresholdZat?: number },
   ) => Promise<{ hex: string; txid?: string }>;
   /** Build the Orchard proving key in the instance that proves (see `prove`). */
   warmProvingKey?: () => Promise<{ ready: boolean; ms: number }>;
@@ -114,6 +118,7 @@ type WalletHandle = HardwareWalletHandle & {
   applySharedMemos?: (json: string) => number;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
+  rewindToChecked?: (height: number) => number;
   resetScan?: () => void;
   rescanFrom?: (birthday: number) => void;
   recomputePools?: () => void;
@@ -122,13 +127,15 @@ type WalletHandle = HardwareWalletHandle & {
   ) => void;
   nextUnifiedAddress: () => string;
   attachSeed?: (mnemonic: string) => void;
-  estimateFee?: (to: string, amountZec: string, memo?: string) => string;
+  balanceWithConfirmations?: (minConfirmations: number) => string;
+  estimateFee?: (to: string, amountZec: string, memo?: string, minConfirmations?: number) => string;
   estimateTransparentFee?: (to: string, amountZec: string) => string;
   proveTransparentSend?: (mnemonic: string, to: string, amountZec: string, maxFeeZat?: string) => string;
   maxSend?: (to?: string) => string;
   snapshotJson: (server: string) => string;
   toSnapshot: () => Uint8Array;
   history: (limit: number) => string;
+  historyQuery?: (limit: number, status: string, txid: string) => string;
   pendingRawTxs?: () => string;
   scannedHeight: () => number;
   birthday: () => number;
@@ -244,6 +251,12 @@ export function localScanSession(
       return cur.memoEnhancementTxids ? JSON.parse(cur.memoEnhancementTxids(limit)) as string[] : null;
     },
     rewindTo: async (height) => w().rewindTo?.(height) ?? 0,
+    rewindToChecked: async (height) => {
+      if (!Number.isInteger(height) || height < 0 || height > 0xffffffff) throw new Error("invalid rewind height");
+      const cur = w();
+      if (typeof cur.rewindToChecked !== "function") throw new Error("this wasm build cannot verify a rewind checkpoint");
+      return cur.rewindToChecked(height);
+    },
     rescanFrom: async (birthday) => {
       const cur = w();
       if (!cur.rescanFrom) throw new Error("this wasm build cannot rescan an earlier birthday");
@@ -276,10 +289,18 @@ export function localScanSession(
       if (typeof cur.attachSeed !== "function") throw new Error("attachSeed missing");
       cur.attachSeed(mnemonic);
     },
-    estimateFee: async (to, amountZec, memo) => {
+    balanceWithConfirmations: async (minConfirmations) => {
+      minimumConfirmations(minConfirmations);
       const cur = w();
+      if (typeof cur.balanceWithConfirmations !== "function") throw new Error("this wasm build cannot enforce confirmation policies");
+      return cur.balanceWithConfirmations(minConfirmations);
+    },
+    estimateFee: async (to, amountZec, memo, minConfirmations) => {
+      minimumConfirmations(minConfirmations);
+      const cur = w();
+      if (minConfirmations !== undefined && typeof cur.balanceWithConfirmations !== "function") throw new Error("this wasm build cannot enforce confirmation policies");
       if (typeof cur.estimateFee !== "function") throw new Error("this wasm build cannot estimate fees");
-      return cur.estimateFee(to, amountZec, memo);
+      return cur.estimateFee(to, amountZec, memo, minConfirmations);
     },
     supportsTransparentSend: async () => typeof w().estimateTransparentFee === "function" && typeof w().proveTransparentSend === "function",
     estimateTransparentFee: async (to, amountZec) => {
@@ -301,6 +322,11 @@ export function localScanSession(
       return { bytes, previewJson: cur.snapshotJson("") };
     },
     history: async (limit) => w().history(limit),
+    historyQuery: async (limit, status, txid) => {
+      const cur = w();
+      if (typeof cur.historyQuery !== "function") throw new Error("this wasm build cannot query complete transaction history");
+      return cur.historyQuery(limit, status, txid);
+    },
     pendingRawTxs: async () => parseRawTxs(w().pendingRawTxs?.()),
     scannedHeight: async () => w().scannedHeight(),
     birthday: async () => w().birthday(),
@@ -791,6 +817,12 @@ export function workerScanSession(): ScanSession | null {
       const data = await sessionRpc("rewindTo", { height });
       return Number(data.height) || 0;
     },
+    rewindToChecked: async (height) => {
+      if (!Number.isInteger(height) || height < 0 || height > 0xffffffff) throw new Error("invalid rewind height");
+      const data = await sessionRpc("rewindToChecked", { height });
+      if (!Number.isInteger(data.height) || Number(data.height) < 0 || Number(data.height) > height) throw new Error("invalid rewind result");
+      return Number(data.height);
+    },
     rescanFrom: async (birthday) => { await sessionRpc("rescanFrom", { birthday }); },
     resetScan: async () => {
       await sessionRpc("resetScan");
@@ -810,8 +842,14 @@ export function workerScanSession(): ScanSession | null {
     attachSeed: async (mnemonic) => {
       await sessionRpc("attachSeed", { mnemonic });
     },
-    estimateFee: async (to, amountZec, memo) => {
-      const data = await sessionRpc("estimateFee", { to, amountZec, memo });
+    balanceWithConfirmations: async (minConfirmations) => {
+      minimumConfirmations(minConfirmations);
+      const data = await sessionRpc("balanceWithConfirmations", { minConfirmations });
+      return String(data.json ?? "{}");
+    },
+    estimateFee: async (to, amountZec, memo, minConfirmations) => {
+      minimumConfirmations(minConfirmations);
+      const data = await sessionRpc("estimateFee", { to, amountZec, memo, minConfirmations });
       return String(data.json ?? "{}");
     },
     supportsTransparentSend: async () => !!(await sessionRpc("supportsTransparentSend")).supported,
@@ -839,6 +877,10 @@ export function workerScanSession(): ScanSession | null {
     },
     history: async (limit) => {
       const data = await sessionRpc("history", { limit });
+      return String(data.json ?? "[]");
+    },
+    historyQuery: async (limit, status, txid) => {
+      const data = await sessionRpc("historyQuery", { limit, status, txid });
       return String(data.json ?? "[]");
     },
     scannedHeight: async () => {
@@ -892,7 +934,7 @@ export function workerScanSession(): ScanSession | null {
           prove: async (
             kind: "send" | "sendTransparent" | "shield",
             mnemonic: string,
-            args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; thresholdZat?: number },
+            args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; minConfirmations?: number; thresholdZat?: number },
           ) => {
             // Same limit as the prove worker; a first send may also build the key.
             const data = await sessionRpc("prove", { kind, mnemonic, ...args }, undefined, 600_000);

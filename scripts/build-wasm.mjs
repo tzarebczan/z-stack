@@ -10,10 +10,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { engineSourceHash } from "./wasm-build-inputs.mjs";
+import { assertWasmVariant, wasmTargetDirectory } from "./wasm-build-variant.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = join(root, "packages", "sdk", "src", "generated");
 const sourceSha256 = engineSourceHash();
+const targetDir = wasmTargetDirectory(root, "single-thread");
 // no-vectorize-slp: newer LLVM packs pairs of 64-bit field multiplies into
 // i64x2.mul, which x64 engines emulate (2x slower proofs on the nightly
 // multicore build; the pinned stable toolchain does not do it yet).
@@ -37,7 +39,7 @@ const r = spawnSync(
     cwd: join(root, "crates", "z-wasm"),
     stdio: "inherit",
     shell: true,
-    env: { ...process.env, RUSTFLAGS: rustflags },
+    env: { ...process.env, RUSTFLAGS: rustflags, CARGO_TARGET_DIR: targetDir },
   },
 );
 if (r.status !== 0) process.exit(r.status ?? 1);
@@ -47,6 +49,7 @@ if (!existsSync(wasm) || !readFileSync(wasm).toString("latin1").includes("simd12
   process.exit(1);
 }
 const sha256 = createHash("sha256").update(readFileSync(wasm)).digest("hex");
+assertWasmVariant(readFileSync(wasm), "single-thread");
 assert.equal(engineSourceHash(), sourceSha256, "engine source changed during build; rebuild before packing");
 writeFileSync(
   join(out, "integrity.json"),

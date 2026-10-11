@@ -27,6 +27,54 @@ fn pipeline_truncation_distinguishes_missing_row_from_sqlite_failure() {
     assert_eq!(truncate_existing(&mut db, &path, 100).unwrap(), None);
 }
 
+#[tokio::test]
+async fn shorter_chain_without_a_real_ancestor_preserves_saved_payment_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.sqlite");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    rusqlite::vtab::array::load_module(&conn).unwrap();
+    let mut db = zcash_client_sqlite::WalletDb::from_connection(
+        conn,
+        ZNetwork::Regtest,
+        zcash_client_sqlite::util::SystemClock,
+        rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+    );
+    zcash_client_sqlite::wallet::init::init_wallet_db(&mut db, None).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("INSERT INTO blocks(height,hash,time,sapling_tree,sapling_commitment_tree_size,orchard_commitment_tree_size,ironwood_commitment_tree_size)
+        VALUES(20,zeroblob(32),0,x'000000',0,0,0)").unwrap();
+    assert_eq!(
+        super::super::wallet::rewind_target(&path, 10).unwrap(),
+        None
+    );
+    conn.execute_batch(
+        "CREATE TABLE ext_native_payments_v1(id TEXT PRIMARY KEY, proposal BLOB NOT NULL,
+        fee INTEGER NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL,
+        height INTEGER NOT NULL, block_hash BLOB NOT NULL, phase TEXT NOT NULL, txids TEXT NOT NULL);
+        INSERT INTO ext_native_payments_v1 VALUES ('fixture', x'010203',10000,1,121,20,zeroblob(32),'unknown','[]');",
+    )
+    .unwrap();
+    let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+    let mut client = LwdClient::new(super::super::lwd::LwdChannel::new(channel, true));
+    assert!(matches!(
+        reconcile_chain_checkpoint(&mut client, &mut db, &path, 10).await,
+        Err(EngineError::Reorg { height: 20, .. })
+    ));
+    assert_eq!(
+        super::super::wallet::rewind_target(&path, u32::MAX).unwrap(),
+        Some(20)
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT proposal FROM ext_native_payments_v1 WHERE id='fixture'",
+            [],
+            |row| row.get::<_, Vec<u8>>(0)
+        )
+        .unwrap(),
+        [1, 2, 3]
+    );
+}
+
 #[test]
 fn streamed_note_free_chunks_bound_each_historic_write_to_eight_thousand_heights() {
     use selective_scan::tests::no_note_batch;
@@ -442,8 +490,10 @@ async fn streamed_retry_replaces_a_stale_note_free_prefix() {
     use zcash_client_backend::scanning::Nullifiers;
     let mut db = empty_scan_db();
     let ufvk = test_ufvk(7);
-    let ufvks =
-        selective_scan::AccountUfvks::from([(zcash_client_sqlite::AccountUuid::default(), ufvk.clone())]);
+    let ufvks = selective_scan::AccountUfvks::from([(
+        zcash_client_sqlite::AccountUuid::default(),
+        ufvk.clone(),
+    )]);
     let mut original: Vec<_> = (1..=1_000).map(compact_at).collect();
     crate::scan::ensure_compact_chain_metadata(&mut original, 0, 0, 0);
     let context = selective_scan::TrialContext::new(ufvks, Nullifiers::empty());

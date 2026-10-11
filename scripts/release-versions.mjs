@@ -7,7 +7,7 @@ export function assertReleaseVersions(root) {
   const manifest = path => JSON.parse(readFileSync(join(root, path), 'utf8'));
   const version = manifest('packages/sdk/package.json').version;
   assert.equal(typeof version, 'string', 'SDK version must be declared');
-  for (const file of ['package.json', ...['core', 'passkey', 'base'].map(name => `packages/${name}/package.json`)]) {
+  for (const file of ['package.json', ...['core', 'passkey', 'base', 'gift-cards'].map(name => `packages/${name}/package.json`)]) {
     assert.equal(manifest(file).version, version, `${file}: release version must match SDK ${version}`);
   }
   const cargo = readFileSync(join(root, 'Cargo.toml'), 'utf8');

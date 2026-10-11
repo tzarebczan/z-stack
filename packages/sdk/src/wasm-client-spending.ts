@@ -42,17 +42,19 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
   function proveAndSubmit(
     kind: "send" | "sendTransparent" | "shield",
     seed: string,
-    args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; thresholdZat?: number },
+    args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; minConfirmations?: number; thresholdZat?: number },
     beforeBroadcast?: () => boolean,
+    beforeSubmit?: HardwareSendOptions["beforeSubmit"],
   ): Promise<string | undefined> {
-    return runtime.withOriginSpendLock(() => proveAndSubmitHere(kind, seed, args, beforeBroadcast));
+    return runtime.withOriginSpendLock(() => proveAndSubmitHere(kind, seed, args, beforeBroadcast, beforeSubmit));
   }
 
   async function proveAndSubmitHere(
     kind: "send" | "sendTransparent" | "shield",
     seed: string,
-    args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; thresholdZat?: number },
+    args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; minConfirmations?: number; thresholdZat?: number },
     beforeBroadcast?: () => boolean,
+    beforeSubmit?: HardwareSendOptions["beforeSubmit"],
   ): Promise<string | undefined> {
     if (!ctx.session) throw new Error("no wasm wallet");
     const source = ctx.session;
@@ -89,6 +91,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
     let published = false;
     let proofInterrupted = false;
     let broadcastStarted = false;
+    let receiptCommitted = false;
     let sentTxid: string | undefined;
     let finishDrain: ((error?: unknown) => void) | undefined;
     let rollbackFailure: unknown;
@@ -159,7 +162,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
           const handle = runtime.requireBindings().WasmWallet.fromSnapshot(backup);
           try {
             const result = kind === "send"
-              ? handle.proveSend(seed, args.to ?? "", args.amountZec ?? "0", args.memo)
+              ? handle.proveSend(seed, args.to ?? "", args.amountZec ?? "0", args.memo, args.maxFeeZat, args.minConfirmations)
               : kind === "sendTransparent"
                 ? handle.proveTransparentSend?.(seed, args.to ?? "", args.amountZec ?? "0", args.maxFeeZat) ?? (() => { throw new Error("this wasm build cannot prove transparent swap outputs"); })()
                 : handle.proveShield(seed, args.thresholdZat ?? 100_000);
@@ -192,6 +195,15 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       // wallet that was replaced, so they must not be broadcast.
       if (!sameLineage()) throw new WalletError("wallet_changed", "the wallet was saved by another tab");
       assertBroadcastAllowed();
+      if (beforeSubmit) {
+        const reservedTxid = sentTxid;
+        // Await the commit itself: aborting this wait can race a successful write.
+        // The hook must reject before committing or resolve after committing.
+        await beforeSubmit({ txid: reservedTxid }, operation.signal);
+        receiptCommitted = true;
+      }
+      ctx.assertSource(operation, source);
+      assertBroadcastAllowed();
       ctx.bus.emit("broadcast", { kind: kind === "sendTransparent" ? "send" : kind, ...(sentTxid ? { txid: sentTxid } : {}) });
       ctx.assertSource(operation, source);
       assertBroadcastAllowed();
@@ -205,14 +217,14 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
     } catch (e) {
       if (proofInterrupted) throw new DOMException("wallet proof cancelled before broadcast", "AbortError");
       if (operation.signal.aborted || source !== ctx.session) {
-        if (broadcastStarted) throw new WalletError("broadcast_failed",
-          "Wallet changed after submission started. Check this transaction before sending another payment.", e, { txid: sentTxid });
+        if (broadcastStarted || receiptCommitted) throw new WalletError("broadcast_failed",
+          "Wallet changed after its payment receipt was committed. Check this transaction before sending another payment.", e, { txid: sentTxid });
         throw e;
       }
       // After wallet_changed this tab already holds the saved state, which
       // never had this send.
       const reloaded = isWalletError(e) && e.code === "wallet_changed";
-      if (!broadcastStarted && published) {
+      if (!broadcastStarted && !receiptCommitted && published) {
         try {
           await undoSend();
         } catch (undoError) {
@@ -226,9 +238,9 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
         // The node refused this transaction: undo it now (its notes are free
         // again) rather than keep resending it until it expires.
         await undoSend();
-        throw new WalletError("broadcast_rejected", `broadcast rejected: ${message}`, e);
+        throw new WalletError("broadcast_rejected", `broadcast rejected: ${message}`, e, { txid: sentTxid });
       }
-      if (broadcastStarted) {
+      if (broadcastStarted || receiptCommitted) {
         // The txid lets the app show this send as pending (it is saved and
         // resent) instead of offering a retry that could pay twice.
         throw new WalletError(
@@ -318,7 +330,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
 
   async function hardwareSubmitHere(
     args: { to: string; amountZec: string; memo?: string },
-    { signer, onStage: userOnStage, signal, beforeBroadcast }: HardwareSendOptions,
+    { signer, onStage: userOnStage, signal, beforeBroadcast, beforeSubmit }: HardwareSendOptions,
   ): Promise<string | undefined> {
     if (!ctx.session) throw new Error("no wasm wallet");
     let source = ctx.session;
@@ -358,6 +370,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
     let reserved = false;
     let finalizedTxid: string | undefined;
     let broadcastStarted = false;
+    let receiptCommitted = false;
     let stateAtHardware = 0;
     let finishDrain: ((error?: unknown) => void) | undefined;
     let rollbackFailure: unknown;
@@ -450,6 +463,17 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       onStage("broadcasting");
       ctx.assertSource(operation, source);
       assertReviewCurrent();
+      if (beforeSubmit) {
+        const reservedTxid = finalizedTxid;
+        // Signing is finished. Cancellation must not kill this actor while the
+        // application is committing the already-signed receipt.
+        removeReservationInterrupt?.();
+        removeReservationInterrupt = undefined;
+        await beforeSubmit({ txid: reservedTxid }, operation.signal);
+        receiptCommitted = true;
+      }
+      ctx.assertSource(operation, source);
+      assertReviewCurrent();
       ctx.bus.emit("broadcast", { kind: "send", txid: finalizedTxid });
       ctx.assertSource(operation, source);
       assertReviewCurrent();
@@ -460,8 +484,8 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       return done.txid ?? (/^[0-9a-f]{64}$/i.test(submitted) ? submitted.toLowerCase() : undefined);
     } catch (e) {
       if (operation.signal.aborted || source !== ctx.session) {
-        if (broadcastStarted) throw new WalletError("broadcast_failed",
-          "Wallet changed after submission started. Check this transaction before sending another payment.", e, { txid: finalizedTxid });
+        if (broadcastStarted || receiptCommitted) throw new WalletError("broadcast_failed",
+          "Wallet changed after its payment receipt was committed. Check this transaction before sending another payment.", e, { txid: finalizedTxid });
         throw e;
       }
       if (proofInterrupted && reserved && !broadcastStarted) {
@@ -469,7 +493,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
         catch (error) { rollbackFailure = error; throw error; }
       }
       const reloaded = isWalletError(e) && e.code === "wallet_changed";
-      if (!broadcastStarted && reserved && !reloaded) {
+      if (!broadcastStarted && !receiptCommitted && reserved && !reloaded) {
         // Durable too: a background save may already hold the reservation
         // or the finalized transaction.
         try {
@@ -505,9 +529,9 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
           }
           if (ctx.stateEpoch === epoch) break;
         }
-        throw new WalletError("broadcast_rejected", `broadcast rejected: ${message}`, e);
+        throw new WalletError("broadcast_rejected", `broadcast rejected: ${message}`, e, { txid: finalizedTxid });
       }
-      if (broadcastStarted) {
+      if (broadcastStarted || receiptCommitted) {
         throw new WalletError(
           "broadcast_failed",
           `broadcast outcome unknown; transaction remains pending. Sync before retrying: ${message}`,

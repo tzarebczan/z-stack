@@ -18,7 +18,7 @@ import {
   type WalletSnapshot
 } from "@z-stack/core";
 import { createLightServerRecovery, LightServerUnavailableError, type LightServerRecovery } from "./light-server-recovery";
-import { isTransientLightServerError } from "./lwd";
+import { assertCompactBlockHeight, isTransientLightServerError } from "./lwd";
 import { createBlockPrefetch } from "./prefetch";
 import { supportsTransparentCompact, syncPublicData } from "./public-data";
 import {
@@ -180,10 +180,38 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const tip = await recovery.run(() => ctx.transport.tip(signal));
     recoveryTip = tip;
     if (cancelled()) throw new Error("sync cancelled");
-    const start = await source.nextHeight();
+    let start = await source.nextHeight();
+    const birthday = await source.birthday();
+    if (ctx.opts.verifyChainTip && start > birthday) {
+      // A height alone cannot establish that a previously mined payment is
+      // still mined. Check the overlap even when no new block has arrived.
+      const overlap = Math.min(start - 1, tip);
+      if (overlap < birthday) throw new Error("reorg before wallet birthday; retry sync after the chain recovers");
+      const blob = await recovery.run(() => ctx.transport.blocks(overlap, overlap, signal));
+      assertCompactBlockHeight(blob, overlap);
+      if (cancelled()) throw new Error("sync cancelled");
+      if (start - 1 > tip) {
+        // Refuse stale endpoints outside the exact retained checkpoint horizon.
+        // The unchecked rewind may otherwise reset to birthday before a gap error.
+        if (!source.rewindToChecked) throw new WalletError("sync_required", "The engine cannot safely verify this older chain tip.");
+        const kept = await source.rewindToChecked(tip);
+        if (kept !== tip) throw new WalletError("sync_required", "The engine could not retain the requested chain checkpoint.");
+      }
+      try {
+        await source.applyBlob(blob);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/reorg/i.test(message)) throw error;
+        // The engine rewinds on a hash mismatch while retaining signed
+        // pending payments. The normal scan below fills the replacement chain.
+        if (await source.nextHeight() > overlap) throw error;
+      }
+      if (cancelled()) throw new Error("sync cancelled");
+      await source.recomputePools();
+      start = await source.nextHeight();
+    }
     recoveryScanned = start - 1;
     recoveryStart = start;
-    const birthday = await source.birthday();
     const syncStarted = Date.now();
     const nearTip = tip - start <= NEAR_TIP_BLOCKS;
     const followOn = tip - start <= STALL_QUIET_REMAINING;

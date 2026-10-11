@@ -34,7 +34,7 @@ wallet failure.
 
 ## CI verification
 
-CI builds both production WASM engines and packs one SDK/core/passkey/Base set.
+CI builds both production WASM engines and packs one SDK/core/passkey/Base/gift-card set.
 The installed-consumer checks and three parallel browser jobs use those same
 archives. Each consumer gets a fresh app and dependency installation; workspace
 links are never substituted for the packaged SDK. Browser jobs verify the
@@ -75,10 +75,12 @@ To reuse an already-built matching archive set locally:
 pnpm build:sdk
 pnpm pack:sdk
 pnpm pack:base
+pnpm pack:gift-cards
 node scripts/test-packages.mjs --archives=artifacts
 node scripts/test-packages.mjs --browser --browsers=firefox --archives=artifacts
 node scripts/test-base-package.mjs --browser --browsers=firefox --archives=artifacts
 node scripts/test-combined-package.mjs --archives=artifacts
+node scripts/test-gift-cards-package.mjs --archives=artifacts
 ```
 
 Without `--archives=DIR`, each check packs its own set as before. An incomplete
@@ -86,7 +88,7 @@ or mismatched-version set fails instead of rebuilding silently.
 
 PRs confined to maintained public Markdown run documentation checks without
 Rust or browser builds. The executable guides in `docs/SDK.md` and
-`docs/SERVICES.md` always select the full route so their marked examples compile
+`docs/SERVICES.md` and `docs/GIFT-CARDS.md` always select the full route so their marked examples compile
 against installed packages. Code, dependencies, workflow files, unknown paths and
 code-to-docs renames also select the full route. Pushes to `main` always run the full
 suite and can populate the Rust caches; PRs only restore them. The required
@@ -123,7 +125,7 @@ regenerate the browser inventory when dependencies change.
 
 Describe the user-visible behavior, package/API impact, and checks run. For a
 breaking change, update the example and wallet consumer in the same release.
-Keep SDK, core, passkey, Base, the workspace, and `SDK_VERSION` versions in sync. Before distributing
+Keep SDK, core, passkey, Base, gift cards, the workspace, and `SDK_VERSION` versions in sync. Before distributing
 archives, run [the release checks](docs/RELEASE.md) from a clean checkout.
 
 Never commit a seed, wallet database, cookie, credential, `.env`, or private

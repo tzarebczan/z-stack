@@ -12,7 +12,7 @@ test('reject mismatched archive/bundle/runtime labels before release', () => {
     mkdirSync(dirname(join(root, file)), { recursive: true });
     writeFileSync(join(root, file), content);
   };
-  const manifests = ['package.json', ...['sdk', 'core', 'passkey', 'base'].map(name => `packages/${name}/package.json`)];
+  const manifests = ['package.json', ...['sdk', 'core', 'passkey', 'base', 'gift-cards'].map(name => `packages/${name}/package.json`)];
   const cargo = `[workspace.package]\n# version = "wrong-comment"\nversion = "${version}" # release\n\n[workspace.dependencies]\nfoo = "9.9.9"\n`;
   const runtime = `export const SDK_VERSION = "${version}";\n`;
   try {

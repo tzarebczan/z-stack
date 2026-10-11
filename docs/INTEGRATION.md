@@ -142,6 +142,14 @@ const history = await wallet.history(50);
 wallet.startAutoSync();
 ```
 
+For workflows that use mined history as settlement evidence, source-built SDKs
+can enable `verifyChainTip: true` when creating the browser wallet. It defaults
+to false and adds one public compact block range request on sync after a block
+has been scanned, including unchanged or shorter server tips. It compares the
+saved overlap hash with the configured server and rewinds a changed chain before
+returning successful sync evidence. See [the verification contract](SDK.md#verify-the-saved-chain-tip).
+This option is not part of the existing published alpha.9 preview.
+
 Show `snapshot.balance.totalAvailable` as spendable, and
 `snapshot.balance.totalPending` (or `pendingZec`) separately as confirming funds.
 The default mainnet/testnet policy needs three confirmations for incoming funds;

@@ -358,6 +358,7 @@ test("scan worker falls back to verified ST when the MT artifact lacks its threa
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
   }).outputText);
   const source = readFileSync(url, "utf8")
+    .replace('from "./confirmation-policy"', `from ${JSON.stringify(new URL("../src/confirmation-policy.ts", import.meta.url).href)}`)
     .replace('from "./integrity"', `from ${JSON.stringify(integrity)}`)
     .replace('from "./hardware-ops"', `from ${JSON.stringify(hardwareOps)}`)
     .replace('import("./generated-mt/z_wasm.js")', `import(${JSON.stringify(mt)})`)

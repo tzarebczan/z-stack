@@ -26,6 +26,7 @@ use secrecy::{ExposeSecret, SecretString, SecretVec};
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::net::ToSocketAddrs;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -624,6 +625,19 @@ pub struct NativeWallet {
     network: ZNetwork,
     server: LightServer,
     meta: WalletMeta,
+}
+
+fn explicit_confirmations_policy(confirmations: u32) -> Result<ConfirmationsPolicy> {
+    let count = NonZeroU32::new(confirmations)
+        .ok_or_else(|| EngineError::Message("confirmations_invalid".into()))?;
+    #[cfg(feature = "transparent-inputs")]
+    {
+        Ok(ConfirmationsPolicy::new_symmetrical(count, false))
+    }
+    #[cfg(not(feature = "transparent-inputs"))]
+    {
+        Ok(ConfirmationsPolicy::new_symmetrical(count))
+    }
 }
 
 impl NativeWallet {
@@ -1819,9 +1833,19 @@ impl NativeWallet {
     }
 
     pub fn balance(&self) -> Result<Balance> {
+        self.balance_with_policy(crate::confirmations_policy(self.network))
+    }
+
+    /// Currently unspent value under a caller's symmetric confirmation policy.
+    /// Both external receipts and wallet change must meet the same positive threshold.
+    pub fn balance_with_confirmations(&self, confirmations: u32) -> Result<Balance> {
+        self.balance_with_policy(explicit_confirmations_policy(confirmations)?)
+    }
+
+    fn balance_with_policy(&self, policy: ConfirmationsPolicy) -> Result<Balance> {
         let db = self.open_db()?;
         let summary = db
-            .get_wallet_summary(crate::confirmations_policy(self.network))
+            .get_wallet_summary(policy)
             .map_err(|e| EngineError::WalletDb(format!("summary: {e}")))?
             .ok_or(EngineError::SyncRequired)?;
 

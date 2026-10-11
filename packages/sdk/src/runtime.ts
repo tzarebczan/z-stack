@@ -161,6 +161,8 @@ export interface ParsedAddress {
 type WasmBindings = {
   default: (module_or_path?: unknown) => Promise<unknown>;
   generateMnemonic: () => string;
+  giftMnemonicToEntropy: (words: string) => Uint8Array;
+  giftMnemonicFromEntropy: (entropy: Uint8Array) => string;
   seedFingerprint?: (mnemonic: string) => string;
   accountFromMnemonic: (
     mnemonic: string,
@@ -501,6 +503,16 @@ export function wasmRuntime(): WasmRuntime | null {
 
 export function generateMnemonic(): string {
   return requireWasm().generateMnemonic();
+}
+
+/** Original entropy, never the BIP-39 derived seed. Optional gift-card adapter. */
+export function giftMnemonicToEntropy(words: string): Uint8Array {
+  return requireWasm().giftMnemonicToEntropy(words);
+}
+
+/** Rust validates entropy and reconstructs the English phrase. */
+export function giftMnemonicFromEntropy(entropy: Uint8Array): string {
+  return requireWasm().giftMnemonicFromEntropy(entropy);
 }
 
 export function deriveAccount(

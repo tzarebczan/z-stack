@@ -1041,6 +1041,18 @@ export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}
 }
 
 /** Every field of one protobuf message; varints as numbers (exact to 2^53). */
+/** A chain probe must contain precisely the requested compact block, never a stale range. */
+export function assertCompactBlockHeight(blob: Uint8Array, height: number): void {
+  if (blob.byteLength < 4 || new DataView(blob.buffer, blob.byteOffset, 4).getUint32(0) !== blob.byteLength - 4)
+    throw new Error("invalid compact-block chain verification range");
+  const fields = protoFieldsOf(blob.subarray(4), true);
+  const heights = fields.filter(field => field.field === 2);
+  const hashes = fields.filter(field => field.field === 3);
+  if (heights.length !== 1 || heights[0]?.value !== height || hashes.length !== 1 ||
+      !(hashes[0]?.value instanceof Uint8Array) || hashes[0].value.byteLength !== 32)
+    throw new Error("invalid compact-block chain verification height or hash");
+}
+
 function protoFieldsOf(buf: Uint8Array, strict = false): Array<{ field: number; value: number | Uint8Array }> {
   const out: Array<{ field: number; value: number | Uint8Array }> = [];
   let i = 0;

@@ -51,6 +51,11 @@
       "@z-stack/source": "./src/diagnostics.ts",
       "types": "./dist/diagnostics.d.ts",
       "import": "./dist/diagnostics.js"
+    },
+    "./gift-keys": {
+      "@z-stack/source": "./src/gift-keys.ts",
+      "types": "./dist/gift-keys.d.ts",
+      "import": "./dist/gift-keys.js"
     }
   },
   "files": [
@@ -132,6 +137,10 @@
       "./diagnostics": {
         "types": "./dist/diagnostics.d.ts",
         "import": "./dist/diagnostics.js"
+      },
+      "./gift-keys": {
+        "types": "./dist/gift-keys.d.ts",
+        "import": "./dist/gift-keys.js"
       }
     }
   }
