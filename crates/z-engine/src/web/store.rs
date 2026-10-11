@@ -994,7 +994,7 @@ impl WebWallet {
             version: SNAPSHOT_VERSION,
             tree_sizes: &self.tree_sizes,
             pending_txs: self
-                .unmined_pending_txs()
+                .retained_signed_txs()
                 .map(|(key, raw)| (key, to_hex(raw)))
                 .collect(),
             live_trees: self.stored_live_trees()?,
@@ -1963,9 +1963,12 @@ impl WebWallet {
         self.repair_tree_cursors();
         self.block_hashes.retain(|&h, _| h <= keep);
         let txs = &self.txs;
+        let scanned_height = self.scanned_height;
         self.pending_txs.retain(|id, _| {
-            txs.get(&to_hex(id.as_ref()))
-                .is_some_and(|agg| agg.mined_height.is_none())
+            txs.get(&to_hex(id.as_ref())).is_some_and(|agg| {
+                agg.mined_height
+                    .is_none_or(|h| (scanned_height.saturating_sub(h) as usize) <= HASH_KEEP)
+            })
         });
         if keep < self.birthday {
             self.scanned_height = birthday_bound;
@@ -2061,6 +2064,21 @@ impl WebWallet {
         })
     }
 
+    // A recently mined send can leave the chain after this wallet has closed.
+    // Keep its original signed bytes through the retained checkpoint horizon,
+    // without treating it as pending or rebroadcasting while it remains mined.
+    fn retained_signed_txs(&self) -> impl Iterator<Item = (String, &Vec<u8>)> + '_ {
+        self.pending_txs.iter().filter_map(|(id, raw)| {
+            let key = to_hex(id.as_ref());
+            let agg = self.txs.get(&key)?;
+            let retain = agg.mined_height.map_or_else(
+                || !self.expired_unmined(agg),
+                |height| (self.scanned_height.saturating_sub(height) as usize) <= HASH_KEEP,
+            );
+            retain.then_some((key, raw))
+        })
+    }
+
     /// Hex of every unmined, unexpired send, for an idempotent rebroadcast.
     pub fn pending_raw_txs(&self) -> Vec<String> {
         self.unmined_pending_txs()
@@ -2079,6 +2097,15 @@ impl WebWallet {
     /// SQLite wallets do. Otherwise a rejected or evicted send locks its notes
     /// forever. The history row stays and shows the transaction as expired.
     fn release_expired_spends(&mut self) {
+        let scanned_height = self.scanned_height;
+        let txs = &self.txs;
+        self.pending_txs.retain(|id, _| {
+            txs.get(&to_hex(id.as_ref())).is_some_and(|agg| {
+                agg.mined_height.is_none_or(|height| {
+                    (scanned_height.saturating_sub(height) as usize) <= HASH_KEEP
+                })
+            })
+        });
         let expired: Vec<String> = self
             .txs
             .iter()
@@ -4146,6 +4173,30 @@ mod tests {
         assert_eq!(w.to_snapshot().unwrap(), before);
         w.scanned_height = 40;
         w.rescan_from(1).unwrap();
+        assert!(w.pending_txs.is_empty());
+    }
+
+    #[test]
+    fn mined_signed_receipts_are_saved_but_not_broadcast_and_retention_is_bounded() {
+        let mut w = wallet();
+        let id = TxId::from_bytes([7; 32]);
+        w.pending_txs.insert(id, vec![1, 2, 3]);
+        w.txs.insert(
+            to_hex(id.as_ref()),
+            TxAgg {
+                mined_height: Some(10),
+                expiry_height: Some(20),
+                ..Default::default()
+            },
+        );
+        w.scanned_height = 10;
+        assert!(w.pending_raw_txs().is_empty());
+        let saved: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(saved["pending_txs"].as_object().unwrap().len(), 1);
+        w.scanned_height = 10 + HASH_KEEP as u32 + 1;
+        let pruned: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+        assert!(pruned["pending_txs"].as_object().unwrap().is_empty());
+        w.release_expired_spends();
         assert!(w.pending_txs.is_empty());
     }
 

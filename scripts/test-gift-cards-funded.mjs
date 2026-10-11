@@ -231,6 +231,7 @@ try {
   const before = await page.evaluate(
     async () => (await window.f.main.getWallet()).unifiedAddress,
   );
+  console.log("Creating and funding an isolated gift; simulating a lost acknowledgement");
   const review = await page.evaluate(async () => {
     const r = await window.f.gifts.prepare({
       amountZat: 50000n,
@@ -251,6 +252,7 @@ try {
     "unresolved",
   );
   const afterFunding = submitCount;
+  console.log("Funding receipt retained; reopening the browser wallet");
   await page.reload();
   await page.waitForFunction(() => window.f, { timeout: 120000 });
   assert.equal(
@@ -283,6 +285,7 @@ try {
   assert.equal(inspected.confirmations, 6);
   assert.equal(inspected.phase, "funded");
   assert.equal(inspected.available, "60000");
+  console.log("Exact face amount and reserve confirmed through six scanned blocks");
   const redeemReview = await page.evaluate(
     async ({ id, destination }) => {
       const s = await window.f.gifts.prepareRedeem(id, destination);
@@ -325,6 +328,7 @@ try {
   }, review.id);
   assert.equal(final.phase, "redeemed");
   assert.equal(final.available, "0");
+  console.log("Claim mined; invalidating its block to test recovery");
   assert.equal(
     await page.evaluate(
       async () => (await window.f.main.getWallet()).unifiedAddress,
@@ -354,6 +358,7 @@ try {
   assert.equal(reorg.phase, "redeeming");
   assert.equal(reorg.claimTxid, claim.claimTxid);
   assert.equal(reorg.scanned, rewoundTip);
+  console.log("Reorged claim returned to pending; checking the same signed claim after re-mining");
   assert.equal(
     await page.evaluate(
       async ({ id, destination, fee }) => {

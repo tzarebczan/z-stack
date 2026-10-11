@@ -1556,13 +1556,28 @@ fn check_mined_self_send_history(blob: bool) {
     let fee = live.fee_zat.expect("constructed send records its fee") as i64;
     assert!(live.mined_height.is_some());
     assert_eq!(live.account_delta_zat, -fee, "self-send costs only its fee");
-    let reloaded = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+    let mut reloaded = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
     let saved = reloaded.history_matching(1, None, Some(&txid)).remove(0);
     assert_eq!(live.account_delta_zat, saved.account_delta_zat);
     assert_eq!(
         live.orchard_received + live.ironwood_received,
         saved.orchard_received + saved.ironwood_received
     );
+    assert!(
+        reloaded.pending_raw_txs().is_empty(),
+        "mined sends must not be rebroadcast"
+    );
+    reloaded
+        .rewind_to_height(live.mined_height.unwrap() - 1)
+        .unwrap();
+    let expected = vec![to_hex(&raw)];
+    assert_eq!(
+        reloaded.pending_raw_txs(),
+        expected,
+        "a reopened reorged send retains its signed bytes"
+    );
+    let reopened = WebWallet::from_snapshot(&reloaded.to_snapshot().unwrap()).unwrap();
+    assert_eq!(reopened.pending_raw_txs(), expected);
 }
 
 /// A shield's history keeps exactly the transparent input it spent: pending

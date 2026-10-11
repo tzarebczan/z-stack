@@ -98,9 +98,13 @@ Status comes from positive chain evidence and the saved local attempt. A zero
 balance or missing history does not prove another holder redeemed the gift.
 On reload or lost replies, inspect the existing wallet and receipt. Any replay
 uses retained signed bytes; do not create another funding payment or claim while
-its outcome is unknown. SDK sync can rebroadcast such saved bytes. The initial
-release retains gift wallet state and secrets instead of automatically deleting
-them after a mined receipt.
+its outcome is unknown. New SDK snapshots retain locally signed bytes for mined
+claims within the 2,048-block retention horizon. Sync only rebroadcasts them after
+a reorg makes the claim unmined and while it remains unexpired. Legacy snapshots,
+pruned receipts, and expired claims may lack replayable bytes; retain the claim ID
+and keep the outcome unresolved rather than constructing another claim.
+The initial release retains gift wallet state and secrets instead of automatically
+deleting them after a mined receipt.
 
 Native integrations keep renderer commands typed. Trusted runtime code chooses
 gift roots, transport endpoints, and account fingerprints. Serialize source and

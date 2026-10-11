@@ -138,9 +138,14 @@ Applications should await a successful sync before using its history as settleme
 evidence. The check compares against the chosen light server; it does not replace
 validator consensus verification.
 
-Rewinds retain recorded outgoing payment identities and input reservations.
-Sync may rebroadcast retained signed bytes, but does not construct a replacement
-payment. Closing cancels verification under the ordinary wallet lifecycle.
+Rewinds retain recorded outgoing payment identities and input reservations until
+expiry. New snapshots also retain locally signed bytes for recently mined sends
+within the 2,048-block retention horizon. A mined send is not rebroadcast. If a
+rewind makes it unmined while it remains unexpired, sync can rebroadcast those
+same bytes after reload without constructing a replacement payment. Legacy
+snapshots, pruned receipts, and expired payments may lack replayable bytes; keep
+their outcome unresolved until chain evidence establishes it.
+Closing cancels verification under the ordinary wallet lifecycle.
 The optional browser gift-card worker always enables this check so inspection
 can downgrade a reorged claim from mined to unresolved.
 
