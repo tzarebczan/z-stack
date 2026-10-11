@@ -15,7 +15,7 @@ size limit and network compatibility.
 
 ## Build and install the optional archive
 
-The alpha.10 preview includes this optional archive and the matching SDK.
+The alpha.11 preview includes this optional archive and the matching SDK.
 Alpha.9 predates gift cards. To build matching archives from source:
 
 ```sh
@@ -29,15 +29,15 @@ Packages are downloadable preview archives, not npm registry packages. To use
 only the pure helpers, install the downloaded or source-built gift-card archive:
 
 ```sh
-npm install /path/to/z-stack-gift-cards-0.1.0-alpha.10.tgz
+npm install /path/to/z-stack-gift-cards-0.1.0-alpha.11.tgz
 ```
 
 For browser wallets, also install the same checkout's SDK archive. The SDK includes its
 core/passkey helpers and production WASM engines:
 
 ```sh
-npm install /path/to/z-stack-sdk-0.1.0-alpha.10.tgz \
-  /path/to/z-stack-gift-cards-0.1.0-alpha.10.tgz
+npm install /path/to/z-stack-sdk-0.1.0-alpha.11.tgz \
+  /path/to/z-stack-gift-cards-0.1.0-alpha.11.tgz
 ```
 
 ```ts

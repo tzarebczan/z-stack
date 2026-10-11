@@ -1,12 +1,12 @@
 # Package builds and verification
 
-The current preview is [`0.1.0-alpha.10`](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.10),
+The current preview is [`0.1.0-alpha.11`](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.11),
 with NU7 support and downloadable archives. Alpha.1 and alpha.2 predate NU7. Packages are not published to npm or Cargo. The browser SDK includes
 production WASM engines, so an app consuming built packages does not need Rust. See the
 [walkthrough](GETTING-STARTED.md) and [support limits](SUPPORT.md).
 
-The alpha.10 preview includes the optional gift-card archive. Alpha.9 predates
-gift cards and remains available with its original assets and checksums.
+The alpha.11 preview includes the optional gift-card archive introduced in alpha.10.
+Alpha.9 predates gift cards and remains available with its original assets and checksums.
 
 ## Build archives and a preview bundle
 
@@ -201,9 +201,9 @@ patch boundary described in [UPSTREAM.md](UPSTREAM.md).
 ## Assemble downloadable release assets
 
 The filenames below use the checkout's current version for local rehearsal.
-For alpha.10, update the synchronized package versions and filenames, and verify
-that committed revision before publishing. Keep the existing published alpha.9
-assets and tag unchanged. A Cargo workspace version change also changes the WASM
+For alpha.11, update the synchronized package versions and filenames, and verify
+that committed revision before publishing. Keep existing published alpha.10 and
+earlier assets and tags unchanged. A Cargo workspace version change also changes the WASM
 source fingerprint, so rebuild both engines after the version bump.
 
 From a clean, signed, verified source commit, run the build/check commands above,
@@ -216,12 +216,12 @@ pnpm pack:base
 pnpm pack:gift-cards
 pnpm bundle:preview
 cd artifacts
-sha256sum z-stack-core-0.1.0-alpha.10.tgz z-stack-passkey-0.1.0-alpha.10.tgz \
-  z-stack-sdk-0.1.0-alpha.10.tgz z-stack-base-0.1.0-alpha.10.tgz \
-  z-stack-gift-cards-0.1.0-alpha.10.tgz \
-  z-stack-preview-0.1.0-alpha.10.tgz > SHA256SUMS-alpha.10
-sha256sum --quiet -c SHA256SUMS-alpha.10
-# macOS: generate with shasum -a 256; verify with shasum -q -a 256 -c SHA256SUMS-alpha.10.
+sha256sum z-stack-core-0.1.0-alpha.11.tgz z-stack-passkey-0.1.0-alpha.11.tgz \
+  z-stack-sdk-0.1.0-alpha.11.tgz z-stack-base-0.1.0-alpha.11.tgz \
+  z-stack-gift-cards-0.1.0-alpha.11.tgz \
+  z-stack-preview-0.1.0-alpha.11.tgz > SHA256SUMS-alpha.11
+sha256sum --quiet -c SHA256SUMS-alpha.11
+# macOS: generate with shasum -a 256; verify with shasum -q -a 256 -c SHA256SUMS-alpha.11.
 ```
 
 Use a directory with exactly one preview bundle for this version. Upload these
@@ -244,7 +244,7 @@ pnpm bundle:preview
 ```
 
 The optional `z-stack-zaino-image.json` asset is a container build receipt, separate
-from the SDK archives. `SHA256SUMS-alpha.10` covers only its named files; a passing
+from the SDK archives. `SHA256SUMS-alpha.11` covers only its named files; a passing
 checksum does not verify additional downloads. Verify the receipt's GitHub artifact
 attestation separately with `gh attestation verify z-stack-zaino-image.json --repo tzarebczan/z-stack`, then use its immutable image digest. The SDK preview does not
 need this container or receipt.
@@ -253,7 +253,7 @@ need this container or receipt.
 
 `pnpm pack:sdk` continues to produce only the core/passkey/SDK set. Build and pack
 the gift-card API explicitly with `pnpm build:gift-cards` and `pnpm pack:gift-cards`.
-Alpha.10 preview bundles include that fifth package alongside Base. The
+Alpha.11 preview bundles include that fifth package alongside Base. The
 published alpha.9 preview does not include it.
 
 ```sh

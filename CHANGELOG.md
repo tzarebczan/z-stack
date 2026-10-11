@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0-alpha.11
+
+- Resolve native historical tree states by the same block's hash when a supported light server rejects a height lookup. Bound the fallback, validate the returned chain identity and frontiers, and refuse malformed successful responses without moving the wallet birthday.
+- Add experimental wallet-independent verification of accepted 16-block mainnet windows. Bind the predecessor, absolute heights, transaction effects and caller-supplied source identity into an opaque verification receipt. This API does not replay a wallet, authorize a payment or qualify production Private Cloud.
+- Integrators installing preview archives must use the matching alpha.11 package set, including the optional gift-card browser peer. Direct Rust consumers retain the pinned workspace cryptographic patches described in `docs/UPSTREAM.md`.
+
 ## 0.1.0-alpha.10
 
 - Distribute the optional `@z-stack/gift-cards` archive with the preview bundle. Its dependency-free root supplies the Vizor v3 codec and funding math; browser wallets use a matching SDK peer. Existing alpha.9 consumers must install the matching alpha.10 archive set to use it.
