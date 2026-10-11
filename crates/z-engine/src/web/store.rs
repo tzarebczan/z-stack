@@ -4191,11 +4191,11 @@ mod tests {
         );
         w.scanned_height = 10;
         assert!(w.pending_raw_txs().is_empty());
-        let saved: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
-        assert_eq!(saved["pending_txs"].as_object().unwrap().len(), 1);
+        let saved: Snapshot = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(saved.pending_txs.len(), 1);
         w.scanned_height = 10 + HASH_KEEP as u32 + 1;
-        let pruned: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
-        assert!(pruned["pending_txs"].as_object().unwrap().is_empty());
+        let pruned: Snapshot = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+        assert!(pruned.pending_txs.is_empty());
         w.release_expired_spends();
         assert!(w.pending_txs.is_empty());
     }

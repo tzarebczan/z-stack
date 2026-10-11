@@ -2469,10 +2469,10 @@ fn unmined_send_bytes_survive_a_reload_for_rebroadcast() {
     }
     record_test_height(&mut w, 100);
     assert_eq!(w.pending_raw_txs(), vec![to_hex(&[1u8; 3])]);
-    // A reload (page refresh) keeps only what can still be rebroadcast.
+    // A reload keeps recent mined receipts too, but only pending bytes broadcast.
     let reloaded = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
     assert_eq!(reloaded.pending_raw_txs(), vec![to_hex(&[1u8; 3])]);
-    assert_eq!(reloaded.pending_txs.len(), 1);
+    assert_eq!(reloaded.pending_txs.len(), 2);
 }
 
 /// Orchard spends from NU6.3 on leave zero-value Orchard notes in the wallet.
