@@ -508,11 +508,35 @@ fn apply_wallet_pragmas(conn: &rusqlite::Connection) {
 }
 
 fn open_wallet_db(path: &Path, network: ZNetwork) -> Result<Db> {
+    open_wallet_db_with_durability(path, network, false)
+}
+
+fn open_wallet_connection_with_durability(
+    path: &Path,
+    durable: bool,
+) -> Result<rusqlite::Connection> {
     let conn = rusqlite::Connection::open(path)
         .map_err(|e| EngineError::WalletDb(format!("open: {e}")))?;
     rusqlite::vtab::array::load_module(&conn)
         .map_err(|e| EngineError::WalletDb(format!("array module: {e}")))?;
     apply_wallet_pragmas(&conn);
+    if durable {
+        conn.pragma_update(None, "synchronous", "FULL")
+            .map_err(|_| EngineError::Message("native_recovery_storage_failed".into()))?;
+        let synchronous: i64 = conn
+            .pragma_query_value(None, "synchronous", |r| r.get(0))
+            .map_err(|_| EngineError::Message("native_recovery_storage_failed".into()))?;
+        if synchronous != 2 {
+            return Err(EngineError::Message(
+                "native_recovery_storage_failed".into(),
+            ));
+        }
+    }
+    Ok(conn)
+}
+
+fn open_wallet_db_with_durability(path: &Path, network: ZNetwork, durable: bool) -> Result<Db> {
+    let conn = open_wallet_connection_with_durability(path, durable)?;
     Ok(
         WalletDb::from_connection(conn, network, SystemClock, new_rng())
             .with_enhancement_mode(EnhancementMode::Standard)
@@ -780,7 +804,16 @@ impl NativeWallet {
     }
 
     pub(super) fn open_db(&self) -> Result<Db> {
-        let mut db = open_wallet_db(&self.paths.data_db, self.network)?;
+        self.open_db_with_durability(false)
+    }
+
+    #[cfg(feature = "native-pir")]
+    pub(super) fn open_recovery_db(&self) -> Result<Db> {
+        self.open_db_with_durability(true)
+    }
+
+    fn open_db_with_durability(&self, durable: bool) -> Result<Db> {
+        let mut db = open_wallet_db_with_durability(&self.paths.data_db, self.network, durable)?;
         // Migrations: only when needed. Passing None avoids seed-required failures on open;
         // seed-bearing migrations run during create/restore with the seed present.
         if needs_migrate(&mut db)? {
@@ -1701,6 +1734,8 @@ impl NativeWallet {
                 Ok(0)
             })
             .unwrap_or(0);
+        #[cfg(feature = "transparent-inputs")]
+        self.classify_balance_funding(&mut db).await?;
         info!("memo enhancement completed");
         if enhanced > 0 {
             info!("memo enhance stored decrypted outputs");
@@ -1955,6 +1990,16 @@ impl NativeWallet {
 
     pub fn balance(&self) -> Result<Balance> {
         let db = self.open_db()?;
+        #[cfg(feature = "transparent-inputs")]
+        if let Some(tip) = db
+            .chain_height()
+            .map_err(|_| EngineError::WalletDb("transparent funding height unavailable".into()))?
+        {
+            super::transparent_funding::require_balance_classified(
+                &self.paths.data_db,
+                u32::from(tip).saturating_add(1),
+            )?;
+        }
         let summary = db
             .get_wallet_summary(crate::confirmations_policy(self.network))
             .map_err(|e| EngineError::WalletDb(format!("summary: {e}")))?
@@ -2361,6 +2406,11 @@ impl NativeWallet {
             // Older sparse scans could persist notes/rows without a usable
             // checkpoint. A caught-up wallet must recover those anchors too.
             self.recover_spend_checkpoints(scanned).await?;
+            #[cfg(feature = "transparent-inputs")]
+            {
+                let mut db = self.open_db()?;
+                self.classify_balance_funding(&mut db).await?;
+            }
             // The web bridge syncs through here: resubmit unmined sends even
             // when no block arrived.
             let _ = tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip)).await;
@@ -2380,6 +2430,25 @@ impl NativeWallet {
         drop(lease);
         let (h, p) = self.sync().await?;
         Ok((h, p, true))
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    async fn classify_balance_funding(&self, db: &mut Db) -> Result<usize> {
+        self.require_network_access()?;
+        let rpc = self.validator_rpc_url();
+        let phase = super::transparent_funding::classify_balance_funding(
+            db,
+            &self.paths.data_db,
+            self.network,
+            |txid| {
+                let txid = txid.to_string();
+                let rpc = rpc.as_deref();
+                async move { Self::fetch_raw_transaction_with_rpc(&self.server, rpc, &txid).await }
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(30), phase)
+            .await
+            .map_err(|_| EngineError::SyncRequired)?
     }
 
     async fn recover_spend_checkpoints(&self, scanned: u32) -> Result<()> {
@@ -4442,6 +4511,8 @@ mod tests {
                 allow_deep_sync: false,
             },
         };
+        assert!(matches!(wallet.balance(), Err(EngineError::SyncRequired)));
+
         let rows = wallet.history(10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].txid, canonical);

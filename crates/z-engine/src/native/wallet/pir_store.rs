@@ -296,8 +296,8 @@ impl<'a> NativePirStore<'a> {
                 .open_db()
                 .map_err(|_| io(rusqlite::Error::InvalidQuery))?,
         );
-        let mut conn = Connection::open(&wallet.paths.data_db).map_err(io)?;
-        rusqlite::vtab::array::load_module(&conn).map_err(io)?;
+        let mut conn = open_wallet_connection_with_durability(&wallet.paths.data_db, true)
+            .map_err(|_| io(rusqlite::Error::InvalidQuery))?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(io)?;
         conn.pragma_update(None, "synchronous", "FULL")

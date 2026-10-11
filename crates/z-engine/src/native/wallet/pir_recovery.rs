@@ -23,6 +23,8 @@ struct Receipt {
     report: PirRecoveryReport,
     chain_context: Option<String>,
     scope_identity: String,
+    #[serde(default)]
+    discovery_scope_identity: Option<String>,
     scanner_identity: String,
     #[serde(default)]
     journal_head: Option<(u64, String)>,
@@ -44,7 +46,16 @@ fn require_journal_head(
     }
     Ok(())
 }
+fn require_discovery_scope(discovered: &str, scope: &NativeScope) -> anyhow::Result<()> {
+    if discovered != scope.identity()? {
+        anyhow::bail!("native_recovery_reconciliation_required");
+    }
+    Ok(())
+}
 fn receipt_journal_matches(conn: &rusqlite::Connection, receipt: &Receipt) -> bool {
+    if receipt.discovery_scope_identity.as_deref() != Some(receipt.scope_identity.as_str()) {
+        return false;
+    }
     receipt.journal_head.as_ref().is_some_and(|expected| {
         conn.query_row(
             "SELECT generation,digest FROM ext_coffer_pir_head WHERE id=1",
@@ -56,6 +67,8 @@ fn receipt_journal_matches(conn: &rusqlite::Connection, receipt: &Receipt) -> bo
 }
 fn schema(wallet: &NativeWallet) -> Result<()> {
     let conn = rusqlite::Connection::open(&wallet.paths.data_db)
+        .map_err(|_| failed("native_recovery_storage_failed"))?;
+    conn.pragma_update(None, "synchronous", "FULL")
         .map_err(|_| failed("native_recovery_storage_failed"))?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS ext_coffer_pir_recovery_v1(id INTEGER PRIMARY KEY CHECK(id=1), blocked INTEGER NOT NULL CHECK(blocked IN (0,1)), generation INTEGER NOT NULL, receipt BLOB);").map_err(|_| failed("native_recovery_storage_failed"))?;
     Ok(())
@@ -161,6 +174,9 @@ pub(in crate::native::wallet) fn ensure_transaction_receipt<
     }
     let receipt: Receipt =
         serde_json::from_slice(&bytes.ok_or_else(|| anyhow::anyhow!("native_recovery_pending"))?)?;
+    if receipt.discovery_scope_identity.as_deref() != Some(receipt.scope_identity.as_str()) {
+        anyhow::bail!("native_recovery_reconciliation_required");
+    }
     require_journal_head(ext, receipt.journal_head.as_ref())?;
     let snapshot =
         NativeScanSnapshot::capture(db, receipt.report.accepted_height).map_err(store_failed)?;
@@ -262,7 +278,7 @@ impl NativeWallet {
         }
         let _lease = database_lease::shared(&self.paths.data_db)?;
         cancel.transaction(|| schema(self))?;
-        let mut db = self.open_db()?;
+        let mut db = self.open_recovery_db()?;
         cancel.transaction(||db.transactionally_with_extension(|_,ext|->anyhow::Result<u64>{
             ext.execute("INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,1,1,NULL) ON CONFLICT(id) DO UPDATE SET blocked=1,generation=generation+1,receipt=NULL",[])?;
             Ok(ext.query_row("SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",[],|r|r.get(0))?)
@@ -287,7 +303,7 @@ impl NativeWallet {
         let _lease = database_lease::shared(&self.paths.data_db)?;
         cancel.transaction(|| schema(self))?;
         let generation = self.begin_regtest_pir_recovery(chain, cancel)?;
-        let mut db = self.open_db()?;
+        let mut db = self.open_recovery_db()?;
         let compact = evidence.compact_blocks()?;
         let mut genesis = crate::web::from_hex(
             &chain
@@ -401,7 +417,7 @@ impl NativeWallet {
             cancel.flag(),
             Some(cancel),
         )?;
-        let mut db = self.open_db()?;
+        let mut db = self.open_recovery_db()?;
         let scope = self.recovery_scope()?;
         let expected = expected_events(&evidence, &scope)?;
         let store = store::NativePirStore::open_recovery(self, cancel).map_err(store_failed)?;
@@ -449,6 +465,10 @@ impl NativeWallet {
                     anyhow::bail!("native_recovery_generation_changed");
                 }
                 require_journal_head(ext, Some(&journal_head))?;
+                require_discovery_scope(
+                    &discovery.scope_identity,
+                    &native_scope_in_transaction(wdb, ext, 1)?,
+                )?;
                 let snapshot = NativeScanSnapshot::capture(wdb, chain.target_height())
                     .map_err(store_failed)?;
                 if !snapshot.matches_chain(chain)
@@ -462,6 +482,7 @@ impl NativeWallet {
                     report: report.clone(),
                     chain_context: chain.context_identity.clone(),
                     scope_identity: scope.identity()?,
+                    discovery_scope_identity: Some(discovery.scope_identity.clone()),
                     scanner_identity: snapshot.identity().map_err(store_failed)?,
                     journal_head: Some(journal_head.clone()),
                     anchor: chain.target.clone(),
@@ -709,6 +730,7 @@ mod tests {
             },
             chain_context: chain.context_identity.clone(),
             scope_identity: wallet.recovery_scope().unwrap().identity().unwrap(),
+            discovery_scope_identity: Some(wallet.recovery_scope().unwrap().identity().unwrap()),
             scanner_identity: NativeScanSnapshot::capture(&db, 1)
                 .unwrap()
                 .identity()
@@ -769,6 +791,123 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("native_recovery_reconciliation_required"));
+    }
+    #[test]
+    fn final_recovery_writer_refuses_scope_allocated_after_discovery_without_new_events() {
+        let (_dir, wallet, chain, receipt) = completed_fixture();
+        let old_scope = wallet.recovery_scope().unwrap();
+        let (bytes, _) = fixture_with_script(&[0x51]);
+        let evidence =
+            verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap();
+        let before_events = expected_events(&evidence, &old_scope).unwrap();
+        wallet
+            .begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
+            .unwrap();
+        let mut allocator = wallet.open_db().unwrap();
+        let before_scan = NativeScanSnapshot::capture(&allocator, 1).unwrap();
+        let seed = SecretVec::new(
+            Mnemonic::parse_normalized(crate::keys::REGTEST_FAUCET_MNEMONIC)
+                .unwrap()
+                .to_seed("")
+                .to_vec(),
+        );
+        let mut hash = crate::web::from_hex(chain.target_hash()).unwrap();
+        hash.reverse();
+        let birthday = AccountBirthday::from_parts(
+            zcash_client_backend::data_api::chain::ChainState::empty(
+                1.into(),
+                BlockHash::from_slice(&hash),
+            ),
+            None,
+        );
+        allocator
+            .import_account_hd(
+                "future",
+                &seed,
+                Zip32AccountId::try_from(1).unwrap(),
+                &birthday,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            NativeScanSnapshot::capture(&allocator, 1).unwrap(),
+            before_scan
+        );
+        drop(allocator);
+        let scope = wallet.recovery_scope().unwrap();
+        assert_ne!(scope.identity().unwrap(), receipt.scope_identity);
+        assert_eq!(expected_events(&evidence, &scope).unwrap(), before_events);
+        let mut db = wallet.open_recovery_db().unwrap();
+        let result = db.transactionally_with_extension(|wdb, ext| {
+            require_journal_head(ext, receipt.journal_head.as_ref())?;
+            let current_scope = native_scope_in_transaction(wdb, ext, 1)?;
+            require_discovery_scope(&receipt.scope_identity, &current_scope)
+        });
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("native_recovery_reconciliation_required"));
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let pending: bool = conn
+            .query_row(
+                "SELECT blocked=1 AND receipt IS NULL FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(pending);
+    }
+    #[test]
+    fn recovery_marker_writers_use_full_durability_and_pending_survives_early_return() {
+        let (dir, wallet, chain, _) = completed_fixture();
+        let ordinary =
+            open_wallet_connection_with_durability(&wallet.paths.data_db, false).unwrap();
+        assert_eq!(
+            ordinary
+                .pragma_query_value(None, "synchronous", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let recovery = open_wallet_connection_with_durability(&wallet.paths.data_db, true).unwrap();
+        assert_eq!(
+            recovery
+                .pragma_query_value(None, "synchronous", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        let generation = wallet
+            .begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
+            .unwrap();
+        drop(ordinary);
+        drop(recovery);
+        let reopened = NativeWallet::open_offline(dir.path()).unwrap();
+        assert!(reopened.ensure_recovery_selection_ready().is_err());
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let actual: (bool, u64, bool) = conn.query_row("SELECT blocked,generation,receipt IS NULL FROM ext_coffer_pir_recovery_v1 WHERE id=1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!(actual, (true, generation, true));
+    }
+    #[test]
+    fn legacy_complete_without_discovery_scope_binding_refuses_on_reopen_and_payment_writer() {
+        let (dir, wallet, chain, receipt) = completed_fixture();
+        let mut old = serde_json::to_value(receipt).unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("discovery_scope_identity");
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        conn.execute(
+            "UPDATE ext_coffer_pir_recovery_v1 SET receipt=?1 WHERE id=1",
+            [serde_json::to_vec(&old).unwrap()],
+        )
+        .unwrap();
+        let reopened = NativeWallet::open_offline(dir.path()).unwrap();
+        assert!(reopened.ensure_recovery_selection_ready().is_err());
+        assert!(reopened.regtest_pir_recovery_for(&chain).is_err());
+        let mut db = reopened.open_recovery_db().unwrap();
+        assert!(db
+            .transactionally_with_extension(|wdb, ext| {
+                super::super::super::recovery_guard::transaction_recovery_ready(wdb, ext)
+            })
+            .is_err());
     }
     #[test]
     fn changed_journal_invalidates_complete_and_stale_receipts_on_cold_reopen() {

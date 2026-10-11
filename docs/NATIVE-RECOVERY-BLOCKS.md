@@ -129,3 +129,17 @@ downgrade. Public scans recheck ownership under the SQLite writer; ordinary
 network scan operations hold an exclusive ownership lease against canonical
 recovery. Offline payment submission refuses before changing a signed intent
 to an unknown outcome and retains the saved transaction bytes.
+
+The final canonical writer also requires the private discovery scope identity
+to match its freshly derived native scope, including receivers allocated after
+discovery even when they have no event. Recovery marker, verified native effect
+and receipt transactions use a FULL synchronous SQLite connection; the ordinary
+scanner keeps its separate NORMAL policy. Pending is durable before discovery
+transport or an early no-overlap return.
+
+Ordinary native sync classifies recent retained transparent funding from
+validated raw transactions before reporting a ready balance. This covers locked
+and below-confirmation outputs as well as spendable ones. A balance read returns
+`SyncRequired` while maturity metadata remains unresolved; failed or timed-out
+classification retains validated rows for the next sync. The network phase is
+bounded to 30 seconds and 256 candidates per call.
