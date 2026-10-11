@@ -1,8 +1,12 @@
 //! Experimental regtest confirmed discovery. No event reaches native coin
 //! selection, signing, balances, history views or transparent fallback RPCs.
+#[path = "pir_recovery.rs"]
+mod recovery;
 #[path = "pir_store.rs"]
 mod store;
 use super::*;
+pub(super) use recovery::ensure_transaction_receipt;
+pub use recovery::PirRecoveryReport;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -183,10 +187,18 @@ pub(super) fn native_scope<D: WalletRead<AccountId = AccountUuid>>(
         let birthday = u64::from(u32::from(
             db.get_account_birthday(account).map_err(|_| invalid())?,
         ));
-        for (address, metadata) in db
+        let mut receivers = db
             .get_transparent_receivers(account, true, true)
-            .map_err(|_| invalid())?
-        {
+            .map_err(|_| invalid())?;
+        // Pinned ephemeral enumeration requires a known chain tip. Canonical
+        // recovery establishes that tip before deriving its completion scope.
+        if db.chain_height().map_err(|_| invalid())?.is_some() {
+            receivers.extend(
+                db.get_ephemeral_transparent_receivers(account, u32::MAX, false)
+                    .map_err(|_| invalid())?,
+            );
+        }
+        for (address, metadata) in receivers {
             let imported = metadata.scope().is_none();
             let required_from = receiver_history_floor(imported, birthday, start)?;
             scope.push(ScopeEntry {
@@ -216,6 +228,73 @@ pub(super) fn native_scope<D: WalletRead<AccountId = AccountUuid>>(
         return Err(invalid());
     }
     Ok(NativeScope(scope))
+}
+
+// Pinned rc7 exposes only previously-exposed ephemeral receivers via WalletRead.
+// Canonical recovery also enrolls the native allocated gap using read-only
+// extension SQL; addresses remain decoded by the native address implementation.
+pub(super) fn native_scope_in_transaction<D: WalletRead<AccountId = AccountUuid>>(
+    db: &D,
+    ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
+    start: u64,
+) -> anyhow::Result<NativeScope> {
+    let mut scope = native_scope(db, start).map_err(store_failed)?;
+    let marker:bool=ext.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",[],|r|r.get(0))?;
+    if !marker {
+        return Ok(scope);
+    }
+    let foreign: u64 = ext.query_row(
+        "SELECT count(*) FROM addresses WHERE key_scope=-1",
+        [],
+        |r| r.get(0),
+    )?;
+    if foreign != 0 {
+        anyhow::bail!("native_recovery_imports_unsupported");
+    }
+    for account in db
+        .get_account_ids()
+        .map_err(|_| failed("native_pir_scope_invalid"))?
+    {
+        let birthday = u64::from(u32::from(
+            db.get_account_birthday(account)
+                .map_err(|_| failed("native_pir_scope_invalid"))?,
+        ));
+        let uuid = account.expose_uuid();
+        // key_scope=2 is pinned sqlite KeyScope::Ephemeral encoding.
+        let count:u64=ext.query_row("SELECT count(*) FROM addresses a JOIN accounts c ON c.id=a.account_id WHERE c.uuid=?1 AND a.key_scope=2 AND a.cached_transparent_receiver_address IS NOT NULL",[uuid.as_bytes().as_slice()],|r|r.get(0))?;
+        if count > 4096 {
+            anyhow::bail!("native_pir_scope_invalid");
+        }
+        for offset in 0..count {
+            let encoded:String=ext.query_row("SELECT a.cached_transparent_receiver_address FROM addresses a JOIN accounts c ON c.id=a.account_id WHERE c.uuid=?1 AND a.key_scope=2 AND a.cached_transparent_receiver_address IS NOT NULL ORDER BY a.id LIMIT 1 OFFSET ?2",rusqlite::params![uuid.as_bytes().as_slice(),offset],|r|r.get(0))?;
+            let address = zcash_keys::address::Address::decode(&ZNetwork::Regtest, &encoded)
+                .and_then(|a| a.to_transparent_address())
+                .ok_or_else(|| failed("native_pir_scope_invalid"))?;
+            let script: transparent::address::Script = address.script().into();
+            scope.0.push(ScopeEntry {
+                account: uuid.to_string(),
+                entry: ScriptEntry {
+                    script: script.0 .0,
+                    origin: ScriptOrigin::Derived,
+                    required_from: receiver_history_floor(false, birthday, start)
+                        .map_err(store_failed)?,
+                },
+            });
+        }
+    }
+    scope.0.sort_by(|a, b| {
+        a.entry
+            .script
+            .cmp(&b.entry.script)
+            .then(a.account.cmp(&b.account))
+    });
+    scope
+        .0
+        .dedup_by(|a, b| a.account == b.account && a.entry.script == b.entry.script);
+    if scope.0.len() > 4096 {
+        anyhow::bail!("native_pir_scope_invalid");
+    }
+    Ok(scope)
 }
 
 fn receiver_history_floor(
@@ -399,6 +478,8 @@ impl<T: ShardTransport> ShardTransport for CancelTransport<'_, T> {
 impl NativeWallet {
     /// Rust-only, bounded regtest qualification using caller-owned private transport.
     /// Transport must enforce endpoint consent, deadline and network privacy policy.
+    /// This discovery-only API polls an atomic cancellation flag. Canonical
+    /// recovery also gates every database commit with `RecoveryCancellation`.
     pub fn sync_regtest_pir(
         &self,
         chain: &RegtestAcceptedChain,
@@ -406,6 +487,17 @@ impl NativeWallet {
         transport: &mut impl ShardTransport,
         limits: WorkLimits,
         cancel: &AtomicBool,
+    ) -> Result<PirDiscoveryReport> {
+        self.sync_regtest_pir_with_commit_gate(chain, filters, transport, limits, cancel, None)
+    }
+    fn sync_regtest_pir_with_commit_gate(
+        &self,
+        chain: &RegtestAcceptedChain,
+        filters: &mut impl FilterSource,
+        transport: &mut impl ShardTransport,
+        limits: WorkLimits,
+        cancel: &AtomicBool,
+        recovery_cancel: Option<&RecoveryCancellation>,
     ) -> Result<PirDiscoveryReport> {
         if self.network != ZNetwork::Regtest {
             return Err(failed("native_pir_regtest_only"));
@@ -440,9 +532,9 @@ impl NativeWallet {
         let geometry = parse_init(&init).map_err(|_| failed("native_pir_publication_invalid"))?;
         let mut db = self.open_db()?;
         let (scope, native_snapshot) = db
-            .transactionally(|wdb| -> anyhow::Result<_> {
+            .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
                 Ok((
-                    native_scope(wdb, map.start_height).map_err(store_failed)?,
+                    native_scope_in_transaction(wdb, ext, map.start_height)?,
                     NativeScanSnapshot::capture(wdb, chain.target.height as u32)
                         .map_err(store_failed)?,
                 ))
@@ -452,7 +544,8 @@ impl NativeWallet {
         if !native_snapshot.matches_chain(chain) {
             return Err(failed("native_pir_reconciliation_required"));
         }
-        let mut store = store::NativePirStore::open(self, cancel).map_err(store_failed)?;
+        let mut store = store::NativePirStore::open_with_commit_gate(self, cancel, recovery_cancel)
+            .map_err(store_failed)?;
         store
             .enroll(scope.clone(), map.start_height)
             .map_err(store_failed)?;
@@ -580,10 +673,10 @@ impl NativeWallet {
             .map_err(|_| failed("native_pir_store_invalid"))?;
         let mut db = self.open_db()?;
         let (snapshot, actual_scope) = db
-            .transactionally(|wdb| -> anyhow::Result<_> {
+            .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
                 Ok((
                     NativeScanSnapshot::capture(wdb, height).map_err(store_failed)?,
-                    native_scope(wdb, report.publication_start).map_err(store_failed)?,
+                    native_scope_in_transaction(wdb, ext, report.publication_start)?,
                 ))
             })
             .map_err(EngineError::from)?;
@@ -1028,13 +1121,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = WalletPaths::new(dir.path());
         paths.ensure_dirs().unwrap();
-        std::fs::write(&paths.data_db, b"unfinished").unwrap();
+        rusqlite::Connection::open(&paths.data_db)
+            .unwrap()
+            .execute_batch("CREATE TABLE unfinished(value INTEGER);")
+            .unwrap();
+        let unfinished = std::fs::read(&paths.data_db).unwrap();
         let lease = database_lease::shared(&paths.data_db).unwrap();
         assert_eq!(
             paths.prepare_new_wallet().unwrap_err().to_string(),
             "native_pir_database_busy"
         );
-        assert_eq!(std::fs::read(&paths.data_db).unwrap(), b"unfinished");
+        assert_eq!(std::fs::read(&paths.data_db).unwrap(), unfinished);
         drop(lease);
         paths.prepare_new_wallet().unwrap();
         assert!(!paths.data_db.exists());

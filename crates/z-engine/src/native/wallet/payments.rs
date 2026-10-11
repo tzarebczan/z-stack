@@ -184,6 +184,77 @@ mod tests {
         assert!(client.is_none(), "missing bytes must not reach a server");
     }
 
+    #[tokio::test]
+    async fn offline_submission_preserves_saved_signed_and_unknown_intents() {
+        use zcash_primitives::transaction::{Authorized, TransactionData, TxVersion};
+        let dir = tempfile::tempdir().unwrap();
+        let mut wallet = fixture_wallet(dir.path());
+        let (ufvk, birthday) = fixture_account();
+        wallet.replace_scan_db(&ufvk, &birthday).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        wallet
+            .set_light_server(LightServer::parse(
+                &format!("http://{}", listener.local_addr().unwrap()),
+                ZNetwork::Regtest,
+            ))
+            .unwrap();
+        let transaction = TransactionData::<Authorized>::from_parts(
+            TxVersion::V5,
+            BranchId::Nu6_3,
+            0,
+            (crate::regtest_nu6_3_height() + 10).into(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        let txid = transaction.txid();
+        let mut raw = Vec::new();
+        transaction.write(&mut raw).unwrap();
+        let conn = connection(&wallet).unwrap();
+        conn.execute_batch("INSERT INTO blocks (height,hash,time,sapling_tree) VALUES (1,zeroblob(32),0,X'000000')").unwrap();
+        conn.execute("INSERT INTO transactions (txid,created,expiry_height,raw,min_observed_height) VALUES (?1,'2026-09-24T00:00:00Z',?2,?3,1)", params![txid.as_ref(), crate::regtest_nu6_3_height() + 10, raw]).unwrap();
+        // A disposable wallet history row makes the saved authorized transaction
+        // visible through the same receipt lookup used by public submission.
+        conn.execute("INSERT INTO transparent_received_outputs (transaction_id,output_index,account_id,address,script,value_zat,address_id) SELECT (SELECT id_tx FROM transactions WHERE txid=?1),0,account_id,'fixture',x'51',10000,id FROM addresses LIMIT 1", [txid.as_ref()]).unwrap();
+        prepare(&conn);
+        let offline = NativeWallet::open_offline(dir.path()).unwrap();
+        assert!(offline.transaction(&txid.to_string()).unwrap().is_some());
+        for phase in ["signed", "unknown"] {
+            conn.execute(
+                "UPDATE ext_native_payments_v1 SET phase=?1,txids=?2 WHERE id=?3",
+                params![
+                    phase,
+                    serde_json::to_string(&vec![txid.to_string()]).unwrap(),
+                    ID
+                ],
+            )
+            .unwrap();
+            assert_eq!(offline.payment_receipt(ID).unwrap().phase, phase);
+            let before: (String, String, Vec<u8>) = conn.query_row(
+                "SELECT p.phase,p.txids,t.raw FROM ext_native_payments_v1 p JOIN transactions t ON t.txid=?1 WHERE p.id=?2", params![txid.as_ref(),ID], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            ).unwrap();
+            assert!(offline
+                .submit_payment(ID)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("native_offline_wallet"));
+            let after: (String, String, Vec<u8>) = conn.query_row(
+                "SELECT p.phase,p.txids,t.raw FROM ext_native_payments_v1 p JOIN transactions t ON t.txid=?1 WHERE p.id=?2", params![txid.as_ref(),ID], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            ).unwrap();
+            assert!(before == after);
+            assert_eq!(offline.payment_receipt(ID).unwrap().phase, phase);
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
     #[test]
     fn signed_receipts_require_their_wallet_transaction() {
         let dir = tempfile::tempdir().unwrap();
@@ -312,6 +383,8 @@ impl NativeWallet {
         if to.trim().to_ascii_lowercase().starts_with("zcash:") {
             return Err(failed("payment_plain_address_required"));
         }
+        self.ensure_recovery_selection_ready()?;
+        let recovery_generation = self.recovery_generation()?;
         let request = self.send_request(to, amount, memo)?;
         let mut db = self.open_db()?;
         let height = db
@@ -323,6 +396,15 @@ impl NativeWallet {
             .map_err(|_| failed("payment_storage_failed"))?
             .ok_or(EngineError::SyncRequired)?;
         let account = Self::primary_account_id(&db)?;
+        let spend_policy = shielded_spend_policy();
+        #[cfg(feature = "native-pir")]
+        let spend_policy = if self.network == ZNetwork::Regtest
+            && self.has_complete_pir_recovery()?
+        {
+            spend_policy.with_transparent(zcash_client_backend::data_api::wallet::input_selection::TransparentSpendPolicy::any_account_addr())
+        } else {
+            spend_policy
+        };
         let proposal = propose_transfer::<_, _, _, _, Infallible>(
             &mut db,
             &self.network,
@@ -336,7 +418,7 @@ impl NativeWallet {
             ),
             request,
             crate::confirmations_policy(self.network),
-            &shielded_spend_policy(),
+            &spend_policy,
             None,
             None,
         )
@@ -355,41 +437,28 @@ impl NativeWallet {
             .map_err(|_| failed("payment_random_failed"))?;
         let id = nonce.iter().map(|b| format!("{b:02x}")).collect::<String>();
         let now = clock()?;
+        drop(db);
         let conn = connection(self)?;
-        // Expired unsigned reviews can be removed; signed recovery records never are.
-        conn.execute(
-            "DELETE FROM ext_native_payments_v1 WHERE phase='prepared' AND expires < ?1",
-            [now.saturating_sub(86400)],
-        )
-        .map_err(|_| failed("payment_storage_failed"))?;
-        let count: u64 = conn
-            .query_row("SELECT COUNT(*) FROM ext_native_payments_v1", [], |r| {
-                r.get(0)
-            })
-            .map_err(|_| failed("payment_storage_failed"))?;
-        if count >= 10000 {
-            return Err(failed("payment_storage_limit"));
-        }
-        conn.execute(
-            "INSERT INTO ext_native_payments_v1 VALUES (?1,?2,?3,?4,?5,?6,?7,'prepared','[]')",
-            params![
-                id,
-                bytes,
-                fee,
-                now,
-                now + 120,
-                u32::from(height),
-                hash.0.to_vec()
-            ],
-        )
-        .map_err(|_| failed("payment_storage_failed"))?;
-        read(&conn, &id)
+        let mut db = WalletDb::from_connection(conn, self.network, SystemClock, new_rng());
+        db.transactionally_with_extension(|wdb,ext|->anyhow::Result<()> {
+            super::recovery_guard::transaction_recovery_ready(wdb,ext)?;
+            let marker:bool=ext.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",[],|r|r.get(0))?;
+            let generation = if marker {Some(ext.query_row("SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",[],|r|r.get::<_,u64>(0))?)} else {None};
+            if generation!=recovery_generation || wdb.chain_height()?!=Some(height) || wdb.get_block_hash(height)?.is_none_or(|h|h!=hash) {anyhow::bail!("payment_review_expired");}
+            ext.execute("DELETE FROM ext_native_payments_v1 WHERE phase='prepared' AND expires < ?1",[now.saturating_sub(86400)])?;
+            let count:u64=ext.query_row("SELECT COUNT(*) FROM ext_native_payments_v1",[],|r|r.get(0))?;
+            if count>=10000 {anyhow::bail!("payment_storage_limit");}
+            ext.execute("INSERT INTO ext_native_payments_v1 VALUES (?1,?2,?3,?4,?5,?6,?7,'prepared','[]')",params![id,bytes,fee,now,now+120,u32::from(height),hash.0.to_vec()])?;
+            Ok(())
+        }).map_err(EngineError::from)?;
+        self.payment_receipt(&id)
     }
 
     /// Prove/sign the stored proposal. The signed transaction, note reservations and
     /// receipt commit in ONE SQLite transaction before this returns. No broadcast.
     /// A failed/interrupted transaction leaves the review prepared and sends nothing.
     pub fn sign_payment(&self, auth: &SeedAuth, id: &str) -> Result<PaymentReceipt> {
+        self.ensure_recovery_selection_ready()?;
         // Authentication always precedes an operation that could create spend access.
         let seed = self.load_seed(auth)?;
         let usk = UnifiedSpendingKey::from_seed(
@@ -418,6 +487,7 @@ impl NativeWallet {
         // Keep the phase check inside the write transaction as well. Concurrent
         // callers must fail rather than sign twice or overwrite a saved receipt.
         db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<()> {
+            super::recovery_guard::transaction_recovery_ready(wdb,ext)?;
             let unchanged = wdb.chain_height()?.map(u32::from) == Some(height)
                 && wdb.get_block_hash(height.into())?.is_some_and(|h| h.0.as_slice() == hash);
             if !unchanged { anyhow::bail!("payment_review_expired"); }
@@ -466,6 +536,7 @@ impl NativeWallet {
     /// create a replacement payment. Lost replies remain unknown; explicit node
     /// rejections surface as errors while the signed receipt remains recoverable.
     pub async fn submit_payment(&self, id: &str) -> Result<PaymentReceipt> {
+        self.require_network_access()?;
         let conn = connection(self)?;
         let receipt = self.payment_receipt(id)?;
         if matches!(receipt.phase.as_str(), "accepted" | "mined") {

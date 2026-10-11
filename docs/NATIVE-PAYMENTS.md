@@ -84,3 +84,7 @@ PIR, OHTTP, or an anonymity guarantee. Reorgs and rollback are refused; they do
 not reset saved state automatically. When a consumer checkpoints its publication
 after scanning, a failed checkpoint write must retry the same publication, not
 assume that the wallet transaction was also rolled back.
+
+For the feature-gated full-block canonical PIR profile, including its accepted-chain
+trust contract, durable spending barrier and offline setup APIs, see
+[native verified recovery](NATIVE-RECOVERY-BLOCKS.md).

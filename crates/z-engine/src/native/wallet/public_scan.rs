@@ -101,15 +101,16 @@ impl NativeWallet {
     /// `bytes` uses protobuf varint-delimited CompactBlock messages. The caller
     /// verifies publication signatures, freshness, digests and anti-rollback first.
     /// This is shielded-wallet integration research, not production chain trust,
-    /// transparent history, or a scalable incremental scanning API.
+    /// transparent history, or a scalable incremental scanning API. Wallets with
+    /// a canonical recovery marker must use verified full-block recovery instead.
     pub fn scan_public_regtest(&self, bytes: &[u8], schedule: RegtestScanSchedule) -> Result<u32> {
         self.scan_public_regtest_inner(bytes, schedule, false)
     }
 
     /// Verify a complete authenticated publication against native overlap hashes,
     /// then scan only its suffix in one transaction using persisted native state.
-    /// If native leaves were pruned, reconstruct prefix commitments and verify
-    /// their sizes/roots against native state; prefix notes are not decrypted again.
+    /// Reconstruct prefix commitments and verify their sizes/roots against native
+    /// state before reusing any overlap; prefix notes are not decrypted again.
     /// Equal prefixes are no-ops. Gaps, missing native roots, rollback and divergent
     /// history refuse advancement; explicitly rewind/reset before accepting a fork.
     /// The publication remains bounded to 320 blocks and 128 MiB. This reduces
@@ -128,6 +129,11 @@ impl NativeWallet {
         schedule: RegtestScanSchedule,
         incremental: bool,
     ) -> Result<u32> {
+        if has_recovery_marker(&self.paths.data_db)? {
+            return Err(EngineError::Message(
+                "native_recovery_profile_required".into(),
+            ));
+        }
         if self.network != ZNetwork::Regtest
             || self.birthday_height() != 1
             || schedule.nu6_3_height < 2
@@ -165,146 +171,151 @@ impl NativeWallet {
         }
         let tip = blocks.len() as u32;
         let mut db = self.open_db()?;
-        db.transactionally(|wdb| -> anyhow::Result<()> {
-            // Tip, overlap and commitment state must come from this same write transaction.
-            if wdb
-                .chain_height()?
-                .is_some_and(|height| u32::from(height) > tip)
-            {
-                anyhow::bail!("public_scan_invalid");
+        db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<()> {
+            // Recheck under the scanner's write transaction so recovery cannot
+            // install its marker between the earlier check and these mutations.
+            let recovery: bool = ext.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",
+                [],
+                |row| row.get(0),
+            )?;
+            if recovery {
+                anyhow::bail!("native_recovery_profile_required");
             }
-            for b in &blocks {
-                if let Some(hash) = wdb.get_block_hash((b.height as u32).into())? {
-                    if hash.0.as_slice() != b.hash {
-                        anyhow::bail!("public_scan_invalid");
-                    }
-                }
-            }
-            let max = wdb.block_max_scanned()?;
-            if max
-                .as_ref()
-                .is_some_and(|b| u32::from(b.block_height()) > tip)
-            {
-                anyhow::bail!("public_scan_invalid");
-            }
-            let from_state = if incremental {
-                let fully = wdb.block_fully_scanned()?;
-                if fully.as_ref().map(|b| b.block_height())
-                    != max.as_ref().map(|b| b.block_height())
-                {
-                    anyhow::bail!("public_scan_resume_required");
-                }
-                if let Some(boundary) = fully {
-                    let height = u32::from(boundary.block_height());
-                    // Every committed overlap hash is required, not just the boundary.
-                    for b in blocks.iter().take(height as usize) {
-                        if wdb
-                            .get_block_hash((b.height as u32).into())?
-                            .as_ref()
-                            .map(|h| h.0.as_slice())
-                            != Some(b.hash.as_slice())
-                        {
-                            anyhow::bail!("public_scan_resume_required");
-                        }
-                    }
-                    if height == tip {
-                        return Ok(());
-                    }
-                    macro_rules! boundary_tree {
-                        ($tree:expr,$expected:expr) => {{
-                            let size = $expected
-                                .map(u64::from)
-                                .ok_or_else(|| anyhow::anyhow!("public_scan_resume_required"))?;
-                            let maximum = $tree.max_leaf_position(None)?;
-                            let maximum_size = maximum.map(|p| u64::from(p) + 1).unwrap_or(0);
-                            if maximum_size < size {
-                                anyhow::bail!("public_scan_resume_required");
-                            }
-                            // Block metadata fixes the scanned position even when no checkpoint
-                            // was retained for an empty block or prefetched roots extend past it.
-                            let root = if size == 0 {
-                                incrementalmerkletree::Hashable::empty_root(32.into())
-                            } else {
-                                $tree.root(
-                                    incrementalmerkletree::Address::from_parts(32.into(), 0),
-                                    size.into(),
-                                )?
-                            };
-                            let frontier = if maximum_size != size {
-                                None
-                            } else {
-                                match $tree.frontier() {
-                                    Ok(frontier) => Some(frontier),
-                                    Err(shardtree::error::ShardTreeError::Query(
-                                        shardtree::error::QueryError::TreeIncomplete(_),
-                                    )) => None,
-                                    Err(error) => return Err(anyhow::Error::from(error)),
-                                }
-                            };
-                            Ok::<_, anyhow::Error>((root, frontier))
-                        }};
-                    }
-                    let (sapling_root, sapling) = wdb
-                        .with_sapling_tree_mut::<_, _, anyhow::Error>(|tree| {
-                            boundary_tree!(tree, boundary.sapling_tree_size())
-                        })?;
-                    let (orchard_root, orchard) = wdb
-                        .with_orchard_tree_mut::<_, _, anyhow::Error>(|tree| {
-                            boundary_tree!(tree, boundary.orchard_tree_size())
-                        })?;
-                    let (ironwood_root, ironwood) = wdb
-                        .with_ironwood_tree_mut::<_, _, anyhow::Error>(|tree| {
-                            boundary_tree!(tree, boundary.ironwood_tree_size())
-                        })?
-                        .ok_or_else(|| anyhow::anyhow!("public_scan_resume_required"))?;
-                    let resumed = match (sapling, orchard, ironwood) {
-                        (Some(s), Some(o), Some(i))
-                            if boundary.sapling_tree_size().map(u64::from)
-                                == Some(s.tree_size())
-                                && boundary.orchard_tree_size().map(u64::from)
-                                    == Some(o.tree_size())
-                                && boundary.ironwood_tree_size().map(u64::from)
-                                    == Some(i.tree_size()) =>
-                        {
-                            ChainState::new(boundary.block_height(), boundary.block_hash(), s, o, i)
-                        }
-                        _ => prefix_frontiers(&blocks[..height as usize], genesis)?,
-                    };
-                    if boundary.sapling_tree_size().map(u64::from)
-                        != Some(resumed.final_sapling_tree().tree_size())
-                        || boundary.orchard_tree_size().map(u64::from)
-                            != Some(resumed.final_orchard_tree().tree_size())
-                        || boundary.ironwood_tree_size().map(u64::from)
-                            != Some(resumed.final_ironwood_tree().tree_size())
-                        || resumed.final_sapling_tree().root() != sapling_root
-                        || resumed.final_orchard_tree().root() != orchard_root
-                        || resumed.final_ironwood_tree().root() != ironwood_root
-                    {
-                        anyhow::bail!("public_scan_resume_required");
-                    }
-                    resumed
-                } else {
-                    ChainState::empty(0.into(), genesis)
-                }
-            } else {
-                ChainState::empty(0.into(), genesis)
-            };
-            let start = u32::from(from_state.block_height()) + 1;
-            wdb.update_chain_tip(tip.into())?;
-            scan_cached_blocks(
-                &self.network,
-                &Blocks(blocks),
-                wdb,
-                start.into(),
-                &from_state,
-                (tip - start + 1) as usize,
-            )
-            .map_err(|_| anyhow::anyhow!("public_scan_failed"))?;
-            Ok(())
+            scan_in_transaction(wdb, self.network, blocks, incremental, genesis)
         })
         .map_err(EngineError::from)?;
         Ok(tip)
     }
+}
+
+pub(super) type TransactionDb<'a, 'b, 'c, 'd> = WalletDb<
+    zcash_client_sqlite::SqlTransaction<'a>,
+    &'b ZNetwork,
+    &'c SystemClock,
+    &'d mut UnwrapErr<SysRng>,
+>;
+
+pub(super) fn scan_in_transaction(
+    wdb: &mut TransactionDb<'_, '_, '_, '_>,
+    network: ZNetwork,
+    blocks: Vec<CompactBlock>,
+    incremental: bool,
+    genesis: BlockHash,
+) -> anyhow::Result<()> {
+    let tip = blocks.len() as u32;
+
+    // Tip, overlap and commitment state must come from this same write transaction.
+    if wdb
+        .chain_height()?
+        .is_some_and(|height| u32::from(height) > tip)
+    {
+        anyhow::bail!("public_scan_invalid");
+    }
+    for b in &blocks {
+        if let Some(hash) = wdb.get_block_hash((b.height as u32).into())? {
+            if hash.0.as_slice() != b.hash {
+                anyhow::bail!("public_scan_invalid");
+            }
+        }
+    }
+    let max = wdb.block_max_scanned()?;
+    if max
+        .as_ref()
+        .is_some_and(|b| u32::from(b.block_height()) > tip)
+    {
+        anyhow::bail!("public_scan_invalid");
+    }
+    let from_state = if incremental {
+        let fully = wdb.block_fully_scanned()?;
+        if fully.as_ref().map(|b| b.block_height()) != max.as_ref().map(|b| b.block_height()) {
+            anyhow::bail!("public_scan_resume_required");
+        }
+        if let Some(boundary) = fully {
+            let height = u32::from(boundary.block_height());
+            // Every committed overlap hash is required, not just the boundary.
+            for b in blocks.iter().take(height as usize) {
+                if wdb
+                    .get_block_hash((b.height as u32).into())?
+                    .as_ref()
+                    .map(|h| h.0.as_slice())
+                    != Some(b.hash.as_slice())
+                {
+                    anyhow::bail!("public_scan_resume_required");
+                }
+            }
+            macro_rules! boundary_tree {
+                ($tree:expr,$expected:expr) => {{
+                    let size = $expected
+                        .map(u64::from)
+                        .ok_or_else(|| anyhow::anyhow!("public_scan_resume_required"))?;
+                    let maximum = $tree.max_leaf_position(None)?;
+                    let maximum_size = maximum.map(|p| u64::from(p) + 1).unwrap_or(0);
+                    if maximum_size < size {
+                        anyhow::bail!("public_scan_resume_required");
+                    }
+                    // Block metadata fixes the scanned position even when no checkpoint
+                    // was retained for an empty block or prefetched roots extend past it.
+                    let root = if size == 0 {
+                        incrementalmerkletree::Hashable::empty_root(32.into())
+                    } else {
+                        $tree.root(
+                            incrementalmerkletree::Address::from_parts(32.into(), 0),
+                            size.into(),
+                        )?
+                    };
+                    Ok::<_, anyhow::Error>(root)
+                }};
+            }
+            let sapling_root = wdb.with_sapling_tree_mut::<_, _, anyhow::Error>(|tree| {
+                boundary_tree!(tree, boundary.sapling_tree_size())
+            })?;
+            let orchard_root = wdb.with_orchard_tree_mut::<_, _, anyhow::Error>(|tree| {
+                boundary_tree!(tree, boundary.orchard_tree_size())
+            })?;
+            let ironwood_root = wdb
+                .with_ironwood_tree_mut::<_, _, anyhow::Error>(|tree| {
+                    boundary_tree!(tree, boundary.ironwood_tree_size())
+                })?
+                .ok_or_else(|| anyhow::anyhow!("public_scan_resume_required"))?;
+            // Native roots alone cannot authenticate an earlier compact scan.
+            // Derive the same boundary from this caller's complete publication,
+            // including when the wallet already claims to have reached its tip.
+            let resumed = prefix_frontiers(&blocks[..height as usize], genesis)?;
+            if boundary.sapling_tree_size().map(u64::from)
+                != Some(resumed.final_sapling_tree().tree_size())
+                || boundary.orchard_tree_size().map(u64::from)
+                    != Some(resumed.final_orchard_tree().tree_size())
+                || boundary.ironwood_tree_size().map(u64::from)
+                    != Some(resumed.final_ironwood_tree().tree_size())
+                || resumed.final_sapling_tree().root() != sapling_root
+                || resumed.final_orchard_tree().root() != orchard_root
+                || resumed.final_ironwood_tree().root() != ironwood_root
+            {
+                anyhow::bail!("public_scan_resume_required");
+            }
+            if height == tip {
+                return Ok(());
+            }
+            resumed
+        } else {
+            ChainState::empty(0.into(), genesis)
+        }
+    } else {
+        ChainState::empty(0.into(), genesis)
+    };
+    let start = u32::from(from_state.block_height()) + 1;
+    wdb.update_chain_tip(tip.into())?;
+    scan_cached_blocks(
+        &network,
+        &Blocks(blocks),
+        wdb,
+        start.into(),
+        &from_state,
+        (tip - start + 1) as usize,
+    )
+    .map_err(|_| anyhow::anyhow!("public_scan_failed"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -499,6 +510,127 @@ mod tests {
         );
         assert_eq!(before, snapshot(&incremental));
     }
+    #[test]
+    fn public_scans_refuse_pending_and_completed_recovery_markers_without_mutation() {
+        for blocked in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let wallet = initialized(dir.path());
+            let mut blocks = encrypted_publication();
+            wallet
+                .scan_public_regtest(&encode(&blocks), schedule())
+                .unwrap();
+            assert_witnesses(&wallet);
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            let nf: Vec<u8> = conn
+                .query_row("SELECT nf FROM orchard_received_notes LIMIT 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            // These compact spend effects preserve hashes and tree commitments.
+            blocks[5].vtx[0].actions[0].nullifier = nf;
+            conn.execute_batch("CREATE TABLE ext_coffer_pir_recovery_v1(id INTEGER PRIMARY KEY, blocked INTEGER NOT NULL, generation INTEGER NOT NULL, receipt BLOB);").unwrap();
+            conn.execute(
+                "INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,?1,1,x'00')",
+                [blocked],
+            )
+            .unwrap();
+            let before = snapshot(&wallet);
+            for incremental in [false, true] {
+                let result =
+                    wallet.scan_public_regtest_inner(&encode(&blocks), schedule(), incremental);
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "native_recovery_profile_required"
+                );
+                assert_eq!(snapshot(&wallet), before);
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT blocked FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                        [],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap(),
+                    blocked
+                );
+                assert_witnesses(&wallet);
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_rejects_forged_prefix_commitments_at_same_tip_and_before_suffix() {
+        let verified = encrypted_publication();
+        let mut forged = verified.clone();
+        forged[2].vtx.clear();
+        crate::native::selective_scan::tests::pay_orchard(
+            &mut forged[2],
+            &crate::native::selective_scan::tests::test_ufvk(8),
+        );
+        // An earlier compact provider can supply accepted hashes and correct
+        // counts while substituting another recipient's commitment effects.
+        assert_eq!(forged[2].hash, verified[2].hash);
+        assert_eq!(forged[2].chain_metadata, verified[2].chain_metadata);
+        assert_ne!(forged[2].vtx[0].actions, verified[2].vtx[0].actions);
+        for boundary in [4, verified.len()] {
+            let dir = tempfile::tempdir().unwrap();
+            let wallet = initialized(dir.path());
+            wallet
+                .scan_public_regtest(&encode(&forged[..boundary]), schedule())
+                .unwrap();
+            let before = snapshot(&wallet);
+            assert!(wallet
+                .scan_public_regtest_incremental(&encode(&verified), schedule())
+                .is_err());
+            assert_eq!(snapshot(&wallet), before);
+            assert_eq!(wallet.scanned_height().unwrap(), boundary as u32);
+        }
+    }
+
+    #[test]
+    fn full_prefix_replay_repairs_owned_notes_and_positions_without_changing_roots() {
+        let verified = encrypted_publication();
+        let mut missing_note = verified.clone();
+        // Ciphertext is not part of a commitment root. A prior compact provider
+        // can hide ownership while preserving every commitment and block hash.
+        for action in &mut missing_note[2].vtx[0].actions {
+            action.ciphertext.fill(0);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = initialized(dir.path());
+        wallet
+            .scan_public_regtest(&encode(&missing_note), schedule())
+            .unwrap();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let notes = || {
+            conn.query_row("SELECT count(*) FROM orchard_received_notes", [], |r| {
+                r.get::<_, u32>(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(notes(), 1);
+        wallet
+            .scan_public_regtest_incremental(&encode(&verified), schedule())
+            .unwrap();
+        assert_eq!(notes(), 1);
+        wallet
+            .scan_public_regtest(&encode(&verified), schedule())
+            .unwrap();
+        assert_eq!(notes(), 2);
+        assert_witnesses(&wallet);
+        conn.execute_batch("UPDATE orchard_received_notes SET commitment_tree_position=0")
+            .unwrap();
+        wallet
+            .scan_public_regtest(&encode(&verified), schedule())
+            .unwrap();
+        assert_witnesses(&wallet);
+        let oracle_dir = tempfile::tempdir().unwrap();
+        let oracle = initialized(oracle_dir.path());
+        oracle
+            .scan_public_regtest(&encode(&verified), schedule())
+            .unwrap();
+        assert_eq!(snapshot(&wallet), snapshot(&oracle));
+    }
+
     #[test]
     fn incremental_resume_uses_boundary_position_despite_prefetched_subtree_roots() {
         use incrementalmerkletree::Hashable;

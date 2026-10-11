@@ -89,6 +89,89 @@ where
     Ok(count)
 }
 
+// Unlike shielding selection, a balance read also covers locked and below-minconf
+// outputs. Classification is local after verified raw retrieval; unknown recent
+// funding must not be reported as available while a fetch is pending or fails.
+const BALANCE_CLASSIFICATION_BATCH: usize = 256;
+
+fn balance_candidates(
+    conn: &rusqlite::Connection,
+    target: u32,
+) -> rusqlite::Result<Vec<(TxId, BlockHeight)>> {
+    let expiry = zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
+    let sql = format!("SELECT DISTINCT t.txid,t.mined_height
+        FROM transactions t JOIN transparent_received_outputs u ON u.transaction_id=t.id_tx
+        WHERE t.tx_index IS NULL AND t.raw IS NULL
+          AND t.mined_height < :target AND t.mined_height > :floor
+          AND NOT EXISTS (
+              SELECT 1 FROM transparent_received_output_spends s
+              JOIN transactions st ON st.id_tx=s.transaction_id
+              WHERE s.transparent_received_output_id=u.id
+                AND (st.mined_height < :target OR st.expiry_height=0 OR st.expiry_height >= :target
+                     OR (st.expiry_height IS NULL AND COALESCE(st.target_height,st.min_observed_height)+{expiry} >= :target))
+          ) ORDER BY t.mined_height,t.txid LIMIT :limit");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        rusqlite::named_params! {
+            ":target":target, ":floor":target.saturating_sub(COINBASE_MATURITY_BLOCKS),
+            ":limit": BALANCE_CLASSIFICATION_BATCH + 1,
+        },
+        |r| {
+            let id: Vec<u8> = r.get(0)?;
+            let bytes: [u8; 32] = id.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            Ok((TxId::from_bytes(bytes), BlockHeight::from_u32(r.get(1)?)))
+        },
+    )?;
+    rows.collect()
+}
+
+fn retained_balance_candidates(db_path: &Path, target: u32) -> Result<Vec<(TxId, BlockHeight)>> {
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|_| {
+                EngineError::WalletDb("transparent funding metadata unavailable".into())
+            })?;
+    balance_candidates(&conn, target)
+        .map_err(|_| EngineError::WalletDb("transparent funding metadata invalid".into()))
+}
+
+pub(super) fn require_balance_classified(db_path: &Path, target: u32) -> Result<()> {
+    if !retained_balance_candidates(db_path, target)?.is_empty() {
+        return Err(EngineError::SyncRequired);
+    }
+    Ok(())
+}
+
+pub(super) async fn classify_balance_funding<F, Fut>(
+    db: &mut SyncDb,
+    db_path: &Path,
+    network: Network,
+    mut fetch: F,
+) -> Result<usize>
+where
+    F: FnMut(TxId) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>>>,
+{
+    let Some(tip) = db
+        .chain_height()
+        .map_err(|_| EngineError::WalletDb("transparent funding height unavailable".into()))?
+    else {
+        return Ok(0);
+    };
+    let target = u32::from(tip).saturating_add(1);
+    let candidates = retained_balance_candidates(db_path, target)?;
+    let count = candidates.len().min(BALANCE_CLASSIFICATION_BATCH);
+    for (txid, height) in candidates.into_iter().take(BALANCE_CLASSIFICATION_BATCH) {
+        let raw = fetch(txid).await?;
+        let tx = validated_transaction(&raw, network, height, txid)?;
+        decrypt_and_store_transaction(&network, db, &tx, Some(height)).map_err(|_| {
+            EngineError::WalletDb("transparent funding classification failed".into())
+        })?;
+    }
+    require_balance_classified(db_path, target)?;
+    Ok(count)
+}
+
 fn could_be_immature(height: u32, target: u32) -> bool {
     height < target && target - height < COINBASE_MATURITY_BLOCKS
 }
@@ -145,6 +228,50 @@ fn validated_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn balance_candidates_include_locked_and_below_minconf_but_skip_live_spends() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE transactions(id_tx INTEGER PRIMARY KEY,txid BLOB,mined_height INTEGER,tx_index INTEGER,raw BLOB,expiry_height INTEGER,target_height INTEGER,min_observed_height INTEGER);
+            CREATE TABLE transparent_received_outputs(id INTEGER PRIMARY KEY,transaction_id INTEGER,lock_expiry_height INTEGER);
+            CREATE TABLE transparent_received_output_spends(transparent_received_output_id INTEGER,transaction_id INTEGER);").unwrap();
+        for (id, height, index, raw) in [
+            (1u8, 101, None, None),
+            (2, 199, None, None),
+            (3, 100, None, None),
+            (4, 199, Some(0), None),
+            (5, 199, None, Some(vec![1u8])),
+            (6, 199, None, None),
+            (7, 199, None, None),
+        ] {
+            conn.execute(
+                "INSERT INTO transactions VALUES(?1,?2,?3,?4,?5,NULL,NULL,1)",
+                rusqlite::params![id, vec![id; 32], height, index, raw],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO transparent_received_outputs VALUES(?1,?1,999)",
+                [id],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO transactions VALUES(8,zeroblob(32),199,NULL,NULL,0,NULL,1);
+            INSERT INTO transparent_received_output_spends VALUES(6,8);
+            INSERT INTO transactions VALUES(9,zeroblob(32),NULL,NULL,NULL,198,NULL,1);
+            INSERT INTO transparent_received_output_spends VALUES(7,9);",
+        )
+        .unwrap();
+        let found = balance_candidates(&conn, 200).unwrap();
+        assert_eq!(
+            found,
+            [
+                (TxId::from_bytes([1; 32]), 101.into()),
+                (TxId::from_bytes([2; 32]), 199.into()),
+                (TxId::from_bytes([7; 32]), 199.into())
+            ]
+        );
+    }
 
     #[test]
     fn only_recent_unknown_eligible_funding_is_fetched_once() {
@@ -275,6 +402,70 @@ mod tests {
         .unwrap();
         db.put_received_transparent_utxo(&output).unwrap();
         let confirmations = crate::confirmations_policy(Network::Regtest);
+        assert!(matches!(
+            require_balance_classified(&path, 200),
+            Err(EngineError::SyncRequired)
+        ));
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE transparent_received_outputs SET lock_expiry_height=250",
+            [],
+        )
+        .unwrap();
+        assert!(db
+            .get_spendable_transparent_outputs_for_addresses(
+                &addresses,
+                200.into(),
+                confirmations,
+                CoinbaseFilter::AllTransparentOutputs,
+                LockFilter::Policy(&LockedInputPolicy::Exclude)
+            )
+            .unwrap()
+            .is_empty());
+        assert!(classify_balance_funding(
+            &mut db,
+            &path,
+            Network::Regtest,
+            |_| std::future::ready(Err(EngineError::Transport("unavailable".into())))
+        )
+        .await
+        .is_err());
+        assert!(matches!(
+            require_balance_classified(&path, 200),
+            Err(EngineError::SyncRequired)
+        ));
+        let mut classified = 0;
+        assert_eq!(
+            classify_balance_funding(&mut db, &path, Network::Regtest, |requested| {
+                assert_eq!(requested, tx.txid());
+                classified += 1;
+                std::future::ready(Ok(raw.clone()))
+            })
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(classified, 1);
+        require_balance_classified(&path, 200).unwrap();
+        assert_eq!(
+            classify_balance_funding(&mut db, &path, Network::Regtest, |_| std::future::ready(
+                Err(EngineError::Transport("unexpected refetch".into()))
+            ))
+            .await
+            .unwrap(),
+            0
+        );
+        // Restore an unresolved output for the independent shielding retry checks.
+        conn.execute(
+            "UPDATE transactions SET tx_index=NULL,raw=NULL WHERE txid=?1",
+            [tx.txid().as_ref().as_slice()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE transparent_received_outputs SET lock_expiry_height=NULL",
+            [],
+        )
+        .unwrap();
         let failure = classify_recent_funding(
             &mut db,
             &path,
@@ -343,5 +534,42 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(repeat, 0);
+        let mut regular_raw = raw.clone();
+        regular_raw[5] = 1; // This fixture spends a non-null outpoint, not coinbase.
+        let regular = Transaction::read(&regular_raw[..], BranchId::Sprout).unwrap();
+        assert!(!regular.transparent_bundle().unwrap().is_coinbase());
+        let output = WalletTransparentOutput::from_parts(
+            transparent::bundle::OutPoint::new(*regular.txid().as_ref(), 0),
+            regular.transparent_bundle().unwrap().vout[0].clone(),
+            Some(199.into()),
+            Some(account),
+            None,
+            None,
+        )
+        .unwrap();
+        db.put_received_transparent_utxo(&output).unwrap();
+        assert!(matches!(
+            require_balance_classified(&path, 200),
+            Err(EngineError::SyncRequired)
+        ));
+        assert_eq!(
+            classify_balance_funding(&mut db, &path, Network::Regtest, |requested| {
+                assert_eq!(requested, regular.txid());
+                std::future::ready(Ok(regular_raw.clone()))
+            })
+            .await
+            .unwrap(),
+            1
+        );
+        let stored: (Option<u32>, Vec<u8>) = conn
+            .query_row(
+                "SELECT tx_index,raw FROM transactions WHERE txid=?1",
+                [regular.txid().as_ref().as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(stored.0.is_none());
+        assert!(stored.1 == regular_raw);
+        require_balance_classified(&path, 200).unwrap();
     }
 }

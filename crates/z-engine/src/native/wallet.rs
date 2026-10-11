@@ -1,11 +1,24 @@
 //! SQLite-backed native wallet: create, sync, balance, shield, send.
 
 mod database_lease;
+#[cfg(feature = "native-pir")]
+mod recovery_blocks;
+#[cfg(feature = "native-pir")]
+mod recovery_bootstrap;
+#[cfg(feature = "native-pir")]
+mod recovery_cancellation;
+mod recovery_guard;
+#[cfg(feature = "native-pir")]
+pub use recovery_blocks::{verify_regtest_recovery_blocks, VerifiedRegtestRecoveryBlocks};
+#[cfg(feature = "native-pir")]
+pub use recovery_cancellation::RecoveryCancellation;
 mod payments;
 #[cfg(feature = "native-pir")]
 mod pir;
 #[cfg(feature = "native-pir")]
-pub use pir::{PirConfirmedTransaction, PirDiscoveryReport, RegtestAcceptedChain};
+pub use pir::{
+    PirConfirmedTransaction, PirDiscoveryReport, PirRecoveryReport, RegtestAcceptedChain,
+};
 mod public_scan;
 pub use payments::PaymentReceipt;
 pub use public_scan::RegtestScanSchedule;
@@ -318,6 +331,72 @@ fn write_meta(path: &Path, meta: &WalletMeta) -> Result<()> {
         .map_err(|e| EngineError::Message(format!("wallet.json: {e}")))
 }
 
+fn has_recovery_marker(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|_| EngineError::Message("native_recovery_storage_failed".into()))?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|_| EngineError::Message("native_recovery_storage_failed".into()))
+}
+
+#[cfg(feature = "native-pir")]
+fn require_initial_recovery_setup(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let refused = || EngineError::Message("native_recovery_setup_resume_refused".into());
+    if !has_recovery_marker(path)? {
+        return Err(refused());
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|_| refused())?;
+    let initial: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ext_coffer_pir_recovery_v1 WHERE id=1 AND blocked=1 AND generation=1 AND receipt IS NULL)
+             AND NOT EXISTS(SELECT 1 FROM blocks WHERE height>0)
+             AND NOT EXISTS(SELECT 1 FROM transactions)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| refused())?;
+    if !initial {
+        return Err(refused());
+    }
+    let intents: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_native_payments_v1')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| refused())?;
+    if intents
+        && conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ext_native_payments_v1)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|_| refused())?
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+enum NewWalletProfile {
+    Ordinary,
+    #[cfg(feature = "native-pir")]
+    VerifiedRegtestRecovery,
+}
+
 #[derive(Debug, Clone)]
 pub struct WalletPaths {
     pub root: PathBuf,
@@ -351,9 +430,13 @@ impl WalletPaths {
     /// written last, so it marks one even when `data.sqlite` is missing (a
     /// rescan interrupted mid-swap); writing a new seed there would destroy the
     /// only copy of the old one. A database without `wallet.json` is a create
-    /// or restore that never returned: nothing was scanned and no address was
-    /// shown, so it is set aside rather than wedging every later attempt.
+    /// or restore that never returned. Ordinary interrupted databases can be
+    /// set aside; a persisted recovery marker requires its recovery profile.
     fn prepare_new_wallet(&self) -> Result<()> {
+        self.prepare_new_wallet_for(NewWalletProfile::Ordinary)
+    }
+
+    fn prepare_new_wallet_for(&self, profile: NewWalletProfile) -> Result<()> {
         if self.meta_path.exists() || self.reset_backup().exists() {
             return Err(EngineError::AlreadyExists(self.root.display().to_string()));
         }
@@ -361,6 +444,19 @@ impl WalletPaths {
             let _lease = database_lease::exclusive(&self.data_db)?;
             if self.meta_path.exists() || self.reset_backup().exists() {
                 return Err(EngineError::AlreadyExists(self.root.display().to_string()));
+            }
+            match profile {
+                NewWalletProfile::Ordinary => {
+                    if has_recovery_marker(&self.data_db)? {
+                        return Err(EngineError::Message(
+                            "native_recovery_profile_required".into(),
+                        ));
+                    }
+                }
+                #[cfg(feature = "native-pir")]
+                NewWalletProfile::VerifiedRegtestRecovery => {
+                    require_initial_recovery_setup(&self.data_db)?;
+                }
             }
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -412,11 +508,35 @@ fn apply_wallet_pragmas(conn: &rusqlite::Connection) {
 }
 
 fn open_wallet_db(path: &Path, network: ZNetwork) -> Result<Db> {
+    open_wallet_db_with_durability(path, network, false)
+}
+
+fn open_wallet_connection_with_durability(
+    path: &Path,
+    durable: bool,
+) -> Result<rusqlite::Connection> {
     let conn = rusqlite::Connection::open(path)
         .map_err(|e| EngineError::WalletDb(format!("open: {e}")))?;
     rusqlite::vtab::array::load_module(&conn)
         .map_err(|e| EngineError::WalletDb(format!("array module: {e}")))?;
     apply_wallet_pragmas(&conn);
+    if durable {
+        conn.pragma_update(None, "synchronous", "FULL")
+            .map_err(|_| EngineError::Message("native_recovery_storage_failed".into()))?;
+        let synchronous: i64 = conn
+            .pragma_query_value(None, "synchronous", |r| r.get(0))
+            .map_err(|_| EngineError::Message("native_recovery_storage_failed".into()))?;
+        if synchronous != 2 {
+            return Err(EngineError::Message(
+                "native_recovery_storage_failed".into(),
+            ));
+        }
+    }
+    Ok(conn)
+}
+
+fn open_wallet_db_with_durability(path: &Path, network: ZNetwork, durable: bool) -> Result<Db> {
+    let conn = open_wallet_connection_with_durability(path, durable)?;
     Ok(
         WalletDb::from_connection(conn, network, SystemClock, new_rng())
             .with_enhancement_mode(EnhancementMode::Standard)
@@ -620,6 +740,7 @@ pub struct LightProbe {
 }
 
 pub struct NativeWallet {
+    network_access: bool,
     paths: WalletPaths,
     network: ZNetwork,
     server: LightServer,
@@ -637,6 +758,9 @@ impl NativeWallet {
 
     /// Validator JSON-RPC if configured on this wallet, else implied by the light server.
     pub fn validator_rpc_url(&self) -> Option<String> {
+        if !self.network_access {
+            return None;
+        }
         self.meta
             .validator_rpc
             .as_deref()
@@ -680,7 +804,16 @@ impl NativeWallet {
     }
 
     pub(super) fn open_db(&self) -> Result<Db> {
-        let mut db = open_wallet_db(&self.paths.data_db, self.network)?;
+        self.open_db_with_durability(false)
+    }
+
+    #[cfg(feature = "native-pir")]
+    pub(super) fn open_recovery_db(&self) -> Result<Db> {
+        self.open_db_with_durability(true)
+    }
+
+    fn open_db_with_durability(&self, durable: bool) -> Result<Db> {
+        let mut db = open_wallet_db_with_durability(&self.paths.data_db, self.network, durable)?;
         // Migrations: only when needed. Passing None avoids seed-required failures on open;
         // seed-bearing migrations run during create/restore with the seed present.
         if needs_migrate(&mut db)? {
@@ -745,6 +878,7 @@ impl NativeWallet {
     }
 
     pub(super) async fn connect(&self) -> Result<LwdClient> {
+        self.require_network_access()?;
         Self::connect_url(
             &self.server.as_url(),
             Self::skip_ironwood_subtrees(self.network, &self.server.as_url()),
@@ -919,6 +1053,7 @@ impl NativeWallet {
 
         let wallet = Self {
             paths,
+            network_access: true,
             network,
             server,
             meta,
@@ -1042,6 +1177,7 @@ impl NativeWallet {
         Ok((
             Self {
                 paths,
+                network_access: true,
                 network,
                 server,
                 meta,
@@ -1127,6 +1263,7 @@ impl NativeWallet {
         Ok((
             Self {
                 paths,
+                network_access: true,
                 network,
                 server,
                 meta,
@@ -1149,10 +1286,35 @@ impl NativeWallet {
             .ok_or_else(|| EngineError::InvalidNetwork(meta.network.clone()))?;
         Ok(Self {
             paths,
+            network_access: true,
             network,
             server: LightServer::parse(&meta.server, network),
             meta,
         })
+    }
+
+    /// Open local wallet state with transport capability disabled, regardless
+    /// of stored endpoints. Signing and canonical verified recovery stay local.
+    pub fn open_offline(root: impl Into<PathBuf>) -> Result<Self> {
+        let mut wallet = Self::open(root)?;
+        wallet.network_access = false;
+        Ok(wallet)
+    }
+
+    fn require_network_access(&self) -> Result<()> {
+        if self.network_access {
+            Ok(())
+        } else {
+            Err(EngineError::Message("native_offline_wallet".into()))
+        }
+    }
+
+    fn ordinary_scan_lease(&self) -> Result<std::fs::File> {
+        let lease = database_lease::exclusive(&self.paths.data_db)?;
+        if has_recovery_marker(&self.paths.data_db)? {
+            return Err(EngineError::Message("native_recovery_scan_refused".into()));
+        }
+        Ok(lease)
     }
 
     /// Open and persist a different compact-block URL when the UI field changed.
@@ -1318,6 +1480,8 @@ impl NativeWallet {
         &self,
         live: Option<Arc<Mutex<SyncProgress>>>,
     ) -> Result<(u32, SyncProgress)> {
+        self.require_network_access()?;
+        let _lease = self.ordinary_scan_lease()?;
         let mut progress = SyncProgress {
             stage: SyncStage::Connecting,
             percent: 0.0,
@@ -1570,6 +1734,8 @@ impl NativeWallet {
                 Ok(0)
             })
             .unwrap_or(0);
+        #[cfg(feature = "transparent-inputs")]
+        self.classify_balance_funding(&mut db).await?;
         info!("memo enhancement completed");
         if enhanced > 0 {
             info!("memo enhance stored decrypted outputs");
@@ -1605,6 +1771,7 @@ impl NativeWallet {
     /// status requests and unknown transactions are reported back with
     /// `set_transaction_status`, so they leave the queue instead of blocking it.
     async fn enhance_memos(&self, db: &mut Db) -> Result<u32> {
+        self.require_network_access()?;
         const MAX: usize = 24;
         let reqs = db
             .transaction_enhancement_work()
@@ -1715,6 +1882,9 @@ impl NativeWallet {
     /// A validator RPC answers with the mined height in one call; the light
     /// server's GetTransaction does too and covers wallets without one.
     async fn lookup_transaction(&self, client: Option<LwdClient>, txid: TxId) -> TxLookup {
+        if !self.network_access {
+            return TxLookup::Unavailable(EngineError::Message("native_offline_wallet".into()));
+        }
         let mut failure = None;
         if let Some(rpc) = self
             .validator_rpc_url()
@@ -1820,6 +1990,16 @@ impl NativeWallet {
 
     pub fn balance(&self) -> Result<Balance> {
         let db = self.open_db()?;
+        #[cfg(feature = "transparent-inputs")]
+        if let Some(tip) = db
+            .chain_height()
+            .map_err(|_| EngineError::WalletDb("transparent funding height unavailable".into()))?
+        {
+            super::transparent_funding::require_balance_classified(
+                &self.paths.data_db,
+                u32::from(tip).saturating_add(1),
+            )?;
+        }
         let summary = db
             .get_wallet_summary(crate::confirmations_policy(self.network))
             .map_err(|e| EngineError::WalletDb(format!("summary: {e}")))?
@@ -1881,6 +2061,8 @@ impl NativeWallet {
     /// Rewind scan_queue to the last filled island so the next `sync` trial-decrypts
     /// island_end+1→tip. Does not wipe keys or the already-scanned island.
     pub async fn rewind_scan_to_gap(&self) -> Result<u32> {
+        self.require_network_access()?;
+        let _lease = self.ordinary_scan_lease()?;
         let mut client = Self::connect_url(
             &self.server.as_url(),
             Self::skip_ironwood_subtrees(self.network, &self.server.as_url()),
@@ -1895,10 +2077,16 @@ impl NativeWallet {
             .height
             .try_into()
             .map_err(|_| EngineError::Message("tip height out of range".into()))?;
-        self.rewind_scan_to_gap_at_tip(tip)
+        self.rewind_scan_to_gap_locked(tip)
     }
 
+    #[cfg(test)]
     fn rewind_scan_to_gap_at_tip(&self, tip: u32) -> Result<u32> {
+        let _lease = self.ordinary_scan_lease()?;
+        self.rewind_scan_to_gap_locked(tip)
+    }
+
+    fn rewind_scan_to_gap_locked(&self, tip: u32) -> Result<u32> {
         let island = last_filled_island_end(&self.paths.data_db, self.meta.birthday_height, tip);
         if island >= tip {
             return Err(EngineError::Message(
@@ -1919,6 +2107,10 @@ impl NativeWallet {
     /// Wipe sqlite + compact-block cache and re-import the UFVK at birthday.
     /// Seed / keyring / wallet.json stay. Next `sync` is a full rescan.
     pub async fn reset_scan(&self) -> Result<()> {
+        self.require_network_access()?;
+        if has_recovery_marker(&self.paths.data_db)? {
+            return Err(EngineError::Message("native_recovery_reset_refused".into()));
+        }
         let ufvk_str = match self
             .meta
             .ufvk
@@ -1975,6 +2167,9 @@ impl NativeWallet {
     ) -> Result<()> {
         let db_path = &self.paths.data_db;
         let _lease = database_lease::exclusive(db_path)?;
+        if has_recovery_marker(db_path)? {
+            return Err(EngineError::Message("native_recovery_reset_refused".into()));
+        }
         payments::require_rescan_safe(db_path)?;
         Self::checkpoint_sqlite(db_path)?;
         // Build the replacement beside the live database and swap it in with
@@ -2203,12 +2398,19 @@ impl NativeWallet {
 
     /// Sync if the wallet is behind the light server tip. Returns whether work ran.
     pub async fn catch_up(&self) -> Result<(u32, SyncProgress, bool)> {
+        self.require_network_access()?;
+        let lease = self.ordinary_scan_lease()?;
         let scanned = self.scanned_height()?;
         let tip = Self::fetch_tip(&self.server).await?;
         if scanned >= tip {
             // Older sparse scans could persist notes/rows without a usable
             // checkpoint. A caught-up wallet must recover those anchors too.
             self.recover_spend_checkpoints(scanned).await?;
+            #[cfg(feature = "transparent-inputs")]
+            {
+                let mut db = self.open_db()?;
+                self.classify_balance_funding(&mut db).await?;
+            }
             // The web bridge syncs through here: resubmit unmined sends even
             // when no block arrived.
             let _ = tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip)).await;
@@ -2225,8 +2427,28 @@ impl NativeWallet {
                 false,
             ));
         }
+        drop(lease);
         let (h, p) = self.sync().await?;
         Ok((h, p, true))
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    async fn classify_balance_funding(&self, db: &mut Db) -> Result<usize> {
+        self.require_network_access()?;
+        let rpc = self.validator_rpc_url();
+        let phase = super::transparent_funding::classify_balance_funding(
+            db,
+            &self.paths.data_db,
+            self.network,
+            |txid| {
+                let txid = txid.to_string();
+                let rpc = rpc.as_deref();
+                async move { Self::fetch_raw_transaction_with_rpc(&self.server, rpc, &txid).await }
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(30), phase)
+            .await
+            .map_err(|_| EngineError::SyncRequired)?
     }
 
     async fn recover_spend_checkpoints(&self, scanned: u32) -> Result<()> {
@@ -2295,6 +2517,8 @@ impl NativeWallet {
 
     #[cfg(feature = "transparent-inputs")]
     pub async fn shield(&self, auth: &SeedAuth, threshold_zat: u64) -> Result<Vec<String>> {
+        self.require_network_access()?;
+        self.ensure_recovery_selection_ready()?;
         let mut db = self.open_db()?;
         let account = Self::primary_account_id(&db)?;
         let seed = self.load_seed(auth)?;
@@ -2357,17 +2581,28 @@ impl NativeWallet {
         .map_err(|e| map_funds_err(format!("propose_shielding: {e}")))?;
 
         let prover = crate::params::local_tx_prover()?;
-        let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
-            &mut db,
-            &self.network,
-            &*prover,
-            &*prover,
-            &SpendingKeys::from_unified_spending_key(usk),
-            OvkPolicy::Sender,
-            &proposal,
-            None,
-        )
-        .map_err(|e| map_funds_err(format!("create shielding tx: {e}")))?;
+        let txids = db
+            .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
+                recovery_guard::transaction_recovery_ready(wdb, ext)?;
+                Ok(create_proposed_transactions::<
+                    _,
+                    _,
+                    Infallible,
+                    _,
+                    Infallible,
+                    _,
+                >(
+                    wdb,
+                    &self.network,
+                    &*prover,
+                    &*prover,
+                    &SpendingKeys::from_unified_spending_key(usk),
+                    OvkPolicy::Sender,
+                    &proposal,
+                    None,
+                )?)
+            })
+            .map_err(|e| map_funds_err(format!("create shielding tx: {e}")))?;
 
         let out = self.broadcast_all(&mut db, txids.iter().copied()).await;
         info!("shield timings");
@@ -2376,6 +2611,7 @@ impl NativeWallet {
 
     /// After sync: auto-shield t→Orchard, then migrate Sapling→Orchard when funded.
     pub async fn maintain(&self, auth: &SeedAuth) -> Result<Vec<String>> {
+        self.require_network_access()?;
         let mut out = Vec::new();
         let bal = self.balance()?;
         if bal.transparent_available >= crate::SHIELD_THRESHOLD_ZAT {
@@ -2617,6 +2853,8 @@ impl NativeWallet {
         memo: Option<&str>,
         policy: SpendPolicy,
     ) -> Result<Vec<String>> {
+        self.require_network_access()?;
+        self.ensure_recovery_selection_ready()?;
         crate::keys::assert_shielded_send_dest(to, crate::keys::SendDestPolicy::Shielded)?;
         let db = self.open_db()?;
         let account = Self::primary_account_id(&db)?;
@@ -2668,6 +2906,8 @@ impl NativeWallet {
         payments: &[crate::Zip321Payment],
         policy: SpendPolicy,
     ) -> Result<Vec<String>> {
+        self.require_network_access()?;
+        self.ensure_recovery_selection_ready()?;
         if payments.is_empty() {
             return Err(EngineError::Message("ZIP-321 URI has no payments".into()));
         }
@@ -2741,17 +2981,28 @@ impl NativeWallet {
         .map_err(|e| map_funds_err(format!("propose_transfer: {e}")))?;
 
         let prover = crate::params::local_tx_prover()?;
-        let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
-            &mut db,
-            &self.network,
-            &*prover,
-            &*prover,
-            &SpendingKeys::from_unified_spending_key(usk),
-            OvkPolicy::Sender,
-            &proposal,
-            None,
-        )
-        .map_err(|e| map_funds_err(format!("create send tx: {e}")))?;
+        let txids = db
+            .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
+                recovery_guard::transaction_recovery_ready(wdb, ext)?;
+                Ok(create_proposed_transactions::<
+                    _,
+                    _,
+                    Infallible,
+                    _,
+                    Infallible,
+                    _,
+                >(
+                    wdb,
+                    &self.network,
+                    &*prover,
+                    &*prover,
+                    &SpendingKeys::from_unified_spending_key(usk),
+                    OvkPolicy::Sender,
+                    &proposal,
+                    None,
+                )?)
+            })
+            .map_err(|e| map_funds_err(format!("create send tx: {e}")))?;
 
         let out = self.broadcast_all(&mut db, txids.iter().copied()).await;
         info!("send timings");
@@ -2821,6 +3072,7 @@ impl NativeWallet {
     /// received the bytes, so the light server takes them rather than the send
     /// ending as "outcome unknown" with its notes held until expiry.
     async fn submit_raw(&self, client: &mut Option<LwdClient>, data: Vec<u8>) -> Result<()> {
+        self.require_network_access()?;
         if let Some(rpc) = self.validator_rpc_url() {
             let bytes = data.clone();
             let url = rpc.clone();
@@ -3787,10 +4039,155 @@ mod tests {
         let meta = fixture_meta();
         write_meta(&paths.meta_path, &meta).unwrap();
         NativeWallet {
+            network_access: true,
             paths,
             network: ZNetwork::Regtest,
             server: LightServer::parse(&meta.server, ZNetwork::Regtest),
             meta,
+        }
+    }
+
+    #[tokio::test]
+    async fn offline_catch_up_refuses_before_any_tip_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wallet = fixture_wallet(dir.path());
+        let (key, birthday) = fixture_account();
+        wallet.replace_scan_db(&key, &birthday).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        wallet
+            .set_light_server(LightServer::parse(
+                &format!("http://{}", listener.local_addr().unwrap()),
+                ZNetwork::Regtest,
+            ))
+            .unwrap();
+        let offline = NativeWallet::open_offline(dir.path()).unwrap();
+        let error = offline.catch_up().await.unwrap_err();
+        assert!(error.to_string().contains("native_offline_wallet"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_scan_paths_preserve_pending_and_completed_recovery_before_network() {
+        for (blocked, receipt) in [(1, None), (0, Some(b"retained-receipt".as_slice()))] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut wallet = fixture_wallet(dir.path());
+            let (key, birthday) = fixture_account();
+            wallet.replace_scan_db(&key, &birthday).unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            wallet
+                .set_light_server(LightServer::parse(
+                    &format!("http://{}", listener.local_addr().unwrap()),
+                    ZNetwork::Regtest,
+                ))
+                .unwrap();
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            conn.execute_batch("CREATE TABLE ext_coffer_pir_recovery_v1(id INTEGER PRIMARY KEY,blocked INTEGER NOT NULL,generation INTEGER NOT NULL,receipt BLOB);").unwrap();
+            conn.execute(
+                "INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,?1,7,?2)",
+                rusqlite::params![blocked, receipt],
+            )
+            .unwrap();
+            drop(conn);
+            NativeWallet::checkpoint_sqlite(&wallet.paths.data_db).unwrap();
+            let before = std::fs::read(&wallet.paths.data_db).unwrap();
+            let reopened = NativeWallet::open(dir.path()).unwrap();
+            for error in [
+                reopened.sync_reported(None).await.unwrap_err(),
+                reopened.sync_reported_resilient(None).await.unwrap_err(),
+                reopened.catch_up().await.unwrap_err(),
+                reopened.rewind_scan_to_gap().await.unwrap_err(),
+                reopened.rewind_scan_to_gap_at_tip(200).unwrap_err(),
+            ] {
+                assert!(error.to_string().contains("native_recovery_scan_refused"));
+            }
+            assert!(std::fs::read(&wallet.paths.data_db).unwrap() == before);
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            let offline = NativeWallet::open_offline(dir.path()).unwrap();
+            assert!(offline
+                .catch_up()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("native_offline_wallet"));
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            let retained: (i32, u64, Option<Vec<u8>>) = conn
+                .query_row(
+                    "SELECT blocked,generation,receipt FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(retained, (blocked, 7, receipt.map(Vec::from)));
+            conn.execute_batch("DROP TABLE ext_coffer_pir_recovery_v1")
+                .unwrap();
+            assert!(reopened.ordinary_scan_lease().is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_scan_preserves_pending_and_completed_recovery_markers_on_ordinary_reopen() {
+        for (blocked, receipt) in [(1, None), (0, Some(b"retained-receipt".as_slice()))] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut wallet = fixture_wallet(dir.path());
+            let (key, birthday) = fixture_account();
+            wallet.replace_scan_db(&key, &birthday).unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            wallet
+                .set_light_server(LightServer::parse(
+                    &format!("http://{}", listener.local_addr().unwrap()),
+                    ZNetwork::Regtest,
+                ))
+                .unwrap();
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            conn.execute_batch("CREATE TABLE ext_coffer_pir_recovery_v1(id INTEGER PRIMARY KEY,blocked INTEGER NOT NULL,generation INTEGER NOT NULL,receipt BLOB);").unwrap();
+            conn.execute(
+                "INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,?1,7,?2)",
+                rusqlite::params![blocked, receipt],
+            )
+            .unwrap();
+            drop(conn);
+            let ordinary = NativeWallet::open(dir.path()).unwrap();
+            let error = ordinary.reset_scan().await.unwrap_err();
+            assert!(error.to_string().contains("native_recovery_reset_refused"));
+            // Repeat the marker check under the replacement's exclusive lease.
+            assert!(ordinary
+                .replace_scan_db(&key, &birthday)
+                .unwrap_err()
+                .to_string()
+                .contains("native_recovery_reset_refused"));
+            let retained: (i32, u64, Option<Vec<u8>>) = rusqlite::Connection::open(
+                &wallet.paths.data_db,
+            )
+            .unwrap()
+            .query_row(
+                "SELECT blocked,generation,receipt FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+            assert_eq!(retained, (blocked, 7, receipt.map(Vec::from)));
+            assert!(!dir.path().join("data.sqlite.new").exists());
+            std::fs::remove_file(&wallet.paths.meta_path).unwrap();
+            assert!(wallet
+                .paths
+                .prepare_new_wallet()
+                .unwrap_err()
+                .to_string()
+                .contains("native_recovery_profile_required"));
+            assert!(has_recovery_marker(&wallet.paths.data_db).unwrap());
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
         }
     }
 
@@ -4097,6 +4494,7 @@ mod tests {
         db.put_received_transparent_utxo(&output).unwrap();
         drop(db);
         let wallet = NativeWallet {
+            network_access: true,
             paths,
             network: ZNetwork::Regtest,
             server: LightServer::LocalRegtest,
@@ -4113,6 +4511,8 @@ mod tests {
                 allow_deep_sync: false,
             },
         };
+        assert!(matches!(wallet.balance(), Err(EngineError::SyncRequired)));
+
         let rows = wallet.history(10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].txid, canonical);
@@ -4319,6 +4719,7 @@ mod tests {
 
     fn checkpoint_fixture_wallet(root: &Path, birthday_height: u32) -> NativeWallet {
         NativeWallet {
+            network_access: true,
             paths: WalletPaths::new(root),
             network: ZNetwork::Regtest,
             server: LightServer::LocalRegtest,

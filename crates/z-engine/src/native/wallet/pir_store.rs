@@ -1,6 +1,9 @@
 //! Bounded qualification journal. The pinned upstream store defines semantics;
 //! each accepted operation commits through the wallet's extension transaction.
-use super::pir::{native_scope, NativeScanSnapshot, NativeScope, PirDiscoveryReport};
+use super::super::RecoveryCancellation;
+use super::pir::{
+    native_scope_in_transaction, NativeScanSnapshot, NativeScope, PirDiscoveryReport,
+};
 use super::*;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -167,6 +170,7 @@ enum Operation {
     Shard(Shard),
     Anchor(Anchor, u64, u64),
     Rollback(Anchor, String),
+    NativeRewind(Anchor),
     Promote(u64, String),
     Setup(String, String, bool, u32, SetupBlob),
     Filter(String, String, bool, Vec<u8>),
@@ -190,6 +194,9 @@ impl Replay {
             Operation::Shard(s) => self.memory.commit_shard(s.decode()?)?,
             Operation::Anchor(a, s, c) => self.memory.commit_anchor(&a, s, c)?,
             Operation::Rollback(a, r) => self.memory.rollback_above(&a, &r)?,
+            Operation::NativeRewind(a) => self
+                .memory
+                .rollback_above(&a, "native accepted-chain rewind")?,
             Operation::Promote(i, r) => {
                 self.memory.promote_provisional(i, &r)?;
                 0
@@ -253,6 +260,7 @@ pub(super) struct NativePirStore<'a> {
     bytes: u64,
     digest: String,
     cancel: &'a AtomicBool,
+    recovery_cancel: Option<&'a RecoveryCancellation>,
     scope: Option<NativeScope>,
     publication_start: u64,
     // Fields drop in declaration order: close SQLite before releasing its lease.
@@ -263,6 +271,23 @@ impl<'a> NativePirStore<'a> {
         wallet: &NativeWallet,
         cancel: &'a AtomicBool,
     ) -> std::result::Result<Self, StoreError> {
+        Self::open_with_commit_gate(wallet, cancel, None)
+    }
+    pub(super) fn open_recovery(
+        wallet: &NativeWallet,
+        cancel: &'a RecoveryCancellation,
+    ) -> std::result::Result<Self, StoreError> {
+        Self::open_with_commit_gate(wallet, cancel.flag(), Some(cancel))
+    }
+    pub(super) fn open_with_commit_gate(
+        wallet: &NativeWallet,
+        cancel: &'a AtomicBool,
+        recovery_cancel: Option<&'a RecoveryCancellation>,
+    ) -> std::result::Result<Self, StoreError> {
+        let _gate = recovery_cancel
+            .map(|token| token.commit_guard())
+            .transpose()
+            .map_err(|_| StoreError::Io("native_pir_cancelled".into()))?;
         let database_lease = database_lease::shared(&wallet.paths.data_db)
             .map_err(|_| StoreError::Io("native_pir_database_busy".into()))?;
         // Initialize/migrate the native wallet before introducing extension schema.
@@ -271,8 +296,8 @@ impl<'a> NativePirStore<'a> {
                 .open_db()
                 .map_err(|_| io(rusqlite::Error::InvalidQuery))?,
         );
-        let mut conn = Connection::open(&wallet.paths.data_db).map_err(io)?;
-        rusqlite::vtab::array::load_module(&conn).map_err(io)?;
+        let mut conn = open_wallet_connection_with_durability(&wallet.paths.data_db, true)
+            .map_err(|_| io(rusqlite::Error::InvalidQuery))?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(io)?;
         conn.pragma_update(None, "synchronous", "FULL")
@@ -360,6 +385,7 @@ impl<'a> NativePirStore<'a> {
             bytes,
             digest,
             cancel,
+            recovery_cancel,
             scope: None,
             publication_start: 0,
             _database_lease: database_lease,
@@ -385,6 +411,9 @@ impl<'a> NativePirStore<'a> {
     pub(super) fn report(&self) -> Option<&(PirDiscoveryReport, NativeScope)> {
         self.state.report.as_ref()
     }
+    pub(super) fn journal_head(&self) -> (u64, String) {
+        (self.generation, self.digest.clone())
+    }
     pub(super) fn persist_report(
         &mut self,
         report: PirDiscoveryReport,
@@ -404,6 +433,14 @@ impl<'a> NativePirStore<'a> {
         )
         .map(|_| ())
     }
+    pub(super) fn rewind_native(
+        &mut self,
+        anchor: Anchor,
+        expected: &NativeScanSnapshot,
+    ) -> std::result::Result<u32, StoreError> {
+        self.write_at(Operation::NativeRewind(anchor.clone()), Some(expected))?;
+        Ok(anchor.height as u32)
+    }
     fn write(&mut self, op: Operation) -> std::result::Result<u64, StoreError> {
         self.write_at(op, None)
     }
@@ -415,6 +452,10 @@ impl<'a> NativePirStore<'a> {
         if self.cancel.load(Ordering::Acquire) {
             return Err(StoreError::Io("native_pir_cancelled".into()));
         }
+        let native_rewind = match &op {
+            Operation::NativeRewind(anchor) => Some(anchor.clone()),
+            _ => None,
+        };
         let payload = serde_json::to_vec(&op).map_err(|_| corrupt())?;
         if self.generation >= MAX_ENTRIES
             || self.bytes + payload.len() as u64 > MAX_BYTES
@@ -435,6 +476,11 @@ impl<'a> NativePirStore<'a> {
         let scope = &self.scope;
         let cancel = self.cancel;
         let start = self.publication_start;
+        let _gate = self
+            .recovery_cancel
+            .map(|token| token.commit_guard())
+            .transpose()
+            .map_err(|_| StoreError::Io("native_pir_cancelled".into()))?;
         self.db
             .transactionally_with_extension(|wdb, ext| -> std::result::Result<(), JournalError> {
                 let current: (u64, String) = ext.query_row(
@@ -451,7 +497,9 @@ impl<'a> NativePirStore<'a> {
                     return Err(JournalError(StoreError::Io("native_pir_cancelled".into())));
                 }
                 if let Some(expected) = scope {
-                    let actual = native_scope(wdb, start).map_err(JournalError)?;
+                    let actual = native_scope_in_transaction(wdb, ext, start).map_err(|_| {
+                        JournalError(StoreError::Io("native_pir_scope_invalid".into()))
+                    })?;
                     if &actual != expected {
                         return Err(JournalError(StoreError::Io(
                             "native_pir_scope_changed".into(),
@@ -468,6 +516,11 @@ impl<'a> NativePirStore<'a> {
                         )));
                     }
                 }
+                if let Some(anchor)=&native_rewind {
+                    let actual=wdb.truncate_to_height((anchor.height as u32).into()).map_err(|_|JournalError(StoreError::Io("native_recovery_rewind_failed".into())))?;
+                    if u64::from(u32::from(actual))!=anchor.height {return Err(JournalError(StoreError::Io("native_recovery_rewind_checkpoint_required".into())));}
+                    ext.execute("INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,1,1,NULL) ON CONFLICT(id) DO UPDATE SET blocked=1,generation=generation+1,receipt=NULL",[])?;
+                }
                 ext.execute(
                     "INSERT INTO ext_coffer_pir_journal(id,payload) VALUES(?1,?2)",
                     (generation + 1, &payload),
@@ -476,6 +529,16 @@ impl<'a> NativePirStore<'a> {
                     "UPDATE ext_coffer_pir_head SET generation=?1,bytes=?2,digest=?3 WHERE id=1",
                     (generation + 1, bytes, &digest),
                 )?;
+                let recovery: bool = ext.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",
+                    [], |r| r.get(0),
+                )?;
+                if recovery {
+                    ext.execute(
+                        "UPDATE ext_coffer_pir_recovery_v1 SET blocked=1,generation=generation+1,receipt=NULL WHERE id=1 AND blocked=0",
+                        [],
+                    )?;
+                }
                 if cancel.load(Ordering::Acquire) {
                     return Err(JournalError(StoreError::Io("native_pir_cancelled".into())));
                 }
@@ -666,6 +729,68 @@ mod tests {
                 .confirmed_balance(),
             10_000
         );
+    }
+    #[test]
+    fn recovery_journal_writes_wait_for_the_cancellation_commit_gate() {
+        let (_dir, wallet) = fixture();
+        let token = RecoveryCancellation::new();
+        let mut store = NativePirStore::open_recovery(&wallet, &token).unwrap();
+        let gate = token.commit_guard().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (written_tx, written_rx) = std::sync::mpsc::channel();
+        let (cancelled_tx, cancelled_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|threads| {
+            threads.spawn(move || {
+                started_tx.send(()).unwrap();
+                written_tx
+                    .send(store.commit_shard(commit()).is_err())
+                    .unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                written_rx.recv_timeout(Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            threads.spawn(|| {
+                token.cancel();
+                cancelled_tx.send(()).unwrap();
+            });
+            while !token.is_cancelled() {
+                std::thread::yield_now();
+            }
+            assert!(matches!(
+                cancelled_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            drop(gate);
+            cancelled_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(written_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        });
+        let conn = Connection::open(&wallet.paths.data_db).unwrap();
+        let generation: u64 = conn
+            .query_row(
+                "SELECT generation FROM ext_coffer_pir_head WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(generation, 0);
+    }
+    #[test]
+    fn cancelled_recovery_never_initializes_a_discovery_journal() {
+        let (_dir, wallet) = fixture();
+        let token = RecoveryCancellation::new();
+        token.cancel();
+        assert!(NativePirStore::open_recovery(&wallet, &token).is_err());
+        let conn = Connection::open(&wallet.paths.data_db).unwrap();
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='ext_coffer_pir_head')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!exists);
     }
     #[test]
     fn stale_writer_and_cancel_do_not_advance_coverage() {
