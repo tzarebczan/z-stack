@@ -8,6 +8,7 @@ the SDK checkout. The [support matrix](SUPPORT.md) lists tested paths and limits
 - [Browser integration](INTEGRATION.md): installation, lifecycle and hosting.
 - [Wallet API](SDK.md): methods, events, storage, hardware and native clients.
 - [Native payment receipts](NATIVE-PAYMENTS.md): experimental Rust approval, recovery and offline regtest scanning.
+- [Native verified recovery](NATIVE-RECOVERY-BLOCKS.md): bounded regtest full-block evidence, canonical PIR reconciliation and offline setup.
 - [Examples](../examples/README.md): TypeScript, React, Next.js, local passkeys,
   remote backups and optional Base wallets.
 - [Diagnostics](DIAGNOSTICS.md), [adapter checks](ADAPTERS.md) and
