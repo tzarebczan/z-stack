@@ -123,7 +123,7 @@ Choose a height or date before the first deposit for every recovery method.
 
 Browser `createWallet({ verifyChainTip: true, ... })` checks the last scanned
 compact block against the configured light server on each sync. The default is
-false. This option is available in source builds; published alpha.9 predates it.
+false. This option is available starting with alpha.10; alpha.9 predates it.
 Once the wallet has scanned a block, this option adds one public compact
 block range request, even when the server's tip height is unchanged or shorter.
 The requested height is the lower of the saved scan height and the server tip.

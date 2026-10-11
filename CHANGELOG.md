@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.10
+
+- Distribute the optional `@z-stack/gift-cards` archive with the preview bundle. Its dependency-free root supplies the Vizor v3 codec and funding math; browser wallets use a matching SDK peer. Existing alpha.9 consumers must install the matching alpha.10 archive set to use it.
+- Add experimental native durable payment proposals, signed-transaction receipts and verified-chain submission. Preserve uncertain submissions for reconciliation without constructing replacement payments.
+- Add feature-gated canonical PIR recovery for bounded regtest chains, with durable readiness barriers, verified replay and wallet-scoped receipts. Production privacy and mainnet spending remain separate qualification gates.
+- Recover Sapling-funded cross-pool payment history and bound native scanning/proving CPU use.
+- Bound browser public-block responses and prefetch memory, reject malformed or oversized retrieval, and suspend stream-idle timing while applying a local page.
+- Reuse verified production engines and installed archives in CI, with separate Chromium, Firefox and WebKit checks and recorded native compilation timing.
 
 - Browser sync events expose typed loading, syncing and server-retry activity; clients can configure `lightServerGraceMs`.
 - Refuse automatic restore birthdays before querying a server or changing saved state. Creation keeps its automatic default.

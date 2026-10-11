@@ -12,7 +12,7 @@ For manual setup, copy this directory outside the checkout and install the archi
 
 ```sh
 cd /path/to/copied/browser-wallet
-npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.9.tgz
+npm install /path/to/z-stack-preview/artifacts/z-stack-sdk-0.1.0-alpha.10.tgz
 npm run dev
 ```
 
