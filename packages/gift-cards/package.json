@@ -1,6 +1,6 @@
 {
   "name": "@z-stack/gift-cards",
-  "version": "0.1.0-alpha.10",
+  "version": "0.1.0-alpha.11",
   "private": true,
   "description": "Optional shielded bearer gift cards with isolated browser wallets and application-owned encrypted storage",
   "type": "module",
@@ -58,7 +58,7 @@
     "url": "https://github.com/tzarebczan/z-stack/issues"
   },
   "peerDependencies": {
-    "@z-stack/sdk": "0.1.0-alpha.10"
+    "@z-stack/sdk": "0.1.0-alpha.11"
   },
   "peerDependenciesMeta": {
     "@z-stack/sdk": {

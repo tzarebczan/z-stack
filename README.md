@@ -7,7 +7,7 @@ their UI, authentication, and backup service.
 **Alpha.** The packages are not published to npm. Original code is Apache-2.0;
 see [licensing](docs/LICENSING.md) and
 [release status](docs/RELEASE.md).
-The [alpha.10 preview](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.10)
+The [alpha.11 preview](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.11)
 includes NU7 support and prebuilt browser SDK archives, with both single-threaded
 and threaded WASM engines. No Rust toolchain is needed to use these archives.
 Alpha.1 and alpha.2 predate NU7.
@@ -33,7 +33,7 @@ Alpha.1 and alpha.2 predate NU7.
 
 ## Run the published preview
 
-The current prebuilt preview is **alpha.10**, with NU7 support. Node 22.18+ is required.
+The current prebuilt preview is **alpha.11**, with NU7 support. Node 22.18+ is required.
 Follow the [funding walkthrough](docs/GETTING-STARTED.md#funded-testing) for test coins
 and the recorded public receive/self-send results.
 
@@ -43,11 +43,11 @@ manifests, and bundled core and passkey helpers. Download the bundle, verify
 both checksum layers, then generate an app:
 
 ```sh
-gh release download v0.1.0-alpha.10 --repo tzarebczan/z-stack --dir sdk-alpha \
-  --pattern 'z-stack-preview-0.1.0-alpha.10.tgz*'
+gh release download v0.1.0-alpha.11 --repo tzarebczan/z-stack --dir sdk-alpha \
+  --pattern 'z-stack-preview-0.1.0-alpha.11.tgz*'
 cd sdk-alpha
-sha256sum --quiet -c z-stack-preview-0.1.0-alpha.10.tgz.sha256
-tar -xzf z-stack-preview-0.1.0-alpha.10.tgz
+sha256sum --quiet -c z-stack-preview-0.1.0-alpha.11.tgz.sha256
+tar -xzf z-stack-preview-0.1.0-alpha.11.tgz
 cd z-stack-preview
 sha256sum --quiet -c SHA256SUMS
 node scripts/create-example.mjs browser-wallet ../my-wallet --install
@@ -55,19 +55,19 @@ cd ../my-wallet
 npm run dev
 ```
 
-On macOS, use `shasum -q -a 256 -c z-stack-preview-0.1.0-alpha.10.tgz.sha256` for the outer check and
-`shasum -q -a 256 -c SHA256SUMS` inside the bundle. The preview checksum covers the one bundle; the separate `SHA256SUMS-alpha.10`
+On macOS, use `shasum -q -a 256 -c z-stack-preview-0.1.0-alpha.11.tgz.sha256` for the outer check and
+`shasum -q -a 256 -c SHA256SUMS` inside the bundle. The preview checksum covers the one bundle; the separate `SHA256SUMS-alpha.11`
 asset covers all six archives for a full download. Use the scripts **inside that
 bundle**; a scaffolder from a different source version expects different archives.
 See [the walkthrough](docs/GETTING-STARTED.md) for Next.js and funding limitations.
 
-Without GitHub CLI, use the [release downloads](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.10)
+Without GitHub CLI, use the [release downloads](https://github.com/tzarebczan/z-stack/releases/tag/v0.1.0-alpha.11)
 or download the two files with curl before the same checksum/extraction steps:
 
 ```sh
 mkdir sdk-alpha && cd sdk-alpha
-curl -fLO https://github.com/tzarebczan/z-stack/releases/download/v0.1.0-alpha.10/z-stack-preview-0.1.0-alpha.10.tgz
-curl -fLO https://github.com/tzarebczan/z-stack/releases/download/v0.1.0-alpha.10/z-stack-preview-0.1.0-alpha.10.tgz.sha256
+curl -fLO https://github.com/tzarebczan/z-stack/releases/download/v0.1.0-alpha.11/z-stack-preview-0.1.0-alpha.11.tgz
+curl -fLO https://github.com/tzarebczan/z-stack/releases/download/v0.1.0-alpha.11/z-stack-preview-0.1.0-alpha.11.tgz.sha256
 ```
 
 ## Build from source
@@ -98,7 +98,7 @@ npm run dev
 helpers, both WASM engines and their workers. For a wallet app, install it alone:
 
 ```sh
-npm install /path/to/artifacts/z-stack-sdk-0.1.0-alpha.10.tgz
+npm install /path/to/artifacts/z-stack-sdk-0.1.0-alpha.11.tgz
 ```
 
 Configure Vite once:

@@ -29,8 +29,8 @@ when validating messages, including in standalone Node 22 consumers.
 
 ## Install and configure
 
-The alpha.10 preview includes the optional gift-card archive alongside the
-matching SDK. Alpha.9 predates gift cards. From the downloaded alpha.10 bundle,
+The alpha.11 preview includes the optional gift-card archive alongside the
+matching SDK. Alpha.9 predates gift cards. From the downloaded alpha.11 bundle,
 run the scaffolder with `--with-gift-cards`. To build the archives from source:
 
 ```sh
