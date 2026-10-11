@@ -24,6 +24,18 @@ transaction using `synchronous=FULL`. `sign_payment` never broadcasts. A second
 signing call for that ID is refused. `submit_payment(id)` reads and sends the
 saved transaction bytes; a retry cannot construct another payment.
 
+Before submission, the engine verifies the wallet's canonical network name and
+pinned genesis hash on the connection used to broadcast. A validator must support
+persistent HTTP/1.1 for these checks; a light server must serve block one, whose
+parent is the genesis block. Submission clients refuse automatic reconnects after
+identity verification. A mismatched or unavailable identity refuses submission
+while preserving
+the signed bytes and receipt phase. A validator connection refusal may use the
+configured light server after verifying its identity; a failed identity check
+never triggers that fallback. These checks also apply to ordinary native sends
+and rebroadcasts. They prevent accidental endpoint changes, not a dishonest
+server that claims the expected identity.
+
 Persist the ID in the application's send journal **before** signing. If a
 process or response is lost, use the offline `payment_receipt(id)`:
 

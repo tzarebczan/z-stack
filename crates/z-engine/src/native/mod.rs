@@ -2,6 +2,7 @@
 
 mod block_cache;
 mod bridge;
+mod chain_identity;
 mod lwd;
 mod lwd_pipe;
 mod pipeline;
@@ -9,6 +10,7 @@ mod rpc;
 mod runtime;
 mod seed;
 mod selective_scan;
+mod submission_channel;
 mod transparent_funding;
 mod transparent_refresh;
 mod verify;

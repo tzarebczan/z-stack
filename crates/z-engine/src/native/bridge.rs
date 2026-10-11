@@ -243,21 +243,37 @@ impl Bridge {
 
     async fn dispatch_lwd(&self, req: &HttpReq) -> (u16, &'static str, &'static str, Vec<u8>) {
         let path = req.path.split('?').next().unwrap_or(&req.path);
-        let network = query_param(&req.path, "network")
-            .and_then(|s| Network::parse(&s))
-            .unwrap_or(Network::Regtest);
+        let wallet = if self.wallet_exists() {
+            match NativeWallet::open(&self.wallet) {
+                Ok(wallet) => Some(wallet),
+                Err(error)
+                    if req.method == "POST"
+                        && path == "/lwd/sendraw"
+                        && query_param(&req.path, "network").is_none() =>
+                {
+                    return lwd_err(error);
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        let network = match query_param(&req.path, "network") {
+            Some(network) => match Network::parse(&network) {
+                Some(network) => network,
+                None => return lwd_msg(400, "unknown network query parameter"),
+            },
+            None => wallet
+                .as_ref()
+                .map(NativeWallet::network)
+                .unwrap_or(Network::Regtest),
+        };
         let server = match query_param(&req.path, "server") {
             Some(u) if !u.trim().is_empty() => LightServer::parse(&u, network),
-            _ => {
-                if self.wallet_exists() {
-                    match NativeWallet::open(&self.wallet) {
-                        Ok(w) => LightServer::parse(&w.server_url(), network),
-                        Err(_) => LightServer::for_network(network),
-                    }
-                } else {
-                    LightServer::for_network(network)
-                }
-            }
+            _ => wallet
+                .as_ref()
+                .map(|wallet| LightServer::parse(&wallet.server_url(), network))
+                .unwrap_or_else(|| LightServer::for_network(network)),
         };
         match (req.method.as_str(), path) {
             ("GET", "/lwd/tip") => match NativeWallet::fetch_tip(&server).await {
@@ -292,7 +308,16 @@ impl Bridge {
                         "no validator RPC (set local Zakura / Zebra, or Z_STACK_VALIDATOR_RPC)",
                     );
                 };
-                match crate::native::rpc::send_raw_transaction(&rpc, &raw) {
+                let sent = tokio::task::spawn_blocking(move || {
+                    crate::native::rpc::send_raw_transaction_verified(&rpc, network, &raw)
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    Err(EngineError::Transport(
+                        "sendraw broadcast task failed".into(),
+                    ))
+                });
+                match sent {
                     Ok(hash) => json_ok_bytes(serde_json::json!({ "txid": hash })),
                     Err(e) => lwd_send_err(e),
                 }
@@ -1374,6 +1399,129 @@ async fn write_http_typed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sendraw_relay_verifies_requested_identity_before_receiving_transaction_bytes() {
+        use crate::native::rpc::{verified_response, verified_response_peer};
+        let txid = "aa".repeat(32);
+        for (network, chain, genesis_network, accepted) in [
+            (Network::Testnet, "test", Network::Testnet, true),
+            (Network::Regtest, "test", Network::Regtest, true),
+            (Network::Testnet, "test", Network::Regtest, false),
+            (Network::Regtest, "main", Network::Mainnet, false),
+        ] {
+            let mut responses = vec![
+                verified_response(1, json!({"chain": chain})),
+                verified_response(
+                    2,
+                    json!(crate::native::chain_identity::genesis(genesis_network)),
+                ),
+            ];
+            if accepted {
+                responses.push(verified_response(3, json!(txid)));
+            }
+            let (rpc, peer) = verified_response_peer(responses);
+            let dir = tempfile::tempdir().unwrap();
+            let bridge = Bridge::new(dir.path(), SeedAuth::passphrase("disposable-fixture"));
+            let request = HttpReq {
+                method: "POST".into(),
+                path: format!("/lwd/sendraw?network={}&rpc={rpc}", network.as_str()),
+                origin: None,
+                token: None,
+                body: b"faceb00c".to_vec(),
+            };
+            let (status, _, _, body) = bridge.dispatch_lwd(&request).await;
+            let requests = peer.join().unwrap();
+            assert_eq!(requests.len(), if accepted { 3 } else { 2 });
+            assert_eq!(requests[0]["method"], "getblockchaininfo");
+            assert_eq!(requests[1]["method"], "getblockhash");
+            assert_eq!(requests[1]["params"], json!([0]));
+            if accepted {
+                assert_eq!(status, 200);
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&body).unwrap()["txid"],
+                    txid
+                );
+                assert_eq!(requests[2]["method"], "sendrawtransaction");
+                assert_eq!(requests[2]["params"], json!(["faceb00c"]));
+            } else {
+                assert!(status >= 400);
+                assert!(requests.iter().all(|request| {
+                    request["method"] != "sendrawtransaction"
+                        && !request.to_string().contains("faceb00c")
+                }));
+                assert!(!String::from_utf8(body).unwrap().contains("faceb00c"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sendraw_relay_refuses_an_invalid_network_before_connecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = Bridge::new(dir.path(), SeedAuth::passphrase("disposable-fixture"));
+        let request = HttpReq {
+            method: "POST".into(),
+            path: "/lwd/sendraw?network=private-chain&rpc=http://127.0.0.1:1".into(),
+            origin: None,
+            token: None,
+            body: b"faceb00c".to_vec(),
+        };
+        assert_eq!(bridge.dispatch_lwd(&request).await.0, 400);
+    }
+
+    #[tokio::test]
+    async fn sendraw_relay_uses_wallet_network_when_the_query_omits_it() {
+        use crate::native::rpc::{verified_response, verified_response_peer};
+        for network in [Network::Mainnet, Network::Testnet] {
+            let txid = "aa".repeat(32);
+            let (rpc, peer) = verified_response_peer(vec![
+                verified_response(1, json!({"chain": network.as_str()})),
+                verified_response(2, json!(crate::native::chain_identity::genesis(network))),
+                verified_response(3, json!(txid)),
+            ]);
+            let dir = tempfile::tempdir().unwrap();
+            // Opening a wallet reads only its metadata; no seed or funding is needed.
+            std::fs::write(dir.path().join("data.sqlite"), []).unwrap();
+            std::fs::write(
+                dir.path().join("wallet.json"),
+                json!({
+                    "network": network.as_str(), "server": "http://127.0.0.1:1",
+                    "birthday_height": 1, "account_index": 0,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let bridge = Bridge::new(dir.path(), SeedAuth::passphrase("disposable-fixture"));
+            let request = HttpReq {
+                method: "POST".into(),
+                path: format!("/lwd/sendraw?rpc={rpc}"),
+                origin: None,
+                token: None,
+                body: b"faceb00c".to_vec(),
+            };
+            let (status, _, _, body) = bridge.dispatch_lwd(&request).await;
+            assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+            assert_eq!(peer.join().unwrap()[2]["method"], "sendrawtransaction");
+        }
+    }
+
+    #[tokio::test]
+    async fn sendraw_relay_requires_readable_wallet_identity_when_the_query_omits_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data.sqlite"), []).unwrap();
+        std::fs::write(dir.path().join("wallet.json"), b"{").unwrap();
+        let bridge = Bridge::new(dir.path(), SeedAuth::passphrase("disposable-fixture"));
+        let request = HttpReq {
+            method: "POST".into(),
+            path: "/lwd/sendraw?rpc=http://127.0.0.1:1".into(),
+            origin: None,
+            token: None,
+            body: b"faceb00c".to_vec(),
+        };
+        let (status, _, _, body) = bridge.dispatch_lwd(&request).await;
+        assert!(status >= 400);
+        assert!(String::from_utf8(body).unwrap().contains("wallet.json"));
+    }
 
     #[test]
     fn loopback_only() {

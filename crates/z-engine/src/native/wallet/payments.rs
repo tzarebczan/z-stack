@@ -843,13 +843,15 @@ impl NativeWallet {
         if !matches!(receipt.phase.as_str(), "signed" | "unknown") {
             return Err(failed("payment_not_signed"));
         }
+        // Refuse a changed chain before changing the durable receipt. Keep this
+        // verified connection for submission; do not reconnect after the check.
+        let mut client = Some(self.connect_submission().await?);
         conn.execute(
             "UPDATE ext_native_payments_v1 SET phase='unknown' WHERE id=?1",
             [id],
         )
         .map_err(|_| failed("payment_storage_failed"))?;
         let mut db = self.open_db()?;
-        let mut client = None;
         for id in &receipt.txids {
             let txid = TxId::from_hex(id).ok_or_else(|| failed("payment_storage_failed"))?;
             if !submission_acknowledged(self.broadcast_one(&mut client, &mut db, txid).await)? {
