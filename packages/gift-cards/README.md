@@ -15,8 +15,8 @@ size limit and network compatibility.
 
 ## Build and install the optional archive
 
-The published alpha.9 preview predates gift cards. Build a source checkout that
-contains this package and pack its matching SDK and gift-card archives first:
+The alpha.10 preview includes this optional archive and the matching SDK.
+Alpha.9 predates gift cards. To build matching archives from source:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -25,20 +25,19 @@ pnpm pack:sdk
 pnpm pack:gift-cards
 ```
 
-Packages are local preview archives, not npm registry packages. A future published
-preview must explicitly include the gift-card archive. To use only the pure
-helpers, install the archive produced above:
+Packages are downloadable preview archives, not npm registry packages. To use
+only the pure helpers, install the downloaded or source-built gift-card archive:
 
 ```sh
-npm install /path/to/z-stack-gift-cards-0.1.0-alpha.9.tgz
+npm install /path/to/z-stack-gift-cards-0.1.0-alpha.10.tgz
 ```
 
 For browser wallets, also install the same checkout's SDK archive. The SDK includes its
 core/passkey helpers and production WASM engines:
 
 ```sh
-npm install /path/to/z-stack-sdk-0.1.0-alpha.9.tgz \
-  /path/to/z-stack-gift-cards-0.1.0-alpha.9.tgz
+npm install /path/to/z-stack-sdk-0.1.0-alpha.10.tgz \
+  /path/to/z-stack-gift-cards-0.1.0-alpha.10.tgz
 ```
 
 ```ts
