@@ -337,7 +337,7 @@ fn repair_note(tx: &rusqlite::Transaction<'_>, effect: &NoteEffect) -> anyhow::R
     } else {
         "rho=?9,rseed=?10,note_version=?11"
     };
-    let sql = format!("UPDATE {pool}_received_notes SET account_id=?1,address_id=?2,diversifier=?3,value=?4,nf=?5,commitment_tree_position=?6,recipient_key_scope=?7,is_change=?8,witness_stabilized=0,{secret} WHERE transaction_id=(SELECT id_tx FROM transactions WHERE txid=?12) AND {index}=?13");
+    let sql = format!("UPDATE {pool}_received_notes SET account_id=?1,address_id=?2,diversifier=?3,value=?4,nf=?5,commitment_tree_position=?6,recipient_key_scope=?7,is_change=?8,witness_stabilized=0,memo=?14,{secret} WHERE transaction_id=(SELECT id_tx FROM transactions WHERE txid=?12) AND {index}=?13");
     let mut stmt = tx.prepare(&sql)?;
     stmt.raw_bind_parameter(1, effect.account)?;
     stmt.raw_bind_parameter(2, address_id)?;
@@ -354,6 +354,7 @@ fn repair_note(tx: &rusqlite::Transaction<'_>, effect: &NoteEffect) -> anyhow::R
     }
     stmt.raw_bind_parameter(12, bytes(&effect.txid)?)?;
     stmt.raw_bind_parameter(13, effect.index as u64)?;
+    stmt.raw_bind_parameter(14, effect.memo.as_deref().map(bytes).transpose()?)?;
     if stmt.raw_execute()? != 1 {
         return Err(invalid());
     }
@@ -804,11 +805,21 @@ mod tests {
         NativeWallet,
         VerifiedRegtestRecoveryBlocks,
     ) {
+        let (key, _) = fixture_account();
+        scanned_fixture_with_transaction(encrypted_orchard_transaction(&key, 7, [0; 32]))
+    }
+
+    fn scanned_fixture_with_transaction(
+        transaction: Transaction,
+    ) -> (
+        tempfile::TempDir,
+        NativeWallet,
+        VerifiedRegtestRecoveryBlocks,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let wallet = fixture_wallet(dir.path());
         let (key, birthday) = fixture_account();
         wallet.replace_scan_db(&key, &birthday).unwrap();
-        let transaction = encrypted_orchard_transaction(&key, 7, [0; 32]);
         let (bytes, chain) = fixture_prefix_with_transactions(&[0x51], 3, vec![(3, transaction)]);
         let evidence =
             verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap();
@@ -856,7 +867,7 @@ mod tests {
         assert_eq!((actual.0, actual.1, actual.2, actual.3), original);
         assert_eq!(
             (actual.4, actual.5, actual.6, actual.7, actual.8),
-            (50_000, false, false, 42, vec![0xf6])
+            (50_000, false, false, 42, vec![])
         );
         assert_eq!(
             conn.query_row("SELECT count(*) FROM orchard_received_notes", [], |r| r
@@ -881,6 +892,78 @@ mod tests {
         )
         .unwrap();
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn mined_received_memo_repairs_stale_nonnull_bytes_and_binds_the_actual_receipt() {
+        for memo in [
+            MemoBytes::empty(),
+            MemoBytes::from_bytes(b"verified native memo").unwrap(),
+        ] {
+            let (key, _) = fixture_account();
+            let transaction = sender_encrypted_transaction_with_memo(
+                &key,
+                &key,
+                Scope::External,
+                [0; 32],
+                *memo.as_array(),
+            );
+            let (_dir, wallet, evidence) = scanned_fixture_with_transaction(transaction);
+            let actual = &evidence.blocks[2].vtx()[1];
+            zcash_client_backend::data_api::wallet::decrypt_and_store_transaction(
+                &ZNetwork::Regtest,
+                &mut wallet.open_db().unwrap(),
+                actual,
+                Some(3.into()),
+            )
+            .unwrap();
+            let mut conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            let identity = |conn: &rusqlite::Connection| {
+                shielded_effect_identity(
+                    |sql| conn.query_row(sql, [], |r| r.get(0)),
+                    ZNetwork::Regtest,
+                    3,
+                    &BTreeSet::new(),
+                )
+                .unwrap()
+            };
+            let before = identity(&conn);
+            let original: (i64, Vec<u8>) = conn
+                .query_row("SELECT id,memo FROM orchard_received_notes", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap();
+            assert_eq!(original.1, bytes(&memo_identity(&memo)).unwrap());
+            conn.execute(
+                "UPDATE orchard_received_notes SET memo=x'01',lock_expiry_height=42",
+                [],
+            )
+            .unwrap();
+            assert_ne!(identity(&conn), before);
+            let tx = conn.transaction().unwrap();
+            reconcile_shielded_outputs(
+                &tx,
+                ZNetwork::Regtest,
+                &evidence,
+                &[],
+                &RecoveryCancellation::new(),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            let repaired: (i64, Vec<u8>, u32) = conn
+                .query_row(
+                    "SELECT id,memo,lock_expiry_height FROM orchard_received_notes",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!((repaired.0, repaired.1), original);
+            assert_eq!(repaired.2, 42);
+            assert_eq!(identity(&conn), before);
+            conn.execute("UPDATE orchard_received_notes SET memo=x'02'", [])
+                .unwrap();
+            assert_ne!(identity(&conn), before);
+        }
     }
 
     #[test]

@@ -71,16 +71,20 @@ where
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .map_err(|e| EngineError::WalletDb(format!("shield funding metadata: {e}")))?;
-        classification_candidates(&conn, target_height, &recent)
+        classification_candidates(&conn, target_height, &recent, network)
             .map_err(|e| EngineError::WalletDb(format!("shield funding metadata: {e}")))?
     };
     let count = candidates.len();
     for (txid, height) in candidates {
-        let raw = fetch(txid).await.map_err(|e| {
+        let raw = if let Some(raw) = retained_transaction(db_path, txid)? {
+            raw
+        } else {
+            fetch(txid).await.map_err(|e| {
             EngineError::Transport(format!(
                 "cannot classify recent transparent funding transaction {txid} before shielding: {e}"
             ))
-        })?;
+        })?
+        };
         let tx = validated_transaction(&raw, network, height, txid)?;
         decrypt_and_store_transaction(&network, db, &tx, Some(height)).map_err(|e| {
             EngineError::WalletDb(format!("store transparent funding transaction {txid}: {e}"))
@@ -93,15 +97,19 @@ where
 // outputs. Classification is local after verified raw retrieval; unknown recent
 // funding must not be reported as available while a fetch is pending or fails.
 const BALANCE_CLASSIFICATION_BATCH: usize = 256;
+const BALANCE_INSPECTION_ROWS: usize = 4096;
+const BALANCE_INSPECTION_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_RETAINED_TRANSACTION_BYTES: u64 = 2 * 1024 * 1024;
 
 fn balance_candidates(
     conn: &rusqlite::Connection,
     target: u32,
+    network: Network,
 ) -> rusqlite::Result<Vec<(TxId, BlockHeight)>> {
     let expiry = zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
-    let sql = format!("SELECT DISTINCT t.txid,t.mined_height
+    let sql = format!("SELECT DISTINCT t.txid,t.mined_height,length(t.raw)
         FROM transactions t JOIN transparent_received_outputs u ON u.transaction_id=t.id_tx
-        WHERE t.tx_index IS NULL AND t.raw IS NULL
+        WHERE t.tx_index IS NULL
           AND t.mined_height < :target AND t.mined_height > :floor
           AND NOT EXISTS (
               SELECT 1 FROM transparent_received_output_spends s
@@ -109,34 +117,75 @@ fn balance_candidates(
               WHERE s.transparent_received_output_id=u.id
                 AND (st.mined_height < :target OR st.expiry_height=0 OR st.expiry_height >= :target
                      OR (st.expiry_height IS NULL AND COALESCE(st.target_height,st.min_observed_height)+{expiry} >= :target))
-          ) ORDER BY t.mined_height,t.txid LIMIT :limit");
+          ) ORDER BY t.mined_height,t.txid LIMIT :inspected_limit");
     let mut stmt = conn.prepare(&sql)?;
+    let mut inspected = 0usize;
+    let mut raw_bytes = 0u64;
     let rows = stmt.query_map(
         rusqlite::named_params! {
             ":target":target, ":floor":target.saturating_sub(COINBASE_MATURITY_BLOCKS),
-            ":limit": BALANCE_CLASSIFICATION_BATCH + 1,
+            ":inspected_limit": BALANCE_INSPECTION_ROWS + 1,
         },
         |r| {
+            inspected += 1;
+            let length: Option<u64> = r.get(2)?;
+            let length = length.unwrap_or(0);
+            raw_bytes = raw_bytes
+                .checked_add(length)
+                .ok_or(rusqlite::Error::InvalidQuery)?;
+            if inspected > BALANCE_INSPECTION_ROWS
+                || length > MAX_RETAINED_TRANSACTION_BYTES
+                || raw_bytes > BALANCE_INSPECTION_BYTES
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
             let id: Vec<u8> = r.get(0)?;
             let bytes: [u8; 32] = id.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
-            Ok((TxId::from_bytes(bytes), BlockHeight::from_u32(r.get(1)?)))
+            Ok((
+                TxId::from_bytes(bytes),
+                BlockHeight::from_u32(r.get(1)?),
+                conn.query_row(
+                    "SELECT raw FROM transactions WHERE txid=?1",
+                    [bytes.as_slice()],
+                    |row| row.get::<_, Option<Vec<u8>>>(0),
+                )?,
+            ))
         },
     )?;
-    rows.collect()
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (txid, height, raw) = row?;
+        if !needs_classification(raw.as_deref(), network, height, txid)? {
+            continue;
+        }
+        candidates.push((txid, height));
+        if candidates.len() > BALANCE_CLASSIFICATION_BATCH {
+            break;
+        }
+    }
+    Ok(candidates)
 }
 
-fn retained_balance_candidates(db_path: &Path, target: u32) -> Result<Vec<(TxId, BlockHeight)>> {
+fn retained_balance_candidates(
+    db_path: &Path,
+    target: u32,
+    network: Network,
+) -> Result<Vec<(TxId, BlockHeight)>> {
     let conn =
         rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|_| {
                 EngineError::WalletDb("transparent funding metadata unavailable".into())
             })?;
-    balance_candidates(&conn, target)
+    balance_candidates(&conn, target, network)
         .map_err(|_| EngineError::WalletDb("transparent funding metadata invalid".into()))
 }
 
-pub(super) fn require_balance_classified(db_path: &Path, target: u32) -> Result<()> {
-    if !retained_balance_candidates(db_path, target)?.is_empty() {
+pub(super) fn require_balance_classified(
+    db_path: &Path,
+    target: u32,
+    network: Network,
+) -> Result<()> {
+    if !retained_balance_candidates(db_path, target, network)?.is_empty() {
         return Err(EngineError::SyncRequired);
     }
     Ok(())
@@ -159,17 +208,54 @@ where
         return Ok(0);
     };
     let target = u32::from(tip).saturating_add(1);
-    let candidates = retained_balance_candidates(db_path, target)?;
+    let candidates = retained_balance_candidates(db_path, target, network)?;
     let count = candidates.len().min(BALANCE_CLASSIFICATION_BATCH);
     for (txid, height) in candidates.into_iter().take(BALANCE_CLASSIFICATION_BATCH) {
-        let raw = fetch(txid).await?;
+        let raw = if let Some(raw) = retained_transaction(db_path, txid)? {
+            raw
+        } else {
+            fetch(txid).await?
+        };
         let tx = validated_transaction(&raw, network, height, txid)?;
         decrypt_and_store_transaction(&network, db, &tx, Some(height)).map_err(|_| {
             EngineError::WalletDb("transparent funding classification failed".into())
         })?;
     }
-    require_balance_classified(db_path, target)?;
+    require_balance_classified(db_path, target, network)?;
     Ok(count)
+}
+
+fn retained_transaction(db_path: &Path, txid: TxId) -> Result<Option<Vec<u8>>> {
+    rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT length(raw),raw FROM transactions WHERE txid=?1",
+                [txid.as_ref().as_slice()],
+                |row| {
+                    if row.get::<_, Option<u64>>(0)?.unwrap_or(0) > MAX_RETAINED_TRANSACTION_BYTES {
+                        return Err(rusqlite::Error::InvalidQuery);
+                    }
+                    row.get(1)
+                },
+            )
+        })
+        .map_err(|_| EngineError::WalletDb("transparent funding metadata unavailable".into()))
+}
+
+fn needs_classification(
+    raw: Option<&[u8]>,
+    network: Network,
+    height: BlockHeight,
+    txid: TxId,
+) -> rusqlite::Result<bool> {
+    let Some(raw) = raw else {
+        return Ok(true);
+    };
+    let tx = validated_transaction(raw, network, height, txid)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    Ok(tx
+        .transparent_bundle()
+        .is_some_and(|bundle| bundle.is_coinbase()))
 }
 
 fn could_be_immature(height: u32, target: u32) -> bool {
@@ -180,27 +266,48 @@ fn classification_candidates(
     conn: &rusqlite::Connection,
     target: u32,
     eligible: &[TxId],
+    network: Network,
 ) -> rusqlite::Result<Vec<(TxId, BlockHeight)>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT mined_height FROM transactions
-         WHERE txid = ?1 AND tx_index IS NULL AND raw IS NULL
+        "SELECT mined_height, length(raw), raw FROM transactions
+         WHERE txid = ?1 AND tx_index IS NULL
            AND mined_height < ?2 AND mined_height > ?3",
     )?;
     let floor = target.saturating_sub(COINBASE_MATURITY_BLOCKS);
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
+    let mut inspected = 0usize;
+    let mut raw_bytes = 0u64;
     for &txid in eligible {
         if !seen.insert(txid) {
             continue;
         }
-        let height: Option<u32> = stmt
+        inspected += 1;
+        if inspected > BALANCE_INSPECTION_ROWS {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let retained: Option<(u32, Option<Vec<u8>>)> = stmt
             .query_row(
                 rusqlite::params![txid.as_ref().as_slice(), target, floor],
-                |row| row.get(0),
+                |row| {
+                    let length = row.get::<_, Option<u64>>(1)?.unwrap_or(0);
+                    raw_bytes = raw_bytes
+                        .checked_add(length)
+                        .ok_or(rusqlite::Error::InvalidQuery)?;
+                    if length > MAX_RETAINED_TRANSACTION_BYTES
+                        || raw_bytes > BALANCE_INSPECTION_BYTES
+                    {
+                        return Err(rusqlite::Error::InvalidQuery);
+                    }
+                    Ok((row.get(0)?, row.get(2)?))
+                },
             )
             .optional()?;
-        if let Some(height) = height {
-            candidates.push((txid, BlockHeight::from_u32(height)));
+        if let Some((height, raw)) = retained {
+            let height = BlockHeight::from_u32(height);
+            if needs_classification(raw.as_deref(), network, height, txid)? {
+                candidates.push((txid, height));
+            }
         }
     }
     Ok(candidates)
@@ -240,7 +347,7 @@ mod tests {
             (2, 199, None, None),
             (3, 100, None, None),
             (4, 199, Some(0), None),
-            (5, 199, None, Some(vec![1u8])),
+            (5, 199, Some(1), Some(vec![1u8])),
             (6, 199, None, None),
             (7, 199, None, None),
         ] {
@@ -262,7 +369,7 @@ mod tests {
             INSERT INTO transparent_received_output_spends VALUES(7,9);",
         )
         .unwrap();
-        let found = balance_candidates(&conn, 200).unwrap();
+        let found = balance_candidates(&conn, 200, Network::Regtest).unwrap();
         assert_eq!(
             found,
             [
@@ -274,19 +381,58 @@ mod tests {
     }
 
     #[test]
+    fn balance_inspection_exhaustion_refuses_instead_of_skipping_later_rows() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE transactions(id_tx INTEGER PRIMARY KEY,txid BLOB,mined_height INTEGER,tx_index INTEGER,raw BLOB,expiry_height INTEGER,target_height INTEGER,min_observed_height INTEGER);
+            CREATE TABLE transparent_received_outputs(id INTEGER PRIMARY KEY,transaction_id INTEGER,lock_expiry_height INTEGER);
+            CREATE TABLE transparent_received_output_spends(transparent_received_output_id INTEGER,transaction_id INTEGER);").unwrap();
+        let insertion = conn.transaction().unwrap();
+        let mut eligible = Vec::new();
+        for id in 0..=BALANCE_INSPECTION_ROWS {
+            let mut raw = coinbase_bytes();
+            raw[5] = 1; // Real parseable noncoinbase with a legitimately unknown ordinal.
+            let end = raw.len();
+            raw[end - 4..].copy_from_slice(&(id as u32).to_le_bytes());
+            let tx = Transaction::read(&raw[..], BranchId::Sprout).unwrap();
+            eligible.push(tx.txid());
+            insertion
+                .execute(
+                    "INSERT INTO transactions VALUES(?1,?2,199,NULL,?3,NULL,NULL,1)",
+                    rusqlite::params![id, tx.txid().as_ref().as_slice(), raw],
+                )
+                .unwrap();
+            insertion
+                .execute(
+                    "INSERT INTO transparent_received_outputs VALUES(?1,?1,NULL)",
+                    [id],
+                )
+                .unwrap();
+        }
+        insertion.commit().unwrap();
+        assert!(balance_candidates(&conn, 200, Network::Regtest).is_err());
+        assert!(classification_candidates(&conn, 200, &eligible, Network::Regtest).is_err());
+        let repeated = vec![eligible[0]; BALANCE_INSPECTION_ROWS + 2];
+        assert!(
+            classification_candidates(&conn, 200, &repeated, Network::Regtest)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn only_recent_unknown_eligible_funding_is_fetched_once() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE transactions (txid BLOB PRIMARY KEY, mined_height INTEGER, tx_index INTEGER, raw BLOB)").unwrap();
         for (id, height, index, raw) in [
-            (1u8, Some(101), None, None),          // 99 confirmations: classify
-            (2, Some(100), None, None),            // exactly mature: no fetch
-            (3, Some(99), None, None),             // old: no fetch
-            (4, Some(199), Some(0), None),         // known coinbase
-            (5, Some(199), Some(1), None),         // known ordinary
-            (6, Some(199), None, Some(vec![1u8])), // fully enhanced ordinary
-            (7, Some(200), None, None),            // not mined before target
-            (8, None, None, None),                 // unmined
-            (9, Some(199), None, None),            // not an eligible unspent output
+            (1u8, Some(101), None, None),             // 99 confirmations: classify
+            (2, Some(100), None, None),               // exactly mature: no fetch
+            (3, Some(99), None, None),                // old: no fetch
+            (4, Some(199), Some(0), None),            // known coinbase
+            (5, Some(199), Some(1), None),            // known ordinary
+            (6, Some(199), Some(1), Some(vec![1u8])), // fully enhanced ordinary
+            (7, Some(200), None, None),               // not mined before target
+            (8, None, None, None),                    // unmined
+            (9, Some(199), None, None),               // not an eligible unspent output
         ] {
             conn.execute(
                 "INSERT INTO transactions VALUES (?1,?2,?3,?4)",
@@ -296,21 +442,23 @@ mod tests {
         }
         let mut eligible: Vec<_> = (1..=8).map(|id| TxId::from_bytes([id; 32])).collect();
         eligible.push(eligible[0]);
-        let result = classification_candidates(&conn, 200, &eligible).unwrap();
+        let result = classification_candidates(&conn, 200, &eligible, Network::Regtest).unwrap();
         assert_eq!(result, [(eligible[0], 101.into())]);
         assert!(could_be_immature(101, 200));
         assert!(!could_be_immature(100, 200));
         assert!(!could_be_immature(201, 200));
-        // Successful non-coinbase enhancement stores raw but legitimately leaves
-        // tx_index NULL. That completion must still prevent another fetch.
+        // A known ordinal needs no further classification. Retained raw with a
+        // NULL ordinal is covered by the actual transaction fixtures below.
         conn.execute(
-            "UPDATE transactions SET raw = X'01' WHERE txid = ?1",
+            "UPDATE transactions SET tx_index = 0 WHERE txid = ?1",
             [eligible[0].as_ref().as_slice()],
         )
         .unwrap();
-        assert!(classification_candidates(&conn, 200, &eligible)
-            .unwrap()
-            .is_empty());
+        assert!(
+            classification_candidates(&conn, 200, &eligible, Network::Regtest)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn coinbase_bytes() -> Vec<u8> {
@@ -403,7 +551,7 @@ mod tests {
         db.put_received_transparent_utxo(&output).unwrap();
         let confirmations = crate::confirmations_policy(Network::Regtest);
         assert!(matches!(
-            require_balance_classified(&path, 200),
+            require_balance_classified(&path, 200, Network::Regtest),
             Err(EngineError::SyncRequired)
         ));
         let conn = rusqlite::Connection::open(&path).unwrap();
@@ -431,7 +579,7 @@ mod tests {
         .await
         .is_err());
         assert!(matches!(
-            require_balance_classified(&path, 200),
+            require_balance_classified(&path, 200, Network::Regtest),
             Err(EngineError::SyncRequired)
         ));
         let mut classified = 0;
@@ -446,7 +594,7 @@ mod tests {
             1
         );
         assert_eq!(classified, 1);
-        require_balance_classified(&path, 200).unwrap();
+        require_balance_classified(&path, 200, Network::Regtest).unwrap();
         assert_eq!(
             classify_balance_funding(&mut db, &path, Network::Regtest, |_| std::future::ready(
                 Err(EngineError::Transport("unexpected refetch".into()))
@@ -455,6 +603,57 @@ mod tests {
             .unwrap(),
             0
         );
+        // Reorg relinking can retain validated raw while dropping only the mined
+        // ordinal. Treat that cold state as unresolved until local coinbase
+        // classification restores index zero, without any network fetch.
+        conn.execute(
+            "UPDATE transactions SET mined_height=199,tx_index=NULL WHERE txid=?1",
+            [tx.txid().as_ref().as_slice()],
+        )
+        .unwrap();
+        assert!(matches!(
+            require_balance_classified(&path, 200, Network::Regtest),
+            Err(EngineError::SyncRequired)
+        ));
+        assert_eq!(
+            classify_balance_funding(&mut db, &path, Network::Regtest, |_| {
+                std::future::ready(Err(EngineError::Transport(
+                    "unexpected retained refetch".into(),
+                )))
+            })
+            .await
+            .unwrap(),
+            1
+        );
+        require_balance_classified(&path, 200, Network::Regtest).unwrap();
+        let cold = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let restored: (u32, u32, Vec<u8>) = cold
+            .query_row(
+                "SELECT mined_height,tx_index,raw FROM transactions WHERE txid=?1",
+                [tx.txid().as_ref().as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert!(restored == (199, 0, raw.clone()));
+        assert!(db
+            .get_spendable_transparent_outputs_for_addresses(
+                &addresses,
+                200.into(),
+                confirmations,
+                CoinbaseFilter::AllTransparentOutputs,
+                LockFilter::Policy(&LockedInputPolicy::Exclude)
+            )
+            .unwrap()
+            .is_empty());
+        conn.execute(
+            "UPDATE transactions SET mined_height=101 WHERE txid=?1",
+            [tx.txid().as_ref().as_slice()],
+        )
+        .unwrap();
         // Restore an unresolved output for the independent shielding retry checks.
         conn.execute(
             "UPDATE transactions SET tx_index=NULL,raw=NULL WHERE txid=?1",
@@ -478,7 +677,7 @@ mod tests {
         assert!(failure.is_err());
         let conn = rusqlite::Connection::open(&path).unwrap();
         assert_eq!(
-            classification_candidates(&conn, 200, &[tx.txid()])
+            classification_candidates(&conn, 200, &[tx.txid()], Network::Regtest)
                 .unwrap()
                 .len(),
             1
@@ -549,7 +748,7 @@ mod tests {
         .unwrap();
         db.put_received_transparent_utxo(&output).unwrap();
         assert!(matches!(
-            require_balance_classified(&path, 200),
+            require_balance_classified(&path, 200, Network::Regtest),
             Err(EngineError::SyncRequired)
         ));
         assert_eq!(
@@ -570,6 +769,51 @@ mod tests {
             .unwrap();
         assert!(stored.0.is_none());
         assert!(stored.1 == regular_raw);
-        require_balance_classified(&path, 200).unwrap();
+        require_balance_classified(&path, 200, Network::Regtest).unwrap();
+        assert_eq!(
+            classify_balance_funding(&mut db, &path, Network::Regtest, |_| {
+                std::future::ready(Err(EngineError::Transport(
+                    "unexpected ordinary refetch".into(),
+                )))
+            })
+            .await
+            .unwrap(),
+            0
+        );
+        assert!(
+            classification_candidates(&conn, 200, &[regular.txid()], Network::Regtest)
+                .unwrap()
+                .is_empty()
+        );
+        conn.execute(
+            "UPDATE transactions SET raw=zeroblob(?1) WHERE txid=?2",
+            rusqlite::params![
+                MAX_RETAINED_TRANSACTION_BYTES + 1,
+                regular.txid().as_ref().as_slice()
+            ],
+        )
+        .unwrap();
+        assert!(require_balance_classified(&path, 200, Network::Regtest).is_err());
+        conn.execute(
+            "UPDATE transactions SET raw=x'00' WHERE txid=?1",
+            [regular.txid().as_ref().as_slice()],
+        )
+        .unwrap();
+        assert!(require_balance_classified(&path, 200, Network::Regtest).is_err());
+        assert!(
+            classify_balance_funding(&mut db, &path, Network::Regtest, |_| {
+                std::future::ready(Err(EngineError::Transport(
+                    "invalid local raw must not refetch".into(),
+                )))
+            })
+            .await
+            .is_err()
+        );
+        conn.execute(
+            "UPDATE transactions SET raw=?1 WHERE txid=?2",
+            rusqlite::params![regular_raw, regular.txid().as_ref().as_slice()],
+        )
+        .unwrap();
+        require_balance_classified(&path, 200, Network::Regtest).unwrap();
     }
 }

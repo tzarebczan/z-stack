@@ -741,7 +741,8 @@ impl NativeWallet {
         })?;
         drop(db);
         after_replay();
-        self.reconcile_verified_effects(generation, &evidence, &pending, cancel)?;
+        let reconciled_scope =
+            self.reconcile_verified_effects(generation, &evidence, &pending, cancel)?;
         let discovery = self.sync_regtest_pir_with_commit_gate(
             chain,
             filters,
@@ -755,6 +756,7 @@ impl NativeWallet {
             &evidence,
             generation,
             recovered_outputs,
+            &reconciled_scope,
             discovery,
             cancel,
         )
@@ -765,6 +767,7 @@ impl NativeWallet {
         evidence: &VerifiedRegtestRecoveryBlocks,
         generation: u64,
         recovered_outputs: usize,
+        reconciled_scope: &str,
         discovery: PirDiscoveryReport,
         cancel: &RecoveryCancellation,
     ) -> Result<PirRecoveryReport> {
@@ -804,6 +807,10 @@ impl NativeWallet {
                     anyhow::bail!("native_recovery_generation_changed");
                 }
                 require_journal_head(ext, Some(&journal_head))?;
+                require_discovery_scope(
+                    reconciled_scope,
+                    &native_scope_in_transaction(wdb, ext, 1)?,
+                )?;
                 require_discovery_scope(
                     &discovery.scope_identity,
                     &native_scope_in_transaction(wdb, ext, 1)?,
@@ -895,10 +902,10 @@ impl NativeWallet {
         evidence: &VerifiedRegtestRecoveryBlocks,
         pending: &[zcash_primitives::transaction::Transaction],
         cancel: &RecoveryCancellation,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let scope = self.recovery_scope()?;
         cancel.transaction(|| {
-            (|| -> anyhow::Result<()> {
+            (|| -> anyhow::Result<String> {
                 let mut conn = rusqlite::Connection::open(&self.paths.data_db)?;
                 conn.busy_timeout(std::time::Duration::from_secs(5))?;
                 conn.pragma_update(None, "synchronous", "FULL")?;
@@ -962,11 +969,17 @@ impl NativeWallet {
                 tx.execute("DELETE FROM transparent_received_outputs AS n WHERE NOT EXISTS(SELECT 1 FROM transactions t JOIN expected_outputs e ON e.txid=t.txid AND e.output_index=n.output_index WHERE t.id_tx=n.transaction_id)",[])?;
                 let invalid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE NOT EXISTS(SELECT 1 FROM expected_outputs e JOIN expected_owners o ON o.script=e.script AND o.account_id=n.account_id JOIN addresses a ON a.id=n.address_id AND a.account_id=n.account_id AND a.cached_transparent_receiver_address=n.address WHERE e.txid=t.txid AND e.output_index=n.output_index AND e.script=n.script AND e.value=n.value_zat))",[],|r|r.get(0))?;
                 if invalid { anyhow::bail!("native_recovery_reconciliation_required"); }
+                // Every verified output matching the final enrolled scripts must be
+                // present, not merely every retained row valid. Allocation can occur
+                // after replay, so missing historical receivers must remain Pending.
+                let missing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM expected_outputs e JOIN expected_owners o ON o.script=e.script WHERE NOT EXISTS(SELECT 1 FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.txid=e.txid AND n.output_index=e.output_index AND n.script=e.script AND n.value_zat=e.value AND n.account_id=o.account_id))",[],|r|r.get(0))?;
+                if missing { anyhow::bail!("native_recovery_reconciliation_required"); }
                 super::super::recovery_effects::reconcile_sent_outputs(&tx,self.network,evidence,pending,cancel)?;
                 effect_identity(|sql| tx.query_row(sql, [], |r| r.get(0)),self.network,evidence.target_height())?;
                 if cancel.is_cancelled() { anyhow::bail!("native_recovery_cancelled"); }
+                let reconciled_scope = scope.identity()?;
                 tx.commit()?;
-                Ok(())
+                Ok(reconciled_scope)
             })().map_err(EngineError::from)
         })
     }
@@ -1151,6 +1164,53 @@ pub(in crate::native::wallet) mod tests {
         eprintln!("retained raw categories: identical={identical}, canonical_same_effect_auth_variants={auth_variant}, malformed_or_effect_conflicts={malformed}");
         assert_eq!(malformed, 0);
     }
+    #[tokio::test]
+    #[ignore = "private retained fork classification diagnostic"]
+    async fn retained_fork_reference_classifies_local_coinbases_and_matches_canonical_balance() {
+        let root = std::path::PathBuf::from(std::env::var("COFFER_PRIVATE_FIXTURE").unwrap());
+        let reference_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        for (name, dir) in [
+            ("canonical-reference", &reference_dir),
+            ("canonical-target", &target_dir),
+        ] {
+            for file in ["wallet.json", "seed.enc", "data.sqlite"] {
+                std::fs::copy(root.join(name).join(file), dir.path().join(file)).unwrap();
+            }
+        }
+        let reference = NativeWallet::open_offline(reference_dir.path())
+            .unwrap_or_else(|_| panic!("private_reference_open_failed"));
+        let target = NativeWallet::open_offline(target_dir.path())
+            .unwrap_or_else(|_| panic!("private_target_open_failed"));
+        assert!(matches!(
+            reference.balance(),
+            Err(EngineError::SyncRequired)
+        ));
+        let mut db = reference.open_db().unwrap();
+        let classified = crate::native::transparent_funding::classify_balance_funding(
+            &mut db,
+            &reference.paths.data_db,
+            reference.network,
+            |_| async { panic!("retained_fork_must_not_refetch") },
+        )
+        .await
+        .unwrap_or_else(|_| panic!("private_local_classification_failed"));
+        assert_eq!(classified, 2);
+        drop(db);
+        let cold = NativeWallet::open_offline(reference_dir.path())
+            .unwrap_or_else(|_| panic!("private_reference_reopen_failed"));
+        let reference_balance = cold
+            .balance()
+            .unwrap_or_else(|_| panic!("private_reference_balance_failed"));
+        let target_balance = target
+            .balance()
+            .unwrap_or_else(|_| panic!("private_target_balance_failed"));
+        assert!(
+            serde_json::to_value(reference_balance).unwrap()
+                == serde_json::to_value(target_balance).unwrap()
+        );
+    }
+
     #[test]
     #[ignore = "private retained fork replay diagnostic"]
     fn retained_fork_replay_preserves_saved_raw_and_reaches_verified_native_tip() {
@@ -1373,7 +1433,15 @@ pub(in crate::native::wallet) mod tests {
         };
         assert!(
             wallet
-                .finish_regtest_pir_recovery(chain, &evidence, generation, 0, discovery, &cancel)
+                .finish_regtest_pir_recovery(
+                    chain,
+                    &evidence,
+                    generation,
+                    0,
+                    &scope.identity().unwrap(),
+                    discovery,
+                    &cancel
+                )
                 .unwrap()
                 .scope_complete
         );
@@ -2350,7 +2418,15 @@ pub(in crate::native::wallet) mod tests {
                 publication_start: 1,
             };
             let report = cold
-                .finish_regtest_pir_recovery(&chain, &evidence, generation, 1, discovery, &cancel)
+                .finish_regtest_pir_recovery(
+                    &chain,
+                    &evidence,
+                    generation,
+                    1,
+                    &final_scope.identity().unwrap(),
+                    discovery,
+                    &cancel,
+                )
                 .unwrap();
             assert_eq!(report.scope_complete, variant == 2);
             assert_eq!(report.selection_blocked, variant != 2);
@@ -2477,6 +2553,168 @@ pub(in crate::native::wallet) mod tests {
             .to_string()
             .contains("native_recovery_reconciliation_required"));
     }
+    #[test]
+    fn proposal_only_selectors_refuse_pending_and_stale_completed_recovery() {
+        let (dir, wallet) = wallet();
+        let script = wallet.recovery_scope().unwrap().0[0].entry.script.clone();
+        let (bytes, chain) = fixture_with_script(&script);
+        let _ = wallet.recover_regtest_pir(
+            &chain,
+            verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+            &mut Unavailable,
+            &mut Unavailable,
+            WorkLimits {
+                max_queries: Some(1),
+                max_private_bytes: Some(1024),
+            },
+            &RecoveryCancellation::new(),
+        );
+        finish_fixture_recovery(&wallet, &bytes, &chain);
+        let destination = wallet.unified_address().unwrap();
+        // Mutating a receipt-bound native effect must block proposal-only APIs too.
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        assert!(conn.execute("UPDATE transactions SET fee=123", []).unwrap() > 0);
+        let cold = NativeWallet::open_offline(dir.path()).unwrap();
+        for result in [
+            cold.estimate_fee(&destination, 1, None),
+            cold.max_send(None).map(|v| v.0),
+        ] {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("native_recovery_reconciliation_required"));
+        }
+        cold.begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
+            .unwrap();
+        for result in [
+            cold.estimate_fee(&destination, 1, None),
+            cold.max_send(None).map(|v| v.0),
+        ] {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("native_recovery_pending"));
+        }
+    }
+
+    #[test]
+    fn funded_receiver_allocated_after_replay_stays_pending_until_verified_replay_retries() {
+        let (dir, wallet) = wallet();
+        let (_oracle_dir, oracle) = self::wallet();
+        let before = wallet.recovery_scope().unwrap();
+        let allocate = |wallet: &NativeWallet| {
+            let seed = SecretVec::new(
+                Mnemonic::parse_normalized(crate::keys::REGTEST_FAUCET_MNEMONIC)
+                    .unwrap()
+                    .to_seed("")
+                    .to_vec(),
+            );
+            let mut hash = crate::web::from_hex(GENESIS).unwrap();
+            hash.reverse();
+            let birthday = AccountBirthday::from_parts(
+                zcash_client_backend::data_api::chain::ChainState::empty(
+                    0.into(),
+                    BlockHash::from_slice(&hash),
+                ),
+                None,
+            );
+            wallet
+                .open_db()
+                .unwrap()
+                .import_account_hd(
+                    "future",
+                    &seed,
+                    Zip32AccountId::try_from(1).unwrap(),
+                    &birthday,
+                    None,
+                )
+                .unwrap();
+        };
+        // An actual native HD account import allocates its receivers. Derive the
+        // funded receiver independently, then allocate it only after replay.
+        allocate(&oracle);
+        let future = oracle
+            .recovery_scope()
+            .unwrap()
+            .0
+            .into_iter()
+            .find(|entry| {
+                !before
+                    .0
+                    .iter()
+                    .any(|old| old.entry.script == entry.entry.script)
+            })
+            .expect("future account receiver outside enrolled scope");
+        let (bytes, chain) = fixture_with_script(&future.entry.script);
+        let cancel = RecoveryCancellation::new();
+        let error = wallet
+            .recover_regtest_pir_after_replay(
+                &chain,
+                verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+                &mut Unavailable,
+                &mut Unavailable,
+                WorkLimits {
+                    max_queries: Some(1),
+                    max_private_bytes: Some(1024),
+                },
+                &cancel,
+                || allocate(&wallet),
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("native_recovery_reconciliation_required"));
+        let cold = NativeWallet::open_offline(dir.path()).unwrap();
+        assert!(cold.ensure_pir_recovery_ready().is_err());
+        assert!(cold.regtest_pir_recovery_for(&chain).is_err());
+        assert!(cold
+            .estimate_fee(&cold.unified_address().unwrap(), 1, None)
+            .is_err());
+        let conn = rusqlite::Connection::open(&cold.paths.data_db).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM transparent_received_outputs WHERE script=?1",
+                [&future.entry.script],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            0
+        );
+        // The next actual public recovery replays with the enlarged scope. The
+        // unavailable provider still refuses discovery; isolate completion using
+        // its real verified journal/receipt writer after checking the native row.
+        let _ = cold.recover_regtest_pir(
+            &chain,
+            verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+            &mut Unavailable,
+            &mut Unavailable,
+            WorkLimits {
+                max_queries: Some(1),
+                max_private_bytes: Some(1024),
+            },
+            &RecoveryCancellation::new(),
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM transparent_received_outputs WHERE script=?1",
+                [&future.entry.script],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            1
+        );
+        finish_fixture_recovery(&cold, &bytes, &chain);
+        let reopened = NativeWallet::open_offline(dir.path()).unwrap();
+        assert!(
+            reopened
+                .regtest_pir_recovery_for(&chain)
+                .unwrap()
+                .unwrap()
+                .scope_complete
+        );
+        reopened.ensure_pir_recovery_ready().unwrap();
+    }
+
     #[test]
     fn final_recovery_writer_refuses_scope_allocated_after_discovery_without_new_events() {
         let (_dir, wallet, chain, receipt) = completed_fixture();

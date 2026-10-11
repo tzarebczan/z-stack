@@ -2039,6 +2039,7 @@ impl NativeWallet {
             super::transparent_funding::require_balance_classified(
                 &self.paths.data_db,
                 u32::from(tip).saturating_add(1),
+                self.network,
             )?;
         }
         let summary = db
@@ -2697,6 +2698,7 @@ impl NativeWallet {
 
     /// ZIP-317 fee for a shielded send / ZIP-321 URI. Propose only — no prove or broadcast.
     pub fn estimate_fee(&self, to: &str, amount_zatoshis: u64, memo: Option<&str>) -> Result<u64> {
+        self.ensure_recovery_selection_ready()?;
         let request = self.send_request(to, amount_zatoshis, memo)?;
         let mut db = self.open_db()?;
         self.propose_fee(&mut db, request, shielded_spend_policy())
@@ -2704,6 +2706,7 @@ impl NativeWallet {
 
     /// Largest shielded amount that `propose_transfer` accepts for `to` (own UA if omitted).
     pub fn max_send(&self, to: Option<&str>) -> Result<(u64, u64)> {
+        self.ensure_recovery_selection_ready()?;
         let dest = match to.map(str::trim).filter(|s| !s.is_empty()) {
             Some(s) if s.to_ascii_lowercase().starts_with("zcash:") => {
                 let req = crate::parse_zip321(s).map_err(EngineError::Message)?;
@@ -2793,6 +2796,7 @@ impl NativeWallet {
         request: TransactionRequest,
         policy: SpendPolicy,
     ) -> Result<u64> {
+        self.ensure_recovery_selection_ready()?;
         let account = Self::primary_account_id(db)?;
         let input_selector = GreedyInputSelector::new();
         let change_strategy = SingleOutputChangeStrategy::new(
@@ -4472,6 +4476,39 @@ mod tests {
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn proposal_only_selectors_refuse_recovery_markers_before_request_or_selection() {
+        for blocked in [0, 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let wallet = fixture_wallet(dir.path());
+            let (key, birthday) = fixture_account();
+            wallet.replace_scan_db(&key, &birthday).unwrap();
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            conn.execute_batch("CREATE TABLE ext_coffer_pir_recovery_v1(id INTEGER PRIMARY KEY,blocked INTEGER NOT NULL,generation INTEGER NOT NULL,receipt BLOB);").unwrap();
+            conn.execute(
+                "INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,?1,1,NULL)",
+                [blocked],
+            )
+            .unwrap();
+            let cold = NativeWallet::open_offline(dir.path()).unwrap();
+            // Invalid input must never mask the recovery ownership barrier.
+            for result in [
+                cold.estimate_fee("invalid", 1, None),
+                cold.max_send(Some("invalid")).map(|v| v.0),
+            ] {
+                assert!(result.unwrap_err().to_string().contains("native_recovery_"));
+            }
+            let retained: (i32, u64, Option<Vec<u8>>) = conn
+                .query_row(
+                    "SELECT blocked,generation,receipt FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(retained, (blocked, 1, None));
+        }
     }
 
     #[tokio::test]
