@@ -4,6 +4,7 @@ mod accepted_blocks;
 mod block_cache;
 mod bridge;
 mod chain_identity;
+mod compact_prefill;
 mod lwd;
 mod lwd_pipe;
 mod pipeline;
@@ -22,6 +23,12 @@ pub use accepted_blocks::{
     verify_mainnet_block_window, AcceptedMainnetWindow, VerifiedMainnetBlockWindow,
     MAINNET_BLOCK_WINDOW_MAGIC, MAINNET_BLOCK_WINDOW_MAX_BYTES, MAINNET_BLOCK_WINDOW_POLICY,
     MAINNET_BLOCK_WINDOW_WIDTH,
+};
+
+pub use compact_prefill::{
+    derive_mainnet_compact_window, MainnetCompactCheckpoint, VerifiedMainnetCompactWindow,
+    MAINNET_COMPACT_BLOCK_MAX_BYTES, MAINNET_COMPACT_WINDOW_MAX_BYTES,
+    MAINNET_COMPACT_WINDOW_POLICY,
 };
 
 pub use bridge::{origin_allowed, parse_loopback_bind, Bridge};
