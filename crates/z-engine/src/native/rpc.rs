@@ -538,12 +538,10 @@ mod tests {
                 "accepted unsupported URL {url}"
             );
         }
-        assert!(
-            parse_host_port("https://127.0.0.1:8232")
-                .unwrap_err()
-                .to_string()
-                .contains("HTTPS requires a TLS transport")
-        );
+        assert!(parse_host_port("https://127.0.0.1:8232")
+            .unwrap_err()
+            .to_string()
+            .contains("HTTPS requires a TLS transport"));
     }
 
     #[test]

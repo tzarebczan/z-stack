@@ -1,8 +1,8 @@
 //! A validator session whose chain identity is checked before broadcast.
 
 use super::{host_header, parse_host_port, to_hex};
-use crate::Network;
 use crate::error::{EngineError, Result};
+use crate::Network;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
@@ -333,7 +333,7 @@ impl VerifiedValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::net::TcpListener;
     use std::thread::JoinHandle;
 
