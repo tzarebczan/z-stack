@@ -11,7 +11,10 @@ use zcash_keys::{
     keys::{UnifiedAddressRequest, UnifiedFullViewingKey},
 };
 use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::{BlockHeight, BranchId};
+use zcash_protocol::{
+    consensus::{BlockHeight, BranchId},
+    memo::MemoBytes,
+};
 use zip32::Scope;
 
 type NoteKey = (String, String, usize);
@@ -45,6 +48,14 @@ fn invalid() -> anyhow::Error {
 }
 fn hex(bytes: &[u8]) -> String {
     crate::web::to_hex(bytes)
+}
+// Match the pinned SQLite memo_repr encoding, including its empty-memo sentinel.
+fn memo_identity(memo: &MemoBytes) -> String {
+    if memo == &MemoBytes::empty() {
+        hex(&[0xf6])
+    } else {
+        hex(memo.as_slice())
+    }
 }
 fn bytes(encoded: &str) -> anyhow::Result<Vec<u8>> {
     crate::web::from_hex(encoded).map_err(|_| invalid())
@@ -123,7 +134,7 @@ fn owned_effects(
             scope: i64::from(internal),
             change: internal,
             address,
-            memo: Some(hex(output.memo().as_slice())),
+            memo: Some(memo_identity(output.memo())),
         });
     }
     for (pool, outputs, start) in [
@@ -173,7 +184,7 @@ fn owned_effects(
                 scope: i64::from(internal),
                 change: internal,
                 address,
-                memo: Some(hex(output.memo().as_slice())),
+                memo: Some(memo_identity(output.memo())),
             });
         }
     }
@@ -560,7 +571,7 @@ fn sent_effects(
                 to,
                 receiver: Receiver::Sapling(output.note().recipient()),
                 value: output.note().value().inner(),
-                memo: Some(hex(output.memo().as_slice())),
+                memo: Some(memo_identity(output.memo())),
             });
         }
     }
@@ -578,7 +589,7 @@ fn sent_effects(
                     to,
                     receiver: Receiver::Orchard(output.note().0.recipient()),
                     value: output.note().0.value().inner(),
-                    memo: Some(hex(output.memo().as_slice())),
+                    memo: Some(memo_identity(output.memo())),
                 });
             }
         }
@@ -979,6 +990,16 @@ mod tests {
         scope: Scope,
         spend: [u8; 32],
     ) -> Transaction {
+        sender_encrypted_transaction_with_memo(sender, recipient, scope, spend, [7; 512])
+    }
+
+    fn sender_encrypted_transaction_with_memo(
+        sender: &UnifiedFullViewingKey,
+        recipient: &UnifiedFullViewingKey,
+        scope: Scope,
+        spend: [u8; 32],
+        memo: [u8; 512],
+    ) -> Transaction {
         use chacha20poly1305::{
             aead::{AeadInPlace, KeyInit},
             ChaCha20Poly1305,
@@ -1003,7 +1024,7 @@ mod tests {
         let cmx = ExtractedNoteCommitment::from(note.commitment());
         let cv = ValueCommitment::from_bytes(&[0; 32]).unwrap();
         let ovk = sender.orchard().unwrap().to_ovk(Scope::External);
-        let enc = OrchardNoteEncryption::new(Some(ovk.clone()), note, [7; 512]);
+        let enc = OrchardNoteEncryption::new(Some(ovk.clone()), note, memo);
         let epk = OrchardDomain::epk_bytes(enc.epk());
         // Encrypt the known outgoing plaintext through the pinned domain. This
         // avoids introducing a second rand_core version solely for this fixture.
@@ -1176,6 +1197,88 @@ mod tests {
             assert_ne!(before, after);
         }
     }
+    fn assert_pending_empty_memo_preserves_identity(sent: bool) {
+        let (_dir, wallet, _) = scanned_fixture();
+        let (key, _) = fixture_account();
+        let foreign = crate::native::selective_scan::tests::test_ufvk(8);
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let identity = || {
+            shielded_effect_identity(
+                |sql| conn.query_row(sql, [], |r| r.get(0)),
+                ZNetwork::Regtest,
+                3,
+                &BTreeSet::new(),
+            )
+        };
+        let before = identity().unwrap();
+        let spend = if sent {
+            conn.query_row("SELECT nf FROM orchard_received_notes", [], |r| {
+                r.get::<_, Vec<u8>>(0)
+            })
+            .unwrap()
+            .try_into()
+            .unwrap()
+        } else {
+            [1; 32]
+        };
+        let pending = sender_encrypted_transaction_with_memo(
+            &key,
+            if sent { &foreign } else { &key },
+            Scope::External,
+            spend,
+            *MemoBytes::empty().as_array(),
+        );
+        zcash_client_backend::data_api::wallet::decrypt_and_store_transaction(
+            &ZNetwork::Regtest,
+            &mut wallet.open_db().unwrap(),
+            &pending,
+            None,
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE transactions SET created=1 WHERE txid=?1",
+            [pending.txid().as_ref().as_slice()],
+        )
+        .unwrap();
+        let table = if sent {
+            "sent_notes"
+        } else {
+            "orchard_received_notes"
+        };
+        let filter = "transaction_id=(SELECT id_tx FROM transactions WHERE txid=?1)";
+        let stored: Vec<u8> = conn
+            .query_row(
+                &format!("SELECT memo FROM {table} WHERE {filter}"),
+                [pending.txid().as_ref().as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, vec![0xf6]);
+        assert_eq!(identity().unwrap(), before);
+        conn.execute(
+            &format!("UPDATE {table} SET memo=x'01' WHERE {filter}"),
+            [pending.txid().as_ref().as_slice()],
+        )
+        .unwrap();
+        assert!(identity().is_err());
+        conn.execute(
+            &format!("UPDATE {table} SET memo=x'f6' WHERE {filter}"),
+            [pending.txid().as_ref().as_slice()],
+        )
+        .unwrap();
+        assert_eq!(identity().unwrap(), before);
+    }
+
+    #[test]
+    fn genuine_empty_pending_received_memo_uses_native_storage_encoding() {
+        assert_pending_empty_memo_preserves_identity(false);
+    }
+
+    #[test]
+    fn genuine_empty_pending_sent_memo_uses_native_storage_encoding() {
+        assert_pending_empty_memo_preserves_identity(true);
+    }
+
     #[test]
     fn authored_pending_shielded_sent_memo_drift_is_rejected_without_staling_mined_identity() {
         let (_dir, wallet, _) = scanned_fixture();
