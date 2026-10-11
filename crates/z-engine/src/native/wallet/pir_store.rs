@@ -294,9 +294,12 @@ impl<'a> NativePirStore<'a> {
             .map_err(|_| StoreError::Io("native_pir_database_busy".into()))?;
         // Initialize/migrate the native wallet before introducing extension schema.
         drop(
-            wallet
-                .open_db()
-                .map_err(|_| io(rusqlite::Error::InvalidQuery))?,
+            (if recovery_cancel.is_some() {
+                wallet.open_recovery_db()
+            } else {
+                wallet.open_db()
+            })
+            .map_err(|_| io(rusqlite::Error::InvalidQuery))?,
         );
         let mut conn = open_wallet_connection_with_durability(&wallet.paths.data_db, true)
             .map_err(|_| io(rusqlite::Error::InvalidQuery))?;

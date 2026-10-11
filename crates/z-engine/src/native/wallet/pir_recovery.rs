@@ -296,7 +296,7 @@ impl NativeWallet {
         }
         let _lease = database_lease::shared(&self.paths.data_db)?;
         cancel.transaction(|| schema(self))?;
-        let mut db = self.open_recovery_db()?;
+        let mut db = self.open_pir_db(Some(cancel))?;
         cancel.transaction(||db.transactionally_with_extension(|_,ext|->anyhow::Result<u64>{
             ext.execute("INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,1,1,NULL) ON CONFLICT(id) DO UPDATE SET blocked=1,generation=generation+1,receipt=NULL",[])?;
             Ok(ext.query_row("SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",[],|r|r.get(0))?)
@@ -321,7 +321,7 @@ impl NativeWallet {
         let _lease = database_lease::shared(&self.paths.data_db)?;
         cancel.transaction(|| schema(self))?;
         let generation = self.begin_regtest_pir_recovery(chain, cancel)?;
-        let mut db = self.open_recovery_db()?;
+        let mut db = self.open_pir_db(Some(cancel))?;
         let compact = evidence.compact_blocks()?;
         let mut genesis = crate::web::from_hex(
             &chain
@@ -453,8 +453,11 @@ impl NativeWallet {
         discovery: PirDiscoveryReport,
         cancel: &RecoveryCancellation,
     ) -> Result<PirRecoveryReport> {
-        let mut db = self.open_recovery_db()?;
-        let scope = self.recovery_scope()?;
+        let mut db = self.open_pir_db(Some(cancel))?;
+        let scope = cancel.transaction(|| {
+            db.transactionally_with_extension(|wdb, ext| native_scope_in_transaction(wdb, ext, 1))
+                .map_err(EngineError::from)
+        })?;
         let expected = expected_events(evidence, &scope)?;
         let store = store::NativePirStore::open_recovery(self, cancel).map_err(store_failed)?;
         let discrepancy = events_disagree(&expected, store.events().map_err(store_failed)?);
@@ -534,7 +537,7 @@ impl NativeWallet {
         }
         let _lease = database_lease::shared(&self.paths.data_db)?;
         self.begin_regtest_pir_recovery(chain, cancel)?;
-        let db = self.open_db()?;
+        let db = self.open_pir_db(Some(cancel))?;
         let current = db
             .block_max_scanned()
             .map_err(|_| failed("native_recovery_storage_failed"))?
@@ -717,6 +720,45 @@ mod tests {
             .ensure_pir_recovery_ready()
             .is_err());
         assert!(wallet.prepare_payment("unused", 1, None).is_err());
+    }
+    #[test]
+    fn cancelled_recovery_database_open_cannot_initialize_or_migrate_after_return() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = fixture_wallet(dir.path());
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE retained_fixture(value INTEGER); INSERT INTO retained_fixture VALUES(7);",
+        )
+        .unwrap();
+        drop(conn);
+        let before = std::fs::read(&wallet.paths.data_db).unwrap();
+        let cancel = RecoveryCancellation::new();
+        cancel.cancel();
+        assert!(wallet.open_pir_db(Some(&cancel)).is_err());
+        assert!(std::fs::read(&wallet.paths.data_db).unwrap() == before);
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let schemas: u64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(schemas, 1);
+        drop(conn);
+        // The exact same retained database genuinely needs and can run native
+        // initialization when its canonical cancellation token is still live.
+        let live = RecoveryCancellation::new();
+        let db = wallet.open_pir_db(Some(&live)).unwrap();
+        assert!(db.get_account_ids().unwrap().is_empty());
+        drop(db);
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT value FROM retained_fixture", [], |r| r
+                .get::<_, u64>(0))
+                .unwrap(),
+            7
+        );
     }
     #[test]
     fn durable_discovery_events_require_verified_metadata_before_completion() {

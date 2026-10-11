@@ -476,6 +476,13 @@ impl<T: ShardTransport> ShardTransport for CancelTransport<'_, T> {
     }
 }
 impl NativeWallet {
+    fn open_pir_db(&self, cancel: Option<&RecoveryCancellation>) -> Result<Db> {
+        match cancel {
+            Some(cancel) => cancel.transaction(|| self.open_recovery_db()),
+            None => self.open_db(),
+        }
+    }
+
     /// Rust-only, bounded regtest qualification using caller-owned private transport.
     /// Transport must enforce endpoint consent, deadline and network privacy policy.
     /// This discovery-only API polls an atomic cancellation flag. Canonical
@@ -530,7 +537,7 @@ impl NativeWallet {
             return Err(failed("native_pir_publication_invalid"));
         }
         let geometry = parse_init(&init).map_err(|_| failed("native_pir_publication_invalid"))?;
-        let mut db = self.open_db()?;
+        let mut db = self.open_pir_db(recovery_cancel)?;
         let (scope, native_snapshot) = db
             .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
                 Ok((
