@@ -67,7 +67,10 @@ pub use transparent_wallet::{
     WorkLimits as PirWorkLimits,
 };
 #[cfg(feature = "native-pir")]
-pub use wallet::{PirConfirmedTransaction, PirDiscoveryReport, RegtestAcceptedChain};
+pub use wallet::{
+    verify_regtest_recovery_blocks, PirConfirmedTransaction, PirDiscoveryReport,
+    RegtestAcceptedChain, VerifiedRegtestRecoveryBlocks,
+};
 
 #[cfg(feature = "native-pir")]
 pub use transparent_wallet::{

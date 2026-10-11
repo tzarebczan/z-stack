@@ -1,6 +1,10 @@
 //! SQLite-backed native wallet: create, sync, balance, shield, send.
 
 mod database_lease;
+#[cfg(feature = "native-pir")]
+mod recovery_blocks;
+#[cfg(feature = "native-pir")]
+pub use recovery_blocks::{verify_regtest_recovery_blocks, VerifiedRegtestRecoveryBlocks};
 mod payments;
 #[cfg(feature = "native-pir")]
 mod pir;
