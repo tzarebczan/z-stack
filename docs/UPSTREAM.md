@@ -54,6 +54,47 @@ separate from the SDK dependency graph and is not a production server release.
 
 ## Build and integration boundaries
 
+### Native historical tree-state compatibility
+
+Local mainnet checks with Zakura 1.6.0 and Zaino 0.10.1 found that
+`GetTreeState` could return gRPC `INTERNAL` for a historical height while
+`GetBlock` at that height and `GetTreeState` by its block hash succeeded.
+The returned tree state matched the requested height, network and display-order
+block hash. This is a server selector compatibility issue, independent of the
+pinned `zakura-client-backend` 0.1.0-rc7 parser.
+
+`z-engine` handles this in `native/tree_state.rs`, without patching upstream
+crates or selecting another endpoint. It first requests the exact height. On an
+eligible remote gRPC error or an elapsed request timeout, it resolves that same
+height with `GetBlock`, then requests
+the tree state using the returned internal-order hash. It checks the block's
+height and 32-byte hash, the tree state's height and display-order hash, the
+selected wallet network when available, and all three native frontiers. A
+successful malformed response is refused. The public frontier-fetch API has
+no network argument; it checks a recognized network label and the explicit
+local testnet/regtest selection, and preserves the caller's network/genesis checks.
+
+Tonic 0.14.6 and tonic-prost 0.14.6 use `INTERNAL` for local framing/protobuf
+failures as well as remote errors, and the protobuf mapping discards the error
+source. The native channel therefore marks only eligible numeric statuses it
+observes in actual `GetTreeState` response headers/trailers. It strips any
+server-supplied provenance marker first and forwards data frames without
+collecting them. The helper requires the marked code to match the returned
+status. Local decode/framing failures, explicit refusals and unmarked connection
+errors stop the lookup. Regressions include malformed successful wire data,
+forged success markers and genuine remote error trailers.
+
+Each RPC has a 15-second budget, the entire lookup has a 45-second deadline,
+and each decoded response is limited to 4 MiB. This lookup does not move birthdays
+or change transaction submission/rebroadcast policy. Native gRPC regressions cover the height-failure/hash-
+success path, internal/display byte order, matching network labels, malformed
+or foreign responses, response bounds and stalled requests.
+
+Remove the compatibility branch only after the supported light-server versions
+resolve the same historical heights directly and the typed native regressions
+plus a bounded real historical restore pass without it. Rebuild both WASM
+variants after changes to engine Rust sources, even though this module is native.
+
 `z-engine` defaults to native SQLite/networking. `z-wasm` disables those defaults
 and enables browser-safe scan, transaction, proving, and hardware features.
 Threaded WASM adds `multicore`; Sapling proving parameter files remain separate.

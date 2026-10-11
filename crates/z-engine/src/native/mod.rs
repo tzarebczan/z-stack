@@ -13,6 +13,7 @@ mod selective_scan;
 mod submission_channel;
 mod transparent_funding;
 mod transparent_refresh;
+mod tree_state;
 mod verify;
 mod wallet;
 

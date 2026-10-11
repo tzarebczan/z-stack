@@ -62,7 +62,7 @@ pub(super) async fn run(
     let tuning = sync_tuning(crate::uses_fast_sync(light_url));
     let skip_ironwood = super::wallet::NativeWallet::skip_ironwood_subtrees(network, light_url);
     super::wallet::validate_empty_walk_scan(db_path)?;
-    if let Some(height) = reconcile_chain_checkpoint(client, db, db_path, tip).await? {
+    if let Some(height) = reconcile_chain_checkpoint(client, network, db, db_path, tip).await? {
         cache
             .truncate(BlockHeight::from_u32(height))
             .await
@@ -130,6 +130,7 @@ pub(super) async fn run(
     };
     let (tree_state_job, roots_job) = spawn_state_and_roots(
         pool.control.clone(),
+        network,
         light_url.to_string(),
         skip_ironwood,
         progress.clone(),
@@ -694,6 +695,7 @@ fn rebuilt_offload(
 /// and leaves selective shard scanning hashing every commitment.
 fn spawn_state_and_roots(
     mut client: LwdClient,
+    network: ZNetwork,
     light_url: String,
     skip_ironwood: bool,
     progress: Option<Arc<Mutex<SyncProgress>>>,
@@ -710,7 +712,7 @@ fn spawn_state_and_roots(
     });
     let (roots_tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
-        let fetched = fetch_tree_state(&mut client, prior).await;
+        let fetched = fetch_tree_state(&mut client, prior, network).await;
         let start = match &fetched {
             Ok(state) => roots_start(have, selective_scan::tree_sizes(state)),
             Err(_) => have,
@@ -940,7 +942,7 @@ async fn historic(
                 ChainStateSrc::Cached(cs) | ChainStateSrc::Walk(cs) => cs,
                 ChainStateSrc::Fetch => {
                     info!("fetching GetTreeState once at scan start");
-                    let cs = fetch_tree_state(client, u32::from(prior)).await?;
+                    let cs = fetch_tree_state(client, u32::from(prior), network).await?;
                     size_cursor = Some(selective_scan::tree_sizes(&cs));
                     cs
                 }
@@ -1438,7 +1440,7 @@ async fn finish_inflight(
     if trial.had_notes && !selective_scan::frontier_covers(&from_state, prev.start_sizes) {
         let prior = u32::from(prev.range.block_range().start).saturating_sub(1);
         info!("GetTreeState for note batch after note-free frontier skip");
-        from_state = fetch_tree_state(client, prior).await?;
+        from_state = fetch_tree_state(client, prior, network).await?;
     }
     let finalized = match selective_scan::finalize_trial(
         from_state,
@@ -1516,7 +1518,7 @@ async fn finish_streamed(
         scanned,
         |height| {
             let mut client = client.clone();
-            async move { fetch_tree_state(&mut client, height).await }
+            async move { fetch_tree_state(&mut client, height, network).await }
         },
     )
     .await
@@ -1771,6 +1773,7 @@ fn truncate_existing(
 // the no-work path; preserve the database and its signed payment receipts.
 async fn reconcile_chain_checkpoint(
     client: &mut LwdClient,
+    network: ZNetwork,
     db: &mut super::wallet::SyncDb,
     db_path: &Path,
     tip: u32,
@@ -1789,7 +1792,7 @@ async fn reconcile_chain_checkpoint(
             .block_metadata(BlockHeight::from_u32(height))
             .map_err(|e| EngineError::WalletDb(format!("reorg checkpoint: {e}")))?
             .ok_or_else(|| EngineError::WalletDb("missing reorg checkpoint".into()))?;
-        let actual = fetch_tree_state(client, height).await?;
+        let actual = fetch_tree_state(client, height, network).await?;
         if u32::from(actual.block_height()) != height {
             return Err(EngineError::Transport(
                 "reorg checkpoint height mismatch".into(),
@@ -1970,7 +1973,7 @@ async fn scan_inserted(
                 ),
             );
         }
-        fetch_tree_state(client, u32::from(prior)).await?
+        fetch_tree_state(client, u32::from(prior), network).await?
     };
     let limit = blocks.len();
 
@@ -2422,42 +2425,15 @@ where
     Err(last_err.unwrap_or_else(|| EngineError::Transport("GetBlockRange failed".into())))
 }
 
-pub(super) async fn fetch_tree_state(client: &mut LwdClient, height: u32) -> Result<ChainState> {
-    let timeout = Duration::from_secs(45);
-    let mut last_err = None;
-    for _attempt in 1u32..=3 {
-        match tokio::time::timeout(
-            timeout,
-            client.get_tree_state(BlockId {
-                height: u64::from(height),
-                hash: vec![],
-            }),
-        )
-        .await
-        {
-            Ok(Ok(resp)) => {
-                info!("tree state RPC completed");
-                return resp
-                    .into_inner()
-                    .to_chain_state()
-                    .map_err(|e| EngineError::Transport(format!("tree state: {e}")));
-            }
-            Ok(Err(e)) => {
-                info!("tree state RPC retry");
-                warn!("GetTreeState failed; retrying");
-                last_err = Some(EngineError::Transport(format!("GetTreeState: {e}")));
-            }
-            Err(_) => {
-                info!("tree state RPC timeout");
-                warn!("GetTreeState timed out; retrying");
-                last_err = Some(EngineError::Transport(format!(
-                    "GetTreeState at {height} timed out after {}s",
-                    timeout.as_secs()
-                )));
-            }
-        }
-    }
-    Err(last_err.unwrap_or_else(|| EngineError::Transport("GetTreeState failed".into())))
+pub(super) async fn fetch_tree_state(
+    client: &mut LwdClient,
+    height: u32,
+    network: ZNetwork,
+) -> Result<ChainState> {
+    super::tree_state::fetch(client, height, Some(network))
+        .await?
+        .to_chain_state()
+        .map_err(|_| EngineError::Transport("GetTreeState malformed frontier".into()))
 }
 
 const RANGE_TOTAL_CAP_FACTOR: u32 = 10;

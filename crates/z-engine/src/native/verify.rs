@@ -83,7 +83,7 @@ impl NativeWallet {
         let mut roots = Vec::new();
         let mut chain_at_anchor = None;
         for height in heights {
-            let chain = fetch_tree_state(&mut client, height).await?;
+            let chain = fetch_tree_state(&mut client, height, self.network()).await?;
             let id = BlockHeight::from_u32(height);
             let sapling = db
                 .with_sapling_tree_mut(|t| t.root_at_checkpoint_id(&id))
