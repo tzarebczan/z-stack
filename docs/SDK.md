@@ -119,6 +119,31 @@ reject with `birthday_above_tip`. Restores beyond the default deep-sync limit
 reject with `deep_sync_rejected` before saving unless `deepSync` is enabled.
 Choose a height or date before the first deposit for every recovery method.
 
+### Verify the saved chain tip
+
+Browser `createWallet({ verifyChainTip: true, ... })` checks the last scanned
+compact block against the configured light server on each sync. The default is
+false. This option is available in source builds; published alpha.9 predates it.
+Once the wallet has scanned a block, this option adds one public compact
+block range request, even when the server's tip height is unchanged or shorter.
+The requested height is the lower of the saved scan height and the server tip.
+It does not add an address or transaction lookup.
+
+The response must contain exactly the requested block with a valid block hash.
+A changed hash causes the engine to rewind and scan the replacement chain; a
+shorter tip first removes the discarded suffix. A tip below the wallet birthday,
+unavailable verification evidence, or an unsupported deep fork rejects sync.
+Such a failure does not establish that a previously mined payment is still mined.
+Applications should await a successful sync before using its history as settlement
+evidence. The check compares against the chosen light server; it does not replace
+validator consensus verification.
+
+Rewinds retain recorded outgoing payment identities and input reservations.
+Sync may rebroadcast retained signed bytes, but does not construct a replacement
+payment. Closing cancels verification under the ordinary wallet lifecycle.
+The optional browser gift-card worker always enables this check so inspection
+can downgrade a reorged claim from mined to unresolved.
+
 ### Transparent-send primitives
 
 Ordinary browser `send` remains shielded-only. `sendTransparent` is a separate,
@@ -353,6 +378,14 @@ native surface calls the desktop engine over loopback; it does not expose browse
 storage, hardware restore or browser-only transparent-send methods.
 Do not call `initialize()` or `createWallet()` for it. The `:8787` JSON API
 holds the wallet: never bind or proxy it off localhost.
+
+The source-built native engine checks a saved block's height and hash with a
+public `GetTreeState` request before accepting an unchanged or shorter tip.
+If the hash changed, it searches at most 32 stored block checkpoints for a common
+ancestor. A successful rewind unmines affected transactions while retaining their
+identities and signed payment receipts. Missing evidence or an unsupported fork
+rejects sync without replacing the wallet database. This check leaves the existing
+download and scan profiles unchanged.
 
 ## Advanced
 

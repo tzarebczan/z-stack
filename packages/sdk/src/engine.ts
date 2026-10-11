@@ -128,7 +128,10 @@ export type RestoreOpts = {
    */
   beforeCommit?: (snapshot: WalletSnapshot) => void | Promise<void>;
 };
-export type SendOptions = Partial<HardwareSendOptions>;
+export type SendOptions = Partial<HardwareSendOptions> & {
+  /** Browser software wallets only. Enforced on the actual single-recipient shielded proposal. */
+  maxFeeZat?: string;
+};
 
 export type EngineClientOpts = {
   /** Bearer token for `z-wallet serve` / desktop bridge (401 without it on spend routes). */
@@ -318,7 +321,7 @@ export function createEngineClient(baseUrl: string, opts?: EngineClientOpts): En
       if (sendOpts?.signer) {
         return Promise.reject(new WalletError("hardware_unsupported", "hardware wallets need the browser engine (createWallet)"));
       }
-      if (sendOpts?.signal || sendOpts?.beforeBroadcast || sendOpts?.onStage) {
+      if (sendOpts?.signal || sendOpts?.beforeBroadcast || sendOpts?.beforeSubmit || sendOpts?.onStage || sendOpts?.maxFeeZat !== undefined) {
         return Promise.reject(new WalletError("unknown", "Send review and cancellation hooks require the browser engine."));
       }
       const dest = to.trim();

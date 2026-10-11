@@ -81,6 +81,8 @@ export type WalletOptions = {
    * servers, where such a restore fails with `deep_sync_rejected`.
    */
   deepSync?: boolean;
+  /** Compare the last scanned compact block with the server on every sync, including unchanged or shorter tips. Adds one public block request. Default false. */
+  verifyChainTip?: boolean;
   /** Retry transient sync outages for this many milliseconds after the first failure. Default 90,000; zero disables retry. Transport request timeouts are separate. */
   lightServerGraceMs?: number;
   /**
@@ -216,6 +218,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
         requirePersistence: true,
         ...(lightUrl ? { lightUrl } : {}),
         allowDeepSync: opts.deepSync ?? transport.kind === "lwd-pipe",
+        verifyChainTip: opts.verifyChainTip,
         ...(opts.lightServerGraceMs !== undefined ? { lightServerGraceMs: opts.lightServerGraceMs } : {}),
         ...(opts.autoShield !== undefined ? { autoShield: opts.autoShield } : {}),
         ...(opts.prewarmProvingKey !== undefined ? { prewarmProvingKey: opts.prewarmProvingKey } : {}),

@@ -138,6 +138,7 @@ localhost. A Vite development build alone does not configure production headers.
 | [`@z-stack/sdk`](packages/sdk/README.md) | Browser wallet, events, transport, native bridge client, Vite plugin |
 | [`@z-stack/core`](packages/core/README.md) | Platform-independent amounts, addresses, history, errors |
 | [`@z-stack/passkey`](packages/passkey/README.md) | WebAuthn PRF vaults; no runtime dependencies |
+| [`@z-stack/gift-cards`](packages/gift-cards/README.md) | Optional source package for bearer gifts, encrypted recovery and isolated browser wallets |
 | `z-engine` | Zakura-backed wallet engine; native SQLite and browser snapshot stores |
 | `z-wasm` | WASM bindings; single-thread and threaded builds |
 | `z-desktop`, `z-node-launcher` | Native app and node tooling; separate from browser integration |

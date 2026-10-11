@@ -1,0 +1,71 @@
+{
+  "name": "@z-stack/gift-cards",
+  "version": "0.1.0-alpha.9",
+  "private": true,
+  "description": "Optional shielded bearer gift cards with isolated browser wallets and application-owned encrypted storage",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "@z-stack/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./browser": {
+      "@z-stack/source": "./src/browser.ts",
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      },
+      "./browser": {
+        "types": "./dist/browser.d.ts",
+        "import": "./dist/browser.js"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_LICENSES.txt",
+    "THIRD_PARTY_DEPENDENCIES.json"
+  ],
+  "scripts": {
+    "build": "node ../../scripts/build-package.mjs gift-cards",
+    "typecheck": "tsc --noEmit",
+    "prepack": "node ../../scripts/check-package.mjs gift-cards"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tzarebczan/z-stack.git",
+    "directory": "packages/gift-cards"
+  },
+  "homepage": "https://github.com/tzarebczan/z-stack/tree/main/packages/gift-cards",
+  "bugs": {
+    "url": "https://github.com/tzarebczan/z-stack/issues"
+  },
+  "peerDependencies": {
+    "@z-stack/sdk": "0.1.0-alpha.9"
+  },
+  "peerDependenciesMeta": {
+    "@z-stack/sdk": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@z-stack/sdk": "workspace:*"
+  }
+}

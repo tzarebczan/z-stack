@@ -49,11 +49,11 @@ type Wallet = HardwareWalletHandle & {
   ) => void;
   nextUnifiedAddress: () => string;
   attachSeed?: (mnemonic: string) => void;
-  estimateFee?: (to: string, amountZec: string, memo?: string) => string;
+  estimateFee?: (to: string, amountZec: string, memo?: string, maxFeeZat?: string) => string;
   estimateTransparentFee?: (to: string, amountZec: string) => string;
   proveTransparentSend?: (mnemonic: string, to: string, amountZec: string, maxFeeZat?: string) => string;
   maxSend?: (to?: string) => string;
-  proveSend?: (mnemonic: string, to: string, amountZec: string, memo?: string) => string;
+  proveSend?: (mnemonic: string, to: string, amountZec: string, memo?: string, maxFeeZat?: string) => string;
   proveShield?: (mnemonic: string, thresholdZat: number) => string;
   snapshotJson: (server: string) => string;
   toSnapshot: () => Uint8Array;
@@ -390,7 +390,7 @@ async function handle(msg: Req): Promise<void> {
           ? w.proveShield?.(msg.mnemonic ?? "", msg.thresholdZat ?? 100_000)
           : msg.kind === "sendTransparent"
             ? w.proveTransparentSend?.(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.maxFeeZat)
-          : w.proveSend?.(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.memo);
+          : w.proveSend?.(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.memo, msg.maxFeeZat);
         if (typeof out !== "string") throw new Error("this wasm build cannot prove");
         const { hex, txid } = JSON.parse(out) as { hex?: string; txid?: string };
         if (!hex) throw new Error("prove returned no hex");

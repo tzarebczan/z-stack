@@ -77,7 +77,7 @@ export function zStack(options: ZStackViteOptions = {}): ZStackVitePlugin {
     enforce: "pre",
     config: () => ({
       worker: { format: "es" },
-      optimizeDeps: { exclude: ["@z-stack/sdk"] },
+      optimizeDeps: { exclude: ["@z-stack/sdk", "@z-stack/gift-cards"] },
       ...(isolate ? { server: { headers }, preview: { headers } } : {}),
     }),
     // A linked checkout lives outside the app, so Vite must be allowed to serve

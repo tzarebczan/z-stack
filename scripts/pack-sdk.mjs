@@ -13,7 +13,8 @@ function run(command, args, cwd) {
   const result = spawnSync(command, args, { cwd, stdio: "inherit", shell: process.platform === "win32" });
   assert.equal(result.status, 0, `${command} failed to pack distribution`);
 }
-const names = process.argv.includes("--base-only") ? ["base"] : ["core", "passkey", "sdk"];
+assert.ok(!(process.argv.includes("--base-only") && process.argv.includes("--gift-cards-only")), "select one optional package");
+const names = process.argv.includes("--base-only") ? ["base"] : process.argv.includes("--gift-cards-only") ? ["gift-cards"] : ["core", "passkey", "sdk"];
 for (const name of names) {
   const pkg = join(root, "packages", name);
   if (name !== "sdk") {
@@ -43,4 +44,4 @@ for (const name of names) {
     run("npm", ["pack", "--ignore-scripts", "--pack-destination", out], scratch);
   } finally { rmSync(scratch, { recursive: true, force: true }); }
 }
-console.log(`SDK preview archives: ${out}`);
+console.log(`Distribution archives: ${out}`);

@@ -81,7 +81,7 @@ async function handle(msg: Req): Promise<void> {
     try {
       const out: { hex?: string; txid?: string } = JSON.parse(
         msg.kind === "send"
-          ? w.proveSend(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.memo)
+          ? w.proveSend(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.memo, msg.maxFeeZat)
           : msg.kind === "sendTransparent"
             ? w.proveTransparentSend(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.maxFeeZat)
           : w.proveShield(msg.mnemonic ?? "", msg.thresholdZat ?? 100_000),

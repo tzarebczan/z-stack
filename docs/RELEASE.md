@@ -5,6 +5,10 @@ with NU7 support and downloadable archives. Alpha.1 and alpha.2 predate NU7. Pac
 production WASM engines, so an app consuming built packages does not need Rust. See the
 [walkthrough](GETTING-STARTED.md) and [support limits](SUPPORT.md).
 
+The published alpha.9 preview predates gift cards. The optional gift-card commands
+below apply to a source checkout containing that package. A future preview must
+explicitly include its archive before consumers can enable it.
+
 ## Build archives and a preview bundle
 
 Install the toolchains listed in [CONTRIBUTING.md](../CONTRIBUTING.md), then run:
@@ -15,12 +19,14 @@ pnpm build:sdk
 pnpm release:check
 pnpm pack:sdk
 pnpm pack:base
+pnpm pack:gift-cards
 pnpm bundle:preview
 ```
 
 The Zcash package set is `@z-stack/core`, `@z-stack/passkey` and `@z-stack/sdk`.
 Optional `@z-stack/base` has its own archive and runtime license inventory; a
-Zcash-only app does not install it. Keep all four package versions, the workspace
+Zcash-only app does not install it. Optional `@z-stack/gift-cards` has a dependency-free
+root and a browser entry with an optional SDK peer. Keep all five package versions, the workspace
 and `SDK_VERSION` aligned. Pin exact alpha versions in consuming apps.
 
 Archives contain built JavaScript, declarations, source maps and retained legal
@@ -45,7 +51,7 @@ outside the SDK checkout. None of these commands publishes to a registry.
 `pnpm release:check` verifies licenses, documentation links, patch provenance,
 types, generated API docs, regressions and external archive consumers. Consumers
 build the examples, check server-safe imports and render React under browser API
-traps. Optional Base and combined examples have separate archive checks.
+traps. Optional Base, gift-card, and combined examples have separate archive checks.
 
 For Rust or engine changes, also run:
 
@@ -113,6 +119,7 @@ Install Playwright Chromium, Firefox and WebKit, then run:
 ```sh
 pnpm test:packages:browser
 pnpm test:base:browser
+pnpm test:gift-cards:browser
 ```
 
 These checks use fresh archive consumers, real single-threaded/threaded engines,
@@ -140,6 +147,38 @@ match each client's `Z_STACK_REGTEST_NU6_3` to the fixture. Override
 `Z_STACK_ZEBRA_RPC` and `Z_STACK_REGTEST_LWD` only for another deliberately isolated
 local fixture. See [node tooling](NODE.md).
 
+For funded gift-card qualification, build and pack the matching source packages
+and use an already running, funded, disposable regtest fixture. The script uses
+the public test phrase, creates isolated browser wallets, mines blocks, and
+submits real transactions. Save a local descriptor with this shape:
+
+```json
+{
+  "lightUrl": "http://127.0.0.1:18132",
+  "rpcUrl": "http://127.0.0.1:18232",
+  "cookiePath": "/path/to/disposable-chain/.cookie"
+}
+```
+
+Both endpoints must be loopback. The cookie belongs to that owned fixture. Match
+the client's activation heights to the validator and run browsers sequentially:
+
+```sh
+export Z_STACK_GIFT_FIXTURE_STATE=/path/to/owned-gift-fixture.json
+export Z_STACK_REGTEST_NU6_3=150
+export Z_STACK_REGTEST_NU7=250
+node scripts/test-gift-cards-funded.mjs --browser=chromium
+node scripts/test-gift-cards-funded.mjs --browser=firefox
+node scripts/test-gift-cards-funded.mjs --browser=webkit
+```
+
+This check covers lost funding acknowledgements, reload, retained receipts,
+duplicate funding and claim prevention, six scanned confirmations, exact face
+amount redemption, a mined claim, a shortened-tip claim reorg followed by mining
+the same claim again, and main-wallet address preservation. It does not replace
+deep-fork, quota, physical device, or mainnet qualification. Stop the
+owned fixture after testing, including after a failure.
+
 The browser fixture uses compact transparent scanning and a loopback validator
 submission fallback. Keep that fallback out of production gateways. Combined
 Zcash/Base acceptance additionally needs an isolated Anvil EVM; its mock token
@@ -162,24 +201,31 @@ patch boundary described in [UPSTREAM.md](UPSTREAM.md).
 
 ## Assemble downloadable release assets
 
+The filenames below use the checkout's current version for local rehearsal.
+Before publishing a gift-card preview, choose a new unpublished version, update
+the synchronized package versions and filenames, and verify that committed
+revision. Keep the existing published alpha.9 assets and tag unchanged.
+
 From a clean, signed, verified source commit, run the build/check commands above,
-then pack all four packages and the preview bundle. The bundle uses the release version in its filename,
+then pack all five packages and the preview bundle. The bundle uses the release version in its filename,
 records the source revision in `PREVIEW.json`, and has a matching one-file `.sha256` sidecar. Create the full-set outer checksums in `artifacts/`:
 
 ```sh
 pnpm pack:sdk
 pnpm pack:base
+pnpm pack:gift-cards
 pnpm bundle:preview
 cd artifacts
 sha256sum z-stack-core-0.1.0-alpha.9.tgz z-stack-passkey-0.1.0-alpha.9.tgz \
   z-stack-sdk-0.1.0-alpha.9.tgz z-stack-base-0.1.0-alpha.9.tgz \
+  z-stack-gift-cards-0.1.0-alpha.9.tgz \
   z-stack-preview-0.1.0-alpha.9.tgz > SHA256SUMS-alpha.9
 sha256sum --quiet -c SHA256SUMS-alpha.9
 # macOS: generate with shasum -a 256; verify with shasum -q -a 256 -c SHA256SUMS-alpha.9.
 ```
 
 Use a directory with exactly one preview bundle for this version. Upload these
-five archives, the preview `.sha256` sidecar and the full-set checksums to the prerelease tagged `v0.1.0-alpha.9`, targeting
+six archives, the preview `.sha256` sidecar and the full-set checksums to a new prerelease tag matching the selected version, targeting
 the verified commit. Download them again and compare all hashes before publishing.
 Scaffold an app from the downloaded bundle as the final acceptance check. Publishing
 a GitHub prerelease does not publish to npm or Cargo. Keep source tags and signed
@@ -193,6 +239,7 @@ From a clean SDK source revision:
 pnpm release:check
 pnpm pack:sdk
 pnpm pack:base
+pnpm pack:gift-cards
 pnpm bundle:preview
 ```
 
@@ -201,3 +248,24 @@ from the SDK archives. `SHA256SUMS-alpha.9` covers only its named files; a passi
 checksum does not verify additional downloads. Verify the receipt's GitHub artifact
 attestation separately with `gh attestation verify z-stack-zaino-image.json --repo tzarebczan/z-stack`, then use its immutable image digest. The SDK preview does not
 need this container or receipt.
+
+## Optional gift-card package checks
+
+`pnpm pack:sdk` continues to produce only the core/passkey/SDK set. Build and pack
+the gift-card API explicitly with `pnpm build:gift-cards` and `pnpm pack:gift-cards`.
+Source-built preview bundles include that fifth package alongside Base. The
+published alpha.9 preview does not include it.
+
+```sh
+pnpm check:gift-cards
+pnpm test:gift-cards
+node scripts/test-gift-cards-package.mjs --archives=artifacts
+node scripts/test-gift-cards-package.mjs --browser --browsers=chromium,firefox,webkit --archives=artifacts
+```
+
+The pure archive consumer installs without SDK/core/passkey or a registry lookup
+for unpublished peers. The browser consumer explicitly installs the same SDK
+archive, compiles the emitted gift worker URL, and executes real engine key
+derivation in its isolated worker. Keep funded payment, reorg, and lost-reply
+qualification separate from that package smoke test. The application still owns
+its authorization and encrypted recovery vault. See [gift-card integration](GIFT-CARDS.md).

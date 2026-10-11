@@ -55,6 +55,8 @@ test("native send refuses browser cancellation and review hooks before contactin
     { signal: new AbortController().signal },
     { beforeBroadcast: () => true },
     { onStage() {} },
+    { beforeSubmit: async () => {} },
+    { maxFeeZat: "10000" },
   ]) {
     await assert.rejects(engine.send("fixture", "0.01", undefined, options), /require the browser engine/);
   }

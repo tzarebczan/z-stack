@@ -56,7 +56,7 @@ declare module "./generated/z_wasm.js" {
     estimateTransparentFee(to: string, amountZec: string): string;
     proveTransparentSend(mnemonic: string, to: string, amountZec: string, maxFeeZat?: string): string;
     maxSend(to?: string): string;
-    proveSend(mnemonic: string, to: string, amountZec: string, memo?: string): string;
+    proveSend(mnemonic: string, to: string, amountZec: string, memo?: string, maxFeeZat?: string): string;
     proveShield(mnemonic: string, thresholdZat: number): string;
     applyUtxos(json: string): number;
     applyMempool(json: string): number;
@@ -129,7 +129,7 @@ declare module "./generated-mt/z_wasm.js" {
     estimateTransparentFee(to: string, amountZec: string): string;
     proveTransparentSend(mnemonic: string, to: string, amountZec: string, maxFeeZat?: string): string;
     maxSend(to?: string): string;
-    proveSend(mnemonic: string, to: string, amountZec: string, memo?: string): string;
+    proveSend(mnemonic: string, to: string, amountZec: string, memo?: string, maxFeeZat?: string): string;
     proveShield(mnemonic: string, thresholdZat: number): string;
     applyUtxos(json: string): number;
     applyMempool(json: string): number;

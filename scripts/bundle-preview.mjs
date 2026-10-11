@@ -18,7 +18,7 @@ assert.ok(changes.length === 0 || process.argv.includes('--allow-dirty'), 'Commi
 // Ignored dist/ and archives can come from an older same-version commit.
 // Build from the current sources, then repack before associating them with HEAD.
 // The pack gate checks both WASM source fingerprints; stale Rust builds fail.
-for (const command of ['build:packages', 'docs:api', 'pack:sdk', 'pack:base']) {
+for (const command of ['build:packages', 'docs:api', 'pack:sdk', 'pack:base', 'pack:gift-cards']) {
   const result = spawnSync('pnpm', [command], {cwd: root, stdio: 'inherit', shell: process.platform === 'win32'});
   assert.equal(result.status, 0, `${command} failed; no preview source receipt was issued`);
 }
@@ -28,7 +28,7 @@ const currentChanges = execFileSync('git', ['status', '--porcelain', '--untracke
   .trimEnd().split('\n').filter(line => line && !line.slice(3).startsWith('coord/'));
 assert.deepEqual(currentChanges, changes, 'Source worktree changed while rebuilding preview artifacts');
 assert.ok(existsSync(join(root, 'docs/api/index.html')), 'Missing rebuilt offline API reference');
-const packages = inspectArchives(join(root, 'artifacts'), undefined, ['core', 'passkey', 'sdk', 'base']);
+const packages = inspectArchives(join(root, 'artifacts'), undefined, ['core', 'passkey', 'sdk', 'base', 'gift-cards']);
 assert.ok([...packages.values()].every(pkg => pkg.version === version), 'Archive versions must match the bundle release version');
 const output = join(root, 'artifacts', `z-stack-preview-${version}${changes.length ? '-dirty' : ''}.tgz`);
 const scratch = mkdtempSync(join(tmpdir(), 'z-stack-preview-'));
@@ -43,7 +43,7 @@ try {
   copy('examples/shared-base');
   copy('examples/README.md'); copy('examples/templates.json');
   for (const template of Object.keys(JSON.parse(readFileSync(join(root, 'examples/templates.json'))))) copyTemplate(template, join(bundle, 'examples', template));
-  for (const name of ['sdk', 'core', 'passkey', 'base']) copy(`packages/${name}/README.md`);
+  for (const name of ['sdk', 'core', 'passkey', 'base', 'gift-cards']) copy(`packages/${name}/README.md`);
   mkdirSync(join(bundle, 'scripts')); copy('scripts/create-example.mjs'); copy('scripts/check-testnet-chain.mjs');
   mkdirSync(join(bundle, 'artifacts'));
   for (const pkg of packages.values()) cpSync(pkg.file, join(bundle, 'artifacts', pkg.filename));
@@ -52,7 +52,7 @@ try {
   const manifest = { version, revision, dirty: changes.length > 0,
     packages: Object.fromEntries([...packages].map(([name, { filename, version, sha256 }]) => [name, { filename, version, sha256 }])) };
   writeFileSync(join(bundle, 'PREVIEW.json'), JSON.stringify(manifest, null, 2) + '\n');
-  writeFileSync(join(bundle, 'README.md'), `# z-stack preview ${version}\n\nSource revision: ${revision}${changes.length ? ' (local uncommitted rehearsal)' : ''}.\n\nUse Node 22.18+; no Rust toolchain or npm scope is needed for these built archives.\n\n1. Unpack this bundle into an ordinary local directory.\n2. Run \`node scripts/create-example.mjs browser-wallet /path/to/my-wallet --install\`. Use \`next-wallet\` for Next.js.\n3. In the generated app, run \`npm run dev\`. Use disposable test funds only.\n4. Follow [the integration walkthrough](docs/GETTING-STARTED.md). Create, reload and sync are verified on public testnet. Use [the Valar faucet](https://faucet.testnet.valargroup.dev/) for test coins; daily limits apply. An external alpha.7 integration reported a Valar-funded public receive and a mined shielded self-send. [Funded testing](docs/GETTING-STARTED.md#funded-testing) records that evidence and the separate source-checkout regtest path.\n\nThe offline API starts at [docs/api/index.html](docs/api/index.html). PREVIEW.json records archive hashes and the source revision. Notices are included in every package. Source-build instructions and patch links in the deeper docs refer to the repository checkout.\n\nAccount and backup services are optional and configured by your application.\n`);
+  writeFileSync(join(bundle, 'README.md'), `# z-stack preview ${version}\n\nSource revision: ${revision}${changes.length ? ' (local uncommitted rehearsal)' : ''}.\n\nUse Node 22.18+; no Rust toolchain or npm scope is needed for these built archives.\n\n1. Unpack this bundle into an ordinary local directory.\n2. Run \`node scripts/create-example.mjs browser-wallet /path/to/my-wallet --install\`. Use \`next-wallet\` for Next.js.\n3. In the generated app, run \`npm run dev\`. Use disposable test funds only.\n4. Follow [the integration walkthrough](docs/GETTING-STARTED.md). Create, reload and sync are verified on public testnet. Use [the Valar faucet](https://faucet.testnet.valargroup.dev/) for test coins; daily limits apply. An external alpha.7 integration reported a Valar-funded public receive and a mined shielded self-send. [Funded testing](docs/GETTING-STARTED.md#funded-testing) records that evidence and the separate source-checkout regtest path.\n\nThe offline API starts at [docs/api/index.html](docs/api/index.html). PREVIEW.json records archive hashes and the source revision. Notices are included in every package. Source-build instructions and patch links in the deeper docs refer to the repository checkout.\n\nAccount and backup services are optional and configured by your application. Gift cards are an optional fifth package; scaffold with \`--with-gift-cards\` to install its API and follow [gift-card integration](docs/GIFT-CARDS.md).\n`);
   const files = [];
   function inventory(dir, relative = '') {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {

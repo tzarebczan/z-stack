@@ -29,6 +29,10 @@ test('Base addon is explicit and refuses unsupported templates', () => {
   assert.throws(() => createExample('local-passkey', '/unused', '/missing', {withBase:true}), /supports browser-wallet/);
 });
 
+test('gift-card addon requires a Zcash wallet template', () => {
+  assert.throws(() => createExample('base-wallet', '/unused', '/missing', {withGiftCards:true}), /requires a Zcash wallet/);
+});
+
 
 test('generated instructions use already-vendored archives and retain template commands', () => {
   const input = '# Demo\n\nDescription.\n\nCopy this directory and install archives:\n\n```sh\ncd /path/to/copied/demo\nnpm install /path/core.tgz \\\n  /path/passkey.tgz \\\n  /path/sdk.tgz\nnpm run build\nnpm run start\n```\n\nMore guidance.\n';

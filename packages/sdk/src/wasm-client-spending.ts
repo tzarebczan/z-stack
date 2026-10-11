@@ -44,8 +44,9 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
     seed: string,
     args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; thresholdZat?: number },
     beforeBroadcast?: () => boolean,
+    beforeSubmit?: HardwareSendOptions["beforeSubmit"],
   ): Promise<string | undefined> {
-    return runtime.withOriginSpendLock(() => proveAndSubmitHere(kind, seed, args, beforeBroadcast));
+    return runtime.withOriginSpendLock(() => proveAndSubmitHere(kind, seed, args, beforeBroadcast, beforeSubmit));
   }
 
   async function proveAndSubmitHere(
@@ -53,6 +54,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
     seed: string,
     args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; thresholdZat?: number },
     beforeBroadcast?: () => boolean,
+    beforeSubmit?: HardwareSendOptions["beforeSubmit"],
   ): Promise<string | undefined> {
     if (!ctx.session) throw new Error("no wasm wallet");
     const source = ctx.session;
@@ -159,7 +161,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
           const handle = runtime.requireBindings().WasmWallet.fromSnapshot(backup);
           try {
             const result = kind === "send"
-              ? handle.proveSend(seed, args.to ?? "", args.amountZec ?? "0", args.memo)
+              ? handle.proveSend(seed, args.to ?? "", args.amountZec ?? "0", args.memo, args.maxFeeZat)
               : kind === "sendTransparent"
                 ? handle.proveTransparentSend?.(seed, args.to ?? "", args.amountZec ?? "0", args.maxFeeZat) ?? (() => { throw new Error("this wasm build cannot prove transparent swap outputs"); })()
                 : handle.proveShield(seed, args.thresholdZat ?? 100_000);
@@ -191,6 +193,12 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       // A conflicting save reloaded this tab. The proved bytes belong to the
       // wallet that was replaced, so they must not be broadcast.
       if (!sameLineage()) throw new WalletError("wallet_changed", "the wallet was saved by another tab");
+      assertBroadcastAllowed();
+      if (beforeSubmit) {
+        const reservedTxid = sentTxid;
+        await abortable(operation.signal, () => beforeSubmit({ txid: reservedTxid }, operation.signal));
+      }
+      ctx.assertSource(operation, source);
       assertBroadcastAllowed();
       ctx.bus.emit("broadcast", { kind: kind === "sendTransparent" ? "send" : kind, ...(sentTxid ? { txid: sentTxid } : {}) });
       ctx.assertSource(operation, source);
@@ -318,7 +326,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
 
   async function hardwareSubmitHere(
     args: { to: string; amountZec: string; memo?: string },
-    { signer, onStage: userOnStage, signal, beforeBroadcast }: HardwareSendOptions,
+    { signer, onStage: userOnStage, signal, beforeBroadcast, beforeSubmit }: HardwareSendOptions,
   ): Promise<string | undefined> {
     if (!ctx.session) throw new Error("no wasm wallet");
     let source = ctx.session;
@@ -448,6 +456,12 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
         throw new WalletError("wallet_changed", "the wallet was saved by another tab");
       }
       onStage("broadcasting");
+      ctx.assertSource(operation, source);
+      assertReviewCurrent();
+      if (beforeSubmit) {
+        const reservedTxid = finalizedTxid;
+        await waitForDevice(() => beforeSubmit({ txid: reservedTxid }, operation.signal));
+      }
       ctx.assertSource(operation, source);
       assertReviewCurrent();
       ctx.bus.emit("broadcast", { kind: "send", txid: finalizedTxid });

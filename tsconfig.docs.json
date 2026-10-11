@@ -14,6 +14,9 @@
     "packages/sdk/src/diagnostics.ts",
     "packages/sdk/src/lab.ts",
     "packages/base/src/index.ts",
-    "packages/base/src/smart-account/index.ts"
+    "packages/base/src/smart-account/index.ts",
+    "packages/gift-cards/src/index.ts",
+    "packages/gift-cards/src/browser.ts",
+    "packages/sdk/src/gift-keys.ts"
   ]
 }

@@ -10,12 +10,14 @@ import { keystoneSigner } from "../src/hardware.ts";
 import { saveWalletSnapshot, readSavedSnapshotRecord, advanceWalletGeneration, clearSavedSnapshot } from "../src/snapshot-storage.ts";
 import { attachScanWorker, restartScanWorker } from "../src/scan-host.ts";
 import { checkWalletSetup } from "../src/diagnostics.ts";
+import { assertCompactBlockHeight } from "../src/lwd.ts";
 
 // Public BIP-39 fixture; no network, real money, environment or private secrets.
 const words = [...Array(23).fill("abandon"), "art"].join(" ");
 const txid = "ab".repeat(32);
 const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 const decode = (bytes: Uint8Array) => JSON.parse(new TextDecoder().decode(bytes));
+const probeBlock = (height: number) => new Uint8Array([0, 0, 0, 36, 16, height, 26, 32, ...new Array(32).fill(0)]);
 before(async () => initialize({ wasmModule: readFileSync(new URL("../src/generated/z_wasm_bg.wasm", import.meta.url)),
   prewarmProveWorker: false, prewarmProvingKey: false }));
 
@@ -37,6 +39,12 @@ function fixture(t: TestContext) {
         balance: { totalAvailable: state.pending || state.reserved ? 0 : 10, orchardAvailable: state.pending || state.reserved ? 0 : 10, transparentAvailable: 0 } }),
       scannedHeight: () => state.scanned ?? 10,
       nextHeight: () => (state.scanned ?? 10) + 1,
+      rewindTo(height: number) { state.scanned = height; return height; },
+      applyCompactBlocksSummary(bytes: Uint8Array) {
+        state.scanned = bytes[5];
+        return JSON.stringify({ scanned: state.scanned, notesFound: 0, spendsFound: 0 });
+      },
+      recomputePools() {},
       birthday: () => state.birthday ?? 8,
       pendingRawTxs: () => JSON.stringify(state.pending ? ["synthetic-transaction"] : []),
       rescanFrom(height: number) {
@@ -85,6 +93,46 @@ function fixture(t: TestContext) {
   };
 }
 const code = (expected: string) => (error: unknown) => error instanceof WalletError && error.code === expected;
+
+for (const tip of [9, 10]) {
+  test(`explicit chain verification checks a ${tip === 9 ? "shorter" : "unchanged"} tip and preserves pending payment`, async t => {
+    const f = fixture(t);
+    const ranges: number[][] = [];
+    let currentTip = 10;
+    const wallet = await f.open({ verifyChainTip: true, server: {
+      kind: "fixture", label: "offline", tip: async () => currentTip,
+      blocks: async (start, end) => { ranges.push([start, end]); return probeBlock(end); },
+      submit: async () => txid,
+    } });
+    await wallet.create({ birthday: 8 });
+    await wallet.unlock(words);
+    await wallet.send("fixture", "0.00005");
+    currentTip = tip;
+    const result = await wallet.sync();
+    assert.deepEqual(ranges, [[tip, tip]]);
+    assert.equal(result.scannedHeight, tip);
+    assert.equal((await wallet.history())[0]?.txid, txid);
+    await wallet.close();
+    const reopened = await f.open();
+    assert.equal((await reopened.load())?.scannedHeight, tip);
+    assert.equal((await reopened.history())[0]?.txid, txid);
+  });
+}
+
+test("chain verification fails closed on unavailable overlap blocks", async t => {
+  const f = fixture(t);
+  const wallet = await f.open({ verifyChainTip: true });
+  await wallet.create({ birthday: 8 });
+  await assert.rejects(wallet.sync());
+});
+
+test("chain probes reject wrong heights, missing hashes and extra blocks", () => {
+  const valid = probeBlock(10);
+  assert.doesNotThrow(() => assertCompactBlockHeight(valid, 10));
+  assert.throws(() => assertCompactBlockHeight(valid, 9));
+  assert.throws(() => assertCompactBlockHeight(new Uint8Array([...valid, ...valid]), 10));
+  assert.throws(() => assertCompactBlockHeight(new Uint8Array([0, 0, 0, 2, 16, 10]), 10));
+});
 
 test("runtime subscriptions replay, update on scanner readiness and release on close", async t => {
   const f = fixture(t), wallet = await f.open();
@@ -1288,3 +1336,45 @@ test("invalid outage configuration releases the owner for a later client", async
   const f = fixture(t);
   assert.ok(await f.open());
 });
+
+for (const signing of ["software", "hardware"] as const) {
+  test(`${signing} beforeSubmit waits for the application journal after durable reservation`, async t => {
+    const f = fixture(t);
+    let submissions = 0, release!: () => void, entered!: () => void;
+    const journal = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const wallet = await f.open({ server: { kind: "fixture", label: "offline", tip: async () => 10,
+      blocks: async () => new Uint8Array(), submit: async () => { submissions++; return txid; } } });
+    await wallet.create({ birthday: 1 });
+    if (signing === "software") await wallet.unlock(words);
+    const sending = wallet.send("fixture", "0.00005", undefined, {
+      ...(signing === "hardware" ? { signer: keystoneSigner(async bytes => bytes) } : {}),
+      beforeSubmit: async (receipt, signal) => {
+        assert.equal(receipt.txid, txid);
+        signal.throwIfAborted();
+        const saved = await readSavedSnapshotRecord();
+        assert.ok(saved && decode(saved.bytes).pending, "reservation must be committed before the hook");
+        entered(); await journal;
+      },
+    });
+    await waiting;
+    assert.equal(submissions, 0, "network submission cannot race the journal");
+    release(); await sending;
+    assert.equal(submissions, 1);
+  });
+  test(`${signing} failed beforeSubmit rolls back without network submission`, async t => {
+    const f = fixture(t);
+    let submissions = 0;
+    const wallet = await f.open({ server: { kind: "fixture", label: "offline", tip: async () => 10,
+      blocks: async () => new Uint8Array(), submit: async () => { submissions++; return txid; } } });
+    await wallet.create({ birthday: 1 });
+    if (signing === "software") await wallet.unlock(words);
+    await assert.rejects(wallet.send("fixture", "0.00005", undefined, {
+      ...(signing === "hardware" ? { signer: keystoneSigner(async bytes => bytes) } : {}),
+      beforeSubmit: async () => { throw new WalletError("storage_full", "journal full"); },
+    }), code("storage_full"));
+    assert.equal(submissions, 0);
+    assert.deepEqual(await wallet.pending(), []);
+    assert.equal(wallet.hasSpendingSeed(), false);
+  });
+}

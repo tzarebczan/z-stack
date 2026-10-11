@@ -567,6 +567,9 @@ export function createWasmClient(
       if (dest.toLowerCase().startsWith("zcash:")) {
         parseZip321(dest);
       }
+      const maxFeeZat = sendOpts?.maxFeeZat;
+      if (maxFeeZat !== undefined && (!/^(0|[1-9]\d{0,15})$/.test(maxFeeZat) || BigInt(maxFeeZat) > 2_100_000_000_000_000n)) throw new Error("invalid maximum fee in zatoshis");
+      if (maxFeeZat !== undefined && (sendOpts?.signer || (await snap()).hardware)) throw new Error("fee-capped sends currently require a software wallet");
       let txid: string | undefined;
       if (sendOpts?.signer) {
         txid = await hardwareSubmit({ to: dest, amountZec, ...(memo ? { memo } : {}) }, { ...sendOpts, signer: sendOpts.signer });
@@ -574,8 +577,8 @@ export function createWasmClient(
         if ((await snap()).hardware) {
           throw new Error("this wallet signs on its hardware wallet: pass { signer } to send");
         }
-        txid = await proveAndSubmit("send", requireSeed("send"), { to: dest, amountZec, memo },
-          () => !sendOpts?.signal?.aborted && (sendOpts?.beforeBroadcast?.() ?? true));
+        txid = await proveAndSubmit("send", requireSeed("send"), { to: dest, amountZec, memo, maxFeeZat },
+          () => !sendOpts?.signal?.aborted && (sendOpts?.beforeBroadcast?.() ?? true), sendOpts?.beforeSubmit);
       }
       return finishSpend(txid, operation, source);
     },
