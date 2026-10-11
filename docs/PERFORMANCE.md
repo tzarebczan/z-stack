@@ -33,6 +33,37 @@ Rayon pool. Single-threaded scanning uses the separate prove worker. Keep provin
 off the UI thread and show its progress; do not initiate a second payment because
 a proof takes longer than expected.
 
+## Native CPU budget
+
+Native scanning and multicore proving share a process-wide Rayon pool. Wallet
+creation, restoration and opening initialize it before wallet work. The default
+uses half the available logical CPUs, rounded down, with a minimum of one and a
+maximum of eight. This leaves capacity for the application and other processes;
+it is a responsiveness default, not a throughput benchmark.
+
+Set `RAYON_NUM_THREADS` to an integer from 1 to 64 before starting the process,
+or configure the Rust API before opening a wallet:
+
+```rust
+use z_engine::native::initialize_native_threads;
+
+let pool = initialize_native_threads(Some(8))?;
+assert_eq!(pool.threads, Some(8));
+```
+
+Explicit API configuration takes priority over the environment. A live pool
+cannot be resized; restart to change its budget. When an embedding application
+already owns the global Rayon pool, default initialization preserves it and
+reports `threads: None`, since the SDK cannot establish its limit. An explicit
+API request in that situation fails instead of claiming to have applied a limit.
+
+Each engine subprocess has its own pool. Avoid simultaneous unnecessary scans
+across subprocesses and include all active engines when measuring CPU use.
+Thread count limits parallelism, not CPU time: one worker can still occupy a
+core continuously. The SDK does not configure your Tokio runtime. The native
+CLI uses four Tokio workers; an embedding application controls its own async
+runtime separately. Browser `threads` configuration and defaults are unchanged.
+
 ## Persistence and memory
 
 Snapshots retain valid commitment trees so reload can avoid rebuilding them.

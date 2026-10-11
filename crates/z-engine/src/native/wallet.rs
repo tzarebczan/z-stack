@@ -822,6 +822,7 @@ impl NativeWallet {
         account_index: u32,
     ) -> Result<(Self, CreatedWallet)> {
         auth.validate_for_save()?;
+        super::initialize_native_threads(None)?;
         let paths = WalletPaths::new(root);
         paths.prepare_new_wallet()?;
         paths.ensure_dirs()?;
@@ -958,6 +959,7 @@ impl NativeWallet {
         account_index: u32,
     ) -> Result<(Self, String)> {
         auth.validate_for_save()?;
+        super::initialize_native_threads(None)?;
         let paths = WalletPaths::new(root);
         paths.prepare_new_wallet()?;
         paths.ensure_dirs()?;
@@ -1073,6 +1075,7 @@ impl NativeWallet {
         birthday_height: u32,
         account_index: u32,
     ) -> Result<(Self, String)> {
+        super::initialize_native_threads(None)?;
         let keys = crate::keys::account_from_ufvk(ufvk_str, network, account_index)?;
         let ufvk = UnifiedFullViewingKey::decode(&network, keys.ufvk.trim())
             .map_err(|e| EngineError::Message(format!("ufvk: {e}")))?;
@@ -1150,6 +1153,7 @@ impl NativeWallet {
     }
 
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
+        super::initialize_native_threads(None)?;
         let paths = WalletPaths::new(root);
         if paths.meta_path.exists() {
             paths.recover_interrupted_reset();
