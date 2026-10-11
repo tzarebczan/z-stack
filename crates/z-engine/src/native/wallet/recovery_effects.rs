@@ -490,11 +490,39 @@ impl SentRow {
 fn sent_json(filter: &str) -> String {
     format!("SELECT coalesce(json_group_array(json(entry)),'[]') FROM (SELECT json_object('id',s.id,'txid',lower(hex(t.txid)),'pool',s.output_pool,'index',s.output_index,'from',s.from_account_id,'to',s.to_account_id,'address',s.to_address,'value',s.value,'memo',CASE WHEN s.memo IS NULL THEN NULL ELSE lower(hex(s.memo)) END,'created',t.created IS NOT NULL,'mined',t.mined_height IS NOT NULL) AS entry FROM sent_notes s JOIN transactions t ON t.id_tx=s.transaction_id WHERE {filter} ORDER BY t.txid,s.output_pool,s.output_index)")
 }
-fn funding_account(
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FundingPool {
+    Transparent,
+    Sapling,
+    Orchard,
+}
+struct FundingSource {
+    account: i64,
+    pool: FundingPool,
+}
+impl FundingSource {
+    fn external_ovk(
+        &self,
+        key: &UnifiedFullViewingKey,
+    ) -> anyhow::Result<zcash_keys::keys::OutgoingViewingKey> {
+        // Match pinned UFVK::select_ovk / ZIP 316 input preference. Ironwood
+        // inputs use the Orchard key, as in native transaction construction.
+        match self.pool {
+            FundingPool::Orchard => key.orchard().map(|k| k.to_ovk(Scope::External).into()),
+            FundingPool::Sapling => key.sapling().map(|k| k.to_ovk(Scope::External).into()),
+            FundingPool::Transparent => key
+                .transparent()
+                .map(|k| k.external_ovk().as_bytes().into()),
+        }
+        .ok_or_else(invalid)
+    }
+}
+fn funding_source(
     query: &mut impl FnMut(&str) -> rusqlite::Result<String>,
     transaction: &Transaction,
-) -> anyhow::Result<Option<i64>> {
+) -> anyhow::Result<Option<FundingSource>> {
     let mut accounts = BTreeSet::new();
+    let mut sources = BTreeSet::new();
     for (pool, nfs) in [
         (
             "sapling",
@@ -526,7 +554,15 @@ fn funding_account(
     ] {
         for nf in nfs {
             let encoded = query(&format!("SELECT coalesce(json_group_array(account_id),'[]') FROM {pool}_received_notes WHERE nf=x'{nf}'"))?;
-            accounts.extend(serde_json::from_str::<Vec<i64>>(&encoded)?);
+            let owners = serde_json::from_str::<Vec<i64>>(&encoded)?;
+            if !owners.is_empty() {
+                sources.insert(if pool == "sapling" {
+                    FundingPool::Sapling
+                } else {
+                    FundingPool::Orchard
+                });
+            }
+            accounts.extend(owners);
         }
     }
     if let Some(b) = transaction.transparent_bundle() {
@@ -534,7 +570,11 @@ fn funding_account(
             for input in &b.vin {
                 let previous = input.prevout();
                 let encoded = query(&format!("SELECT coalesce(json_group_array(n.account_id),'[]') FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.txid=x'{}' AND n.output_index={}",hex(previous.hash()),previous.n()))?;
-                accounts.extend(serde_json::from_str::<Vec<i64>>(&encoded)?);
+                let owners = serde_json::from_str::<Vec<i64>>(&encoded)?;
+                if !owners.is_empty() {
+                    sources.insert(FundingPool::Transparent);
+                }
+                accounts.extend(owners);
             }
         }
     }
@@ -543,7 +583,10 @@ fn funding_account(
     if accounts.len() > 1 {
         return Err(invalid());
     }
-    Ok(accounts.into_iter().next())
+    Ok(accounts.into_iter().next().map(|account| FundingSource {
+        account,
+        pool: *sources.last().expect("funding account has an owned input"),
+    }))
 }
 fn sent_effects(
     query: &mut impl FnMut(&str) -> rusqlite::Result<String>,
@@ -553,7 +596,8 @@ fn sent_effects(
     tip: BlockHeight,
     keys: &HashMap<i64, UnifiedFullViewingKey>,
 ) -> anyhow::Result<Vec<SentEffect>> {
-    let funding = funding_account(query, transaction)?;
+    let source = funding_source(query, transaction)?;
+    let funding = source.as_ref().map(|s| s.account);
     let decrypted = decrypt_transaction(&network, height, Some(tip), transaction, keys);
     let mut effects = Vec::new();
     let parties = |account, transfer| match transfer {
@@ -595,6 +639,71 @@ fn sent_effects(
             }
         }
     }
+    if let Some(source) = &source {
+        let ovk = source.external_ovk(keys.get(&source.account).ok_or_else(invalid)?)?;
+        // The pinned generic decryptor tries each output pool's own OVK. Native
+        // payments instead select one sender OVK from their input pools, including
+        // cross-pool payments. Recover only missing outputs with that native key.
+        if let Some(bundle) = transaction.sapling_bundle() {
+            let height = height.unwrap_or(tip + 1);
+            let domain = sapling::note_encryption::SaplingDomain::new(
+                zcash_primitives::transaction::components::sapling::zip212_enforcement(
+                    &network, height,
+                ),
+            );
+            let ovk = ovk.into();
+            for (index, output) in bundle.shielded_outputs().iter().enumerate() {
+                if effects.iter().any(|e| e.pool == 2 && e.index == index) {
+                    continue;
+                }
+                if let Some((note, _, memo)) = zcash_note_encryption::try_output_recovery_with_ovk(
+                    &domain,
+                    &ovk,
+                    output,
+                    output.cv(),
+                    output.out_ciphertext(),
+                ) {
+                    effects.push(SentEffect {
+                        txid: hex(transaction.txid().as_ref()),
+                        pool: 2,
+                        index,
+                        from: source.account,
+                        to: None,
+                        receiver: Receiver::Sapling(note.recipient()),
+                        value: note.value().inner(),
+                        memo: Some(memo_identity(&MemoBytes::from_bytes(&memo)?)),
+                    });
+                }
+            }
+        }
+        for (pool, bundle) in [
+            (3, transaction.orchard_bundle()),
+            (4, transaction.ironwood_bundle()),
+        ] {
+            if let Some(bundle) = bundle {
+                let recovered = if pool == 3 {
+                    recover_orchard_sent::<orchard::note_encryption::OrchardVersion>(
+                        transaction,
+                        bundle,
+                        ovk,
+                        source.account,
+                        pool,
+                        &effects,
+                    )?
+                } else {
+                    recover_orchard_sent::<orchard::note_encryption::IronwoodVersion>(
+                        transaction,
+                        bundle,
+                        ovk,
+                        source.account,
+                        pool,
+                        &effects,
+                    )?
+                };
+                effects.extend(recovered);
+            }
+        }
+    }
     if let (Some(from), Some(bundle)) = (funding, transaction.transparent_bundle()) {
         for (index, output) in bundle.vout.iter().enumerate() {
             if let Some(address) = output.recipient_address() {
@@ -614,6 +723,45 @@ fn sent_effects(
                     memo: None,
                 });
             }
+        }
+    }
+    Ok(effects)
+}
+fn recover_orchard_sent<V: orchard::note_encryption::DomainVersion>(
+    transaction: &Transaction,
+    bundle: &orchard::bundle::Bundle<
+        orchard::bundle::Authorized,
+        zcash_protocol::value::ZatBalance,
+    >,
+    ovk: zcash_keys::keys::OutgoingViewingKey,
+    account: i64,
+    pool: i64,
+    existing: &[SentEffect],
+) -> anyhow::Result<Vec<SentEffect>> {
+    let ovk = ovk.into();
+    let mut effects = Vec::new();
+    for (index, action) in bundle.actions().iter().enumerate() {
+        if existing.iter().any(|e| e.pool == pool && e.index == index) {
+            continue;
+        }
+        let domain = orchard::note_encryption::NoteEncryptionDomain::<V>::for_action(action);
+        if let Some((note, _, memo)) = zcash_note_encryption::try_output_recovery_with_ovk(
+            &domain,
+            &ovk,
+            action,
+            action.cv_net(),
+            &action.encrypted_note().out_ciphertext,
+        ) {
+            effects.push(SentEffect {
+                txid: hex(transaction.txid().as_ref()),
+                pool,
+                index,
+                from: account,
+                to: None,
+                receiver: Receiver::Orchard(note.recipient()),
+                value: note.value().inner(),
+                memo: Some(memo_identity(&MemoBytes::from_bytes(&memo)?)),
+            });
         }
     }
     Ok(effects)
@@ -682,6 +830,7 @@ pub(super) fn reconcile_sent_outputs(
     let rows: Vec<SentRow> =
         serde_json::from_str(&tx.query_row(&sent_json("1"), [], |r| r.get::<_, String>(0))?)?;
     let mut actual = BTreeSet::new();
+    let mut discarded = BTreeSet::new();
     for row in rows {
         if cancel.is_cancelled() {
             return Err(invalid());
@@ -722,8 +871,32 @@ pub(super) fn reconcile_sent_outputs(
                     return Err(invalid());
                 }
             }
+            discarded.insert((row.txid, row.pool));
             tx.execute("DELETE FROM sent_notes WHERE id=?1", [row.id])?;
         }
+    }
+    for (key, effect) in &expected {
+        if actual.contains(key) {
+            continue;
+        }
+        // Do not reinterpret a conflicting retained index as an absent row.
+        // Reconstruct only authenticated effects that replay could not record.
+        if discarded.contains(&(effect.txid.clone(), effect.pool)) || cancel.is_cancelled() {
+            return Err(invalid());
+        }
+        use zcash_protocol::consensus::Parameters;
+        let address = effect.to.is_none().then(|| {
+            effect
+                .receiver
+                .to_zcash_address(network.network_type())
+                .to_string()
+        });
+        let memo = effect.memo.as_deref().map(bytes).transpose()?;
+        let count = tx.execute("INSERT INTO sent_notes(transaction_id,output_pool,output_index,from_account_id,to_address,to_account_id,value,memo) VALUES((SELECT id_tx FROM transactions WHERE txid=?1),?2,?3,?4,?5,?6,?7,?8)",params![bytes(&effect.txid)?,effect.pool,effect.index as u64,effect.from,address,effect.to,effect.value,memo])?;
+        if count != 1 {
+            return Err(invalid());
+        }
+        actual.insert(key.clone());
     }
     if actual != expected.keys().cloned().collect() {
         return Err(invalid());
@@ -1083,13 +1256,32 @@ pub(in crate::native::wallet) mod tests {
         spend: [u8; 32],
         memo: [u8; 512],
     ) -> Transaction {
+        sender_encrypted_transaction_with_ovk(
+            sender.orchard().unwrap().to_ovk(Scope::External),
+            recipient,
+            scope,
+            spend,
+            memo,
+            false,
+        )
+    }
+    fn sender_encrypted_transaction_with_ovk(
+        ovk: orchard::keys::OutgoingViewingKey,
+        recipient: &UnifiedFullViewingKey,
+        scope: Scope,
+        spend: [u8; 32],
+        memo: [u8; 512],
+        ironwood: bool,
+    ) -> Transaction {
         use chacha20poly1305::{
             aead::{AeadInPlace, KeyInit},
             ChaCha20Poly1305,
         };
         use orchard::{
             note::{ExtractedNoteCommitment, NoteVersion, RandomSeed, Rho},
-            note_encryption::{OrchardDomain, OrchardNoteEncryption},
+            note_encryption::{
+                DomainVersion, IronwoodVersion, NoteEncryptionDomain, OrchardVersion,
+            },
             value::{NoteValue, ValueCommitment},
             Note,
         };
@@ -1101,34 +1293,63 @@ pub(in crate::native::wallet) mod tests {
             NoteValue::from_raw(50_000),
             rho,
             RandomSeed::from_bytes([9; 32], &rho).unwrap(),
-            NoteVersion::V2,
+            if ironwood {
+                NoteVersion::V3
+            } else {
+                NoteVersion::V2
+            },
         )
         .unwrap();
         let cmx = ExtractedNoteCommitment::from(note.commitment());
         let cv = ValueCommitment::from_bytes(&[0; 32]).unwrap();
-        let ovk = sender.orchard().unwrap().to_ovk(Scope::External);
-        let enc = OrchardNoteEncryption::new(Some(ovk.clone()), note, memo);
-        let epk = OrchardDomain::epk_bytes(enc.epk());
-        // Encrypt the known outgoing plaintext through the pinned domain. This
-        // avoids introducing a second rand_core version solely for this fixture.
-        let ock = OrchardDomain::derive_ock(&ovk, &cv, &cmx.to_bytes(), &epk);
-        let plaintext = OrchardDomain::outgoing_plaintext_bytes(&note, enc.esk());
-        let mut out_cipher = [0u8; 80];
-        out_cipher[..64].copy_from_slice(&plaintext.0);
-        let tag = ChaCha20Poly1305::new(ock.as_ref().into())
-            .encrypt_in_place_detached([0u8; 12][..].into(), &[], &mut out_cipher[..64])
-            .unwrap();
-        out_cipher[64..].copy_from_slice(&tag);
-        let empty = TransactionData::<Authorized>::from_parts(
-            TxVersion::V5,
-            BranchId::Nu6_2,
-            0,
-            0.into(),
-            None,
-            None,
-            None,
-            None,
-        )
+        fn encrypt<V: DomainVersion>(
+            ovk: orchard::keys::OutgoingViewingKey,
+            note: Note,
+            memo: [u8; 512],
+            cv: &ValueCommitment,
+            cmx: &ExtractedNoteCommitment,
+        ) -> ([u8; 32], [u8; 580], [u8; 80]) {
+            type D<V> = NoteEncryptionDomain<V>;
+            let enc =
+                zcash_note_encryption::NoteEncryption::<D<V>>::new(Some(ovk.clone()), note, memo);
+            let epk = D::<V>::epk_bytes(enc.epk());
+            let ock = D::<V>::derive_ock(&ovk, cv, &cmx.to_bytes(), &epk);
+            let plaintext = D::<V>::outgoing_plaintext_bytes(&note, enc.esk());
+            let mut out_cipher = [0u8; 80];
+            out_cipher[..64].copy_from_slice(&plaintext.0);
+            let tag = ChaCha20Poly1305::new(ock.as_ref().into())
+                .encrypt_in_place_detached([0u8; 12][..].into(), &[], &mut out_cipher[..64])
+                .unwrap();
+            out_cipher[64..].copy_from_slice(&tag);
+            (epk.0, enc.encrypt_note_plaintext(), out_cipher)
+        }
+        let (epk, ciphertext, out_cipher) = if ironwood {
+            encrypt::<IronwoodVersion>(ovk, note, memo, &cv, &cmx)
+        } else {
+            encrypt::<OrchardVersion>(ovk, note, memo, &cv, &cmx)
+        };
+        let empty = if ironwood {
+            TransactionData::<Authorized>::from_parts_v6(
+                BranchId::Nu6_3,
+                0,
+                0.into(),
+                None,
+                None,
+                None,
+                None,
+            )
+        } else {
+            TransactionData::<Authorized>::from_parts(
+                TxVersion::V5,
+                BranchId::Nu6_2,
+                0,
+                0.into(),
+                None,
+                None,
+                None,
+                None,
+            )
+        }
         .freeze()
         .unwrap();
         let mut raw = Vec::new();
@@ -1137,10 +1358,10 @@ pub(in crate::native::wallet) mod tests {
         raw.push(1);
         raw.extend(cv.to_bytes());
         raw.extend(spend);
-        raw.extend(epk.0);
+        raw.extend(epk);
         raw.extend(cmx.to_bytes());
-        raw.extend(epk.0);
-        raw.extend(enc.encrypt_note_plaintext());
+        raw.extend(epk);
+        raw.extend(ciphertext);
         raw.extend(out_cipher);
         raw.push(3);
         raw.extend(0i64.to_le_bytes());
@@ -1151,9 +1372,275 @@ pub(in crate::native::wallet) mod tests {
         raw.extend(vec![0; length]);
         raw.extend([0; 128]);
         // Encryption/effects fixture only, without consensus-valid proofs/signatures.
-        Transaction::read(raw.as_slice(), BranchId::Nu6_2).unwrap()
+        Transaction::read(
+            raw.as_slice(),
+            if ironwood {
+                BranchId::Nu6_3
+            } else {
+                BranchId::Nu6_2
+            },
+        )
+        .unwrap()
     }
 
+    fn sapling_funding_transaction(key: &UnifiedFullViewingKey) -> Transaction {
+        use sapling::{
+            bundle::{Authorized as SaplingAuthorized, Bundle, OutputDescription},
+            note_encryption::{sapling_note_encryption, SaplingDomain},
+            value::{NoteValue, ValueCommitTrapdoor, ValueCommitment},
+            Rseed,
+        };
+        use zcash_note_encryption::Domain;
+        use zcash_primitives::transaction::{Authorized, TransactionData, TxVersion};
+        let mut rng = rand::rng();
+        let value = NoteValue::from_raw(50_000);
+        let note = key
+            .sapling()
+            .unwrap()
+            .default_address()
+            .1
+            .create_note(value, Rseed::AfterZip212([7; 32]));
+        let cmu = note.cmu();
+        let cv = ValueCommitment::derive(value, ValueCommitTrapdoor::random(&mut rng));
+        let enc = sapling_note_encryption(None, note, *MemoBytes::empty().as_array(), &mut rng);
+        let output = OutputDescription::from_parts(
+            cv,
+            cmu,
+            SaplingDomain::epk_bytes(enc.epk()),
+            enc.encrypt_note_plaintext(),
+            [0; 80],
+            [0; 192],
+        );
+        TransactionData::<Authorized>::from_parts(
+            TxVersion::V5,
+            BranchId::Nu6_2,
+            0,
+            0.into(),
+            None,
+            None,
+            Bundle::from_parts(
+                vec![],
+                vec![output],
+                zcash_protocol::value::ZatBalance::zero(),
+                SaplingAuthorized {
+                    binding_sig: [0; 64].into(),
+                },
+            ),
+            None,
+        )
+        .freeze()
+        .unwrap()
+    }
+    fn assert_sapling_cross_pool_sent_reconciliation(ironwood: bool, authored: bool) {
+        use sapling::bundle::{Bundle, SpendDescription};
+        use zcash_primitives::transaction::{Authorized, TransactionData, TxVersion};
+        let (key, _) = fixture_account();
+        let foreign = crate::native::selective_scan::tests::test_ufvk(8);
+        let funding = sapling_funding_transaction(&key);
+        let (_dir, wallet, _) = scanned_fixture_with_transaction(funding.clone());
+        let mut conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let (account, nf): (i64, Vec<u8>) = conn
+            .query_row(
+                "SELECT account_id,nf FROM sapling_received_notes",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        // Dummy Orchard-family action nullifier is not an owned input. It must
+        // not select the Orchard OVK over the actual Sapling funding note.
+        let output = sender_encrypted_transaction_with_ovk(
+            key.sapling().unwrap().to_ovk(Scope::External).0.into(),
+            &foreign,
+            Scope::External,
+            [0; 32],
+            *MemoBytes::empty().as_array(),
+            ironwood,
+        );
+        let sample = Transaction::read(
+            &include_bytes!("fixtures/zakura-public-sapling/transaction.bin")[..],
+            BranchId::Canopy,
+        )
+        .unwrap();
+        let sapling = sample.sapling_bundle().unwrap();
+        let template = &sapling.shielded_spends()[0];
+        let spend = SpendDescription::from_parts(
+            template.cv().clone(),
+            *template.anchor(),
+            sapling::Nullifier(nf.try_into().unwrap()),
+            template.rk().clone(),
+            *template.zkproof(),
+            *template.spend_auth_sig(),
+        );
+        let bundle = Bundle::from_parts(
+            vec![spend],
+            vec![],
+            zcash_protocol::value::ZatBalance::zero(),
+            sapling.authorization().clone(),
+        );
+        let outgoing = if ironwood {
+            TransactionData::<Authorized>::from_parts_v6(
+                BranchId::Nu6_3,
+                0,
+                0.into(),
+                None,
+                bundle,
+                None,
+                output.ironwood_bundle().cloned(),
+            )
+        } else {
+            TransactionData::<Authorized>::from_parts(
+                TxVersion::V5,
+                BranchId::Nu6_2,
+                0,
+                0.into(),
+                None,
+                None,
+                bundle,
+                output.orchard_bundle().cloned(),
+            )
+        }
+        .freeze()
+        .unwrap();
+        let outgoing_height = if ironwood {
+            crate::regtest_nu6_3_height()
+        } else {
+            6
+        };
+        assert!(outgoing_height <= 2048);
+        let tip = outgoing_height + 2;
+        let (bytes, chain) = fixture_prefix_with_transactions(
+            &[0x51],
+            tip,
+            vec![(3, funding), (outgoing_height, outgoing)],
+        );
+        let evidence =
+            verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap();
+        let outgoing = &evidence.blocks[(outgoing_height - 1) as usize].vtx()[1];
+        let compact = evidence.compact_blocks().unwrap();
+        wallet
+            .scan_public_regtest(
+                &compact
+                    .iter()
+                    .flat_map(Message::encode_length_delimited_to_vec)
+                    .collect::<Vec<_>>(),
+                RegtestScanSchedule {
+                    nu6_3_height: crate::regtest_nu6_3_height(),
+                    nu7_height: crate::regtest_nu7_height(),
+                },
+            )
+            .unwrap();
+        zcash_client_backend::data_api::wallet::decrypt_and_store_transaction(
+            &ZNetwork::Regtest,
+            &mut wallet.open_db().unwrap(),
+            outgoing,
+            Some(outgoing_height.into()),
+        )
+        .unwrap();
+        let keys = HashMap::from([(account, key.clone())]);
+        let ordinary = decrypt_transaction(
+            &ZNetwork::Regtest,
+            Some(outgoing_height.into()),
+            Some(tip.into()),
+            outgoing,
+            &keys,
+        );
+        assert!(ordinary.orchard_outputs().is_empty() && ordinary.ironwood_outputs().is_empty());
+        let recipient = foreign
+            .default_address(UnifiedAddressRequest::AllAvailableKeys)
+            .unwrap()
+            .0
+            .encode(&ZNetwork::Regtest);
+        let pool = if ironwood { 4 } else { 3 };
+        if authored {
+            let mut raw = vec![];
+            outgoing.write(&mut raw).unwrap();
+            conn.execute(
+                "UPDATE transactions SET raw=?1,created=1 WHERE txid=?2",
+                params![raw, outgoing.txid().as_ref().as_slice()],
+            )
+            .unwrap();
+            // Model the real native store_transaction_to_be_sent history: it knows
+            // the output from construction even when generic decryption misses it.
+            conn.execute("INSERT INTO sent_notes(transaction_id,output_pool,output_index,from_account_id,to_address,value,memo) VALUES((SELECT id_tx FROM transactions WHERE txid=?1),?2,0,?3,?4,50000,x'f6')",params![outgoing.txid().as_ref().as_slice(),pool,account,recipient]).unwrap();
+        } else {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM transactions WHERE created IS NOT NULL",
+                    [],
+                    |r| r.get::<_, u32>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM sent_notes", [], |r| r
+                    .get::<_, u32>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        let reconcile = |conn: &mut rusqlite::Connection| -> anyhow::Result<()> {
+            let tx = conn.transaction()?;
+            reconcile_shielded_outputs(
+                &tx,
+                ZNetwork::Regtest,
+                &evidence,
+                &[],
+                &RecoveryCancellation::new(),
+            )?;
+            reconcile_sent_outputs(
+                &tx,
+                ZNetwork::Regtest,
+                &evidence,
+                &[],
+                &RecoveryCancellation::new(),
+            )?;
+            tx.commit()?;
+            Ok(())
+        };
+        reconcile(&mut conn).unwrap();
+        assert_eq!(conn.query_row("SELECT count(*) FROM sent_notes WHERE output_pool=?1 AND value=50000 AND memo=x'f6'",[pool],|r|r.get::<_,u32>(0)).unwrap(),1);
+        conn.execute("UPDATE sent_notes SET to_address=NULL", [])
+            .unwrap();
+        assert!(reconcile(&mut conn).is_err());
+        conn.execute("UPDATE sent_notes SET to_address=?1", [&recipient])
+            .unwrap();
+        conn.execute("UPDATE sent_notes SET memo=x'01'", [])
+            .unwrap();
+        assert!(reconcile(&mut conn).is_err());
+        conn.execute("UPDATE sent_notes SET memo=x'f6',output_index=99", [])
+            .unwrap();
+        assert!(reconcile(&mut conn).is_err());
+        conn.execute("UPDATE sent_notes SET output_index=0", [])
+            .unwrap();
+        reconcile(&mut conn).unwrap();
+        let source = funding_source(&mut |sql| conn.query_row(sql, [], |r| r.get(0)), outgoing)
+            .unwrap()
+            .unwrap();
+        assert!(source.pool == FundingPool::Sapling);
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM sapling_received_note_spends",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+    #[test]
+    fn sapling_funded_orchard_sent_recovery_uses_input_ovk_and_refuses_unverified_metadata() {
+        for authored in [false, true] {
+            assert_sapling_cross_pool_sent_reconciliation(false, authored);
+        }
+    }
+    #[test]
+    #[ignore = "requires Z_STACK_REGTEST_NU6_3=150 bounded fixture schedule"]
+    fn v6_sapling_funded_ironwood_sent_recovery_uses_input_ovk_and_refuses_unverified_metadata() {
+        for authored in [false, true] {
+            assert_sapling_cross_pool_sent_reconciliation(true, authored);
+        }
+    }
     #[test]
     fn outgoing_and_self_send_history_reconcile_actual_values_preserve_ua_and_bind_receipt_drift() {
         for internal in [false, true] {
