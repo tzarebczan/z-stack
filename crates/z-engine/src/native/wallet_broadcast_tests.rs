@@ -2,7 +2,7 @@ use super::*;
 use crate::native::selective_scan;
 use rusqlite::types::Value;
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use zcash_client_backend::data_api::OutputLockStore;
 use zcash_client_backend::wallet::{LockOwner, OutputRef, WalletTransparentOutput};
@@ -34,10 +34,44 @@ fn contents(path: &Path) -> BTreeMap<String, Vec<Vec<Value>>> {
         .collect()
 }
 
-/// A real HTTP peer consumes the complete raw transaction and then either loses
-/// the reply or rejects a later batch member. No validator or chain is involved.
+fn read_request(stream: &mut BufReader<std::net::TcpStream>) -> Option<serde_json::Value> {
+    let mut line = String::new();
+    if stream.read_line(&mut line).unwrap() == 0 {
+        return None;
+    }
+    assert_eq!(line, "POST / HTTP/1.1\r\n");
+    let mut length = None;
+    loop {
+        line.clear();
+        assert!(stream.read_line(&mut line).unwrap() > 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("Content-Length: ") {
+            length = Some(value.trim().parse::<usize>().unwrap());
+        }
+    }
+    let mut body = vec![0; length.unwrap()];
+    stream.read_exact(&mut body).unwrap();
+    Some(serde_json::from_slice(&body).unwrap())
+}
+
+fn respond(stream: &mut BufReader<std::net::TcpStream>, response: serde_json::Value) {
+    let body = response.to_string();
+    write!(
+        stream.get_mut(),
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+}
+
+/// A persistent HTTP peer first supplies chain identity, then consumes the raw
+/// transaction and loses its reply or rejects a later batch member. A wrong
+/// genesis must close the connection before any transaction arrives.
 fn validator(
     responses: Vec<Option<serde_json::Value>>,
+    wrong_identity: bool,
 ) -> (String, std::thread::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -45,9 +79,9 @@ fn validator(
     let job = std::thread::spawn(move || {
         responses
             .into_iter()
-            .map(|response| {
+            .filter_map(|response| {
                 let deadline = Instant::now() + Duration::from_secs(5);
-                let (mut stream, _) = loop {
+                let (stream, _) = loop {
                     match listener.accept() {
                         Ok(peer) => break peer,
                         Err(e)
@@ -62,43 +96,53 @@ fn validator(
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
-                let mut request = Vec::new();
-                let (header_end, size) = loop {
-                    let mut buf = [0; 1024];
-                    let n = stream.read(&mut buf).unwrap();
-                    assert!(n > 0);
-                    request.extend_from_slice(&buf[..n]);
-                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let headers = std::str::from_utf8(&request[..end]).unwrap();
-                        let length = headers
-                            .lines()
-                            .find_map(|line| {
-                                line.strip_prefix("Content-Length: ")
-                                    .map(|s| s.parse::<usize>().unwrap())
-                            })
-                            .unwrap();
-                        break (end + 4, length);
-                    }
+                let mut stream = BufReader::new(stream);
+                let info = read_request(&mut stream).unwrap();
+                assert_eq!(info["method"], "getblockchaininfo");
+                assert_eq!(info["params"], serde_json::json!([]));
+                assert_eq!(info["id"], 1);
+                respond(
+                    &mut stream,
+                    serde_json::json!({
+                        "id": info["id"], "result": {"chain":"regtest"}, "error": null,
+                    }),
+                );
+                let genesis = read_request(&mut stream).unwrap();
+                assert_eq!(genesis["method"], "getblockhash");
+                assert_eq!(genesis["params"], serde_json::json!([0]));
+                assert_eq!(genesis["id"], 2);
+                let network = if wrong_identity {
+                    ZNetwork::Testnet
+                } else {
+                    ZNetwork::Regtest
                 };
-                while request.len() < header_end + size {
-                    let mut buf = [0; 1024];
-                    let n = stream.read(&mut buf).unwrap();
-                    assert!(n > 0);
-                    request.extend_from_slice(&buf[..n]);
+                respond(
+                    &mut stream,
+                    serde_json::json!({
+                        "id": genesis["id"],
+                        "result": crate::native::chain_identity::genesis(network),
+                        "error": null,
+                    }),
+                );
+                let body = read_request(&mut stream);
+                if wrong_identity {
+                    assert!(
+                        body.is_none(),
+                        "wrong-chain peer received transaction bytes"
+                    );
+                    return None;
                 }
-                let body: serde_json::Value =
-                    serde_json::from_slice(&request[header_end..header_end + size]).unwrap();
+                let body = body.unwrap();
                 assert_eq!(body["method"], "sendrawtransaction");
-                if let Some(response) = response {
-                    let body = response.to_string();
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .unwrap();
+                assert_eq!(body["id"], 3);
+                if let Some(mut response) = response {
+                    response
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("id".into(), body["id"].clone());
+                    respond(&mut stream, response);
                 }
-                body["params"][0].as_str().unwrap().to_owned()
+                Some(body["params"][0].as_str().unwrap().to_owned())
             })
             .collect()
     });
@@ -107,7 +151,7 @@ fn validator(
 
 #[tokio::test]
 async fn uncertain_or_partially_rejected_submission_preserves_all_saved_state() {
-    for partial_success in [false, true] {
+    for (partial_success, wrong_identity) in [(false, false), (true, false), (false, true)] {
         let dir = tempfile::TempDir::new().unwrap();
         let paths = WalletPaths::new(dir.path());
         let mut db = open_wallet_db(&paths.data_db, ZNetwork::Regtest).unwrap();
@@ -193,7 +237,7 @@ async fn uncertain_or_partially_rejected_submission_preserves_all_saved_state() 
         } else {
             vec![None]
         };
-        let (url, peer) = validator(responses);
+        let (url, peer) = validator(responses, wrong_identity);
         let wallet = NativeWallet {
             network_access: true,
             paths,
@@ -220,7 +264,16 @@ async fn uncertain_or_partially_rejected_submission_preserves_all_saved_state() 
             .await
             .unwrap_err();
         let sent = peer.join().unwrap();
-        assert_eq!(sent, raw_hex[..if partial_success { 2 } else { 1 }]);
+        assert_eq!(
+            sent,
+            raw_hex[..if wrong_identity {
+                0
+            } else if partial_success {
+                2
+            } else {
+                1
+            }]
+        );
         assert!(matches!(error, EngineError::BroadcastFailed(_)));
         let message = error.to_string();
         assert!(message.contains(if partial_success {
@@ -229,10 +282,17 @@ async fn uncertain_or_partially_rejected_submission_preserves_all_saved_state() 
             "submission outcome unknown"
         }));
         assert!(message.contains("saved transaction retained"));
+        if wrong_identity {
+            assert!(message.contains("identity mismatch"));
+        }
         for txid in ids {
             assert!(message.contains(&txid.to_string()));
         }
-        assert_eq!(contents(&wallet.paths.data_db), before, "submission errors must not clear locks, spends, raw transactions or rewind checkpoints/scan rows");
+        assert_eq!(
+            contents(&wallet.paths.data_db),
+            before,
+            "submission errors must not clear locks, spends, raw transactions or rewind checkpoints/scan rows"
+        );
         assert_eq!(u32::from(db.chain_height().unwrap().unwrap()), 100);
         // Prove that the removed account-wide cleanup would damage this fixture.
         assert_eq!(db.clear_locked_outputs(account).unwrap(), 1);

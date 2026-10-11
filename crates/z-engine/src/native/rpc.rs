@@ -7,6 +7,14 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+mod verified;
+pub(super) use verified::VerifiedValidator;
+
+/// Verify the validator's chain and genesis, then broadcast on that connection.
+pub fn send_raw_transaction_verified(url: &str, network: Network, raw: &[u8]) -> Result<String> {
+    VerifiedValidator::connect(url, network)?.send(raw)
+}
+
 fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -530,10 +538,12 @@ mod tests {
                 "accepted unsupported URL {url}"
             );
         }
-        assert!(parse_host_port("https://127.0.0.1:8232")
-            .unwrap_err()
-            .to_string()
-            .contains("HTTPS requires a TLS transport"));
+        assert!(
+            parse_host_port("https://127.0.0.1:8232")
+                .unwrap_err()
+                .to_string()
+                .contains("HTTPS requires a TLS transport")
+        );
     }
 
     #[test]
@@ -546,7 +556,7 @@ mod tests {
                     std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
                 ) =>
             {
-                return
+                return;
             }
             Err(error) => panic!("IPv6 loopback listener: {error}"),
         };

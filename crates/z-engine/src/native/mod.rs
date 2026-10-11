@@ -1,6 +1,7 @@
 //! Native (desktop/CLI) wallet backed by `zakura-client-sqlite` + lightwalletd/Zaino.
 
 mod block_cache;
+mod chain_identity;
 mod bridge;
 mod lwd;
 mod lwd_pipe;
@@ -8,6 +9,7 @@ mod pipeline;
 mod rpc;
 mod runtime;
 mod seed;
+mod submission_channel;
 mod selective_scan;
 mod transparent_funding;
 mod transparent_refresh;
