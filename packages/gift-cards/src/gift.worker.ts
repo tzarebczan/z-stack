@@ -1,7 +1,7 @@
 import { createWallet, indexedDbWalletStorage, WalletError, deriveAccount, type Wallet } from "@z-stack/sdk";
 import { initializeGiftKeys, createGiftAccount, deriveGiftAccount, giftMnemonicFromEntropy } from "@z-stack/sdk/gift-keys";
 import { GiftError, validateGiftCard } from "./protocol";
-import { giftIdentity } from "./service";
+import { giftIdentity, type GiftWalletSnapshot } from "./service";
 import type { GiftWorkerReply, GiftWorkerRequest, WorkerConfiguration } from "./worker-messages";
 
 const port = self as unknown as {
@@ -20,6 +20,11 @@ function requireWallet(): Wallet {
   if (stopped || !wallet) throw new GiftError("closed");
   return wallet;
 }
+async function giftSnapshot(snapshot: GiftWalletSnapshot): Promise<GiftWalletSnapshot> {
+  const mature = await requireWallet().balance({ minConfirmations: 6 });
+  requireWallet();
+  return { ...snapshot, matureAvailableZat: mature.saplingAvailable + mature.orchardAvailable + mature.ironwoodAvailable };
+}
 async function initialize(config: WorkerConfiguration): Promise<void> {
   await initializeGiftKeys({ network: config.network, preferMulticore: false, threads: 1,
     prewarmProveWorker: false, prewarmProvingKey: false, wasmBasePath: config.wasmBasePath,
@@ -28,8 +33,8 @@ async function initialize(config: WorkerConfiguration): Promise<void> {
 }
 async function close(): Promise<void> {
   stopped = true;
-  for (const receipt of receipts.values()) receipt.reject();
-  receipts.clear();
+  // Let the journal outcome settle before retiring the wallet. ACKs bypass the queue.
+  await queue;
   const active = wallet;
   wallet = null;
   giftWords = null;
@@ -84,16 +89,21 @@ async function handle(request: GiftWorkerRequest): Promise<void> {
         if (saved.network !== request.card.network || saved.ufvk !== derived.ufvk || saved.birthdayHeight !== request.card.birthdayHeight) throw new GiftError("conflict");
       } else await wallet.restore(giftWords, { birthday: request.card.birthdayHeight });
       requireWallet().lock();
-      post({ kind: "snapshot", id: request.id, value: await requireWallet().getWallet() });
+      post({ kind: "snapshot", id: request.id, value: await giftSnapshot(await requireWallet().getWallet()) });
       return;
     }
-    case "snapshot": post({ kind: "snapshot", id: request.id, value: await requireWallet().getWallet() }); return;
-    case "sync": post({ kind: "snapshot", id: request.id, value: await requireWallet().sync() }); return;
-    case "history": post({ kind: "history", id: request.id, value: await requireWallet().history() }); return;
+    case "snapshot": post({ kind: "snapshot", id: request.id, value: await giftSnapshot(await requireWallet().getWallet()) }); return;
+    case "sync": post({ kind: "snapshot", id: request.id, value: await giftSnapshot(await requireWallet().sync()) }); return;
+    case "history": post({ kind: "history", id: request.id, value: await requireWallet().history(500) }); return;
+    case "transaction": {
+      if (!/^[0-9a-f]{64}$/i.test(request.txid)) throw new GiftError("invalid_link");
+      post({ kind: "transaction", id: request.id, value: await requireWallet().transaction(request.txid) });
+      return;
+    }
     case "fee": {
       const inspection = await requireWallet().inspectAddress(request.to);
       if (inspection.network !== (await requireWallet().getWallet()).network || !inspection.receivers?.includes("orchard")) throw new GiftError("invalid_link");
-      post({ kind: "fee", id: request.id, value: await requireWallet().estimateFee(request.to, request.amountZec) });
+      post({ kind: "fee", id: request.id, value: await requireWallet().estimateFee(request.to, request.amountZec, undefined, { minConfirmations: 6 }) });
       return;
     }
     case "send": {
@@ -101,19 +111,14 @@ async function handle(request: GiftWorkerRequest): Promise<void> {
       if (!giftWords) throw new GiftError("closed");
       try {
         await active.unlock(giftWords);
-        const value = await active.send(request.to, request.amountZec, undefined, { maxFeeZat: request.maxFeeZat,
+        const value = await active.send(request.to, request.amountZec, undefined, { maxFeeZat: request.maxFeeZat, minConfirmations: 6,
           beforeSubmit: async ({ txid }, signal) => {
             await new Promise<void>((resolve, reject) => {
-              const cancel = () => { receipts.delete(request.id); reject(new GiftError("closed")); };
-              signal.addEventListener("abort", cancel, { once: true });
-              receipts.set(request.id, {
-                resolve: () => { signal.removeEventListener("abort", cancel); resolve(); },
-                reject: () => { signal.removeEventListener("abort", cancel); reject(new GiftError("storage")); },
-              });
+              signal.throwIfAborted();
+              receipts.set(request.id, { resolve, reject: () => reject(new GiftError("storage")) });
               post({ kind: "reserved", id: request.id, txid });
             });
-            signal.throwIfAborted();
-          } });
+          }, beforeBroadcast: () => !stopped });
         post({ kind: "spend", id: request.id, value: { txid: value.txid, txids: value.txids } });
       } finally { active.lock(); }
       return;

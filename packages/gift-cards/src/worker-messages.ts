@@ -12,6 +12,7 @@ export type GiftWorkerRequest = { id: number } & (
   | { op: "derive"; config: WorkerConfiguration; card: GiftCard }
   | { op: "open"; config: WorkerConfiguration; card: GiftCard }
   | { op: "snapshot" | "sync" | "history" | "close" }
+  | { op: "transaction"; txid: string }
   | { op: "fee"; to: string; amountZec: string }
   | { op: "send"; to: string; amountZec: string; maxFeeZat: string }
   | { op: "reserved-ack"; accepted: boolean }
@@ -20,6 +21,7 @@ export type GiftWorkerReply =
   | { kind: "account"; id: number; value: GiftAccount }
   | { kind: "snapshot"; id: number; value: GiftWalletSnapshot }
   | { kind: "history"; id: number; value: GiftTransaction[] }
+  | { kind: "transaction"; id: number; value: GiftTransaction | null }
   | { kind: "fee"; id: number; value: { feeZat: number } }
   | { kind: "spend"; id: number; value: GiftSpendResult }
   | { kind: "done"; id: number }

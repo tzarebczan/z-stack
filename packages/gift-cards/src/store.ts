@@ -1,5 +1,5 @@
 import { GiftError, decodeBase64Url, encodeBase64Url } from "./protocol";
-import type { GiftRecord, GiftStore } from "./service";
+import type { GiftRecord, GiftRejectedAttempt, GiftStore } from "./service";
 
 /** Validate decrypted application records. Failures never include their secret fields. */
 export function parseGiftRecord(raw: unknown): GiftRecord {
@@ -11,19 +11,32 @@ export function parseGiftRecord(raw: unknown): GiftRecord {
     !("address" in raw) || typeof raw.address !== "string" || raw.address.length > 1024 ||
     !("amountZat" in raw) || typeof raw.amountZat !== "string" || !/^[1-9]\d{0,15}$/.test(raw.amountZat) ||
     !("phase" in raw)) throw new GiftError("storage");
-  const base: Pick<GiftRecord, "id" | "revision" | "role" | "link" | "address" | "amountZat"> = { id: raw.id, revision: raw.revision, role: raw.role, link: raw.link, address: raw.address, amountZat: raw.amountZat };
+  const rejectedAttempts = "rejectedAttempts" in raw ? rejectedHistory(raw.rejectedAttempts) : undefined;
+  const base: Pick<GiftRecord, "id" | "revision" | "role" | "link" | "address" | "amountZat" | "rejectedAttempts"> = { id: raw.id, revision: raw.revision, role: raw.role, link: raw.link, address: raw.address, amountZat: raw.amountZat,
+    ...(rejectedAttempts ? { rejectedAttempts } : {}) };
   const fundingTxid = "fundingTxid" in raw && raw.fundingTxid !== undefined ? validTxid(raw.fundingTxid) : undefined;
   const feeZat = "feeZat" in raw && raw.feeZat !== undefined ? validFee(raw.feeZat) : undefined;
   switch (raw.phase) {
     case "draft":
       if (fundingTxid || feeZat || ("claimTxid" in raw && raw.claimTxid !== undefined) || ("destination" in raw && raw.destination !== undefined)) throw new GiftError("storage");
       return { ...base, phase: "draft" };
+    case "funding-rejected": {
+      const last = rejectedAttempts?.at(-1);
+      if (base.role !== "issued" || !fundingTxid || feeZat === undefined || last?.kind !== "funding" || last.txid !== fundingTxid || last.feeZat !== feeZat ||
+        ("claimTxid" in raw && raw.claimTxid !== undefined) || ("destination" in raw && raw.destination !== undefined)) throw new GiftError("storage");
+      return { ...base, phase: "funding-rejected", fundingTxid, feeZat };
+    }
     case "funding": case "funded":
       if (("claimTxid" in raw && raw.claimTxid !== undefined) || ("destination" in raw && raw.destination !== undefined)) throw new GiftError("storage");
       return { ...base, phase: raw.phase, ...(fundingTxid ? { fundingTxid } : {}), ...(feeZat ? { feeZat } : {}) };
-    case "redeeming": case "redeemed": {
+    case "redeeming": case "redeemed": case "redemption-rejected": {
       if (!("destination" in raw) || typeof raw.destination !== "string" || raw.destination.length > 1024 || !feeZat) throw new GiftError("storage");
       const claimTxid = "claimTxid" in raw && raw.claimTxid !== undefined ? validTxid(raw.claimTxid) : undefined;
+      if (raw.phase === "redemption-rejected") {
+        const last = rejectedAttempts?.at(-1);
+        if (!claimTxid || last?.kind !== "redemption" || last.txid !== claimTxid || last.destination !== raw.destination || last.feeZat !== feeZat) throw new GiftError("storage");
+        return { ...base, phase: "redemption-rejected", destination: raw.destination, feeZat, claimTxid, ...(fundingTxid ? { fundingTxid } : {}) };
+      }
       if (raw.phase === "redeemed") {
         if (!claimTxid) throw new GiftError("storage");
         return { ...base, phase: "redeemed", destination: raw.destination, feeZat, claimTxid, ...(fundingTxid ? { fundingTxid } : {}) };
@@ -32,6 +45,20 @@ export function parseGiftRecord(raw: unknown): GiftRecord {
     }
     default: throw new GiftError("storage");
   }
+}
+function rejectedHistory(value: unknown): GiftRejectedAttempt[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 256) throw new GiftError("storage");
+  return value.map(attempt => {
+    if (typeof attempt !== "object" || attempt === null || !("txid" in attempt) || !("feeZat" in attempt) || !("kind" in attempt)) throw new GiftError("storage");
+    const txid = validTxid(attempt.txid), feeZat = validFee(attempt.feeZat);
+    if (attempt.kind === "funding") {
+      if ("destination" in attempt && attempt.destination !== undefined) throw new GiftError("storage");
+      return { kind: "funding", txid, feeZat };
+    }
+    if (attempt.kind !== "redemption" || !("destination" in attempt) || typeof attempt.destination !== "string" || attempt.destination.length > 1024) throw new GiftError("storage");
+    return { kind: "redemption", txid, feeZat, destination: attempt.destination };
+  });
 }
 function validTxid(value: unknown): string {
   if (typeof value !== "string" || !/^[0-9a-f]{64}$/i.test(value)) throw new GiftError("storage");

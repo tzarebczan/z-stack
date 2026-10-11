@@ -1,4 +1,4 @@
-import { GiftError } from "./protocol";
+import { GiftError, GIFT_CONFIRMATIONS } from "./protocol";
 import type { GiftBackend, GiftSendOptions, GiftWallet } from "./service";
 import type { BrowserGiftOptions, GiftWorkerReply, GiftWorkerRequest, WorkerConfiguration } from "./worker-messages";
 export type { BrowserGiftOptions } from "./worker-messages";
@@ -54,11 +54,16 @@ export function createBrowserGiftBackend(options: BrowserGiftOptions): GiftBacke
             const r = await session.call({ id: session.next(), op: "history" });
             if (r.kind !== "history") throw new GiftError("conflict"); return r.value;
           },
+          async transaction(txid) {
+            const r = await session.call({ id: session.next(), op: "transaction", txid });
+            if (r.kind !== "transaction") throw new GiftError("conflict"); return r.value;
+          },
           async estimateFee(to, amountZec) {
             const r = await session.call({ id: session.next(), op: "fee", to, amountZec });
             if (r.kind !== "fee") throw new GiftError("conflict"); return r.value;
           },
           async send(to, amountZec, sendOptions) {
+            if (sendOptions.minConfirmations !== undefined && sendOptions.minConfirmations !== GIFT_CONFIRMATIONS) throw new GiftError("invalid_link");
             const r = await session.call({ id: session.next(), op: "send", to, amountZec, maxFeeZat: sendOptions.maxFeeZat }, sendOptions);
             if (r.kind !== "spend") throw new GiftError("conflict"); return r.value;
           },
@@ -80,6 +85,7 @@ class GiftConnection {
   private closing: Promise<void> | null = null;
   private abort = new AbortController();
   private pending = new Map<number, Pending>();
+  private journals = new Set<Promise<void>>();
   constructor(private worker: Worker, onProgress: BrowserGiftOptions["onProgress"], private removed: () => void) {
     worker.onmessage = (event: MessageEvent<GiftWorkerReply>) => {
       const reply = event.data;
@@ -87,16 +93,19 @@ class GiftConnection {
       const waiting = this.pending.get(reply.id);
       if (!waiting) return;
       if (reply.kind === "reserved") {
-        void Promise.resolve().then(() => { this.abort.signal.throwIfAborted(); return waiting.beforeSubmit?.({ txid: reply.txid }, this.abort.signal); })
-          .then(() => worker.postMessage({ id: reply.id, op: "reserved-ack", accepted: !this.stopped }))
+        const journal = Promise.resolve().then(() => { this.abort.signal.throwIfAborted(); return waiting.beforeSubmit?.({ txid: reply.txid }, this.abort.signal); })
+          // A successful atomic journal write remains committed when Close races it.
+          .then(() => worker.postMessage({ id: reply.id, op: "reserved-ack", accepted: true }))
           .catch(() => worker.postMessage({ id: reply.id, op: "reserved-ack", accepted: false }));
+        this.journals.add(journal);
+        void journal.finally(() => this.journals.delete(journal));
         return;
       }
       this.pending.delete(reply.id);
       if (reply.kind === "error") {
-        const code = reply.code === "wrong_network" || reply.code === "conflict" || reply.code === "storage" || reply.code === "closed" || reply.code === "review_changed" ? reply.code
+        const code = reply.code === "wrong_network" || reply.code === "conflict" || reply.code === "storage" || reply.code === "closed" || reply.code === "review_changed" || reply.code === "broadcast_rejected" ? reply.code
           : reply.code === "insufficient_funds" ? "insufficient_funds"
-          : reply.code === "broadcast_failed" || reply.code === "broadcast_rejected" || reply.code === "unresolved" ? "unresolved"
+          : reply.code === "broadcast_failed" || reply.code === "unresolved" ? "unresolved"
           : reply.code === "invalid_mnemonic" || reply.code === "invalid_birthday" || reply.code === "invalid_link" ? "invalid_link" : "connection";
         const error = new GiftError(code);
         waiting.reject(reply.txid ? Object.assign(error, { txid: reply.txid }) : error);
@@ -126,7 +135,10 @@ class GiftConnection {
     this.closing = (async () => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        await Promise.race([this.call({ id: this.next(), op: "close" }), new Promise<void>(resolve => { timer = setTimeout(resolve, 5000); })]);
+        const closed = this.call({ id: this.next(), op: "close" });
+        // Keep the worker alive until every in-flight commit has acknowledged its outcome.
+        await Promise.allSettled([...this.journals]);
+        await Promise.race([closed, new Promise<void>(resolve => { timer = setTimeout(resolve, 5000); })]);
       } finally {
         if (timer !== undefined) clearTimeout(timer);
         this.worker.terminate();

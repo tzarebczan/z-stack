@@ -46,3 +46,23 @@ test("incompatible persisted phases cannot discard prior payment evidence", () =
     { ...draft, phase: "funding", claimTxid: "aa".repeat(32) }, { ...draft, phase: "funded", destination: "recipient" }])
     assert.throws(() => parseGiftRecord(raw), code("storage"));
 });
+
+test("definitive rejection phases persist exact attempt evidence and reject inconsistent retry state", async () => {
+  const factory = new IDBFactory(), store = createEncryptedGiftStore({ name: "gifts", key: await key(), factory });
+  const fundingTxid = "ab".repeat(32), claimTxid = "cd".repeat(32);
+  const funding: GiftRecord = { ...draft, phase: "funding-rejected", fundingTxid, feeZat: "10000",
+    rejectedAttempts: [{ kind: "funding", txid: fundingTxid, feeZat: "10000" }] };
+  await store.save(funding, null);
+  assert.deepEqual(await store.get(draft.id), funding);
+  const redemption: GiftRecord = { ...funding, revision: 1, phase: "redemption-rejected", claimTxid, destination: "recipientUA",
+    rejectedAttempts: [...(funding.rejectedAttempts ?? []), { kind: "redemption", txid: claimTxid, feeZat: "10000", destination: "recipientUA" }] };
+  await store.save(redemption, 0);
+  assert.deepEqual(await store.get(draft.id), redemption);
+  for (const raw of [{ ...funding, rejectedAttempts: [] }, { ...funding, role: "received" },
+    { ...funding, feeZat: "20000" }, { ...funding, fundingTxid: claimTxid },
+    { ...redemption, destination: "otherUA" }, { ...redemption, claimTxid: fundingTxid },
+    { ...redemption, rejectedAttempts: [{ kind: "unknown", txid: claimTxid, feeZat: "10000" }] },
+    { ...redemption, rejectedAttempts: [{ kind: "redemption", txid: "invalid", feeZat: "10000", destination: "recipientUA" }] },
+    { ...funding, rejectedAttempts: Array.from({ length: 257 }, () => funding.rejectedAttempts?.[0]) }])
+    assert.throws(() => parseGiftRecord(raw), code("storage"));
+});

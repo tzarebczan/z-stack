@@ -90,6 +90,42 @@ mod tests {
     const ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[test]
+    fn explicit_maturity_is_symmetric_and_zero_is_rejected_before_database_work() {
+        let six = explicit_confirmations_policy(6).unwrap();
+        assert_eq!(u32::from(six.trusted()), 6);
+        assert_eq!(u32::from(six.untrusted()), 6);
+        #[cfg(feature = "transparent-inputs")]
+        assert!(!six.allow_zero_conf_shielding());
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = fixture_wallet(dir.path());
+        assert_eq!(
+            wallet
+                .balance_with_confirmations(0)
+                .unwrap_err()
+                .to_string(),
+            "confirmations_invalid"
+        );
+        assert_eq!(
+            wallet
+                .prepare_payment_with_confirmations("zcash:example", 10000, None, 0)
+                .unwrap_err()
+                .to_string(),
+            "confirmations_invalid"
+        );
+        assert_eq!(
+            wallet
+                .prepare_payment_with_confirmations("zcash:example", 10000, None, 6)
+                .unwrap_err()
+                .to_string(),
+            "payment_plain_address_required"
+        );
+        assert_eq!(
+            u32::from(crate::confirmations_policy(ZNetwork::Regtest).trusted()),
+            1
+        );
+    }
+
+    #[test]
     fn submission_keeps_rejections_distinct_from_lost_replies() {
         assert!(submission_acknowledged(Ok(ID.into())).unwrap());
         assert!(
@@ -309,6 +345,38 @@ impl NativeWallet {
         amount: u64,
         memo: Option<&str>,
     ) -> Result<PaymentReceipt> {
+        self.prepare_payment_with_policy(
+            to,
+            amount,
+            memo,
+            crate::confirmations_policy(self.network),
+        )
+    }
+
+    /// Select and persist immutable inputs using a positive symmetric maturity rule.
+    /// The serialized proposal retains this rule through sign/recovery; no re-proposal.
+    pub fn prepare_payment_with_confirmations(
+        &self,
+        to: &str,
+        amount: u64,
+        memo: Option<&str>,
+        confirmations: u32,
+    ) -> Result<PaymentReceipt> {
+        self.prepare_payment_with_policy(
+            to,
+            amount,
+            memo,
+            explicit_confirmations_policy(confirmations)?,
+        )
+    }
+
+    fn prepare_payment_with_policy(
+        &self,
+        to: &str,
+        amount: u64,
+        memo: Option<&str>,
+        policy: ConfirmationsPolicy,
+    ) -> Result<PaymentReceipt> {
         if to.trim().to_ascii_lowercase().starts_with("zcash:") {
             return Err(failed("payment_plain_address_required"));
         }
@@ -335,7 +403,7 @@ impl NativeWallet {
                 DustOutputPolicy::default(),
             ),
             request,
-            crate::confirmations_policy(self.network),
+            policy,
             &shielded_spend_policy(),
             None,
             None,

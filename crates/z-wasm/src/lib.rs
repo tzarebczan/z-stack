@@ -540,6 +540,16 @@ impl WasmWallet {
         z_engine::web::SHIELD_NOT_READY.to_string()
     }
 
+    /// Balance of current unspent notes at an explicit minimum confirmation count.
+    #[wasm_bindgen(js_name = balanceWithConfirmations)]
+    pub fn balance_with_confirmations(&self, confirmations: u32) -> Result<String, JsValue> {
+        let balance = self
+            .inner
+            .balance_with_confirmations(confirmations)
+            .map_err(js_err)?;
+        serde_json::to_string(&balance).map_err(js_err)
+    }
+
     /// ZIP-317 fee for a send / ZIP-321 URI. Propose only. Returns `{ feeZat, feeZec }`.
     #[wasm_bindgen(js_name = estimateFee)]
     pub fn estimate_fee(
@@ -547,11 +557,16 @@ impl WasmWallet {
         to: &str,
         amount_zec: &str,
         memo: Option<String>,
+        min_confirmations: Option<u32>,
     ) -> Result<String, JsValue> {
-        let fee = self
-            .inner
-            .estimate_fee(to, amount_zec, memo.as_deref())
-            .map_err(js_err)?;
+        let fee = match min_confirmations {
+            Some(min) => {
+                self.inner
+                    .estimate_fee_with_confirmations(to, amount_zec, memo.as_deref(), min)
+            }
+            None => self.inner.estimate_fee(to, amount_zec, memo.as_deref()),
+        }
+        .map_err(js_err)?;
         Ok(z_engine::fee_estimate_json(fee).to_string())
     }
 
@@ -619,18 +634,37 @@ impl WasmWallet {
         amount_zec: &str,
         memo: Option<String>,
         max_fee_zat: Option<String>,
+        min_confirmations: Option<u32>,
     ) -> Result<String, JsValue> {
-        let raw = match max_fee_zat {
-            Some(limit) => {
-                let fee = limit
+        let max_fee = max_fee_zat
+            .as_deref()
+            .map(|limit| {
+                limit
                     .parse::<u64>()
-                    .map_err(|_| js_err("invalid maximum fee"))?;
-                self.inner
-                    .prove_send_capped(mnemonic, to, amount_zec, memo.as_deref(), fee)
-            }
-            None => self
-                .inner
-                .prove_send(mnemonic, to, amount_zec, memo.as_deref()),
+                    .map_err(|_| js_err("invalid maximum fee"))
+            })
+            .transpose()?;
+        let raw = match min_confirmations {
+            Some(min) => self.inner.prove_send_with_confirmations(
+                mnemonic,
+                to,
+                amount_zec,
+                memo.as_deref(),
+                max_fee,
+                min,
+            ),
+            None => match max_fee_zat {
+                Some(limit) => {
+                    let fee = limit
+                        .parse::<u64>()
+                        .map_err(|_| js_err("invalid maximum fee"))?;
+                    self.inner
+                        .prove_send_capped(mnemonic, to, amount_zec, memo.as_deref(), fee)
+                }
+                None => self
+                    .inner
+                    .prove_send(mnemonic, to, amount_zec, memo.as_deref()),
+            },
         }
         .map_err(js_err)?;
         let txid = self.inner.raw_txid(&raw).map_err(js_err)?;
@@ -658,6 +692,11 @@ impl WasmWallet {
     pub fn memo_enhancement_txids(&self, limit: u32) -> String {
         serde_json::to_string(&self.inner.memo_enhancement_txids(limit as usize))
             .expect("transaction id list serializes")
+    }
+
+    #[wasm_bindgen(js_name = rewindToChecked)]
+    pub fn rewind_to_checked(&mut self, height: u32) -> Result<u32, JsValue> {
+        self.inner.rewind_to_height_checked(height).map_err(js_err)
     }
 
     #[wasm_bindgen(js_name = rewindTo)]

@@ -150,6 +150,7 @@ export function proveInWorker(req: Omit<ProveResult, "hex" | "txid" | "snapshot"
   to?: string;
   amountZec?: string;
   maxFeeZat?: string;
+  minConfirmations?: number;
   memo?: string;
   thresholdZat?: number;
 }): Promise<ProveResult> {

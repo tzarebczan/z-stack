@@ -1261,8 +1261,19 @@ impl WebWallet {
     }
 
     pub fn balance(&self) -> Balance {
+        self.balance_for_policy(&crate::confirmations_policy(self.network))
+    }
+
+    /// Current unspent balance under an explicit minimum for both change and received notes.
+    pub fn balance_with_confirmations(&self, confirmations: u32) -> Result<Balance> {
+        Ok(self.balance_for_policy(&super::explicit_confirmations_policy(confirmations)?))
+    }
+
+    fn balance_for_policy(
+        &self,
+        policy: &zcash_client_backend::data_api::wallet::ConfirmationsPolicy,
+    ) -> Balance {
         use zcash_client_backend::data_api::wallet::TargetHeight;
-        let policy = crate::confirmations_policy(self.network);
         let target = TargetHeight::from(self.scanned_height.saturating_add(1));
         let mut sapling = 0u64;
         let mut orchard = 0u64;
@@ -1287,14 +1298,14 @@ impl WebWallet {
                 &mut t,
                 &mut t_p,
                 u.value_zat,
-                self.utxo_ready(u, target, &policy),
+                self.utxo_ready(u, target, policy),
             );
         }
         for n in &self.notes {
             if n.spent {
                 continue;
             }
-            let ready = self.note_ready(n, target, &policy);
+            let ready = self.note_ready(n, target, policy);
             match n.pool.as_str() {
                 "sapling" => add(&mut sapling, &mut sapling_p, n.value_zat, ready),
                 "ironwood" => add(&mut ironwood, &mut ironwood_p, n.value_zat, ready),
@@ -1876,6 +1887,14 @@ impl WebWallet {
 
     pub(crate) fn hash_at(&self, height: u32) -> Option<&str> {
         self.block_hashes.get(&height).map(String::as_str)
+    }
+
+    /// Verify that an exact retained checkpoint exists before changing any scanned state.
+    pub fn rewind_to_height_checked(&mut self, height: u32) -> Result<u32> {
+        if height > self.scanned_height || !self.block_hashes.contains_key(&height) {
+            return Err(EngineError::Message("reorg checkpoint is outside the retained history; retry with a current light server".into()));
+        }
+        self.rewind_to_height(height)
     }
 
     /// Drop scanned state above `max_height` (inclusive keep). Trees rebuild from remaining leaves.
@@ -4566,6 +4585,66 @@ mod tests {
         assert!(restored.sinsemilla_live);
         restored.finalize_scan_trees().unwrap();
         assert!(restored.sinsemilla_live);
+    }
+
+    #[test]
+    fn checked_rewind_refuses_missing_checkpoint_without_mutating_snapshot() {
+        let mut w = wallet();
+        w.scanned_height = 5000;
+        w.block_hashes.insert(4999, "aa".repeat(32));
+        let before = w.to_snapshot().unwrap();
+        assert!(w.rewind_to_height_checked(100).is_err());
+        assert_eq!(w.scanned_height, 5000);
+        assert_eq!(w.to_snapshot().unwrap(), before);
+        assert!(w.rewind_to_height_checked(5001).is_err());
+    }
+
+    #[test]
+    fn explicit_maturity_counts_only_current_unspent_notes_and_mature_change() {
+        let mut w = wallet();
+        w.scanned_height = 100;
+        for (id, value, height, spent, change) in [
+            ("old-spent", 60_000, 80, true, false),
+            ("fresh-refill", 60_000, 98, false, false),
+            ("fresh-change", 20_000, 100, false, true),
+            ("mature-dust", 1_000, 95, false, false),
+        ] {
+            w.notes.push(TrackedNote {
+                pool: "orchard".into(),
+                txid: id.into(),
+                output_index: 0,
+                value_zat: value,
+                nf: String::new(),
+                is_change: change,
+                spent,
+                spent_in: None,
+                spent_height: None,
+                mined_height: height,
+            });
+        }
+        let mature = w.balance_with_confirmations(6).unwrap();
+        assert_eq!(mature.orchard_available, 1_000);
+        assert_eq!(mature.total_pending, 80_000);
+        assert!(w.balance().orchard_available > mature.orchard_available);
+        assert!(w.balance_with_confirmations(0).is_err());
+        w.scanned_height = 103;
+        assert_eq!(
+            w.balance_with_confirmations(6).unwrap().orchard_available,
+            61_000
+        );
+        w.scanned_height = 105;
+        assert_eq!(
+            w.balance_with_confirmations(6).unwrap().orchard_available,
+            81_000
+        );
+        let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(
+            restored
+                .balance_with_confirmations(6)
+                .unwrap()
+                .orchard_available,
+            81_000
+        );
     }
 
     #[test]

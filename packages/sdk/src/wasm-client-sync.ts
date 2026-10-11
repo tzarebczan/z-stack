@@ -190,7 +190,13 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       const blob = await recovery.run(() => ctx.transport.blocks(overlap, overlap, signal));
       assertCompactBlockHeight(blob, overlap);
       if (cancelled()) throw new Error("sync cancelled");
-      if (start - 1 > tip) await source.rewindTo(tip);
+      if (start - 1 > tip) {
+        // Refuse stale endpoints outside the exact retained checkpoint horizon.
+        // The unchecked rewind may otherwise reset to birthday before a gap error.
+        if (!source.rewindToChecked) throw new WalletError("sync_required", "The engine cannot safely verify this older chain tip.");
+        const kept = await source.rewindToChecked(tip);
+        if (kept !== tip) throw new WalletError("sync_required", "The engine could not retain the requested chain checkpoint.");
+      }
       try {
         await source.applyBlob(blob);
       } catch (error) {

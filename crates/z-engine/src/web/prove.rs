@@ -272,6 +272,26 @@ impl WebWallet {
         self.finish_prove_send_capped(mnemonic, request, Some(to), Some(max_fee_zat))
     }
 
+    /// A shielded send whose actual input selection enforces the reviewed confirmation minimum.
+    pub fn prove_send_with_confirmations(
+        &mut self,
+        mnemonic: &str,
+        to: &str,
+        amount_zec: &str,
+        memo: Option<&str>,
+        max_fee_zat: Option<u64>,
+        confirmations: u32,
+    ) -> Result<Vec<u8>> {
+        let policy = super::explicit_confirmations_policy(confirmations)?;
+        if to.trim().to_ascii_lowercase().starts_with("zcash:") {
+            return Err(EngineError::Message(
+                "explicit confirmations require one plain shielded address".into(),
+            ));
+        }
+        let request = self.send_request(to, amount_zec, memo)?;
+        self.finish_prove_send_policy(mnemonic, request, Some(to), max_fee_zat, policy)
+    }
+
     /// Fee for exactly one bare P2PKH/P2SH output, with shielded change.
     pub fn estimate_transparent_fee(&mut self, to: &str, amount_zec: &str) -> Result<u64> {
         let request = self.transparent_send_request(to, amount_zec)?;
@@ -379,8 +399,25 @@ impl WebWallet {
         record_to: Option<&str>,
         max_fee_zat: Option<u64>,
     ) -> Result<Vec<u8>> {
+        self.finish_prove_send_policy(
+            mnemonic,
+            request,
+            record_to,
+            max_fee_zat,
+            crate::confirmations_policy(self.network()),
+        )
+    }
+
+    fn finish_prove_send_policy(
+        &mut self,
+        mnemonic: &str,
+        request: TransactionRequest,
+        record_to: Option<&str>,
+        max_fee_zat: Option<u64>,
+        policy: ConfirmationsPolicy,
+    ) -> Result<Vec<u8>> {
         let usk = usk_from_mnemonic(self, mnemonic)?;
-        let proposal = self.propose_send(request, None)?;
+        let proposal = self.propose_send_policy(request, None, policy)?;
         if max_fee_zat.is_some_and(|limit| crate::proposal_fee_zat(&proposal) > limit) {
             return Err(EngineError::Message(
                 "swap transaction fee exceeds the approved maximum".into(),
@@ -428,6 +465,20 @@ impl WebWallet {
             <Self as zcash_client_backend::data_api::InputSource>::NoteRef,
         >,
     > {
+        self.propose_send_policy(request, lock, crate::confirmations_policy(self.network()))
+    }
+
+    fn propose_send_policy(
+        &mut self,
+        request: TransactionRequest,
+        lock: Option<zcash_client_backend::data_api::wallet::LockRequest>,
+        policy: ConfirmationsPolicy,
+    ) -> Result<
+        zcash_client_backend::proposal::Proposal<
+            StandardFeeRule,
+            <Self as zcash_client_backend::data_api::InputSource>::NoteRef,
+        >,
+    > {
         self.finalize_for_spend()?;
         if self.scanned_height() == 0 {
             return Err(EngineError::SyncRequired);
@@ -446,7 +497,7 @@ impl WebWallet {
             &input_selector,
             &change_strategy,
             request,
-            crate::confirmations_policy(self.network()),
+            policy,
             &orchard_spend_policy(),
             lock,
             None,
@@ -458,6 +509,19 @@ impl WebWallet {
     pub fn estimate_fee(&mut self, to: &str, amount_zec: &str, memo: Option<&str>) -> Result<u64> {
         let request = self.send_request(to, amount_zec, memo)?;
         self.propose_fee(request)
+    }
+
+    /// Estimate a shielded send using the same explicit input policy as proving.
+    pub fn estimate_fee_with_confirmations(
+        &mut self,
+        to: &str,
+        amount_zec: &str,
+        memo: Option<&str>,
+        confirmations: u32,
+    ) -> Result<u64> {
+        let policy = super::explicit_confirmations_policy(confirmations)?;
+        let request = self.send_request(to, amount_zec, memo)?;
+        self.propose_fee_policy(request, policy)
     }
 
     /// Largest orchard amount `propose_transfer` accepts (own UA if `to` is omitted).
@@ -570,6 +634,14 @@ impl WebWallet {
     }
 
     fn propose_fee(&mut self, request: TransactionRequest) -> Result<u64> {
+        self.propose_fee_policy(request, crate::confirmations_policy(self.network()))
+    }
+
+    fn propose_fee_policy(
+        &mut self,
+        request: TransactionRequest,
+        policy: ConfirmationsPolicy,
+    ) -> Result<u64> {
         self.finalize_scan_trees()?;
         if self.scanned_height() == 0 {
             return Err(EngineError::SyncRequired);
@@ -588,7 +660,7 @@ impl WebWallet {
             &input_selector,
             &change_strategy,
             request,
-            crate::confirmations_policy(self.network()),
+            policy,
             &orchard_spend_policy(),
             None,
             None,

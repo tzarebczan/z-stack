@@ -8,6 +8,7 @@ import {
   type WalletSnapshot
 } from "@z-stack/core";
 import type { BirthdayInput, ChainTip, CreationResult, EngineHealth, WaitOpts } from "./engine";
+import { confirmationBalance, minimumConfirmations } from "./confirmation-policy";
 import { balanceEvent, createEventBus } from "./events";
 import { observeWasmRuntime, wasmRuntime } from "./runtime";
 import type { WalletEventHandler } from "./events";
@@ -286,8 +287,11 @@ export function createWasmClient(
   async function loadHistory(limit = 50, query?: HistoryQuery): Promise<HistoryEntry[]> {
     if (!currentSession() && !(await loadIfNeeded())) return [];
     const filtered = !!(query?.status || query?.txid?.trim());
-    const fetchLimit = filtered ? 500 : limit;
-    const fromWallet = JSON.parse(await session!.history(fetchLimit)) as HistoryEntry[];
+    if (filtered) {
+      const fromWallet = JSON.parse(await session!.historyQuery(limit, query?.status ?? "", query?.txid?.trim() ?? "")) as HistoryEntry[];
+      return filterHistory(fromWallet, query, limit);
+    }
+    const fromWallet = JSON.parse(await session!.history(limit)) as HistoryEntry[];
     const rows = fromWallet.length ? fromWallet : ((await snap()).transactions ?? []);
     return filterHistory(rows, query, limit);
   }
@@ -529,6 +533,19 @@ export function createWasmClient(
         throw WalletError.fromMessage(`could not load saved wallet: ${msg}`, e);
       }
     },
+    balance: async (options) => {
+      const minConfirmations = minimumConfirmations(options?.minConfirmations);
+      if (!currentSession() && !(await loadIfNeeded())) throw WalletError.fromMessage("no wasm wallet");
+      const operation = sessionOperation!;
+      const source = session!;
+      const snapshot = await snap();
+      assertSource(operation, source);
+      if (minConfirmations === undefined) return snapshot.balance;
+      if (snapshot.hardware) throw new WalletError("hardware_unsupported", "Confirmation policies currently require a software wallet.");
+      const json = await source.balanceWithConfirmations(minConfirmations);
+      assertSource(operation, source);
+      return confirmationBalance(json);
+    },
     sync: () =>
       runSync()
         .then((w) => {
@@ -560,6 +577,7 @@ export function createWasmClient(
       return finishSpend(txid, operation, source);
     },
     send: async (to, amountZec, memo, sendOpts) => {
+      const minConfirmations = minimumConfirmations(sendOpts?.minConfirmations);
       if (!currentSession() && !(await loadIfNeeded())) throw new Error("no wasm wallet");
       const operation = sessionOperation!;
       const source = session!;
@@ -570,6 +588,11 @@ export function createWasmClient(
       const maxFeeZat = sendOpts?.maxFeeZat;
       if (maxFeeZat !== undefined && (!/^(0|[1-9]\d{0,15})$/.test(maxFeeZat) || BigInt(maxFeeZat) > 2_100_000_000_000_000n)) throw new Error("invalid maximum fee in zatoshis");
       if (maxFeeZat !== undefined && (sendOpts?.signer || (await snap()).hardware)) throw new Error("fee-capped sends currently require a software wallet");
+      if (minConfirmations !== undefined) {
+        if (sendOpts?.signer || (await snap()).hardware) throw new WalletError("hardware_unsupported", "Confirmation policies currently require a software wallet.");
+        await source.balanceWithConfirmations(minConfirmations);
+        assertSource(operation, source);
+      }
       let txid: string | undefined;
       if (sendOpts?.signer) {
         txid = await hardwareSubmit({ to: dest, amountZec, ...(memo ? { memo } : {}) }, { ...sendOpts, signer: sendOpts.signer });
@@ -577,7 +600,7 @@ export function createWasmClient(
         if ((await snap()).hardware) {
           throw new Error("this wallet signs on its hardware wallet: pass { signer } to send");
         }
-        txid = await proveAndSubmit("send", requireSeed("send"), { to: dest, amountZec, memo, maxFeeZat },
+        txid = await proveAndSubmit("send", requireSeed("send"), { to: dest, amountZec, memo, maxFeeZat, minConfirmations },
           () => !sendOpts?.signal?.aborted && (sendOpts?.beforeBroadcast?.() ?? true), sendOpts?.beforeSubmit);
       }
       return finishSpend(txid, operation, source);
@@ -611,12 +634,19 @@ export function createWasmClient(
         return parseFeeJson(raw);
       } catch (e) { throw WalletError.fromUnknown(e); }
     },
-    estimateFee: async (to, amountZec, memo) => {
+    estimateFee: async (to, amountZec, memo, options) => {
+      const minConfirmations = minimumConfirmations(options?.minConfirmations);
       if (!currentSession() && !(await loadIfNeeded())) throw WalletError.fromMessage("no wasm wallet");
       const dest = to.trim();
       if (dest.toLowerCase().startsWith("zcash:")) parseZip321(dest);
+      const operation = sessionOperation!;
+      const source = session!;
+      if (minConfirmations !== undefined && (await snap()).hardware)
+        throw new WalletError("hardware_unsupported", "Confirmation policies currently require a software wallet.");
+      assertSource(operation, source);
       try {
-        const raw = await session!.estimateFee(dest, amountZec ?? "", memo);
+        const raw = await source.estimateFee(dest, amountZec ?? "", memo, minConfirmations);
+        assertSource(operation, source);
         return parseFeeJson(raw);
       } catch (e) {
         throw WalletError.fromUnknown(e);

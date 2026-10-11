@@ -19,7 +19,7 @@ export type GiftCard = {
   label?: string;
 };
 export type GiftErrorCode = "invalid_link" | "wrong_network" | "invalid_amount" | "not_found" |
-  "conflict" | "unresolved" | "confirming" | "insufficient_funds" | "review_changed" | "storage" | "closed" | "connection";
+  "conflict" | "unresolved" | "broadcast_rejected" | "confirming" | "insufficient_funds" | "review_changed" | "storage" | "closed" | "connection";
 const messages: Record<GiftErrorCode, string> = {
   invalid_link: "That gift card link is invalid or unsupported.",
   wrong_network: "This gift card belongs to a different network.",
@@ -27,6 +27,7 @@ const messages: Record<GiftErrorCode, string> = {
   not_found: "This gift card is not saved on this device.",
   conflict: "This gift card changed. Open the saved card and check its status.",
   unresolved: "A payment is still being checked. Check its status before trying again.",
+  broadcast_rejected: "The node rejected this payment. Review it before trying again.",
   confirming: "Waiting for six block confirmations.",
   insufficient_funds: "This card does not yet have enough confirmed funds, including its fee.",
   review_changed: "The fee or wallet changed. Review this gift again.",

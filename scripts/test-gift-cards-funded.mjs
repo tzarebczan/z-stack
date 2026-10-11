@@ -267,7 +267,13 @@ try {
     "unresolved",
   );
   assert.equal(submitCount, afterFunding);
-  await rpc("generate", [8]);
+  await rpc("generate", [3]);
+  await sync();
+  assert.equal(await page.evaluate(async ({id, destination}) => {
+    try { await window.f.gifts.prepareRedeem(id, destination); return "unexpected"; }
+    catch (error) { return error.code; }
+  }, {id: review.id, destination: before}), "confirming", "three confirmations must not authorize a claim");
+  await rpc("generate", [5]);
   await sync();
   let inspected;
   for (let i = 0; i < 80; i++) {

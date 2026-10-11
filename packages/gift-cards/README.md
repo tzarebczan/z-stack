@@ -66,6 +66,12 @@ metadata; only scanned wallet evidence establishes available funds. Creation fun
 the face amount plus a 10,000-zatoshi claim reserve. The actual funding fee is
 additional. Redemption sends the reviewed face amount, and waits for six scanned
 funding confirmations and enough confirmed funds to cover the engine's actual fee.
+The browser engine selects current unspent notes with six confirmations for
+balance, fee estimation and the actual claim. Old spent deposits cannot qualify
+young refills. Other adapters use a conservative history fallback; its truncated
+500-row page fails closed. Exact claim lookup preserves older mined receipts. Definitive rejection
+of the exact saved transaction has a separate retryable state with retained attempt
+evidence and fresh review. Unknown outcomes remain unresolved.
 
 Initial browser funding requires a software source wallet because the SDK's
 fee-capped send rejects hardware sources. Redemption can pay a hardware or

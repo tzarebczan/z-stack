@@ -17,6 +17,7 @@ import {
 } from "@z-stack/core";
 import { balanceEvent, createEventBus, type EventBus, type WalletEventHandler, type WalletEventName } from "./events";
 import type { HardwareAccount, HardwareSendOptions } from "./hardware";
+import { minimumConfirmations } from "./confirmation-policy";
 import { explainBridgeAuthError, splitProxyAuth, transportFetchOptions } from "./lwd";
 
 export type { BalanceEvent, SyncEvent, WalletEventHandler, WalletEventMap, WalletEventName } from "./events";
@@ -128,9 +129,13 @@ export type RestoreOpts = {
    */
   beforeCommit?: (snapshot: WalletSnapshot) => void | Promise<void>;
 };
+/** Browser software wallets only. Applies to current unspent notes and proposal selection. */
+export type ConfirmationOptions = { minConfirmations: number };
 export type SendOptions = Partial<HardwareSendOptions> & {
   /** Browser software wallets only. Enforced on the actual single-recipient shielded proposal. */
   maxFeeZat?: string;
+  /** Browser software wallets only. Integer 1..4294967295; omitted uses the engine default. */
+  minConfirmations?: number;
 };
 
 export type EngineClientOpts = {
@@ -157,6 +162,8 @@ export type EngineClient = {
   off: <K extends WalletEventName>(event: K, handler: WalletEventHandler<K>) => void;
   health: () => Promise<EngineHealth>;
   getWallet: () => Promise<WalletSnapshot>;
+  /** Current unspent balance; an explicit confirmation policy requires the browser software engine. */
+  balance: (options?: ConfirmationOptions) => Promise<WalletSnapshot["balance"]>;
   sync: () => Promise<WalletSnapshot>;
   /** Shield transparent funds at or above `threshold` zatoshis. Resolves after broadcast. */
   shield: (threshold?: number) => Promise<SpendResult>;
@@ -174,7 +181,7 @@ export type EngineClient = {
   /** Runtime support only; spending still requires the matching seed and spendable notes. */
   supportsTransparentSend: () => Promise<boolean>;
   /** ZIP-317 fee from engine `propose_transfer`. Not a TypeScript pad. */
-  estimateFee: (to: string, amountZec?: string, memo?: string) => Promise<FeeEstimate>;
+  estimateFee: (to: string, amountZec?: string, memo?: string, options?: ConfirmationOptions) => Promise<FeeEstimate>;
   /** Max shielded sendable from engine propose (own UA if `to` omitted). */
   maxSend: (to?: string) => Promise<MaxSend>;
   /** Receivers on a UA / t-addr / sapling string. */
@@ -211,7 +218,7 @@ export type EngineClient = {
   saveSetup: (opts: { network: string; server?: string; validatorRpc?: string }) => Promise<WalletSnapshot>;
   /**
    * Newest first. `status` and `txid` are applied before the limit on the native bridge.
-   * WASM filters inside the 500-row cap.
+   * WASM filters before the 500-row result cap; older WASM without filtered queries rejects.
    */
   history: (limit?: number, query?: HistoryQuery) => Promise<HistoryEntry[]>;
   /** One row, or null when the wallet has no such txid. */
@@ -311,6 +318,11 @@ export function createEngineClient(baseUrl: string, opts?: EngineClientOpts): En
     off: (event, handler) => bus.off(event, handler),
     health: () => call<EngineHealth>("/health"),
     getWallet: () => call<WalletSnapshot>("/wallet"),
+    balance: async (options) => {
+      if (minimumConfirmations(options?.minConfirmations) !== undefined)
+        throw new WalletError("unknown", "Confirmation policies require the browser software engine.");
+      return (await call<WalletSnapshot>("/wallet")).balance;
+    },
     sync: () => snap("/sync", { method: "POST", body: "{}" }, true),
     shield: async (threshold) =>
       spendResult(await snap("/shield", {
@@ -318,6 +330,10 @@ export function createEngineClient(baseUrl: string, opts?: EngineClientOpts): En
         body: JSON.stringify({ threshold }),
       })),
     send: (to, amountZec, memo, sendOpts) => {
+      try {
+        if (minimumConfirmations(sendOpts?.minConfirmations) !== undefined)
+          return Promise.reject(new WalletError("unknown", "Confirmation policies require the browser software engine."));
+      } catch (error) { return Promise.reject(error); }
       if (sendOpts?.signer) {
         return Promise.reject(new WalletError("hardware_unsupported", "hardware wallets need the browser engine (createWallet)"));
       }
@@ -340,7 +356,9 @@ export function createEngineClient(baseUrl: string, opts?: EngineClientOpts): En
     supportsTransparentSend: async () => false,
     sendTransparent: async () => { throw new Error("transparent swap outputs require the WASM software wallet"); },
     estimateTransparentFee: async () => { throw new Error("transparent swap outputs require the WASM software wallet"); },
-    estimateFee: async (to, amountZec, memo) => {
+    estimateFee: async (to, amountZec, memo, options) => {
+      if (minimumConfirmations(options?.minConfirmations) !== undefined)
+        throw new WalletError("unknown", "Confirmation policies require the browser software engine.");
       const dest = to.trim();
       try {
         if (dest.toLowerCase().startsWith("zcash:")) {
