@@ -23,6 +23,7 @@ native = [
     "tower/util",
     "dep:async-trait",
     "dep:rusqlite",
+    "dep:sha2",
     "dep:zcash_script",
     "tokio/net",
     "tokio/io-util",
