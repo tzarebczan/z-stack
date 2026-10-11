@@ -1,3 +1,4 @@
+import { COMPACT_RANGE_MAX_BYTES } from "./transport-bounds";
 /**
  * Compact-block transports for the WASM scanner.
  * Crypto stays in z-wasm; this only moves CompactBlock bytes.
@@ -160,63 +161,167 @@ export function looksLikeLwdPipe(url: string): boolean {
   }
 }
 
-/** Parse u32-BE length-delimited compact blocks from a chunked HTTP body.
- *  Double-buffers: the next HTTP chunks are read while `onPage` (WASM apply) runs.
- */
+// Transport ceilings, not consensus limits. Dense ranges must be requested in
+// smaller pages by the caller; a refusal never selects another retrieval mode.
+const RANGE_BODY_MAX = COMPACT_RANGE_MAX_BYTES;
+const COMPACT_FRAME_MAX = 4 * 1024 * 1024;
+const GRPC_TRAILER_MAX = 64 * 1024;
+const RESPONSE_MESSAGE_MAX = PIPE_HTTP_MAX;
+
+class TransportLimitError extends Error {}
+
+type FrameLimits = { messages: number; exact?: boolean };
+
+function rangeMessages(start: number, end: number): number {
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start) {
+    throw new Error("invalid compact-block range");
+  }
+  const count = end - start + 1;
+  if (!Number.isSafeInteger(count)) throw new Error("invalid compact-block range");
+  return count;
+}
+
+function checkContentLength(response: Response, maxBytes: number): void {
+  const declared = response.headers.get("content-length");
+  if (declared !== null && (!/^\d+$/.test(declared.trim()) || Number(declared.trim()) > maxBytes)) {
+    void response.body?.cancel().catch(() => {});
+    throw new TransportLimitError("response body size limit exceeded");
+  }
+}
+
+async function readChunks(
+  body: ReadableStream<Uint8Array>,
+  maxBytes: number,
+  onChunk: (chunk: Uint8Array) => Promise<void>,
+  signal?: AbortSignal,
+  touch: () => void = () => {},
+): Promise<void> {
+  const reader = body.getReader();
+  let total = 0;
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal?.reason);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+  void aborted.catch(() => {});
+  try {
+    for (;;) {
+      signal?.throwIfAborted();
+      const step = await Promise.race([reader.read(), aborted]);
+      signal?.throwIfAborted();
+      if (step.done) break;
+      if (step.value.byteLength > maxBytes - total || step.value.buffer.byteLength > maxBytes) throw new TransportLimitError("response body size limit exceeded");
+      total += step.value.byteLength;
+      if (step.value.byteLength) {
+        touch();
+        await onChunk(step.value);
+      }
+    }
+  } catch (error) {
+    void reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+    reader.releaseLock();
+  }
+}
+
+/** Validate headers before allocating a frame or handing a page to its consumer. */
+async function readFrames(
+  body: ReadableStream<Uint8Array>,
+  wire: "delimited" | "grpc",
+  limits: FrameLimits,
+  onFrame: (frame: Uint8Array, trailer: boolean) => Promise<void>,
+  signal?: AbortSignal,
+  touch?: () => void,
+  maxBytes = RANGE_BODY_MAX,
+): Promise<void> {
+  const header = new Uint8Array(wire === "grpc" ? 5 : 4);
+  let headerUsed = 0;
+  let frame: Uint8Array | undefined;
+  let used = 0;
+  let trailer = false;
+  let messages = 0;
+  let sawTrailer = false;
+  let allocatedBytes = 0;
+  await readChunks(body, maxBytes, async (chunk) => {
+    let offset = 0;
+    while (offset < chunk.byteLength) {
+      signal?.throwIfAborted();
+      if (!frame) {
+        const n = Math.min(header.length - headerUsed, chunk.length - offset);
+        header.set(chunk.subarray(offset, offset + n), headerUsed);
+        headerUsed += n;
+        offset += n;
+        if (headerUsed < header.length) continue;
+        if (wire === "grpc" && header[0] !== 0 && header[0] !== 0x80) throw new Error("unsupported gRPC-Web frame flag");
+        if (sawTrailer) throw new Error("gRPC-Web frame after trailers");
+        trailer = wire === "grpc" && header[0] === 0x80;
+        if (trailer) sawTrailer = true;
+        const length = new DataView(header.buffer).getUint32(wire === "grpc" ? 1 : 0, false);
+        if (length > (trailer ? GRPC_TRAILER_MAX : COMPACT_FRAME_MAX)) throw new TransportLimitError("response frame size limit exceeded");
+        if (!trailer && ++messages > Math.min(limits.messages, RESPONSE_MESSAGE_MAX)) throw new TransportLimitError("response message count limit exceeded");
+        if (header.length + length > maxBytes - allocatedBytes) throw new TransportLimitError("response body size limit exceeded");
+        allocatedBytes += header.length + length;
+        frame = new Uint8Array(header.length + length);
+        frame.set(header);
+        used = header.length;
+        headerUsed = 0;
+      }
+      const n = Math.min(frame.length - used, chunk.length - offset);
+      frame.set(chunk.subarray(offset, offset + n), used);
+      used += n;
+      offset += n;
+      if (used === frame.length) {
+        await onFrame(frame, trailer);
+        frame = undefined;
+      }
+    }
+  }, signal, touch);
+  if (headerUsed || frame) throw new Error("truncated response frame");
+  if (limits.exact && messages !== limits.messages) throw new Error("incomplete compact-block range");
+}
+
+async function consumeDelimitedPages(
+  body: ReadableStream<Uint8Array>,
+  pageBlocks: number,
+  onPage: (blob: Uint8Array, blocks: number) => Promise<void>,
+  limits: FrameLimits,
+  signal?: AbortSignal,
+  touch?: () => void,
+  maxBytes?: number,
+): Promise<void> {
+  const pageSize = Math.min(RESPONSE_MESSAGE_MAX, Math.max(1, Math.floor(pageBlocks) || 1));
+  const parts: Uint8Array[] = [];
+  let bytes = 0;
+  const flush = async () => {
+    if (!parts.length) return;
+    const count = parts.length;
+    const blob = concatBytes(parts);
+    parts.length = 0;
+    bytes = 0;
+    signal?.throwIfAborted();
+    await onPage(blob, count);
+    signal?.throwIfAborted();
+  };
+  await readFrames(body, "delimited", limits, async (frame) => {
+    // Pages have their own byte ceiling even when the caller asks for many blocks.
+    if (bytes + frame.length > RANGE_BODY_MAX) await flush();
+    parts.push(frame);
+    bytes += frame.length;
+    if (parts.length >= pageSize) await flush();
+  }, signal, touch, maxBytes);
+  await flush();
+}
+
+/** Parse bounded compact-block pages, awaiting each apply before reading ahead. */
 export async function consumeDelimitedStream(
   body: ReadableStream<Uint8Array>,
   pageBlocks: number,
   onPage: (blob: Uint8Array, blocks: number) => Promise<void>,
 ): Promise<void> {
-  const pageSize = Math.max(1, Math.floor(pageBlocks) || 1);
-  const reader = body.getReader();
-  let buf = new Uint8Array(0);
-  const parts: Uint8Array[] = [];
-  let count = 0;
-  let pending: Promise<void> = Promise.resolve();
-
-  const flush = async () => {
-    if (count === 0) return;
-    const blob = concatBytes(parts);
-    parts.length = 0;
-    const n = count;
-    count = 0;
-    await pending;
-    pending = onPage(blob, n);
-  };
-
-  const push = async (framed: Uint8Array) => {
-    parts.push(framed);
-    count += 1;
-    if (count >= pageSize) await flush();
-  };
-
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value || value.byteLength === 0) continue;
-      const next = new Uint8Array(buf.byteLength + value.byteLength);
-      next.set(buf, 0);
-      next.set(value, buf.byteLength);
-      buf = next;
-      let i = 0;
-      while (i + 4 <= buf.byteLength) {
-        const n = new DataView(buf.buffer, buf.byteOffset + i, 4).getUint32(0, false);
-        if (i + 4 + n > buf.byteLength) break;
-                await push(buf.slice(i, i + 4 + n));
-        i += 4 + n;
-      }
-      buf = buf.subarray(i);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  if (buf.byteLength !== 0) {
-    throw new Error(`truncated compact-block stream (${buf.byteLength} leftover bytes)`);
-  }
-  await flush();
-  await pending;
+  await consumeDelimitedPages(body, pageBlocks, onPage, { messages: RESPONSE_MESSAGE_MAX });
 }
 
 const STREAMER = "/cash.z.wallet.sdk.rpc.CompactTxStreamer";
@@ -356,43 +461,10 @@ function grpcStatusError(status: string | null | undefined, rawMessage: string |
 /** Response messages, plus the call's grpc-status once a trailer (or header) carried one. */
 type GrpcMessages = Uint8Array[] & { grpcStatus?: string };
 
-function parseGrpcWeb(buf: Uint8Array): GrpcMessages {
-  const messages: GrpcMessages = [];
-  let i = 0;
-  while (i + 5 <= buf.length) {
-    const flag = buf[i];
-    const len = new DataView(buf.buffer, buf.byteOffset + i + 1, 4).getUint32(0, false);
-    i += 5;
-    if (i + len > buf.length) break;
-    const slice = buf.subarray(i, i + len);
-    i += len;
-    if (flag & 0x80) {
-      const trailers = new TextDecoder().decode(slice);
-      const status = /grpc-status:\s*(\d+)/i.exec(trailers)?.[1];
-      grpcStatusError(status, /grpc-message:\s*([^\r\n]*)/i.exec(trailers)?.[1]);
-      if (status) messages.grpcStatus = status;
-      continue;
-    }
-    messages.push(slice);
-  }
-  return messages;
-}
 
-function toDelimited(parts: Uint8Array[]): Uint8Array {
-  let total = 0;
-  for (const p of parts) total += 4 + p.length;
-  const out = new Uint8Array(total);
-  let o = 0;
-  for (const p of parts) {
-    new DataView(out.buffer, o, 4).setUint32(0, p.length, false);
-    o += 4;
-    out.set(p, o);
-    o += p.length;
-  }
-  return out;
-}
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  if (chunks.length === 1) return chunks[0];
   let n = 0;
   for (const c of chunks) n += c.length;
   const out = new Uint8Array(n);
@@ -515,26 +587,10 @@ function idleWatch(ms: number) {
 }
 
 /** Whole body, touching `idle` per chunk and giving up as soon as `signal` aborts. */
-async function readBody(r: Response, signal: AbortSignal, touch: () => void): Promise<Uint8Array> {
-  if (!r.body) return new Uint8Array(await r.arrayBuffer());
-  const reader = r.body.getReader();
-  const aborted = new Promise<never>((_, reject) => {
-    if (signal.aborted) reject(signal.reason);
-    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-  });
-  void aborted.catch(() => {});
+async function readBody(r: Response, signal: AbortSignal, touch: () => void, maxBytes = RANGE_BODY_MAX): Promise<Uint8Array> {
+  checkContentLength(r, maxBytes);
   const parts: Uint8Array[] = [];
-  try {
-    for (;;) {
-      const step = await Promise.race([reader.read(), aborted]);
-      if (step.done) break;
-      parts.push(step.value);
-      touch();
-    }
-  } catch (error) {
-    void reader.cancel().catch(() => {});
-    throw error;
-  }
+  if (r.body) await readChunks(r.body, maxBytes, async (chunk) => { parts.push(chunk); }, signal, touch);
   return concatBytes(parts);
 }
 
@@ -590,34 +646,40 @@ export function httpLwdTransport(
       return j.tip;
     },
     blocks: async (start, end, signal) => {
-      const fetchRange = async (a: number, b: number) => {
+      rangeMessages(start, end);
+      const fetchRange = async (a: number, b: number, maxBytes = RANGE_BODY_MAX) => {
         const url = `${base}/lwd/blocks?${qs(`start=${a}&end=${b}${opts?.allPools ? "&allPools=1" : ""}`)}`;
         for (let attempt = 0; ; attempt++) {
           signal?.throwIfAborted();
           // A stalled pipe used to hang this sync, and every sync queued behind
           // it, forever. Stalls become a retryable outage instead.
           const idle = idleWatch(blockIdleMs);
-          const both = signal ? AbortSignal.any([signal, idle.signal]) : idle.signal;
+          const request = new AbortController();
+          const both = AbortSignal.any([request.signal, idle.signal, ...(signal ? [signal] : [])]);
           try {
             const r = await fetch(url, authed({ signal: both }));
             idle.touch();
             if (!r.ok) {
-              const j = (await r.json().catch((error) => {
-                if (isRequestCancellation(error)) throw error;
-                return {};
-              })) as { error?: unknown } | null;
+              const j = await readBody(r, both, idle.touch, GRPC_TRAILER_MAX).then((bytes) => {
+                try { return JSON.parse(new TextDecoder().decode(bytes)) as { error?: unknown } | null; } catch { return null; }
+              });
               signal?.throwIfAborted();
               const detail = typeof j?.error === "string" ? j.error : undefined;
               const message = explainBridgeAuthError(r.status, detail) || detail || `${r.status} /lwd/blocks`;
               throw responseError(r.status, message);
             }
             // Nothing escapes until the complete body has arrived. A truncated
-            // response is discarded and the SAME range is retried; never stitch
+            // network failure discards this attempt and retries the SAME range; never stitch
             // a partial prefix to a second response or retry engine validation.
-            const bytes = await readBody(r, both, idle.touch);
+            checkContentLength(r, maxBytes);
+            const parts: Uint8Array[] = [];
+            if (r.body) await readFrames(r.body, "delimited", { messages: rangeMessages(a, b), exact: true }, async (frame) => { parts.push(frame); }, both, idle.touch, maxBytes);
+            else throw new Error("lwd returned no compact-block body");
+            const bytes = concatBytes(parts);
             signal?.throwIfAborted();
             return bytes;
           } catch (caught) {
+            request.abort();
             signal?.throwIfAborted();
             const error = idle.stalled()
               ? new TransientLightServerError(`compact-block download stalled: no data for ${Math.round(blockIdleMs / 1000)}s`)
@@ -633,28 +695,41 @@ export function httpLwdTransport(
         return fetchRange(start, end);
       }
       const parts: Uint8Array[] = [];
+      let total = 0;
       for (let h = start; h <= end; h += PIPE_HTTP_MAX) {
-        parts.push(await fetchRange(h, Math.min(end, h + PIPE_HTTP_MAX - 1)));
+        const part = await fetchRange(h, Math.min(end, h + PIPE_HTTP_MAX - 1), RANGE_BODY_MAX - total);
+        total += part.length;
+        parts.push(part);
       }
       return concatBytes(parts);
     },
     blockStream: isPipe
       ? async (start, end, page, onPage) => {
+          rangeMessages(start, end);
           for (let h = start; h <= end; ) {
             const last = Math.min(end, h + PIPE_HTTP_MAX - 1);
-            const r = await fetch(`${base}/lwd/blocks?${qs(`start=${h}&end=${last}`)}`, authed());
-            if (!r.ok) {
-              const j = (await r.json().catch(() => ({}))) as { error?: string };
-              throw new Error(explainBridgeAuthError(r.status, j.error) || j.error || `${r.status} /lwd/blocks`);
+            const idle = idleWatch(blockIdleMs);
+            const request = new AbortController();
+            const both = AbortSignal.any([request.signal, idle.signal]);
+            try {
+              const r = await fetch(`${base}/lwd/blocks?${qs(`start=${h}&end=${last}`)}`, authed({ signal: both }));
+              idle.touch();
+              if (!r.ok) {
+                const bytes = await readBody(r, both, idle.touch, GRPC_TRAILER_MAX);
+                let detail: unknown;
+                try { detail = (JSON.parse(new TextDecoder().decode(bytes)) as { error?: unknown })?.error; } catch { /* no detail */ }
+                throw new Error(explainBridgeAuthError(r.status, typeof detail === "string" ? detail : undefined) || `${r.status} /lwd/blocks`);
+              }
+              checkContentLength(r, RANGE_BODY_MAX);
+              if (!r.body) throw new Error("lwd-pipe returned no body");
+              await consumeDelimitedPages(r.body, page, onPage, { messages: rangeMessages(h, last), exact: true }, both, idle.touch);
+              h = last + 1;
+            } catch (error) {
+              request.abort();
+              throw error;
+            } finally {
+              idle.stop();
             }
-            if (!r.body) throw new Error("lwd-pipe returned no body");
-            let got = 0;
-            await consumeDelimitedStream(r.body, page, async (blob, n) => {
-              got += n;
-              await onPage(blob, n);
-            });
-            if (got !== last - h + 1) throw new Error(`lwd-pipe incomplete range ${h}..=${last}: received ${got} blocks`);
-            h = last + 1;
           }
         }
       : undefined,
@@ -873,10 +948,14 @@ export type GrpcWebTransportOpts = {
 export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}): BlockTransport {
   const base = lwdUrl.replace(/\/$/, "");
   let sharedMemosUnsupported = false;
-  async function call(method: string, body: Uint8Array, timeoutMs = 15_000, signal?: AbortSignal): Promise<GrpcMessages> {
+  async function call(method: string, body: Uint8Array, timeoutMs = 15_000, signal?: AbortSignal, limits: FrameLimits = { messages: 1 }, onDataFrame?: (frame: Uint8Array) => void): Promise<GrpcMessages> {
+    signal?.throwIfAborted();
     const deadline = AbortSignal.timeout(timeoutMs);
+    const request = new AbortController();
+    const both = AbortSignal.any([request.signal, deadline, ...(signal ? [signal] : [])]);
+    let response: Response | undefined;
     try {
-      const r = await fetch(`${base}${STREAMER}/${method}`, {
+      const r = response = await fetch(`${base}${STREAMER}/${method}`, {
         ...transportFetchOptions,
         method: "POST",
         headers: {
@@ -885,7 +964,7 @@ export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}
           accept: "application/grpc-web+proto",
         },
         body: frameGrpc(body) as unknown as BodyInit,
-        signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+        signal: both,
         // keepalive bodies are capped at 64 KiB; large transactions must not use it.
         keepalive: body.length < 32_768,
       });
@@ -893,10 +972,25 @@ export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}
       // A trailers-only error arrives as HTTP 200 with the status in the headers.
       const headerStatus = r.headers.get("grpc-status");
       grpcStatusError(headerStatus, r.headers.get("grpc-message"));
-      const messages = parseGrpcWeb(new Uint8Array(await r.arrayBuffer()));
+      checkContentLength(r, RANGE_BODY_MAX);
+      const messages: GrpcMessages = [];
+      if (r.body) await readFrames(r.body, "grpc", limits, async (frame, trailer) => {
+        const payload = frame.subarray(5);
+        if (trailer) {
+          const text = new TextDecoder().decode(payload);
+          const status = /grpc-status:\s*(\d+)/i.exec(text)?.[1];
+          grpcStatusError(status, /grpc-message:\s*([^\r\n]*)/i.exec(text)?.[1]);
+          if (status) messages.grpcStatus = status;
+        } else if (onDataFrame) onDataFrame(frame);
+        else messages.push(payload);
+      }, both);
+      else if (limits.exact) throw new Error("incomplete compact-block range");
+      both.throwIfAborted();
       if (headerStatus && !messages.grpcStatus) messages.grpcStatus = headerStatus.trim();
       return messages;
     } catch (error) {
+      request.abort();
+      if (response?.body && !response.body.locked) void response.body.cancel().catch(() => {});
       // Body reads can throw AbortError even when the deadline caused the abort.
       // Keep real cancellation distinct so the scan's outage clock can retry a
       // slow response without restarting work the user explicitly cancelled.
@@ -905,9 +999,18 @@ export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}
       throw error;
     }
   }
+  const compactRange = async (start: number, end: number, allPools: boolean, signal?: AbortSignal) => {
+    const parts: Uint8Array[] = [];
+    await call("GetBlockRange", encodeBlockRange(start, end, allPools), GRPC_WEB_BLOCK_TIMEOUT_MS, signal,
+      { messages: rangeMessages(start, end), exact: true }, (frame) => {
+        // The gRPC header after its flag is already a u32-BE length prefix.
+        // Retain that view instead of storing decoded payloads then reframing them.
+        parts.push(frame.subarray(1));
+      });
+    return concatBytes(parts);
+  };
   return {
-    transparentBlocks: async (start, end, signal) => toDelimited(
-      await call("GetBlockRange", encodeBlockRange(start, end, true), GRPC_WEB_BLOCK_TIMEOUT_MS, signal)),
+    transparentBlocks: async (start, end, signal) => compactRange(start, end, true, signal),
     sharedMemos: opts.sharedMemos === true ? async (start, end, signal) => {
       signal?.throwIfAborted();
       if (sharedMemosUnsupported) return null;
@@ -954,8 +1057,7 @@ export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}
       // Range sizes are already capped at 1k by sync tuning. Do not split a
       // timed-out request into parallel subranges outside the scan's shared
       // outage clock; prefetch will abort and restart from the in-memory cursor.
-      const msgs = await call("GetBlockRange", encodeBlockRange(start, end), GRPC_WEB_BLOCK_TIMEOUT_MS, signal);
-      return toDelimited(msgs);
+      return compactRange(start, end, false, signal);
     },
     info: async () => {
       const msgs = await call("GetLightdInfo", new Uint8Array());
@@ -992,6 +1094,7 @@ export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}
         encodeGetSubtreeRoots(shieldedProtocol(protocol), startIndex, maxEntries),
         180_000,
         signal,
+        { messages: maxEntries > 0 ? maxEntries : RESPONSE_MESSAGE_MAX },
       );
       return msgs.map(decodeSubtreeRoot);
     },
@@ -1024,6 +1127,7 @@ export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}
           const data = msgs[0] ? protoBytes(msgs[0], 1) : undefined;
           if (data && data.length) return toHex(data);
         } catch (e) {
+          if (e instanceof TransportLimitError) throw e;
           last = e;
         }
       }

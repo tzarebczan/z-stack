@@ -7,6 +7,8 @@
  * one-at-a-time after each apply.
  */
 
+import { COMPACT_PREFETCH_MAX_BYTES, COMPACT_RANGE_MAX_BYTES, COMPACT_RANGE_WORKING_BYTES } from "./transport-bounds";
+
 export type PrefetchedRange = {
   start: number;
   end: number;
@@ -49,6 +51,13 @@ export function createBlockPrefetch(opts: BlockPrefetchOpts): BlockPrefetch {
   let failed = false;
   const controller = new AbortController();
   const ready = new Map<number, PrefetchedRange>();
+  let readyBytes = 0;
+  let yieldedBytes = 0;
+  const releases = new Set<() => void>();
+  const retainedBytes = (blob: Uint8Array) => Math.max(blob.byteLength, blob.buffer.byteLength);
+  const reservedBytes = () => readyBytes + yieldedBytes + inFlight * COMPACT_RANGE_WORKING_BYTES;
+  const clearBuffered = () => { ready.clear(); readyBytes = 0; yieldedBytes = 0; };
+  const releaseRequests = () => { for (const release of [...releases]) release(); };
   const listeners = new Set<() => void>();
 
   const notify = () => {
@@ -75,7 +84,8 @@ export function createBlockPrefetch(opts: BlockPrefetchOpts): BlockPrefetch {
     if (!live) return;
     live = false;
     controller.abort();
-    ready.clear();
+    clearBuffered();
+    releaseRequests();
     opts.signal?.removeEventListener("abort", dispose);
     notify();
     listeners.clear();
@@ -84,32 +94,48 @@ export function createBlockPrefetch(opts: BlockPrefetchOpts): BlockPrefetch {
   const launch = () => {
     if (cancelled() || opts.signal?.aborted) dispose();
     if (!live || failed) return;
-    while (inFlight < prefetch && ready.size + inFlight < buffer && nextFetch <= opts.tip) {
+    while (inFlight < prefetch && ready.size + inFlight < buffer && nextFetch <= opts.tip &&
+        reservedBytes() + COMPACT_RANGE_WORKING_BYTES <= COMPACT_PREFETCH_MAX_BYTES) {
       const start = nextFetch;
       const end = Math.min(opts.tip, start + opts.batch - 1);
       nextFetch = end + 1;
       inFlight += 1;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        inFlight -= 1;
+        releases.delete(release);
+      };
+      releases.add(release);
+      const rejectRange = (error: unknown) => {
+        release();
+        if (!live || failed) return;
+        fail = error;
+        failed = true;
+        controller.abort();
+        clearBuffered();
+        releaseRequests();
+        opts.signal?.removeEventListener("abort", dispose);
+        notify();
+      };
       void Promise.resolve().then(() => {
         controller.signal.throwIfAborted();
         return opts.fetch(start, end, controller.signal);
       }).then(
         (blob) => {
-          inFlight -= 1;
+          release();
           if (!live || failed) return;
+          if (retainedBytes(blob) > COMPACT_RANGE_MAX_BYTES) {
+            rejectRange(new Error("prefetch range size limit exceeded"));
+            return;
+          }
+          readyBytes += retainedBytes(blob);
           ready.set(start, { start, end, blob });
           launch();
           notify();
         },
-        (e) => {
-          inFlight -= 1;
-          if (!live || failed) return;
-          fail = e;
-          failed = true;
-          controller.abort();
-          ready.clear();
-          opts.signal?.removeEventListener("abort", dispose);
-          notify();
-        },
+        rejectRange,
       );
     }
   };
@@ -122,6 +148,9 @@ export function createBlockPrefetch(opts: BlockPrefetchOpts): BlockPrefetch {
     buffered: () => ready.size,
     dispose,
     next: async () => {
+      // The previous range remains reserved throughout the caller's apply.
+      // The next next() call acknowledges that sequential consumer has finished.
+      yieldedBytes = 0;
       for (;;) {
         if (!live) throw new Error("sync cancelled");
         if (cancelled()) {
@@ -133,6 +162,8 @@ export function createBlockPrefetch(opts: BlockPrefetchOpts): BlockPrefetch {
         const job = ready.get(nextApply);
         if (job) {
           ready.delete(nextApply);
+          readyBytes -= retainedBytes(job.blob);
+          yieldedBytes = retainedBytes(job.blob);
           nextApply = job.end + 1;
           launch();
           return job;

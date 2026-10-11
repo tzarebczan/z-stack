@@ -3,7 +3,7 @@ import { afterEach, test } from "node:test";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { createEngineClient } from "../src/engine.ts";
-import { BroadcastRejection, decodeAddressUtxos, grpcWebTransport, httpLwdTransport, isTransientLightServerError } from "../src/lwd.ts";
+import { BroadcastRejection, consumeDelimitedStream, decodeAddressUtxos, grpcWebTransport, httpLwdTransport, isTransientLightServerError } from "../src/lwd.ts";
 import { syncPublicData } from "../src/public-data.ts";
 import type { ScanSession } from "../src/scan-host.ts";
 
@@ -202,14 +202,12 @@ test("a gRPC-Web body deadline remains retryable when the browser reports AbortE
   const deadline = new AbortController();
   const reason = new DOMException("Response deadline exceeded", "TimeoutError");
   t.mock.method(AbortSignal, "timeout", () => deadline.signal);
-  globalThis.fetch = (async () => ({
-    ok: true,
-    headers: new Headers(),
-    async arrayBuffer() {
+  globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+    pull(controller) {
       deadline.abort(reason);
-      throw new DOMException("The user aborted a request.", "AbortError");
+      controller.error(new DOMException("The user aborted a request.", "AbortError"));
     },
-  })) as typeof fetch;
+  }, { highWaterMark: 0 }))) as typeof fetch;
   await assert.rejects(grpcWebTransport("https://lwd.example").blocks(1, 1000), (error) => {
     assert.equal(error, reason);
     assert.equal(isTransientLightServerError(error), true);
@@ -221,15 +219,13 @@ test("caller cancellation takes precedence over a gRPC-Web body deadline", async
   const deadline = new AbortController();
   const caller = new AbortController();
   t.mock.method(AbortSignal, "timeout", () => deadline.signal);
-  globalThis.fetch = (async () => ({
-    ok: true,
-    headers: new Headers(),
-    async arrayBuffer() {
+  globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+    pull(controller) {
       deadline.abort(new DOMException("Response deadline exceeded", "TimeoutError"));
       caller.abort();
-      throw new DOMException("The user aborted a request.", "AbortError");
+      controller.error(new DOMException("The user aborted a request.", "AbortError"));
     },
-  })) as typeof fetch;
+  }, { highWaterMark: 0 }))) as typeof fetch;
   await assert.rejects(grpcWebTransport("https://lwd.example").blocks(1, 1000, caller.signal), (error) => {
     assert.equal(error, caller.signal.reason);
     assert.equal(isTransientLightServerError(error), false);
@@ -470,4 +466,185 @@ test("capability negotiation reads multibyte protobuf tags before requesting all
   assert.equal(info.consensusBranchId, "77190ad9");
   assert.equal((await transport.transparentBlocks!(1, 1)).length, 6);
   assert.deepEqual(calls.map(x => x.method), ["GetLightdInfo", "GetBlockRange"]);
+});
+
+function delimited(payload: Uint8Array): Uint8Array {
+  const bytes = new Uint8Array(4 + payload.length);
+  new DataView(bytes.buffer).setUint32(0, payload.length);
+  bytes.set(payload, 4);
+  return bytes;
+}
+
+function streamed(chunks: Uint8Array[], headers?: HeadersInit) {
+  let pulls = 0, cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const chunk = chunks[pulls++];
+      if (chunk) controller.enqueue(chunk); else controller.close();
+    },
+    cancel() { cancelled = true; },
+  }, { highWaterMark: 0 });
+  return { body, response: new Response(body, { headers }), pulls: () => pulls, cancelled: () => cancelled };
+}
+
+for (const transportKind of ["grpc", "http"] as const) {
+  test(`${transportKind} refuses oversized Content-Length before pulling and without waiting for cancellation`, { timeout: 5000 }, async () => {
+    let pulled = false, cancelled = false, requests = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull() { pulled = true; },
+      cancel() { cancelled = true; return new Promise<void>(() => {}); },
+    }, { highWaterMark: 0 });
+    let requestSignal: AbortSignal | undefined;
+    globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+      requests++; requestSignal = init.signal ?? undefined;
+      return new Response(body, { headers: { "content-length": String(32 * 1024 * 1024 + 1) } });
+    }) as typeof fetch;
+    const transport = transportKind === "grpc" ? grpcWebTransport("https://lwd.example") : httpLwdTransport("http://127.0.0.1:1239", "regtest");
+    await assert.rejects(transport.blocks(1, 1), /body size limit/);
+    assert.equal(pulled, false);
+    assert.equal(cancelled, true);
+    assert.equal(body.locked, false);
+    assert.equal(requestSignal?.aborted, true);
+    assert.equal(requests, 1);
+  });
+
+  for (const declared of [undefined, "1"]) test(`${transportKind} rejects oversized frame headers with Content-Length ${declared ?? "absent"}`, async () => {
+    const header = new Uint8Array(transportKind === "grpc" ? 5 : 4);
+    new DataView(header.buffer).setUint32(transportKind === "grpc" ? 1 : 0, 4 * 1024 * 1024 + 1);
+    const stream = streamed([header], declared ? { "content-length": declared } : undefined);
+    let requests = 0;
+    globalThis.fetch = (async () => { requests++; return stream.response; }) as typeof fetch;
+    const transport = transportKind === "grpc" ? grpcWebTransport("https://lwd.example") : httpLwdTransport("http://127.0.0.1:1239", "regtest");
+    await assert.rejects(transport.blocks(1, 1), /frame size limit/);
+    assert.equal(stream.pulls(), 1, "refuse from the header, before requesting any payload");
+    assert.equal(stream.cancelled(), true);
+    assert.equal(stream.body.locked, false);
+    assert.equal(requests, 1, "a limit violation is never a read retry");
+  });
+
+  test(`${transportKind} enforces the inclusive range count before returning bytes`, async () => {
+    const data = new Uint8Array([16, 1]);
+    const stream = streamed([transportKind === "grpc" ? reply(data, data) : Buffer.concat([delimited(data), delimited(data)])]);
+    globalThis.fetch = (async () => stream.response) as typeof fetch;
+    const transport = transportKind === "grpc" ? grpcWebTransport("https://lwd.example") : httpLwdTransport("http://127.0.0.1:1239", "regtest");
+    await assert.rejects(transport.transparentBlocks!(1, 1), /message count limit/);
+    assert.equal(stream.cancelled(), true);
+    assert.equal(stream.body.locked, false);
+    globalThis.fetch = (async () => new Response(transportKind === "grpc" ? reply(data) : delimited(data))) as typeof fetch;
+    await assert.rejects(transport.blocks(1, 2), /incomplete compact-block range/);
+  });
+}
+
+test("gRPC-Web preserves split-frame trailers and rejects trailer overflow or frames after trailers", async () => {
+  const bytes = reply(new Uint8Array([8, 7]));
+  const stream = streamed([...bytes].map(byte => Uint8Array.of(byte)));
+  globalThis.fetch = (async () => stream.response) as typeof fetch;
+  assert.equal(await grpcWebTransport("https://lwd.example").tip(), 7);
+  assert.equal(stream.body.locked, false);
+  const oversized = new Uint8Array(5); oversized[0] = 0x80;
+  new DataView(oversized.buffer).setUint32(1, 64 * 1024 + 1);
+  for (const invalid of [oversized, Buffer.concat([reply(), frame(new Uint8Array())]), Buffer.concat([reply(), reply()])]) {
+    const response = streamed([invalid]);
+    globalThis.fetch = (async () => response.response) as typeof fetch;
+    await assert.rejects(grpcWebTransport("https://lwd.example").tip(), /frame size limit|after trailers/);
+    assert.equal(response.cancelled(), true);
+  }
+});
+
+test("gRPC-Web limit refusal does not probe a second transaction hash or retry a submission", async () => {
+  const header = new Uint8Array(5); new DataView(header.buffer).setUint32(1, 4 * 1024 * 1024 + 1);
+  let requests = 0;
+  globalThis.fetch = (async () => { requests++; return new Response(header); }) as typeof fetch;
+  const transport = grpcWebTransport("https://lwd.example");
+  await assert.rejects(transport.tx!("00".repeat(32)), /frame size limit/);
+  assert.equal(requests, 1);
+  await assert.rejects(transport.submit!("00"), /frame size limit/);
+  assert.equal(requests, 2);
+});
+
+test("a stalled gRPC-Web reader is cancelled and its abort listener removed on caller cancellation", async (t) => {
+  const caller = new AbortController();
+  let cancelled = false, additions = 0, removals = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull() { queueMicrotask(() => caller.abort()); },
+    cancel() { cancelled = true; },
+  }, { highWaterMark: 0 });
+  globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+    const signal = init.signal!;
+    const add = signal.addEventListener.bind(signal), remove = signal.removeEventListener.bind(signal);
+    t.mock.method(signal, "addEventListener", (...args: Parameters<typeof add>) => { additions++; return add(...args); });
+    t.mock.method(signal, "removeEventListener", (...args: Parameters<typeof remove>) => { removals++; return remove(...args); });
+    return new Response(body);
+  }) as typeof fetch;
+  await assert.rejects(grpcWebTransport("https://lwd.example").blocks(1, 1, caller.signal), error => error === caller.signal.reason);
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
+  assert.equal(additions, 1);
+  assert.equal(removals, additions);
+});
+
+test("delimited pages refuse oversized headers and preserve only prior completed callbacks", async () => {
+  const oversized = new Uint8Array(4); new DataView(oversized.buffer).setUint32(0, 4 * 1024 * 1024 + 1);
+  const stream = streamed([delimited(Uint8Array.of(7)), oversized]);
+  let pages = 0;
+  await assert.rejects(consumeDelimitedStream(stream.body, 1, async (_blob, blocks) => { pages += blocks; }), /frame size limit/);
+  assert.equal(pages, 1);
+  assert.equal(stream.cancelled(), true);
+  assert.equal(stream.body.locked, false);
+  const failed = streamed([delimited(Uint8Array.of(7))]);
+  await assert.rejects(consumeDelimitedStream(failed.body, 1, async () => { throw new Error("apply refused"); }), /apply refused/);
+  assert.equal(failed.cancelled(), true);
+  assert.equal(failed.body.locked, false);
+});
+
+test("delimited streams reject cumulative frame allocations before reading an over-budget payload", async () => {
+  const payload = new Uint8Array(64 * 1024);
+  const header = new Uint8Array(4); new DataView(header.buffer).setUint32(0, 4 * 1024 * 1024);
+  let pulls = 0, cancelled = false, pages = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) { controller.enqueue(pulls++ % 65 === 0 ? header : payload); },
+    cancel() { cancelled = true; },
+  }, { highWaterMark: 0 });
+  await assert.rejects(consumeDelimitedStream(body, 1, async () => { pages++; }), /body size limit/);
+  assert.equal(pages, 7, "the declared over-budget eighth frame never reaches the callback");
+  assert.equal(pulls, 7 * 65 + 1, "refuse at the next frame header before reading its payload");
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
+});
+
+test("delimited streams cap zero-length frame counts before another page callback", async () => {
+  let pulls = 0, pages = 0, cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) { pulls++; controller.enqueue(new Uint8Array(4)); },
+    cancel() { cancelled = true; },
+  }, { highWaterMark: 0 });
+  await assert.rejects(consumeDelimitedStream(body, 1000, async (_blob, blocks) => { pages += blocks; }), /message count limit/);
+  assert.equal(pages, 8000);
+  assert.equal(pulls, 8001);
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
+});
+
+test("HTTP streaming stops at an excess block before a buffered page callback or next request", async () => {
+  let requests = 0, pages = 0;
+  const stream = streamed([Buffer.concat([delimited(Uint8Array.of(7)), delimited(Uint8Array.of(8))])]);
+  globalThis.fetch = (async () => { requests++; return stream.response; }) as typeof fetch;
+  await assert.rejects(httpLwdTransport("http://127.0.0.1:1239", "regtest").blockStream!(1, 1, 2, async () => { pages++; }), /message count limit/);
+  assert.equal(pages, 0);
+  assert.equal(requests, 1);
+  assert.equal(stream.cancelled(), true);
+  assert.equal(stream.body.locked, false);
+});
+
+for (const kind of ["http", "grpc"] as const) test(`${kind} counts actual chunk bytes despite a small Content-Length`, async () => {
+  const chunk = new Uint8Array(32 * 1024 * 1024 + 1);
+  const response = streamed([chunk], { "content-length": "1" });
+  let requests = 0;
+  globalThis.fetch = (async () => { requests++; return response.response; }) as typeof fetch;
+  const transport = kind === "grpc" ? grpcWebTransport("https://lwd.example") : httpLwdTransport("http://127.0.0.1:1239", "regtest");
+  await assert.rejects(transport.blocks(1, 1), /body size limit/);
+  assert.equal(response.pulls(), 1);
+  assert.equal(response.cancelled(), true);
+  assert.equal(response.body.locked, false);
+  assert.equal(requests, 1);
 });

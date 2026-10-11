@@ -343,16 +343,28 @@ test("localEndpoints keeps Zaino and Zakura independent", () => {
   assert.equal(localEndpoints("mainnet").light, LOCAL_ZAINO_GRPC_MAINNET);
 });
 
+
+// Valid transport framing; individual payloads remain for Rust to validate.
+function compactRange(count: number, payload = 1): Uint8Array {
+  const bytes = new Uint8Array(count * 5);
+  for (let i = 0; i < count; i++) {
+    new DataView(bytes.buffer).setUint32(i * 5, 1);
+    bytes[i * 5 + 4] = payload;
+  }
+  return bytes;
+}
+
 test("pipe blocks() pages at PIPE_HTTP_MAX", async () => {
   calls.length = 0;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, method: init?.method ?? "GET", body: undefined });
-    return new Response(new Uint8Array([1]), { status: 200 });
+    const range = new URL(String(input)).searchParams;
+    return new Response(compactRange(Number(range.get("end")) - Number(range.get("start")) + 1), { status: 200 });
   }) as typeof fetch;
   const t = httpLwdTransport("http://127.0.0.1:1239", "mainnet", "http://127.0.0.1:8138");
   const blob = await t.blocks(1, PIPE_HTTP_MAX + 10);
-  assert.equal(blob.byteLength, 2);
+  assert.equal(blob.byteLength, (PIPE_HTTP_MAX + 10) * 5);
   assert.ok(calls.some((c) => c.url.includes("start=1") && c.url.includes(`end=${PIPE_HTTP_MAX}`)));
   assert.ok(
     calls.some((c) => c.url.includes(`start=${PIPE_HTTP_MAX + 1}`) && c.url.includes(`end=${PIPE_HTTP_MAX + 10}`)),
@@ -374,12 +386,13 @@ test("a compact-block response that stops delivering becomes a retryable outage"
 });
 
 test("a slow compact-block response that keeps delivering is not cut off", async () => {
+  const bytes = compactRange(10);
   globalThis.fetch = (async () => {
     let sent = 0;
     const body = new ReadableStream<Uint8Array>({
       async pull(controller) {
         await new Promise((r) => setTimeout(r, 25));
-        if (sent++ < 6) controller.enqueue(new Uint8Array([sent]));
+        if (sent < bytes.length) { controller.enqueue(bytes.subarray(sent, sent + 9)); sent += 9; }
         else controller.close();
       },
     });
@@ -388,14 +401,15 @@ test("a slow compact-block response that keeps delivering is not cut off", async
   // Six gaps of 25 ms take longer than the 40 ms idle limit in total.
   const t = httpLwdTransport("http://127.0.0.1:1239", "mainnet", "http://127.0.0.1:8138", undefined, undefined, { blockIdleMs: 40 });
   const blob = await t.blocks(1, 10);
-  assert.deepEqual([...blob], [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(blob, bytes);
 });
 
 test("pipe blocks() one GET when the span is PIPE_HTTP_MAX", async () => {
   calls.length = 0;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     calls.push({ url: String(input), method: "GET", body: undefined });
-    return new Response(new Uint8Array([1]), { status: 200 });
+    const range = new URL(String(input)).searchParams;
+    return new Response(compactRange(Number(range.get("end")) - Number(range.get("start")) + 1), { status: 200 });
   }) as typeof fetch;
   const t = httpLwdTransport("http://127.0.0.1:1239", "mainnet", "http://127.0.0.1:8138");
   await t.blocks(3_368_292, 3_368_292 + PIPE_HTTP_MAX - 1);
@@ -414,7 +428,8 @@ test("pipe blocks() fetches overlap when callers do not await serially", async (
     calls.push({ url: String(input), method: "GET", body: undefined });
     await new Promise((r) => setTimeout(r, 25));
     live -= 1;
-    return new Response(new Uint8Array([1]), { status: 200 });
+    const range = new URL(String(input)).searchParams;
+    return new Response(compactRange(Number(range.get("end")) - Number(range.get("start")) + 1), { status: 200 });
   }) as typeof fetch;
   const t = httpLwdTransport("http://127.0.0.1:1239", "mainnet", "http://127.0.0.1:8138");
   await Promise.all([t.blocks(1, 1000), t.blocks(1001, 2000), t.blocks(2001, 3000)]);
