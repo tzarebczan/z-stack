@@ -75,6 +75,7 @@ where
             .map_err(|e| EngineError::WalletDb(format!("shield funding metadata: {e}")))?
     };
     let count = candidates.len();
+    let mut classified_bytes = 0u64;
     for (txid, height) in candidates {
         let raw = if let Some(raw) = retained_transaction(db_path, txid)? {
             raw
@@ -85,6 +86,7 @@ where
             ))
         })?
         };
+        account_classification_bytes(&raw, &mut classified_bytes)?;
         let tx = validated_transaction(&raw, network, height, txid)?;
         decrypt_and_store_transaction(&network, db, &tx, Some(height)).map_err(|e| {
             EngineError::WalletDb(format!("store transparent funding transaction {txid}: {e}"))
@@ -210,12 +212,14 @@ where
     let target = u32::from(tip).saturating_add(1);
     let candidates = retained_balance_candidates(db_path, target, network)?;
     let count = candidates.len().min(BALANCE_CLASSIFICATION_BATCH);
+    let mut classified_bytes = 0u64;
     for (txid, height) in candidates.into_iter().take(BALANCE_CLASSIFICATION_BATCH) {
         let raw = if let Some(raw) = retained_transaction(db_path, txid)? {
             raw
         } else {
             fetch(txid).await?
         };
+        account_classification_bytes(&raw, &mut classified_bytes)?;
         let tx = validated_transaction(&raw, network, height, txid)?;
         decrypt_and_store_transaction(&network, db, &tx, Some(height)).map_err(|_| {
             EngineError::WalletDb("transparent funding classification failed".into())
@@ -313,12 +317,32 @@ fn classification_candidates(
     Ok(candidates)
 }
 
+fn account_classification_bytes(raw: &[u8], total: &mut u64) -> Result<()> {
+    if raw.len() as u64 > MAX_RETAINED_TRANSACTION_BYTES {
+        return Err(EngineError::Transport(
+            "funding transaction size limit".into(),
+        ));
+    }
+    *total = total
+        .checked_add(raw.len() as u64)
+        .ok_or(EngineError::SyncRequired)?;
+    if *total > BALANCE_INSPECTION_BYTES {
+        return Err(EngineError::SyncRequired);
+    }
+    Ok(())
+}
+
 fn validated_transaction(
     raw: &[u8],
     network: Network,
     height: BlockHeight,
     expected: TxId,
 ) -> Result<Transaction> {
+    if raw.len() as u64 > MAX_RETAINED_TRANSACTION_BYTES {
+        return Err(EngineError::Transport(
+            "funding transaction size limit".into(),
+        ));
+    }
     let mut remaining = raw;
     let tx =
         Transaction::read(&mut remaining, BranchId::for_height(&network, height)).map_err(|e| {
@@ -483,6 +507,20 @@ mod tests {
     }
 
     #[test]
+    fn all_classification_bytes_share_one_phase_budget() {
+        let raw = vec![0; MAX_RETAINED_TRANSACTION_BYTES as usize];
+        let mut total = 0;
+        for _ in 0..(BALANCE_INSPECTION_BYTES / MAX_RETAINED_TRANSACTION_BYTES) {
+            account_classification_bytes(&raw, &mut total).unwrap();
+        }
+        assert_eq!(total, BALANCE_INSPECTION_BYTES);
+        assert!(matches!(
+            account_classification_bytes(&raw, &mut total),
+            Err(EngineError::SyncRequired)
+        ));
+    }
+
+    #[test]
     fn actual_raw_transaction_is_required_and_txid_is_checked() {
         let raw = coinbase_bytes();
         let tx = Transaction::read(&raw[..], BranchId::Sprout).unwrap();
@@ -497,6 +535,12 @@ mod tests {
         )
         .is_err());
         assert!(validated_transaction(&[], Network::Regtest, 101.into(), tx.txid()).is_err());
+        let oversized = vec![0; MAX_RETAINED_TRANSACTION_BYTES as usize + 1];
+        let error =
+            validated_transaction(&oversized, Network::Regtest, 101.into(), tx.txid()).unwrap_err();
+        assert!(
+            matches!(error, EngineError::Transport(message) if message == "funding transaction size limit")
+        );
         let mut trailing = raw;
         trailing.push(0);
         assert!(validated_transaction(&trailing, Network::Regtest, 101.into(), tx.txid()).is_err());
@@ -578,6 +622,26 @@ mod tests {
         )
         .await
         .is_err());
+        assert!(matches!(
+            require_balance_classified(&path, 200, Network::Regtest),
+            Err(EngineError::SyncRequired)
+        ));
+        let oversized = vec![0u8; MAX_RETAINED_TRANSACTION_BYTES as usize + 1];
+        assert!(
+            classify_balance_funding(&mut db, &path, Network::Regtest, |_| {
+                std::future::ready(Ok(oversized.clone()))
+            })
+            .await
+            .is_err()
+        );
+        let unstored: (Option<u32>, Option<Vec<u8>>) = conn
+            .query_row(
+                "SELECT tx_index,raw FROM transactions WHERE txid=?1",
+                [tx.txid().as_ref().as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(unstored == (None, None));
         assert!(matches!(
             require_balance_classified(&path, 200, Network::Regtest),
             Err(EngineError::SyncRequired)
@@ -675,6 +739,20 @@ mod tests {
         )
         .await;
         assert!(failure.is_err());
+        assert!(classify_recent_funding(
+            &mut db,
+            &path,
+            Network::Regtest,
+            &addresses,
+            confirmations,
+            |_| std::future::ready(Ok(oversized.clone()))
+        )
+        .await
+        .is_err());
+        assert!(matches!(
+            require_balance_classified(&path, 200, Network::Regtest),
+            Err(EngineError::SyncRequired)
+        ));
         let conn = rusqlite::Connection::open(&path).unwrap();
         assert_eq!(
             classification_candidates(&conn, 200, &[tx.txid()], Network::Regtest)

@@ -148,8 +148,12 @@ bounded to 30 seconds and 256 candidates per call. Recent retained raw bytes are
 validated locally: a coinbase establishes index zero even after rewind clears its
 mined position, while a genuine noncoinbase may retain an unknown ordinal.
 Classification examines at most 4,096 rows and 32 MiB of retained bytes, with a
-2 MiB transaction ceiling; exhaustion refuses classification rather than
-silently skipping later funding.
+2 MiB transaction ceiling applied before parsing fetched or retained bytes.
+Fetched and retained bytes share a 32 MiB phase budget; exhaustion refuses
+classification rather than silently skipping later funding. Transaction HTTP
+responses are capped at 4 MiB plus 64 KiB before JSON decoding, and GetTransaction
+protobuf envelopes at 2 MiB plus 64 KiB before message decoding. HTTP transaction
+hex is limited to 4 MiB before decoding into the 2 MiB raw transaction.
 Balance reads hold a shared database ownership lease across maturity checks and
 the native summary, returning `SyncRequired` while an ordinary scanner owns the
 exclusive lease.
@@ -172,7 +176,10 @@ against the actual saved authored transaction, so signing may add genuine pendin
 change without invalidating the mined receipt. Transparent locally authored
 memos have no raw-transaction equivalent and remain local metadata. Cold status
 and payment writers perform the same effect checks before accepting Complete.
-Fee estimates and maximum-send proposals also require a current recovery receipt.
+Fee estimates and maximum-send proposals validate the current receipt and select
+inputs within one SQLite snapshot. The maximum amount and all fee-search
+iterations use native spendable notes in that snapshot. A shared ownership lease
+fences database replacement throughout the operation.
 The reconciliation writer requires every verified output matching its enrolled
 transparent scripts to be present, and the final receipt writer rechecks that
 same scope. Receiver allocation during recovery can therefore require another

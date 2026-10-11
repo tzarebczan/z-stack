@@ -2554,6 +2554,84 @@ pub(in crate::native::wallet) mod tests {
             .contains("native_recovery_reconciliation_required"));
     }
     #[test]
+    fn proposal_snapshot_retains_complete_selection_when_recovery_begins_after_guard() {
+        use crate::native::wallet::recovery_blocks::tests::fixture_prefix_with_transactions;
+        for max_send in [false, true] {
+            let (dir, wallet) = wallet();
+            let (key, _) = fixture_account();
+            let (bytes, chain) = fixture_prefix_with_transactions(
+                &[0x51],
+                8,
+                vec![(3, encrypted_orchard_transaction(&key, 7, [0; 32]))],
+            );
+            let _ = wallet.recover_regtest_pir(
+                &chain,
+                verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+                &mut Unavailable,
+                &mut Unavailable,
+                WorkLimits {
+                    max_queries: Some(1),
+                    max_private_bytes: Some(1024),
+                },
+                &RecoveryCancellation::new(),
+            );
+            finish_fixture_recovery(&wallet, &bytes, &chain);
+            let other = NativeWallet::open_offline(dir.path()).unwrap();
+            let destination = wallet.unified_address().unwrap();
+            let begin = || {
+                other
+                    .begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
+                    .unwrap();
+                assert!(other.ensure_pir_recovery_ready().is_err());
+            };
+            if max_send {
+                let (amount, fee) = wallet
+                    .max_send_amount_after_guard(
+                        &destination,
+                        u64::MAX,
+                        shielded_spend_policy(),
+                        begin,
+                    )
+                    .unwrap();
+                assert!(amount > 0 && fee > 0);
+                assert!(amount + fee <= 50_000);
+            } else {
+                let request = wallet.send_request(&destination, 1, None).unwrap();
+                let _lease =
+                    super::super::super::database_lease::shared(&wallet.paths.data_db).unwrap();
+                let mut db = wallet.open_db().unwrap();
+                assert!(
+                    wallet
+                        .propose_fee_after_guard(&mut db, request, shielded_spend_policy(), begin)
+                        .unwrap()
+                        > 0
+                );
+            }
+            let cold = NativeWallet::open_offline(dir.path()).unwrap();
+            assert!(cold
+                .estimate_fee(&destination, 1, None)
+                .unwrap_err()
+                .to_string()
+                .contains("native_recovery_pending"));
+            assert!(cold
+                .max_send_amount(&destination, 0, shielded_spend_policy())
+                .unwrap_err()
+                .to_string()
+                .contains("native_recovery_pending"));
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM transactions WHERE created IS NOT NULL",
+                    [],
+                    |r| r.get::<_, u32>(0)
+                )
+                .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
     fn proposal_only_selectors_refuse_pending_and_stale_completed_recovery() {
         let (dir, wallet) = wallet();
         let script = wallet.recovery_scope().unwrap().0[0].entry.script.clone();

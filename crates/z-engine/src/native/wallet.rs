@@ -55,11 +55,11 @@ use zcash_client_backend::{
         wallet::decrypt_and_store_transaction,
         wallet::{
             create_proposed_transactions,
-            input_selection::{GreedyInputSelector, SpendPolicy},
+            input_selection::{GreedyInputSelector, LockFilter, SpendPolicy},
             propose_shielding, propose_transfer, ConfirmationsPolicy, SpendingKeys,
         },
-        Account, AccountBirthday, AccountPurpose, CoinbaseFilter, TransactionStatus, WalletRead,
-        WalletWrite,
+        Account, AccountBirthday, AccountPurpose, CoinbaseFilter, InputSource, MaxSpendMode,
+        TargetValue, TransactionStatus, WalletRead, WalletWrite,
     },
     fees::{standard::SingleOutputChangeStrategy, DustOutputPolicy, StandardFeeRule},
     proto::service::{
@@ -1454,7 +1454,10 @@ impl NativeWallet {
         self.save_meta()
     }
 
-    fn primary_account_id(db: &Db) -> Result<AccountUuid> {
+    fn primary_account_id<D: WalletRead<AccountId = AccountUuid>>(db: &D) -> Result<AccountUuid>
+    where
+        D::Error: std::fmt::Display,
+    {
         db.get_account_ids()
             .map_err(|e| EngineError::WalletDb(format!("accounts: {e}")))?
             .into_iter()
@@ -1937,6 +1940,8 @@ impl NativeWallet {
                     .unwrap_or_else(|| EngineError::Transport("light server unreachable".into())),
             );
         };
+        // Bound the protobuf envelope before tonic materializes transaction bytes.
+        client = client.max_decoding_message_size(2 * 1024 * 1024 + 64 * 1024);
         // Wire order first; a legacy server may expect it reversed.
         let mut hash = txid.as_ref().to_vec();
         let mut unknown = 0;
@@ -2700,6 +2705,7 @@ impl NativeWallet {
     pub fn estimate_fee(&self, to: &str, amount_zatoshis: u64, memo: Option<&str>) -> Result<u64> {
         self.ensure_recovery_selection_ready()?;
         let request = self.send_request(to, amount_zatoshis, memo)?;
+        let _lease = database_lease::shared(&self.paths.data_db)?;
         let mut db = self.open_db()?;
         self.propose_fee(&mut db, request, shielded_spend_policy())
     }
@@ -2726,12 +2732,7 @@ impl NativeWallet {
             }
             None => self.unified_address()?,
         };
-        let bal = self.balance()?;
-        let available = bal
-            .sapling_available
-            .saturating_add(bal.orchard_available)
-            .saturating_add(bal.ironwood_available);
-        self.max_send_amount(&dest, available, shielded_spend_policy())
+        self.max_send_amount(&dest, u64::MAX, shielded_spend_policy())
     }
 
     fn send_request(
@@ -2796,7 +2797,38 @@ impl NativeWallet {
         request: TransactionRequest,
         policy: SpendPolicy,
     ) -> Result<u64> {
-        self.ensure_recovery_selection_ready()?;
+        self.propose_fee_after_guard(db, request, policy, || {})
+    }
+
+    fn propose_fee_after_guard(
+        &self,
+        db: &mut Db,
+        request: TransactionRequest,
+        policy: SpendPolicy,
+        after_guard: impl FnOnce(),
+    ) -> Result<u64> {
+        db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<u64> {
+            recovery_guard::transaction_recovery_ready(wdb, ext)?;
+            after_guard();
+            self.propose_fee_in_snapshot(wdb, request, policy)
+                .map_err(anyhow::Error::new)
+        })
+        .map_err(proposal_transaction_error)
+    }
+
+    fn propose_fee_in_snapshot<D>(
+        &self,
+        db: &mut D,
+        request: TransactionRequest,
+        policy: SpendPolicy,
+    ) -> Result<u64>
+    where
+        D: WalletWrite
+            + WalletRead<AccountId = AccountUuid>
+            + InputSource<AccountId = AccountUuid, Error = <D as WalletRead>::Error>,
+        <D as WalletRead>::Error: std::fmt::Display,
+        <D as InputSource>::NoteRef: std::fmt::Display,
+    {
         let account = Self::primary_account_id(db)?;
         let input_selector = GreedyInputSelector::new();
         let change_strategy = SingleOutputChangeStrategy::new(
@@ -2821,17 +2853,24 @@ impl NativeWallet {
         Ok(crate::proposal_fee_zat(&proposal))
     }
 
-    fn propose_amount(
+    fn propose_amount<D>(
         &self,
-        db: &mut Db,
+        db: &mut D,
         dest: &str,
         amount_zat: u64,
         policy: SpendPolicy,
-    ) -> Result<u64> {
+    ) -> Result<u64>
+    where
+        D: WalletWrite
+            + WalletRead<AccountId = AccountUuid>
+            + InputSource<AccountId = AccountUuid, Error = <D as WalletRead>::Error>,
+        <D as WalletRead>::Error: std::fmt::Display,
+        <D as InputSource>::NoteRef: std::fmt::Display,
+    {
         let payment = zip_payment(dest, amount_zat, None)?;
         let request = TransactionRequest::new(vec![payment])
             .map_err(|e| EngineError::Message(format!("ZIP-321: {e}")))?;
-        self.propose_fee(db, request, policy)
+        self.propose_fee_in_snapshot(db, request, policy)
     }
 
     fn max_send_amount(
@@ -2840,34 +2879,72 @@ impl NativeWallet {
         available: u64,
         policy: SpendPolicy,
     ) -> Result<(u64, u64)> {
-        if available == 0 {
-            return Ok((0, 0));
-        }
+        self.max_send_amount_after_guard(dest, available, policy, || {})
+    }
+
+    fn max_send_amount_after_guard(
+        &self,
+        dest: &str,
+        available: u64,
+        policy: SpendPolicy,
+        after_guard: impl FnOnce(),
+    ) -> Result<(u64, u64)> {
+        let _lease = database_lease::shared(&self.paths.data_db)?;
         let mut db = self.open_db()?;
-        let mut pad = crate::FEE_PAD_ZAT;
-        for _ in 0..8 {
-            let amt = available.saturating_sub(pad);
-            if amt == 0 {
-                return Ok((0, 0));
-            }
-            match self.propose_amount(&mut db, dest, amt, policy.clone()) {
-                Ok(fee) => {
-                    let exact = available.saturating_sub(fee);
-                    if exact > 0 && exact != amt {
-                        if let Ok(fee2) = self.propose_amount(&mut db, dest, exact, policy.clone())
-                        {
-                            return Ok((exact, fee2));
-                        }
+        db.transactionally_with_extension(|db, ext| -> anyhow::Result<(u64, u64)> {
+            recovery_guard::transaction_recovery_ready(db, ext)?;
+            after_guard();
+            let account = Self::primary_account_id(db)?;
+            let confirmations = crate::confirmations_policy(self.network);
+            let eligible = match db.get_target_and_anchor_heights(confirmations.trusted())? {
+                Some((target, _)) => db
+                    .select_spendable_notes(
+                        account,
+                        TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
+                        &policy.shielded().iter().copied().collect::<Vec<_>>(),
+                        target,
+                        confirmations,
+                        &[],
+                        LockFilter::Policy(policy.locked_input_policy()),
+                    )?
+                    .total_value()?
+                    .into_u64(),
+                None => 0,
+            };
+            let available = available.min(eligible);
+            (|| -> Result<(u64, u64)> {
+                if available == 0 {
+                    return Ok((0, 0));
+                }
+                let mut pad = crate::FEE_PAD_ZAT;
+                for _ in 0..8 {
+                    let amt = available.saturating_sub(pad);
+                    if amt == 0 {
+                        return Ok((0, 0));
                     }
-                    return Ok((amt, fee));
+                    match self.propose_amount(db, dest, amt, policy.clone()) {
+                        Ok(fee) => {
+                            let exact = available.saturating_sub(fee);
+                            if exact > 0 && exact != amt {
+                                if let Ok(fee2) =
+                                    self.propose_amount(db, dest, exact, policy.clone())
+                                {
+                                    return Ok((exact, fee2));
+                                }
+                            }
+                            return Ok((amt, fee));
+                        }
+                        Err(EngineError::InsufficientFunds) => {
+                            pad = pad.saturating_mul(2).max(pad.saturating_add(1));
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
-                Err(EngineError::InsufficientFunds) => {
-                    pad = pad.saturating_mul(2).max(pad.saturating_add(1));
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok((0, 0))
+                Ok((0, 0))
+            })()
+            .map_err(anyhow::Error::new)
+        })
+        .map_err(proposal_transaction_error)
     }
 
     pub async fn send(
@@ -3465,7 +3542,9 @@ impl NativeWallet {
         }
         let skip =
             matches!(server, LightServer::LocalRegtest) || server.as_url().contains(":28137");
-        let mut client = Self::connect_url(&server.as_url(), skip).await?;
+        let mut client = Self::connect_url(&server.as_url(), skip)
+            .await?
+            .max_decoding_message_size(2 * 1024 * 1024 + 64 * 1024);
         let mut hash = TxId::from_hex(txid_hex)
             .ok_or_else(|| EngineError::Message("txid must be 64 hexadecimal digits".into()))?
             .as_ref()
@@ -4479,6 +4558,34 @@ mod tests {
     }
 
     #[test]
+    fn proposal_readers_fence_database_replacement_even_with_zero_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = fixture_wallet(dir.path());
+        let (key, birthday) = fixture_account();
+        wallet.replace_scan_db(&key, &birthday).unwrap();
+        let destination = wallet.unified_address().unwrap();
+        let writer = database_lease::exclusive(&wallet.paths.data_db).unwrap();
+        for result in [
+            wallet.estimate_fee(&destination, 1, None),
+            wallet
+                .max_send_amount(&destination, 0, shielded_spend_policy())
+                .map(|v| v.0),
+        ] {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("native_pir_database_busy"));
+        }
+        drop(writer);
+        assert_eq!(
+            wallet
+                .max_send_amount(&destination, 0, shielded_spend_policy())
+                .unwrap(),
+            (0, 0)
+        );
+    }
+
+    #[test]
     fn proposal_only_selectors_refuse_recovery_markers_before_request_or_selection() {
         for blocked in [0, 1] {
             let dir = tempfile::tempdir().unwrap();
@@ -5451,3 +5558,10 @@ mod tests {
 #[cfg(all(test, feature = "transparent-inputs"))]
 #[path = "wallet_broadcast_tests.rs"]
 mod broadcast_tests;
+
+fn proposal_transaction_error(error: anyhow::Error) -> EngineError {
+    match error.downcast::<EngineError>() {
+        Ok(error) => error,
+        Err(error) => EngineError::from(error),
+    }
+}
