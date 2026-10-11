@@ -243,6 +243,14 @@ pub(super) fn native_scope_in_transaction<D: WalletRead<AccountId = AccountUuid>
     if !marker {
         return Ok(scope);
     }
+    let foreign: u64 = ext.query_row(
+        "SELECT count(*) FROM addresses WHERE key_scope=-1",
+        [],
+        |r| r.get(0),
+    )?;
+    if foreign != 0 {
+        anyhow::bail!("native_recovery_imports_unsupported");
+    }
     for account in db
         .get_account_ids()
         .map_err(|_| failed("native_pir_scope_invalid"))?

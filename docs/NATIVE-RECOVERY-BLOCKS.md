@@ -84,3 +84,14 @@ restore resumes while preserving the existing encrypted seed material. Finished
 wallets still refuse replacement. Standalone/foreign imported keys remain disabled
 in this initial build; native HD accounts and external/internal/ephemeral allocated
 receivers are supported within the bounded scope and gap fixed point.
+
+Native qualification includes an explicit bounded V6 test run:
+`Z_STACK_REGTEST_NU6_3=150 cargo +1.91 test -p z-engine --locked --no-default-features --features native-pir --lib v6_ -- --ignored`.
+The all-pool fixture asserts Sapling spends/outputs, Orchard/Ironwood compact
+fields and cumulative commitment counts from the same full transaction. Its dummy
+authorizing data and synthetic accepted headers test effect conversion only;
+real funded consensus/signature qualification remains a separate gate. Native
+coinbase maturity is retained; ordinary recovered payment preparation permits
+non-coinbase transparent funding. Coinbase shielding follows the existing native
+policy. Persisted foreign/standalone receiver rows are explicitly refused by the
+initial profile instead of silently excluding them.

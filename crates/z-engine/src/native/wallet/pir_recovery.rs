@@ -706,6 +706,138 @@ mod tests {
             .contains("native_recovery_reconciliation_required"));
     }
     #[test]
+    fn recovered_coinbase_maturity_is_native_policy_and_pending_still_blocks_payment() {
+        let (_dir, wallet) = wallet();
+        let db = wallet.open_db().unwrap();
+        let account = db.get_account_ids().unwrap()[0];
+        let address = db
+            .get_transparent_receivers(account, true, true)
+            .unwrap()
+            .into_keys()
+            .next()
+            .unwrap();
+        let script: transparent::address::Script = address.script().into();
+        for target in [1, 103] {
+            let (bytes, chain) =
+                super::super::super::recovery_blocks::tests::fixture_prefix(&script.0 .0, target);
+            assert!(wallet
+                .recover_regtest_pir(
+                    &chain,
+                    verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false))
+                        .unwrap(),
+                    &mut Unavailable,
+                    &mut Unavailable,
+                    WorkLimits {
+                        max_queries: Some(1),
+                        max_private_bytes: Some(1024)
+                    },
+                    &RecoveryCancellation::new()
+                )
+                .is_err());
+            let available = wallet.balance().unwrap().transparent_available;
+            if target == 1 {
+                assert_eq!(available, 0);
+            } else {
+                assert!(available > 0);
+            }
+            assert!(wallet.ensure_recovery_selection_ready().is_err());
+            assert!(wallet.prepare_payment("unused", 1, None).is_err());
+        }
+    }
+    #[test]
+    fn native_rewind_atomically_truncates_canonical_blocks_and_keeps_pending_on_reopen() {
+        let (dir, wallet) = wallet();
+        let db = wallet.open_db().unwrap();
+        let account = db.get_account_ids().unwrap()[0];
+        let address = db
+            .get_transparent_receivers(account, true, true)
+            .unwrap()
+            .into_keys()
+            .next()
+            .unwrap();
+        let script: transparent::address::Script = address.script().into();
+        let (bytes, chain) =
+            super::super::super::recovery_blocks::tests::fixture_prefix(&script.0 .0, 2);
+        assert!(wallet
+            .recover_regtest_pir(
+                &chain,
+                verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+                &mut Unavailable,
+                &mut Unavailable,
+                WorkLimits {
+                    max_queries: Some(1),
+                    max_private_bytes: Some(1024)
+                },
+                &RecoveryCancellation::new()
+            )
+            .is_err());
+        assert_eq!(wallet.scanned_height().unwrap(), 2);
+        let (_, short) =
+            super::super::super::recovery_blocks::tests::fixture_prefix(&script.0 .0, 1);
+        assert_eq!(
+            wallet
+                .rewind_regtest_pir(&short, &RecoveryCancellation::new())
+                .unwrap(),
+            1
+        );
+        let reopened = NativeWallet::open_offline(dir.path()).unwrap();
+        assert_eq!(reopened.scanned_height().unwrap(), 1);
+        let conn = rusqlite::Connection::open(&reopened.paths.data_db).unwrap();
+        let (above,blocked):(u64,bool)=conn.query_row("SELECT (SELECT count(*) FROM blocks WHERE height>1),blocked FROM ext_coffer_pir_recovery_v1 WHERE id=1",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(above, 0);
+        assert!(blocked);
+        assert!(reopened.ensure_recovery_selection_ready().is_err());
+    }
+    #[test]
+    fn allocated_unexposed_ephemeral_output_enters_native_canonical_store() {
+        let (_dir, wallet) = wallet();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let encoded:String=conn.query_row("SELECT cached_transparent_receiver_address FROM addresses WHERE key_scope=2 ORDER BY id LIMIT 1",[],|r|r.get(0)).unwrap();
+        let address = zcash_keys::address::Address::decode(&ZNetwork::Regtest, &encoded)
+            .unwrap()
+            .to_transparent_address()
+            .unwrap();
+        let script: transparent::address::Script = address.script().into();
+        let (bytes, chain) = fixture_with_script(&script.0 .0);
+        assert!(wallet
+            .recover_regtest_pir(
+                &chain,
+                verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+                &mut Unavailable,
+                &mut Unavailable,
+                WorkLimits {
+                    max_queries: Some(1),
+                    max_private_bytes: Some(1024)
+                },
+                &RecoveryCancellation::new()
+            )
+            .is_err());
+        let count:u64=conn.query_row("SELECT count(*) FROM transparent_received_outputs t JOIN addresses a ON a.id=t.address_id WHERE a.key_scope=2",[],|r|r.get(0)).unwrap();
+        assert_eq!(count, 1);
+        assert!(wallet.ensure_recovery_selection_ready().is_err());
+        assert!(wallet
+            .recovery_scope()
+            .unwrap()
+            .0
+            .iter()
+            .any(|entry| entry.entry.script == script.0 .0));
+    }
+    #[test]
+    fn foreign_imported_receiver_rows_are_hard_refused_by_initial_profile() {
+        let (_dir, wallet) = wallet();
+        let (_, chain) = fixture_with_script(&[0x51]);
+        wallet
+            .begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
+            .unwrap();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        conn.execute("UPDATE addresses SET key_scope=-1,diversifier_index_be=NULL WHERE id=(SELECT min(id) FROM addresses WHERE key_scope=0)",[]).unwrap();
+        assert!(wallet
+            .recovery_scope()
+            .unwrap_err()
+            .to_string()
+            .contains("native_recovery_imports_unsupported"));
+    }
+    #[test]
     fn conflicting_saved_raw_is_preserved_and_recovery_remains_pending() {
         let (_dir, wallet) = wallet();
         let db = wallet.open_db().unwrap();

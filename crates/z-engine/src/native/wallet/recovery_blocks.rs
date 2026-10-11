@@ -334,6 +334,330 @@ pub(super) mod tests {
         envelope.extend(raw);
         (envelope, chain)
     }
+    pub(in crate::native::wallet) fn fixture_prefix(
+        script: &[u8],
+        count: u32,
+    ) -> (Vec<u8>, RegtestAcceptedChain) {
+        fixture_prefix_with_transaction(script, count, None)
+    }
+    fn fixture_prefix_with_transaction(
+        script: &[u8],
+        count: u32,
+        extra: Option<Transaction>,
+    ) -> (Vec<u8>, RegtestAcceptedChain) {
+        use transparent::{
+            address::Script,
+            bundle::{Authorized as TransparentAuthorized, Bundle, OutPoint, TxIn, TxOut},
+        };
+        use zcash_primitives::transaction::{Authorized, TransactionData, TxVersion};
+        use zcash_protocol::value::Zatoshis;
+        let genesis = "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327";
+        let mut parent = crate::web::from_hex(genesis).unwrap();
+        parent.reverse();
+        let mut headers = vec![(0, genesis.to_string())];
+        let mut envelope = MAGIC.to_vec();
+        envelope.extend(1u32.to_le_bytes());
+        envelope.extend(count.to_le_bytes());
+        for height in 1..=count {
+            let mut height_bytes = height.to_le_bytes().to_vec();
+            while height_bytes.last() == Some(&0) {
+                height_bytes.pop();
+            }
+            if height_bytes.last().is_some_and(|b| b & 0x80 != 0) {
+                height_bytes.push(0);
+            }
+            let mut sig = vec![height_bytes.len() as u8];
+            sig.extend(height_bytes);
+            let transparent = Some(Bundle {
+                vin: vec![TxIn::from_parts(
+                    OutPoint::new([0; 32], u32::MAX),
+                    Script(zcash_script::script::Code(sig)),
+                    u32::MAX,
+                )],
+                vout: vec![TxOut::new(
+                    Zatoshis::from_u64(50_000 + u64::from(height)).unwrap(),
+                    Script(zcash_script::script::Code(script.to_vec())),
+                )],
+                authorization: TransparentAuthorized,
+            });
+            let branch = BranchId::for_height(&ZNetwork::Regtest, height.into());
+            let tx = if branch == BranchId::Canopy {
+                TransactionData::<Authorized>::from_parts(
+                    TxVersion::V4,
+                    branch,
+                    0,
+                    0.into(),
+                    transparent,
+                    None,
+                    None,
+                    None,
+                )
+                .freeze()
+                .unwrap()
+            } else if height < crate::regtest_nu6_3_height() {
+                TransactionData::<Authorized>::from_parts(
+                    TxVersion::V5,
+                    branch,
+                    0,
+                    0.into(),
+                    transparent,
+                    None,
+                    None,
+                    None,
+                )
+                .freeze()
+                .unwrap()
+            } else {
+                TransactionData::<Authorized>::from_parts_v6(
+                    branch,
+                    0,
+                    0.into(),
+                    transparent,
+                    None,
+                    None,
+                    None,
+                )
+                .freeze()
+                .unwrap()
+            };
+            let header = BlockHeaderData {
+                version: 4,
+                prev_block: BlockHash::from_slice(&parent),
+                merkle_root: transaction_root(if height == count {
+                    extra.as_ref().map_or_else(
+                        || vec![*tx.txid().as_ref()],
+                        |other| vec![*tx.txid().as_ref(), *other.txid().as_ref()],
+                    )
+                } else {
+                    vec![*tx.txid().as_ref()]
+                })
+                .unwrap(),
+                final_sapling_root: [0; 32],
+                time: height,
+                bits: 0,
+                nonce: [0; 32],
+                solution: vec![],
+            }
+            .freeze()
+            .unwrap();
+            let mut raw = vec![];
+            header.write(&mut raw).unwrap();
+            raw.push(if height == count && extra.is_some() {
+                2
+            } else {
+                1
+            });
+            tx.write(&mut raw).unwrap();
+            if height == count {
+                if let Some(other) = &extra {
+                    other.write(&mut raw).unwrap();
+                }
+            }
+            headers.push((height, header.hash().to_string()));
+            parent = header.hash().0.to_vec();
+            envelope.extend((raw.len() as u32).to_le_bytes());
+            envelope.extend(raw);
+        }
+        (
+            envelope,
+            RegtestAcceptedChain::from_local_node(
+                RegtestScanSchedule {
+                    nu6_3_height: crate::regtest_nu6_3_height(),
+                    nu7_height: crate::regtest_nu7_height(),
+                },
+                headers,
+            )
+            .unwrap(),
+        )
+    }
+    #[test]
+    #[ignore = "requires Z_STACK_REGTEST_NU6_3=150 bounded fixture schedule"]
+    fn v6_all_pools_compact_effects_come_from_same_full_transaction() {
+        use orchard::{
+            note::{ExtractedNoteCommitment, NoteVersion, RandomSeed, Rho},
+            note_encryption::{
+                IronwoodDomain, IronwoodNoteEncryption, OrchardDomain, OrchardNoteEncryption,
+            },
+            value::NoteValue,
+            Note,
+        };
+        use zcash_note_encryption::Domain;
+        use zcash_primitives::transaction::{Authorized, TransactionData};
+        let (ufvk, _) = crate::native::wallet::tests::fixture_account();
+        let fvk = ufvk.orchard().unwrap();
+        let mut expected = vec![];
+        let empty = TransactionData::<Authorized>::from_parts_v6(
+            BranchId::Nu6_3,
+            0,
+            0.into(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        let mut raw = vec![];
+        empty.write(&mut raw).unwrap();
+        raw.truncate(raw.len() - 2);
+        for ironwood in [false, true] {
+            let rho = Rho::from_bytes(&[0; 32]).unwrap();
+            let rseed = RandomSeed::from_bytes([7; 32], &rho).unwrap();
+            let note = Note::from_parts(
+                fvk.address_at(0u32, zip32::Scope::External),
+                NoteValue::from_raw(50_000),
+                rho,
+                rseed,
+                if ironwood {
+                    NoteVersion::V3
+                } else {
+                    NoteVersion::V2
+                },
+            )
+            .unwrap();
+            let cmx = ExtractedNoteCommitment::from(note.commitment()).to_bytes();
+            let (epk, ciphertext) = if ironwood {
+                let enc = IronwoodNoteEncryption::new(None, note, [0; 512]);
+                (
+                    IronwoodDomain::epk_bytes(enc.epk()).0,
+                    enc.encrypt_note_plaintext(),
+                )
+            } else {
+                let enc = OrchardNoteEncryption::new(None, note, [0; 512]);
+                (
+                    OrchardDomain::epk_bytes(enc.epk()).0,
+                    enc.encrypt_note_plaintext(),
+                )
+            };
+            expected.push((cmx, epk, ciphertext[..52].to_vec()));
+            raw.push(1);
+            raw.extend([0; 32]);
+            raw.extend([0; 32]);
+            raw.extend(epk);
+            raw.extend(cmx);
+            raw.extend(epk);
+            raw.extend(ciphertext);
+            raw.extend([0; 80]);
+            raw.push(3);
+            raw.extend(0i64.to_le_bytes());
+            raw.extend([0; 32]);
+            let proof_len = orchard::Proof::expected_proof_size(1);
+            raw.push(253);
+            raw.extend((proof_len as u16).to_le_bytes());
+            raw.extend(vec![0; proof_len]);
+            raw.extend([0; 128]);
+        }
+        // Dummy auth bytes isolate native parsing/effect conversion; this test
+        // does not claim signatures/proofs or synthetic headers are valid chain.
+        let tx = Transaction::read(&raw[..], BranchId::Nu6_3).unwrap();
+        let sapling_sample = Transaction::read(
+            &include_bytes!("fixtures/zakura-public-sapling/transaction.bin")[..],
+            BranchId::Canopy,
+        )
+        .unwrap();
+        let sapling = sapling_sample.sapling_bundle().unwrap().clone();
+        let expected_sapling = sapling
+            .shielded_outputs()
+            .iter()
+            .map(|output| {
+                (
+                    output.cmu().to_bytes(),
+                    output.ephemeral_key().0,
+                    output.enc_ciphertext()[..52].to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(!expected_sapling.is_empty());
+        let expected_spends = sapling
+            .shielded_spends()
+            .iter()
+            .map(|spend| spend.nullifier().0)
+            .collect::<Vec<_>>();
+        let tx = TransactionData::<Authorized>::from_parts_v6(
+            BranchId::Nu6_3,
+            0,
+            0.into(),
+            None,
+            Some(sapling),
+            tx.orchard_bundle().cloned(),
+            tx.ironwood_bundle().cloned(),
+        )
+        .freeze()
+        .unwrap();
+        assert!(
+            crate::regtest_nu6_3_height() <= 2048,
+            "bounded fixture schedule required"
+        );
+        let (bytes, chain) =
+            fixture_prefix_with_transaction(&[0x51], crate::regtest_nu6_3_height(), Some(tx));
+        let evidence =
+            verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap();
+        let compact = evidence.compact_blocks().unwrap();
+        let last = compact.last().unwrap();
+        let tx = &last.vtx[1];
+        for (actions, (cmx, epk, ciphertext)) in [&tx.actions, &tx.ironwood_actions]
+            .into_iter()
+            .zip(expected)
+        {
+            assert_eq!(actions.len(), 1);
+            assert_eq!(actions[0].cmx, cmx);
+            assert_eq!(actions[0].ephemeral_key, epk);
+            assert_eq!(actions[0].ciphertext, ciphertext);
+        }
+        assert_eq!(tx.spends.len(), expected_spends.len());
+        for (spend, nf) in tx.spends.iter().zip(expected_spends) {
+            assert_eq!(spend.nf, nf);
+        }
+        assert_eq!(tx.outputs.len(), expected_sapling.len());
+        for (output, (cmu, epk, ciphertext)) in tx.outputs.iter().zip(expected_sapling) {
+            assert_eq!(output.cmu, cmu);
+            assert_eq!(output.ephemeral_key, epk);
+            assert_eq!(output.ciphertext, ciphertext);
+        }
+        let metadata = last.chain_metadata.as_ref().unwrap();
+        assert_eq!(
+            metadata.sapling_commitment_tree_size,
+            tx.outputs.len() as u32
+        );
+        assert_eq!(metadata.orchard_commitment_tree_size, 1);
+        assert_eq!(metadata.ironwood_commitment_tree_size, 1);
+    }
+    #[test]
+    #[ignore = "requires Z_STACK_REGTEST_NU6_3=150 bounded fixture schedule"]
+    fn v6_prefix_and_compact_metadata_follow_actual_native_transactions() {
+        let target = crate::regtest_nu6_3_height();
+        assert!(target <= 2048, "bounded fixture schedule required");
+        let (bytes, chain) = fixture_prefix(&[0x51], target);
+        let evidence =
+            verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap();
+        assert_eq!(
+            evidence.blocks.last().unwrap().vtx()[0].version(),
+            zcash_primitives::transaction::TxVersion::V6
+        );
+        let compact = evidence.compact_blocks().unwrap();
+        assert_eq!(compact.len(), target as usize);
+        assert_eq!(
+            compact.last().unwrap().vtx[0].txid,
+            evidence.blocks.last().unwrap().vtx()[0].txid().as_ref()
+        );
+        assert_eq!(
+            compact
+                .last()
+                .unwrap()
+                .chain_metadata
+                .as_ref()
+                .unwrap()
+                .ironwood_commitment_tree_size,
+            0
+        );
+        let wrong = zcash_primitives::transaction::TransactionData::<
+            zcash_primitives::transaction::Authorized,
+        >::from_parts_v6(BranchId::Nu7, 0, 0.into(), None, None, None, None)
+        .freeze()
+        .unwrap();
+        let (bytes, chain) = fixture_prefix_with_transaction(&[0x51], target, Some(wrong));
+        assert!(verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).is_err());
+    }
     #[test]
     fn accepted_complete_fixture_is_verified_without_wallet_state() {
         let (bytes, chain) = fixture();
