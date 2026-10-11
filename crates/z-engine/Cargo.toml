@@ -54,7 +54,7 @@ lwd = [
 ]
 sync = ["lwd", "zcash_client_backend/sync"]
 transparent-inputs = ["zcash_client_backend/transparent-inputs", "dep:transparent"]
-native-pir = ["native", "dep:transparent-wallet", "dep:transparent-events", "dep:transparent-filter", "dep:sha2"]
+native-pir = ["native", "dep:transparent-wallet", "dep:transparent-events", "dep:transparent-filter", "dep:sha2", "dep:tempfile"]
 # WASM proving (Orchard/Ironwood in-process). Sapling params stay out of the blob.
 wasm-prove = ["orchard/circuit", "zcash_primitives/circuits"]
 # Hardware signers (Keystone, Ledger) via PCZTs: create, prove, redact, apply
@@ -160,6 +160,7 @@ blake2b_simd = { version = "1", optional = true }
 zcash_note_encryption = { version = "=0.4.2", optional = true }
 
 sha2 = { version = "0.10", optional = true }
+tempfile = { version = "3", optional = true }
 transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "bec1f41326cf98261d8df7a16ffa4b4686b48231", optional = true }
 transparent-events = { git = "https://github.com/valargroup/wallet-pir", rev = "bec1f41326cf98261d8df7a16ffa4b4686b48231", optional = true }
 transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "bec1f41326cf98261d8df7a16ffa4b4686b48231", optional = true }

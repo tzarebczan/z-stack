@@ -44,7 +44,22 @@ pub(crate) fn replace_file(
         .unwrap_or_default();
     let tmp = path.with_file_name(format!("{name}.tmp"));
     let written = (|| {
-        let mut file = std::fs::File::create(&tmp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Creation mode does not change a temp file retained by a crash.
+            // Restrict its handle before truncating or writing private metadata.
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.set_len(0)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
@@ -71,10 +86,47 @@ pub use transparent_wallet::{
     WorkLimits as PirWorkLimits,
 };
 #[cfg(feature = "native-pir")]
-pub use wallet::{PirConfirmedTransaction, PirDiscoveryReport, RegtestAcceptedChain};
+pub use wallet::{
+    verify_regtest_recovery_blocks, PirConfirmedTransaction, PirDiscoveryReport, PirRecoveryReport,
+    RecoveryCancellation, RegtestAcceptedChain, VerifiedRegtestRecoveryBlocks,
+};
 
 #[cfg(feature = "native-pir")]
 pub use transparent_wallet::{
     client::Table as PirTable, refusal as pir_refusal, transport::BoxError as PirTransportError,
     Overloaded as PirOverloaded, StaleRevision as PirStaleRevision,
 };
+
+#[cfg(all(test, unix))]
+mod replacement_tests {
+    use super::replace_file;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn replacement_temp_is_private_before_rename_and_on_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        let tmp = dir.path().join("wallet.json.tmp");
+        for retained in [false, true] {
+            if retained {
+                std::fs::write(&tmp, b"interrupted fixture metadata").unwrap();
+                std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            replace_file(&path, b"fixture private metadata", |prepared| {
+                assert_eq!(prepared, tmp);
+                assert_eq!(
+                    std::fs::metadata(prepared)?.permissions().mode() & 0o777,
+                    0o600
+                );
+                assert_eq!(std::fs::read(prepared)?, b"fixture private metadata");
+                Ok(())
+            })
+            .unwrap();
+            assert!(!tmp.exists());
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+}

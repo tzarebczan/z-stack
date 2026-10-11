@@ -63,7 +63,7 @@ pub(super) fn require_rescan_safe(path: &Path) -> Result<()> {
     Ok(())
 }
 fn connection(wallet: &NativeWallet) -> Result<rusqlite::Connection> {
-    let conn = rusqlite::Connection::open(&wallet.paths.data_db)
+    let mut conn = rusqlite::Connection::open(&wallet.paths.data_db)
         .map_err(|_| failed("payment_storage_failed"))?;
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|_| failed("payment_storage_failed"))?;
@@ -76,11 +76,59 @@ fn connection(wallet: &NativeWallet) -> Result<rusqlite::Connection> {
         "CREATE TABLE IF NOT EXISTS ext_native_payments_v1 (
         id TEXT PRIMARY KEY, proposal BLOB NOT NULL, fee INTEGER NOT NULL,
         created INTEGER NOT NULL, expires INTEGER NOT NULL, height INTEGER NOT NULL,
-        block_hash BLOB NOT NULL, phase TEXT NOT NULL, txids TEXT NOT NULL
+        block_hash BLOB NOT NULL, phase TEXT NOT NULL, txids TEXT NOT NULL,
+        recovery_generation INTEGER
     )",
     )
     .map_err(|_| failed("payment_storage_failed"))?;
+    // Existing signed receipts remain valid; generationless prepared reviews must
+    // be renewed. Serialize migration across independent native wallet instances.
+    let migration = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|_| failed("payment_storage_failed"))?;
+    let bound: bool = migration.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ext_native_payments_v1') WHERE name='recovery_generation')",
+        [], |row| row.get(0)).map_err(|_| failed("payment_storage_failed"))?;
+    if !bound {
+        migration
+            .execute_batch(
+                "ALTER TABLE ext_native_payments_v1 ADD COLUMN recovery_generation INTEGER",
+            )
+            .map_err(|_| failed("payment_storage_failed"))?;
+    }
+    migration
+        .commit()
+        .map_err(|_| failed("payment_storage_failed"))?;
     Ok(conn)
+}
+
+fn require_review_binding(current: Option<u64>, reviewed: Option<u64>) -> anyhow::Result<()> {
+    if reviewed != Some(current.unwrap_or(0)) || current == Some(0) {
+        anyhow::bail!("payment_review_expired");
+    }
+    Ok(())
+}
+
+fn transaction_review_binding(
+    ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
+    id: &str,
+) -> anyhow::Result<()> {
+    let marked: bool = ext.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')", [], |row| row.get(0))?;
+    let current = if marked {
+        Some(ext.query_row(
+            "SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?)
+    } else {
+        None
+    };
+    let reviewed = ext.query_row(
+        "SELECT recovery_generation FROM ext_native_payments_v1 WHERE id=?1",
+        [id],
+        |row| row.get::<_, Option<u64>>(0),
+    )?;
+    require_review_binding(current, reviewed)
 }
 
 #[cfg(test)]
@@ -156,8 +204,181 @@ mod tests {
         ));
     }
     fn prepare(conn: &rusqlite::Connection) {
-        conn.execute("INSERT INTO ext_native_payments_v1 VALUES (?1,x'00',10000,1,121,1,zeroblob(32),'prepared','[]')", [ID]).unwrap();
+        conn.execute("INSERT INTO ext_native_payments_v1 (id,proposal,fee,created,expires,height,block_hash,phase,txids,recovery_generation) VALUES (?1,x'00',10000,1,121,1,zeroblob(32),'prepared','[]',0)", [ID]).unwrap();
     }
+    #[test]
+    fn prepared_review_binding_survives_migration_and_rejects_same_chain_generation_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = fixture_wallet(dir.path());
+        let (key, birthday) = fixture_account();
+        wallet.replace_scan_db(&key, &birthday).unwrap();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ext_native_payments_v1 (
+            id TEXT PRIMARY KEY, proposal BLOB NOT NULL, fee INTEGER NOT NULL,
+            created INTEGER NOT NULL, expires INTEGER NOT NULL, height INTEGER NOT NULL,
+            block_hash BLOB NOT NULL, phase TEXT NOT NULL, txids TEXT NOT NULL);
+            CREATE TABLE ext_fixture_reservations(id INTEGER);",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO ext_native_payments_v1 VALUES (?1,x'00',10000,1,121,1,zeroblob(32),'prepared','[]')", [ID]).unwrap();
+        drop(conn);
+        let conn = connection(&wallet).unwrap();
+        let generation: Option<u64> = conn
+            .query_row(
+                "SELECT recovery_generation FROM ext_native_payments_v1 WHERE id=?1",
+                [ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generation, None);
+        assert_eq!(read(&conn, ID).unwrap().phase, "prepared");
+        assert!(wallet
+            .sign_payment(&SeedAuth::mnemonic_once("unused"), ID)
+            .unwrap_err()
+            .to_string()
+            .contains("payment_review_expired"));
+        conn.execute_batch("CREATE TABLE ext_coffer_pir_recovery_v1(id INTEGER PRIMARY KEY, blocked INTEGER NOT NULL,generation INTEGER NOT NULL,receipt BLOB);
+            INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,0,2,x'00');").unwrap();
+        drop(conn);
+        // Exercise the same extension writer binding used immediately before
+        // proving/reserving inputs. Tip/hash never change in this fixture.
+        for reviewed in [None, Some(0u64), Some(1), Some(2)] {
+            let conn = connection(&wallet).unwrap();
+            conn.execute(
+                "UPDATE ext_native_payments_v1 SET recovery_generation=?1 WHERE id=?2",
+                params![reviewed, ID],
+            )
+            .unwrap();
+            let mut db = WalletDb::from_connection(conn, wallet.network, SystemClock, new_rng());
+            let result = db.transactionally_with_extension(|_, ext| -> anyhow::Result<()> {
+                transaction_review_binding(ext, ID)?;
+                ext.execute("INSERT INTO ext_fixture_reservations VALUES(1)", [])?;
+                Ok(())
+            });
+            assert_eq!(result.is_ok(), reviewed == Some(2));
+            let conn = connection(&wallet).unwrap();
+            let reservations: u64 = conn
+                .query_row("SELECT COUNT(*) FROM ext_fixture_reservations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(reservations, u64::from(reviewed == Some(2)));
+            assert_eq!(read(&conn, ID).unwrap().phase, "prepared");
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM transactions", [], |row| row
+                    .get::<_, u64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[cfg(feature = "native-pir")]
+    #[test]
+    fn persisted_review_expires_after_new_recovery_completes_on_the_same_chain() {
+        let (_dir, wallet, chain) = super::super::pir::recovery::tests::completed_wallet_fixture();
+        let conn = connection(&wallet).unwrap();
+        prepare(&conn);
+        let generation = wallet.recovery_generation().unwrap().unwrap();
+        conn.execute("UPDATE ext_native_payments_v1 SET created=?1, expires=?2, recovery_generation=?3 WHERE id=?4",
+            params![clock().unwrap(), clock().unwrap()+120, generation, ID]).unwrap();
+        let receipt: Vec<u8> = conn
+            .query_row(
+                "SELECT receipt FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let native_transactions: u64 = conn
+            .query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get(0))
+            .unwrap();
+        let raw_transactions: u64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transactions WHERE raw IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let before: (u32, Vec<u8>) = conn
+            .query_row(
+                "SELECT height,block_hash FROM ext_native_payments_v1 WHERE id=?1",
+                [ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(conn);
+        let newer = wallet
+            .begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
+            .unwrap();
+        assert!(newer > generation);
+        assert!(wallet.ensure_recovery_selection_ready().is_err());
+        let conn = connection(&wallet).unwrap();
+        // Restore the already validated receipt to isolate the generation boundary:
+        // this same-chain fixture changes no anchor, scanner, scope, or effects.
+        conn.execute(
+            "UPDATE ext_coffer_pir_recovery_v1 SET blocked=0,receipt=?1 WHERE id=1",
+            [receipt],
+        )
+        .unwrap();
+        assert!(wallet.ensure_recovery_selection_ready().is_ok());
+        for reviewed in [Some(generation), Some(0), None] {
+            conn.execute(
+                "UPDATE ext_native_payments_v1 SET recovery_generation=?1 WHERE id=?2",
+                params![reviewed, ID],
+            )
+            .unwrap();
+            let error = wallet
+                .sign_payment(&SeedAuth::mnemonic_once("unused"), ID)
+                .unwrap_err();
+            assert!(error.to_string().contains("payment_review_expired"));
+            assert_eq!(wallet.payment_receipt(ID).unwrap().phase, "prepared");
+            let after: (u32, Vec<u8>) = conn
+                .query_row(
+                    "SELECT height,block_hash FROM ext_native_payments_v1 WHERE id=?1",
+                    [ID],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert!(before == after);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM transactions WHERE raw IS NOT NULL",
+                    [],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+                raw_transactions
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM transactions", [], |row| row
+                    .get::<_, u64>(0))
+                    .unwrap(),
+                native_transactions
+            );
+        }
+        // A freshly bound review passes the exact final writer checks; no proving
+        // parameters or fabricated funding are needed to test this boundary.
+        conn.execute(
+            "UPDATE ext_native_payments_v1 SET recovery_generation=?1 WHERE id=?2",
+            params![newer, ID],
+        )
+        .unwrap();
+        drop(conn);
+        let mut db = WalletDb::from_connection(
+            connection(&wallet).unwrap(),
+            wallet.network,
+            SystemClock,
+            new_rng(),
+        );
+        db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<()> {
+            super::super::recovery_guard::transaction_recovery_ready(wdb, ext)?;
+            transaction_review_binding(ext, ID)?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
     #[test]
     fn receipts_are_wallet_bound_and_corruption_is_not_a_signing_or_submission_state() {
         let first = tempfile::tempdir().unwrap();
@@ -218,6 +439,77 @@ mod tests {
             Err(EngineError::WalletDb(_))
         ));
         assert!(client.is_none(), "missing bytes must not reach a server");
+    }
+
+    #[tokio::test]
+    async fn offline_submission_preserves_saved_signed_and_unknown_intents() {
+        use zcash_primitives::transaction::{Authorized, TransactionData, TxVersion};
+        let dir = tempfile::tempdir().unwrap();
+        let mut wallet = fixture_wallet(dir.path());
+        let (ufvk, birthday) = fixture_account();
+        wallet.replace_scan_db(&ufvk, &birthday).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        wallet
+            .set_light_server(LightServer::parse(
+                &format!("http://{}", listener.local_addr().unwrap()),
+                ZNetwork::Regtest,
+            ))
+            .unwrap();
+        let transaction = TransactionData::<Authorized>::from_parts(
+            TxVersion::V5,
+            BranchId::Nu6_3,
+            0,
+            (crate::regtest_nu6_3_height() + 10).into(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        let txid = transaction.txid();
+        let mut raw = Vec::new();
+        transaction.write(&mut raw).unwrap();
+        let conn = connection(&wallet).unwrap();
+        conn.execute_batch("INSERT INTO blocks (height,hash,time,sapling_tree) VALUES (1,zeroblob(32),0,X'000000')").unwrap();
+        conn.execute("INSERT INTO transactions (txid,created,expiry_height,raw,min_observed_height) VALUES (?1,'2026-09-24T00:00:00Z',?2,?3,1)", params![txid.as_ref(), crate::regtest_nu6_3_height() + 10, raw]).unwrap();
+        // A disposable wallet history row makes the saved authorized transaction
+        // visible through the same receipt lookup used by public submission.
+        conn.execute("INSERT INTO transparent_received_outputs (transaction_id,output_index,account_id,address,script,value_zat,address_id) SELECT (SELECT id_tx FROM transactions WHERE txid=?1),0,account_id,'fixture',x'51',10000,id FROM addresses LIMIT 1", [txid.as_ref()]).unwrap();
+        prepare(&conn);
+        let offline = NativeWallet::open_offline(dir.path()).unwrap();
+        assert!(offline.transaction(&txid.to_string()).unwrap().is_some());
+        for phase in ["signed", "unknown"] {
+            conn.execute(
+                "UPDATE ext_native_payments_v1 SET phase=?1,txids=?2 WHERE id=?3",
+                params![
+                    phase,
+                    serde_json::to_string(&vec![txid.to_string()]).unwrap(),
+                    ID
+                ],
+            )
+            .unwrap();
+            assert_eq!(offline.payment_receipt(ID).unwrap().phase, phase);
+            let before: (String, String, Vec<u8>) = conn.query_row(
+                "SELECT p.phase,p.txids,t.raw FROM ext_native_payments_v1 p JOIN transactions t ON t.txid=?1 WHERE p.id=?2", params![txid.as_ref(),ID], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            ).unwrap();
+            assert!(offline
+                .submit_payment(ID)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("native_offline_wallet"));
+            let after: (String, String, Vec<u8>) = conn.query_row(
+                "SELECT p.phase,p.txids,t.raw FROM ext_native_payments_v1 p JOIN transactions t ON t.txid=?1 WHERE p.id=?2", params![txid.as_ref(),ID], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            ).unwrap();
+            assert!(before == after);
+            assert_eq!(offline.payment_receipt(ID).unwrap().phase, phase);
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]
@@ -380,6 +672,8 @@ impl NativeWallet {
         if to.trim().to_ascii_lowercase().starts_with("zcash:") {
             return Err(failed("payment_plain_address_required"));
         }
+        self.ensure_recovery_selection_ready()?;
+        let recovery_generation = self.recovery_generation()?;
         let request = self.send_request(to, amount, memo)?;
         let mut db = self.open_db()?;
         let height = db
@@ -391,6 +685,15 @@ impl NativeWallet {
             .map_err(|_| failed("payment_storage_failed"))?
             .ok_or(EngineError::SyncRequired)?;
         let account = Self::primary_account_id(&db)?;
+        let spend_policy = shielded_spend_policy();
+        #[cfg(feature = "native-pir")]
+        let spend_policy = if self.network == ZNetwork::Regtest
+            && self.has_complete_pir_recovery()?
+        {
+            spend_policy.with_transparent(zcash_client_backend::data_api::wallet::input_selection::TransparentSpendPolicy::any_account_addr())
+        } else {
+            spend_policy
+        };
         let proposal = propose_transfer::<_, _, _, _, Infallible>(
             &mut db,
             &self.network,
@@ -404,7 +707,7 @@ impl NativeWallet {
             ),
             request,
             policy,
-            &shielded_spend_policy(),
+            &spend_policy,
             None,
             None,
         )
@@ -423,41 +726,41 @@ impl NativeWallet {
             .map_err(|_| failed("payment_random_failed"))?;
         let id = nonce.iter().map(|b| format!("{b:02x}")).collect::<String>();
         let now = clock()?;
+        drop(db);
         let conn = connection(self)?;
-        // Expired unsigned reviews can be removed; signed recovery records never are.
-        conn.execute(
-            "DELETE FROM ext_native_payments_v1 WHERE phase='prepared' AND expires < ?1",
-            [now.saturating_sub(86400)],
-        )
-        .map_err(|_| failed("payment_storage_failed"))?;
-        let count: u64 = conn
-            .query_row("SELECT COUNT(*) FROM ext_native_payments_v1", [], |r| {
-                r.get(0)
-            })
-            .map_err(|_| failed("payment_storage_failed"))?;
-        if count >= 10000 {
-            return Err(failed("payment_storage_limit"));
-        }
-        conn.execute(
-            "INSERT INTO ext_native_payments_v1 VALUES (?1,?2,?3,?4,?5,?6,?7,'prepared','[]')",
-            params![
-                id,
-                bytes,
-                fee,
-                now,
-                now + 120,
-                u32::from(height),
-                hash.0.to_vec()
-            ],
-        )
-        .map_err(|_| failed("payment_storage_failed"))?;
-        read(&conn, &id)
+        let mut db = WalletDb::from_connection(conn, self.network, SystemClock, new_rng());
+        db.transactionally_with_extension(|wdb,ext|->anyhow::Result<()> {
+            super::recovery_guard::transaction_recovery_ready(wdb,ext)?;
+            let marker:bool=ext.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",[],|r|r.get(0))?;
+            let generation = if marker {Some(ext.query_row("SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",[],|r|r.get::<_,u64>(0))?)} else {None};
+            if generation!=recovery_generation || wdb.chain_height()?!=Some(height) || wdb.get_block_hash(height)?.is_none_or(|h|h!=hash) {anyhow::bail!("payment_review_expired");}
+            ext.execute("DELETE FROM ext_native_payments_v1 WHERE phase='prepared' AND expires < ?1",[now.saturating_sub(86400)])?;
+            let count:u64=ext.query_row("SELECT COUNT(*) FROM ext_native_payments_v1",[],|r|r.get(0))?;
+            if count>=10000 {anyhow::bail!("payment_storage_limit");}
+            ext.execute("INSERT INTO ext_native_payments_v1 (id,proposal,fee,created,expires,height,block_hash,phase,txids,recovery_generation) VALUES (?1,?2,?3,?4,?5,?6,?7,'prepared','[]',?8)",params![id,bytes,fee,now,now+120,u32::from(height),hash.0.to_vec(),generation.unwrap_or(0)])?;
+            Ok(())
+        }).map_err(EngineError::from)?;
+        self.payment_receipt(&id)
     }
 
     /// Prove/sign the stored proposal. The signed transaction, note reservations and
     /// receipt commit in ONE SQLite transaction before this returns. No broadcast.
     /// A failed/interrupted transaction leaves the review prepared and sends nothing.
     pub fn sign_payment(&self, auth: &SeedAuth, id: &str) -> Result<PaymentReceipt> {
+        self.ensure_recovery_selection_ready()?;
+        let conn = connection(self)?;
+        let receipt = read(&conn, id)?;
+        if receipt.phase != "prepared" {
+            return Err(failed("payment_already_signed"));
+        }
+        let reviewed = conn
+            .query_row(
+                "SELECT recovery_generation FROM ext_native_payments_v1 WHERE id=?1",
+                [id],
+                |row| row.get::<_, Option<u64>>(0),
+            )
+            .map_err(|_| failed("payment_storage_failed"))?;
+        require_review_binding(self.recovery_generation()?, reviewed).map_err(EngineError::from)?;
         // Authentication always precedes an operation that could create spend access.
         let seed = self.load_seed(auth)?;
         let usk = UnifiedSpendingKey::from_seed(
@@ -466,11 +769,6 @@ impl NativeWallet {
             self.account_index(),
         )
         .map_err(|_| failed("payment_key_failed"))?;
-        let conn = connection(self)?;
-        let receipt = read(&conn, id)?;
-        if receipt.phase != "prepared" {
-            return Err(failed("payment_already_signed"));
-        }
         let (bytes, created, height, hash) = conn.query_row(
             "SELECT proposal, created, height, block_hash FROM ext_native_payments_v1 WHERE id=?1", [id],
             |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, u64>(1)?, r.get::<_, u32>(2)?, r.get::<_, Vec<u8>>(3)?)),
@@ -486,6 +784,8 @@ impl NativeWallet {
         // Keep the phase check inside the write transaction as well. Concurrent
         // callers must fail rather than sign twice or overwrite a saved receipt.
         db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<()> {
+            super::recovery_guard::transaction_recovery_ready(wdb,ext)?;
+            transaction_review_binding(ext, id)?;
             let unchanged = wdb.chain_height()?.map(u32::from) == Some(height)
                 && wdb.get_block_hash(height.into())?.is_some_and(|h| h.0.as_slice() == hash);
             if !unchanged { anyhow::bail!("payment_review_expired"); }
@@ -534,6 +834,7 @@ impl NativeWallet {
     /// create a replacement payment. Lost replies remain unknown; explicit node
     /// rejections surface as errors while the signed receipt remains recoverable.
     pub async fn submit_payment(&self, id: &str) -> Result<PaymentReceipt> {
+        self.require_network_access()?;
         let conn = connection(self)?;
         let receipt = self.payment_receipt(id)?;
         if matches!(receipt.phase.as_str(), "accepted" | "mined") {
