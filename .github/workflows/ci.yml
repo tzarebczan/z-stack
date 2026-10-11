@@ -63,6 +63,8 @@ jobs:
       # Panics and backtraces keep file/line; full debuginfo only slows linking
       # and bloats the cache.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      SCCACHE_DIR: ${{ github.workspace }}/.cache/native-compiler
+      SCCACHE_CACHE_SIZE: "2G"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -87,6 +89,28 @@ jobs:
           printf 'Runner CPU count: %s\n' "$(nproc)" >> "$GITHUB_STEP_SUMMARY"
           awk '/MemTotal/ {printf "Runner memory KiB: %s\n", $2}' /proc/meminfo >> "$GITHUB_STEP_SUMMARY"
           rm -rf target/cargo-timings target/vendor-tests/cargo-timings
+      # Path dependencies are pruned from the Cargo dependency cache. Reuse
+      # their compiler outputs by content without changing Cargo's checks.
+      - id: sccache-install
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: sccache@0.18.0
+      - id: compiler-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/native-compiler
+          key: native-compiler-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.91-sccache-0.18.0-${{ hashFiles('.github/ci/native-profile.toml') }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml', '.github/workflows/ci.yml', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'vendor/zakura/**') }}
+          restore-keys: |
+            native-compiler-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.91-sccache-0.18.0-${{ hashFiles('.github/ci/native-profile.toml') }}-
+      - name: Enable native compiler reuse
+        env:
+          EXACT_CACHE_HIT: ${{ steps.compiler-cache.outputs.cache-hit }}
+        run: |
+          printf 'Compiler cache exact hit: %s\n' "${EXACT_CACHE_HIT:-false}" >> "$GITHUB_STEP_SUMMARY"
+          # Set after rust-cache computes its key, preserving that cache.
+          printf 'RUSTC_WRAPPER=sccache\n' >> "$GITHUB_ENV"
+          sccache --start-server
+          sccache --zero-stats
       - name: Rust formatting
         run: cargo fmt --all -- --check
       # Dependencies (proving, curves) are optimized for the test builds only;
@@ -117,6 +141,19 @@ jobs:
           path: target/**/cargo-timings/cargo-timing-*.html
           retention-days: 7
           if-no-files-found: warn
+      - name: Native compiler cache statistics
+        if: always() && steps.sccache-install.outcome == 'success' && steps.compiler-cache.outcome == 'success'
+        run: |
+          printf '\n### Compiler reuse\n\n```text\n' >> "$GITHUB_STEP_SUMMARY"
+          sccache --stop-server | tee -a "$GITHUB_STEP_SUMMARY"
+          printf '```\n' >> "$GITHUB_STEP_SUMMARY"
+      # PRs never publish compiler outputs, and failed native checks cannot save.
+      - name: Save compiler outputs from successful main verification
+        if: github.ref == 'refs/heads/main' && steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/native-compiler
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
 
   sdk:
     needs: changes
