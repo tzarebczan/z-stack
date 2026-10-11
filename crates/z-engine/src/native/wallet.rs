@@ -631,6 +631,7 @@ pub struct LightProbe {
 }
 
 pub struct NativeWallet {
+    network_access: bool,
     paths: WalletPaths,
     network: ZNetwork,
     server: LightServer,
@@ -648,6 +649,9 @@ impl NativeWallet {
 
     /// Validator JSON-RPC if configured on this wallet, else implied by the light server.
     pub fn validator_rpc_url(&self) -> Option<String> {
+        if !self.network_access {
+            return None;
+        }
         self.meta
             .validator_rpc
             .as_deref()
@@ -756,6 +760,7 @@ impl NativeWallet {
     }
 
     pub(super) async fn connect(&self) -> Result<LwdClient> {
+        self.require_network_access()?;
         Self::connect_url(
             &self.server.as_url(),
             Self::skip_ironwood_subtrees(self.network, &self.server.as_url()),
@@ -930,6 +935,7 @@ impl NativeWallet {
 
         let wallet = Self {
             paths,
+            network_access: true,
             network,
             server,
             meta,
@@ -1053,6 +1059,7 @@ impl NativeWallet {
         Ok((
             Self {
                 paths,
+                network_access: true,
                 network,
                 server,
                 meta,
@@ -1138,6 +1145,7 @@ impl NativeWallet {
         Ok((
             Self {
                 paths,
+                network_access: true,
                 network,
                 server,
                 meta,
@@ -1160,10 +1168,27 @@ impl NativeWallet {
             .ok_or_else(|| EngineError::InvalidNetwork(meta.network.clone()))?;
         Ok(Self {
             paths,
+            network_access: true,
             network,
             server: LightServer::parse(&meta.server, network),
             meta,
         })
+    }
+
+    /// Open local wallet state with transport capability disabled, regardless
+    /// of stored endpoints. Signing and canonical verified recovery stay local.
+    pub fn open_offline(root: impl Into<PathBuf>) -> Result<Self> {
+        let mut wallet = Self::open(root)?;
+        wallet.network_access = false;
+        Ok(wallet)
+    }
+
+    fn require_network_access(&self) -> Result<()> {
+        if self.network_access {
+            Ok(())
+        } else {
+            Err(EngineError::Message("native_offline_wallet".into()))
+        }
     }
 
     /// Open and persist a different compact-block URL when the UI field changed.
@@ -1616,6 +1641,7 @@ impl NativeWallet {
     /// status requests and unknown transactions are reported back with
     /// `set_transaction_status`, so they leave the queue instead of blocking it.
     async fn enhance_memos(&self, db: &mut Db) -> Result<u32> {
+        self.require_network_access()?;
         const MAX: usize = 24;
         let reqs = db
             .transaction_enhancement_work()
@@ -1726,6 +1752,9 @@ impl NativeWallet {
     /// A validator RPC answers with the mined height in one call; the light
     /// server's GetTransaction does too and covers wallets without one.
     async fn lookup_transaction(&self, client: Option<LwdClient>, txid: TxId) -> TxLookup {
+        if !self.network_access {
+            return TxLookup::Unavailable(EngineError::Message("native_offline_wallet".into()));
+        }
         let mut failure = None;
         if let Some(rpc) = self
             .validator_rpc_url()
@@ -1892,6 +1921,7 @@ impl NativeWallet {
     /// Rewind scan_queue to the last filled island so the next `sync` trial-decrypts
     /// island_end+1→tip. Does not wipe keys or the already-scanned island.
     pub async fn rewind_scan_to_gap(&self) -> Result<u32> {
+        self.require_network_access()?;
         let mut client = Self::connect_url(
             &self.server.as_url(),
             Self::skip_ironwood_subtrees(self.network, &self.server.as_url()),
@@ -1930,6 +1960,7 @@ impl NativeWallet {
     /// Wipe sqlite + compact-block cache and re-import the UFVK at birthday.
     /// Seed / keyring / wallet.json stay. Next `sync` is a full rescan.
     pub async fn reset_scan(&self) -> Result<()> {
+        self.require_network_access()?;
         let ufvk_str = match self
             .meta
             .ufvk
@@ -2306,6 +2337,7 @@ impl NativeWallet {
 
     #[cfg(feature = "transparent-inputs")]
     pub async fn shield(&self, auth: &SeedAuth, threshold_zat: u64) -> Result<Vec<String>> {
+        self.require_network_access()?;
         self.ensure_recovery_selection_ready()?;
         let mut db = self.open_db()?;
         let account = Self::primary_account_id(&db)?;
@@ -2369,17 +2401,28 @@ impl NativeWallet {
         .map_err(|e| map_funds_err(format!("propose_shielding: {e}")))?;
 
         let prover = crate::params::local_tx_prover()?;
-        let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
-            &mut db,
-            &self.network,
-            &*prover,
-            &*prover,
-            &SpendingKeys::from_unified_spending_key(usk),
-            OvkPolicy::Sender,
-            &proposal,
-            None,
-        )
-        .map_err(|e| map_funds_err(format!("create shielding tx: {e}")))?;
+        let txids = db
+            .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
+                recovery_guard::transaction_recovery_ready(wdb, ext)?;
+                Ok(create_proposed_transactions::<
+                    _,
+                    _,
+                    Infallible,
+                    _,
+                    Infallible,
+                    _,
+                >(
+                    wdb,
+                    &self.network,
+                    &*prover,
+                    &*prover,
+                    &SpendingKeys::from_unified_spending_key(usk),
+                    OvkPolicy::Sender,
+                    &proposal,
+                    None,
+                )?)
+            })
+            .map_err(|e| map_funds_err(format!("create shielding tx: {e}")))?;
 
         let out = self.broadcast_all(&mut db, txids.iter().copied()).await;
         info!("shield timings");
@@ -2388,6 +2431,7 @@ impl NativeWallet {
 
     /// After sync: auto-shield t→Orchard, then migrate Sapling→Orchard when funded.
     pub async fn maintain(&self, auth: &SeedAuth) -> Result<Vec<String>> {
+        self.require_network_access()?;
         let mut out = Vec::new();
         let bal = self.balance()?;
         if bal.transparent_available >= crate::SHIELD_THRESHOLD_ZAT {
@@ -2629,6 +2673,7 @@ impl NativeWallet {
         memo: Option<&str>,
         policy: SpendPolicy,
     ) -> Result<Vec<String>> {
+        self.require_network_access()?;
         self.ensure_recovery_selection_ready()?;
         crate::keys::assert_shielded_send_dest(to, crate::keys::SendDestPolicy::Shielded)?;
         let db = self.open_db()?;
@@ -2681,6 +2726,7 @@ impl NativeWallet {
         payments: &[crate::Zip321Payment],
         policy: SpendPolicy,
     ) -> Result<Vec<String>> {
+        self.require_network_access()?;
         self.ensure_recovery_selection_ready()?;
         if payments.is_empty() {
             return Err(EngineError::Message("ZIP-321 URI has no payments".into()));
@@ -2755,17 +2801,28 @@ impl NativeWallet {
         .map_err(|e| map_funds_err(format!("propose_transfer: {e}")))?;
 
         let prover = crate::params::local_tx_prover()?;
-        let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
-            &mut db,
-            &self.network,
-            &*prover,
-            &*prover,
-            &SpendingKeys::from_unified_spending_key(usk),
-            OvkPolicy::Sender,
-            &proposal,
-            None,
-        )
-        .map_err(|e| map_funds_err(format!("create send tx: {e}")))?;
+        let txids = db
+            .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
+                recovery_guard::transaction_recovery_ready(wdb, ext)?;
+                Ok(create_proposed_transactions::<
+                    _,
+                    _,
+                    Infallible,
+                    _,
+                    Infallible,
+                    _,
+                >(
+                    wdb,
+                    &self.network,
+                    &*prover,
+                    &*prover,
+                    &SpendingKeys::from_unified_spending_key(usk),
+                    OvkPolicy::Sender,
+                    &proposal,
+                    None,
+                )?)
+            })
+            .map_err(|e| map_funds_err(format!("create send tx: {e}")))?;
 
         let out = self.broadcast_all(&mut db, txids.iter().copied()).await;
         info!("send timings");
@@ -2835,6 +2892,7 @@ impl NativeWallet {
     /// received the bytes, so the light server takes them rather than the send
     /// ending as "outcome unknown" with its notes held until expiry.
     async fn submit_raw(&self, client: &mut Option<LwdClient>, data: Vec<u8>) -> Result<()> {
+        self.require_network_access()?;
         if let Some(rpc) = self.validator_rpc_url() {
             let bytes = data.clone();
             let url = rpc.clone();
@@ -3801,6 +3859,7 @@ mod tests {
         let meta = fixture_meta();
         write_meta(&paths.meta_path, &meta).unwrap();
         NativeWallet {
+            network_access: true,
             paths,
             network: ZNetwork::Regtest,
             server: LightServer::parse(&meta.server, ZNetwork::Regtest),
@@ -4111,6 +4170,7 @@ mod tests {
         db.put_received_transparent_utxo(&output).unwrap();
         drop(db);
         let wallet = NativeWallet {
+            network_access: true,
             paths,
             network: ZNetwork::Regtest,
             server: LightServer::LocalRegtest,
@@ -4333,6 +4393,7 @@ mod tests {
 
     fn checkpoint_fixture_wallet(root: &Path, birthday_height: u32) -> NativeWallet {
         NativeWallet {
+            network_access: true,
             paths: WalletPaths::new(root),
             network: ZNetwork::Regtest,
             server: LightServer::LocalRegtest,

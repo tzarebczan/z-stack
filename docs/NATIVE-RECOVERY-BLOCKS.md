@@ -48,10 +48,11 @@ selection blocked. `regtest_pir_recovery_for(&chain)` returns an exact context,
 anchor, scanner and scope receipt or a curated reconciliation error.
 
 The initial profile requires birthday 1 and the complete prefix. Allocated native
-external, internal and ephemeral receivers are included after the verified scan
+external, internal and previously exposed ephemeral receivers are included after the verified scan
 establishes the chain tip required by the pinned ephemeral API. Discovery on an
-unscanned database cannot enumerate ephemeral receivers and does not qualify
-canonical recovery. Import-enabled builds are outside this initial feature set.
+unscanned database cannot enumerate exposed ephemeral receivers and does not qualify
+canonical recovery. Unexposed ephemeral gap enumeration remains a qualification
+gate for the full recovery profile. Import-enabled builds are outside this initial feature set.
 
 `RecoveryCancellation::cancel()` serializes with the complete SQLite commit.
 Network fetches and pure parsing use its read-only flag; writers hold its commit
@@ -65,3 +66,9 @@ downgrade refuses new preparation/signing/send/shield. Submission of an existing
 durable signed intent remains available because it retransmits saved bytes.
 Raw source data differing from an existing wallet transaction is refused before
 canonical changes, including txid-equivalent authorizing-data substitutions.
+
+`NativeWallet::open_offline(root)` opens persisted wallet state with instance
+transport capability disabled. Stored endpoint metadata and endpoint edits cannot
+re-enable it. Instance connection, validator lookup, enhancement and broadcast
+paths refuse before socket I/O. Existing static transport helpers still require
+explicit endpoints and must not be called by a cloud-only session adapter.

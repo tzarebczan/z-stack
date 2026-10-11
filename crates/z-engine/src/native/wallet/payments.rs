@@ -313,6 +313,7 @@ impl NativeWallet {
             return Err(failed("payment_plain_address_required"));
         }
         self.ensure_recovery_selection_ready()?;
+        let recovery_generation = self.recovery_generation()?;
         let request = self.send_request(to, amount, memo)?;
         let mut db = self.open_db()?;
         let height = db
@@ -324,11 +325,15 @@ impl NativeWallet {
             .map_err(|_| failed("payment_storage_failed"))?
             .ok_or(EngineError::SyncRequired)?;
         let account = Self::primary_account_id(&db)?;
-        let mut spend_policy = shielded_spend_policy();
+        let spend_policy = shielded_spend_policy();
         #[cfg(feature = "native-pir")]
-        if self.network == ZNetwork::Regtest && self.has_complete_pir_recovery()? {
-            spend_policy=spend_policy.with_transparent(zcash_client_backend::data_api::wallet::input_selection::TransparentSpendPolicy::any_account_addr());
-        }
+        let spend_policy = if self.network == ZNetwork::Regtest
+            && self.has_complete_pir_recovery()?
+        {
+            spend_policy.with_transparent(zcash_client_backend::data_api::wallet::input_selection::TransparentSpendPolicy::any_account_addr())
+        } else {
+            spend_policy
+        };
         let proposal = propose_transfer::<_, _, _, _, Infallible>(
             &mut db,
             &self.network,
@@ -361,35 +366,21 @@ impl NativeWallet {
             .map_err(|_| failed("payment_random_failed"))?;
         let id = nonce.iter().map(|b| format!("{b:02x}")).collect::<String>();
         let now = clock()?;
+        drop(db);
         let conn = connection(self)?;
-        // Expired unsigned reviews can be removed; signed recovery records never are.
-        conn.execute(
-            "DELETE FROM ext_native_payments_v1 WHERE phase='prepared' AND expires < ?1",
-            [now.saturating_sub(86400)],
-        )
-        .map_err(|_| failed("payment_storage_failed"))?;
-        let count: u64 = conn
-            .query_row("SELECT COUNT(*) FROM ext_native_payments_v1", [], |r| {
-                r.get(0)
-            })
-            .map_err(|_| failed("payment_storage_failed"))?;
-        if count >= 10000 {
-            return Err(failed("payment_storage_limit"));
-        }
-        conn.execute(
-            "INSERT INTO ext_native_payments_v1 VALUES (?1,?2,?3,?4,?5,?6,?7,'prepared','[]')",
-            params![
-                id,
-                bytes,
-                fee,
-                now,
-                now + 120,
-                u32::from(height),
-                hash.0.to_vec()
-            ],
-        )
-        .map_err(|_| failed("payment_storage_failed"))?;
-        read(&conn, &id)
+        let mut db = WalletDb::from_connection(conn, self.network, SystemClock, new_rng());
+        db.transactionally_with_extension(|wdb,ext|->anyhow::Result<()> {
+            super::recovery_guard::transaction_recovery_ready(wdb,ext)?;
+            let marker:bool=ext.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",[],|r|r.get(0))?;
+            let generation = if marker {Some(ext.query_row("SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",[],|r|r.get::<_,u64>(0))?)} else {None};
+            if generation!=recovery_generation || wdb.chain_height()?!=Some(height) || wdb.get_block_hash(height)?.is_none_or(|h|h!=hash) {anyhow::bail!("payment_review_expired");}
+            ext.execute("DELETE FROM ext_native_payments_v1 WHERE phase='prepared' AND expires < ?1",[now.saturating_sub(86400)])?;
+            let count:u64=ext.query_row("SELECT COUNT(*) FROM ext_native_payments_v1",[],|r|r.get(0))?;
+            if count>=10000 {anyhow::bail!("payment_storage_limit");}
+            ext.execute("INSERT INTO ext_native_payments_v1 VALUES (?1,?2,?3,?4,?5,?6,?7,'prepared','[]')",params![id,bytes,fee,now,now+120,u32::from(height),hash.0.to_vec()])?;
+            Ok(())
+        }).map_err(EngineError::from)?;
+        self.payment_receipt(&id)
     }
 
     /// Prove/sign the stored proposal. The signed transaction, note reservations and
@@ -425,13 +416,7 @@ impl NativeWallet {
         // Keep the phase check inside the write transaction as well. Concurrent
         // callers must fail rather than sign twice or overwrite a saved receipt.
         db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<()> {
-            // Recheck under the writer transaction: a concurrent recovery begin
-            // must win over an earlier read-only preparation/signing check.
-            let recovery_marker: bool = ext.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')", [], |r| r.get(0))?;
-            if recovery_marker {
-                let blocked: Option<bool> = ext.query_row("SELECT blocked FROM ext_coffer_pir_recovery_v1 WHERE id=1", [], |r| r.get(0)).optional()?;
-                if blocked != Some(false) { anyhow::bail!("native_recovery_pending"); }
-            }
+            super::recovery_guard::transaction_recovery_ready(wdb,ext)?;
             let unchanged = wdb.chain_height()?.map(u32::from) == Some(height)
                 && wdb.get_block_hash(height.into())?.is_some_and(|h| h.0.as_slice() == hash);
             if !unchanged { anyhow::bail!("payment_review_expired"); }

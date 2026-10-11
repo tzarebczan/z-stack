@@ -5,6 +5,7 @@ mod recovery;
 #[path = "pir_store.rs"]
 mod store;
 use super::*;
+pub(super) use recovery::ensure_transaction_receipt;
 pub use recovery::PirRecoveryReport;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

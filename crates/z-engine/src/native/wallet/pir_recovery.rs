@@ -117,6 +117,35 @@ fn expected_events(
     }
     Ok(events)
 }
+pub(in crate::native::wallet) fn ensure_transaction_receipt<
+    D: WalletRead<AccountId = AccountUuid>,
+>(
+    db: &D,
+    ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
+) -> anyhow::Result<()> {
+    let (blocked, bytes): (bool, Option<Vec<u8>>) = ext.query_row(
+        "SELECT blocked,receipt FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if blocked {
+        anyhow::bail!("native_recovery_pending");
+    }
+    let receipt: Receipt =
+        serde_json::from_slice(&bytes.ok_or_else(|| anyhow::anyhow!("native_recovery_pending"))?)?;
+    let snapshot =
+        NativeScanSnapshot::capture(db, receipt.report.accepted_height).map_err(store_failed)?;
+    if receipt.report.selection_blocked
+        || !receipt.report.scope_complete
+        || receipt.report.completion != "complete"
+        || !snapshot.matches_anchor(&receipt.anchor)
+        || snapshot.identity().map_err(store_failed)? != receipt.scanner_identity
+        || native_scope(db, 1).map_err(store_failed)?.identity()? != receipt.scope_identity
+    {
+        anyhow::bail!("native_recovery_reconciliation_required");
+    }
+    Ok(())
+}
 impl NativeWallet {
     pub(in crate::native::wallet) fn ensure_pir_recovery_ready(&self) -> Result<()> {
         let conn = rusqlite::Connection::open_with_flags(
@@ -310,6 +339,9 @@ impl NativeWallet {
                             |r| r.get(0),
                         )?;
                         recovered_outputs = after.saturating_sub(before);
+                        if cancel.is_cancelled() {
+                            anyhow::bail!("native_recovery_cancelled");
+                        }
                         return Ok(());
                     }
                 }
@@ -386,6 +418,9 @@ impl NativeWallet {
                     "UPDATE ext_coffer_pir_recovery_v1 SET blocked=?1,receipt=?2 WHERE id=1",
                     (!complete, bytes),
                 )?;
+                if cancel.is_cancelled() {
+                    anyhow::bail!("native_recovery_cancelled");
+                }
                 Ok(())
             })
             .map_err(EngineError::from)
@@ -588,7 +623,119 @@ mod tests {
         assert!(wallet.prepare_payment("unused", 1, None).is_err());
     }
     #[test]
-    fn begin_is_durable_and_all_allocated_native_receiver_scopes_are_enrolled() {
+    fn writer_snapshot_refuses_scope_expansion_after_an_earlier_ready_check() {
+        let (_dir, wallet) = wallet();
+        let (bytes, chain) = fixture_with_script(&[0x51]);
+        let _ = wallet.recover_regtest_pir(
+            &chain,
+            verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+            &mut Unavailable,
+            &mut Unavailable,
+            WorkLimits {
+                max_queries: Some(1),
+                max_private_bytes: Some(1024),
+            },
+            &RecoveryCancellation::new(),
+        );
+        let mut db = wallet.open_db().unwrap();
+        // Install a correctly bound receipt to isolate the readiness race from
+        // transport fixtures; no signing or balance assertion uses this receipt.
+        let receipt = Receipt {
+            report: PirRecoveryReport {
+                completion: "complete".into(),
+                accepted_height: 1,
+                native_scanned_height: 1,
+                recovered_outputs: 0,
+                scope_complete: true,
+                selection_blocked: false,
+            },
+            chain_context: chain.context_identity.clone(),
+            scope_identity: native_scope(&db, 1).unwrap().identity().unwrap(),
+            scanner_identity: NativeScanSnapshot::capture(&db, 1)
+                .unwrap()
+                .identity()
+                .unwrap(),
+            anchor: chain.target.clone(),
+        };
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        conn.execute(
+            "UPDATE ext_coffer_pir_recovery_v1 SET blocked=0,receipt=?1 WHERE id=1",
+            [serde_json::to_vec(&receipt).unwrap()],
+        )
+        .unwrap();
+        assert!(wallet.ensure_recovery_selection_ready().is_ok());
+        let account = db.get_account_ids().unwrap()[0];
+        let mut concurrent = wallet.open_db().unwrap();
+        concurrent
+            .reserve_next_n_ephemeral_addresses(account, 1)
+            .unwrap();
+        // The same writer-bound check called by prepare/sign catches allocation
+        // even though Pending stayed false and the chain anchor did not change.
+        let result = db.transactionally_with_extension(|wdb, ext| {
+            super::super::super::recovery_guard::transaction_recovery_ready(wdb, ext)
+        });
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("native_recovery_reconciliation_required"));
+    }
+    #[test]
+    fn conflicting_saved_raw_is_preserved_and_recovery_remains_pending() {
+        let (_dir, wallet) = wallet();
+        let db = wallet.open_db().unwrap();
+        let account = db.get_account_ids().unwrap()[0];
+        let address = db
+            .get_transparent_receivers(account, true, true)
+            .unwrap()
+            .into_keys()
+            .next()
+            .unwrap();
+        let script: transparent::address::Script = address.script().into();
+        let (bytes, chain) = fixture_with_script(&script.0 .0);
+        let recover = || {
+            wallet.recover_regtest_pir(
+                &chain,
+                verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+                &mut Unavailable,
+                &mut Unavailable,
+                WorkLimits {
+                    max_queries: Some(1),
+                    max_private_bytes: Some(1024),
+                },
+                &RecoveryCancellation::new(),
+            )
+        };
+        assert!(recover().is_err());
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let original: Vec<u8> = conn
+            .query_row(
+                "SELECT raw FROM transactions WHERE mined_height=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut saved = original;
+        saved.push(0x42);
+        conn.execute(
+            "UPDATE transactions SET raw=?1 WHERE mined_height=1",
+            [&saved],
+        )
+        .unwrap();
+        let error = recover().unwrap_err();
+        assert!(error.to_string().contains("native_recovery_raw_conflict"));
+        let after: Vec<u8> = conn
+            .query_row(
+                "SELECT raw FROM transactions WHERE mined_height=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, saved);
+        assert_eq!(wallet.scanned_height().unwrap(), 1);
+        assert!(wallet.ensure_recovery_selection_ready().is_err());
+    }
+    #[test]
+    fn begin_is_durable_and_exposed_native_receiver_scopes_are_enrolled() {
         let (_dir, wallet) = wallet();
         let (_, chain) = fixture_with_script(&[0x51]);
         let token = RecoveryCancellation::new();

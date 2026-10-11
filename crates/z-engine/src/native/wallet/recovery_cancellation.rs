@@ -23,7 +23,9 @@ impl RecoveryCancellation {
         }
     }
     pub fn cancel(&self) {
-        // Even a poisoned operation gate must never restore access.
+        // Request interruption immediately, then drain the commit gate so return
+        // still guarantees that this token cannot produce any later commit.
+        self.cancelled.store(true, Ordering::Release);
         let _gate = self
             .commit
             .lock()
@@ -65,6 +67,40 @@ mod tests {
             })
             .is_err());
         assert!(!entered);
+    }
+    #[test]
+    fn cancellation_request_interrupts_inflight_database_work_and_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cancellation.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE effects(value INTEGER);")
+            .unwrap();
+        let token = std::sync::Arc::new(RecoveryCancellation::new());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let work = token.clone();
+        let worker = std::thread::spawn(move || {
+            work.transaction(|| {
+                let mut conn = rusqlite::Connection::open(path).unwrap();
+                let tx = conn.transaction().unwrap();
+                tx.execute("INSERT INTO effects VALUES(1)", []).unwrap();
+                entered_tx.send(()).unwrap();
+                while !work.is_cancelled() {
+                    std::thread::yield_now();
+                }
+                // The same cancellation checks used inside the canonical
+                // transaction return before its commit and drop all writes.
+                Err::<(), _>(EngineError::Message("native_recovery_cancelled".into()))
+            })
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        token.cancel();
+        assert!(worker.join().unwrap().is_err());
+        let count: u64 = conn
+            .query_row("SELECT count(*) FROM effects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
     #[test]
     fn cancellation_waits_for_commit_that_already_won() {

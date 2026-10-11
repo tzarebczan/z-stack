@@ -195,6 +195,7 @@ async fn uncertain_or_partially_rejected_submission_preserves_all_saved_state() 
         };
         let (url, peer) = validator(responses);
         let wallet = NativeWallet {
+            network_access: true,
             paths,
             network: ZNetwork::Regtest,
             // This unavailable gRPC endpoint is intentionally unnecessary when
