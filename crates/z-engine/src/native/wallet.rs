@@ -3403,20 +3403,27 @@ impl NativeWallet {
         let rpc = validator_rpc
             .map(str::to_string)
             .or_else(|| server.zebra_rpc_url());
-        let try_rpc = |id: &str| -> Result<Vec<u8>> {
-            let Some(rpc) = rpc.as_deref() else {
-                return Err(EngineError::Message("no validator rpc".into()));
-            };
-            let hex = super::rpc::get_raw_transaction_hex(rpc, id)?;
-            crate::web::from_hex(&hex).map_err(EngineError::Message)
+        let try_rpc = |id: String| {
+            let rpc = rpc.clone();
+            async move {
+                let rpc = rpc.ok_or_else(|| EngineError::Message("no validator rpc".into()))?;
+                // The worker owns only request inputs. Dropping a timed-out fetch
+                // cannot leave native database writes running in the background.
+                tokio::task::spawn_blocking(move || {
+                    let hex = super::rpc::get_raw_transaction_hex(&rpc, &id)?;
+                    crate::web::from_hex(&hex).map_err(EngineError::Message)
+                })
+                .await
+                .map_err(|_| EngineError::Message("native_validator_worker_failed".into()))?
+            }
         };
-        if let Ok(raw) = try_rpc(txid_hex) {
+        if let Ok(raw) = try_rpc(txid_hex.to_owned()).await {
             return Ok(raw);
         }
         if let Ok(mut bytes) = crate::web::from_hex(txid_hex) {
             if bytes.len() == 32 {
                 bytes.reverse();
-                if let Ok(raw) = try_rpc(&to_hex(&bytes)) {
+                if let Ok(raw) = try_rpc(to_hex(&bytes)).await {
                     return Ok(raw);
                 }
             }
@@ -4122,6 +4129,47 @@ mod tests {
             server: LightServer::parse(&meta.server, ZNetwork::Regtest),
             meta,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_validator_raw_lookup_does_not_block_the_async_deadline() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let validator = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 1];
+            socket.read_exact(&mut request).unwrap();
+            entered_tx.send(()).unwrap();
+            // Accept the actual RPC but never respond until the async deadline
+            // has returned. Closing afterward drains the blocking worker cleanly.
+            let _ = release_rx.recv();
+        });
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            NativeWallet::fetch_raw_transaction_with_rpc(
+                &LightServer::LocalRegtest,
+                Some(&endpoint),
+                &"11".repeat(32),
+            ),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let entered = entered_rx.try_recv().is_ok();
+        release_tx.send(()).unwrap();
+        validator.join().unwrap();
+        assert!(entered, "fixture validator must receive the actual RPC");
+        assert!(
+            result.is_err(),
+            "async timeout must preempt stalled validator RPC"
+        );
+        assert!(elapsed < Duration::from_secs(2));
     }
 
     #[test]
