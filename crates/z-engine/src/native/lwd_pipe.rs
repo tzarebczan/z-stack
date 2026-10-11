@@ -445,7 +445,7 @@ async fn handle(state: Arc<PipeState>, mut stream: TcpStream) -> anyhow::Result<
                 .await?;
                 return Ok(());
             };
-            match send_raw(state.rpc.as_deref(), &hex).await {
+            match send_raw(state.rpc.as_deref(), state.network, &hex).await {
                 Ok(txid) => {
                     write_json(
                         &mut stream,
@@ -1181,16 +1181,18 @@ async fn mempool_txs(rpc: Option<&str>) -> Result<Vec<Value>> {
         .map_err(|e| EngineError::Transport(format!("mempool: {e}")))?
 }
 
-async fn send_raw(rpc: Option<&str>, hex: &str) -> Result<String> {
+async fn send_raw(rpc: Option<&str>, network: Network, hex: &str) -> Result<String> {
     let Some(rpc) = rpc.map(str::to_string) else {
         return Err(EngineError::Message(
             "no validator RPC (set --rpc or Z_STACK_VALIDATOR_RPC to loopback Zakura/Zebra)".into(),
         ));
     };
     let raw = crate::web::from_hex(hex).map_err(EngineError::Message)?;
-    tokio::task::spawn_blocking(move || crate::native::rpc::send_raw_transaction(&rpc, &raw))
-        .await
-        .map_err(|e| EngineError::Transport(format!("sendraw: {e}")))?
+    tokio::task::spawn_blocking(move || {
+        crate::native::rpc::send_raw_transaction_verified(&rpc, network, &raw)
+    })
+    .await
+    .map_err(|e| EngineError::Transport(format!("sendraw: {e}")))?
 }
 
 fn parse_sendraw_hex(body: &[u8]) -> Option<String> {
@@ -1262,6 +1264,49 @@ mod tests {
         PIPE_MAX_BLOCKS,
     };
     use crate::error::EngineError;
+
+    #[tokio::test]
+    async fn sendraw_pipe_verifies_expected_identity_before_receiving_transaction_bytes() {
+        use crate::native::rpc::{verified_response, verified_response_peer};
+        use crate::Network;
+        use serde_json::json;
+        let txid = "aa".repeat(32);
+        for (network, genesis_network, accepted) in [
+            (Network::Testnet, Network::Testnet, true),
+            (Network::Regtest, Network::Regtest, true),
+            (Network::Testnet, Network::Regtest, false),
+            (Network::Regtest, Network::Testnet, false),
+        ] {
+            let mut responses = vec![
+                verified_response(1, json!({"chain": "test"})),
+                verified_response(
+                    2,
+                    json!(crate::native::chain_identity::genesis(genesis_network)),
+                ),
+            ];
+            if accepted {
+                responses.push(verified_response(3, json!(txid)));
+            }
+            let (rpc, peer) = verified_response_peer(responses);
+            let result = super::send_raw(Some(&rpc), network, "faceb00c").await;
+            let requests = peer.join().unwrap();
+            assert_eq!(requests.len(), if accepted { 3 } else { 2 });
+            assert_eq!(requests[0]["method"], "getblockchaininfo");
+            assert_eq!(requests[1]["method"], "getblockhash");
+            assert_eq!(requests[1]["params"], json!([0]));
+            if accepted {
+                assert_eq!(result.unwrap(), txid);
+                assert_eq!(requests[2]["method"], "sendrawtransaction");
+                assert_eq!(requests[2]["params"], json!(["faceb00c"]));
+            } else {
+                assert!(matches!(result, Err(EngineError::ChainMismatch { .. })));
+                assert!(requests.iter().all(|request| {
+                    request["method"] != "sendrawtransaction"
+                        && !request.to_string().contains("faceb00c")
+                }));
+            }
+        }
+    }
 
     #[test]
     fn an_unreachable_light_server_is_a_retryable_answer() {

@@ -331,7 +331,7 @@ impl VerifiedValidator {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::native) mod tests {
     use super::*;
     use serde_json::{json, Value};
     use std::net::TcpListener;
@@ -351,7 +351,7 @@ mod tests {
         .into_bytes()
     }
 
-    fn reply(id: u64, result: Value) -> Vec<u8> {
+    pub(in crate::native) fn reply(id: u64, result: Value) -> Vec<u8> {
         content_length(&json!({"id": id, "result": result, "error": null}).to_string())
     }
 
@@ -395,7 +395,7 @@ mod tests {
     }
 
     /// A single accept proves all requests use the initially verified socket.
-    fn peer(responses: Vec<Vec<u8>>) -> (String, JoinHandle<Vec<Value>>) {
+    pub(in crate::native) fn peer(responses: Vec<Vec<u8>>) -> (String, JoinHandle<Vec<Value>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
