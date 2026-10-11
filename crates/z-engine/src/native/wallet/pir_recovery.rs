@@ -7,6 +7,7 @@ use transparent_events::{
     FeeState, ReceiveEvent, SpendEvent, TransactionMetadata, TransparentEvent, Txid,
 };
 use zcash_client_backend::{data_api::ll::LowLevelWalletWrite, wallet::WalletTx};
+use zcash_keys::encoding::AddressCodec;
 use zcash_primitives::block::BlockHash;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -190,10 +191,55 @@ fn effect_identity(
             }
         }
     }
+    let metadata=query("SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT hex(txid)||':'||mined_height||':'||coalesce(tx_index,-1)||':'||coalesce(expiry_height,-1)||':'||coalesce(fee,-1) AS entry FROM transactions WHERE mined_height IS NOT NULL ORDER BY txid)")?;
+    hash.update(metadata.as_bytes());
+    hash.update([0]);
+    hash.update(
+        super::super::recovery_effects::shielded_effect_identity(
+            &mut query, network, height, &authored,
+        )?
+        .as_bytes(),
+    );
+    hash.update([0]);
+    let received=query("SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT hex(t.txid)||':'||n.output_index||':'||hex(n.script)||':'||n.value_zat||':'||hex(a.uuid)||':'||n.address_id||':'||n.address||':'||coalesce(n.max_observed_unspent_height,-1)||':'||t.mined_height||':'||coalesce(t.tx_index,-1) AS entry FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id JOIN accounts a ON a.id=n.account_id WHERE t.mined_height IS NOT NULL ORDER BY t.txid,n.output_index)")?;
+    hash.update(received.as_bytes());
+    hash.update([0]);
+    let pending_outputs=query("SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT hex(t.txid)||':'||hex(t.raw)||':'||(t.created IS NOT NULL)||':'||n.output_index||':'||hex(n.script)||':'||n.value_zat||':'||n.address||':'||(EXISTS(SELECT 1 FROM addresses a WHERE a.id=n.address_id AND a.account_id=n.account_id AND a.cached_transparent_receiver_address=n.address)) AS entry FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.mined_height IS NULL ORDER BY t.txid,n.output_index)")?;
+    for row in pending_outputs.split('|').filter(|r| !r.is_empty()) {
+        let f: Vec<_> = row.split(':').collect();
+        if f.len() != 8 {
+            anyhow::bail!("native_recovery_reconciliation_required");
+        }
+        let tx = saved_transaction(
+            &crate::web::from_hex(f[1])
+                .map_err(|_| anyhow::anyhow!("native_recovery_reconciliation_required"))?,
+            &crate::web::from_hex(f[0])
+                .map_err(|_| anyhow::anyhow!("native_recovery_reconciliation_required"))?,
+            zcash_protocol::consensus::BranchId::for_height(&network, height.into()),
+        )?;
+        let index: usize = f[3].parse()?;
+        let script = crate::web::from_hex(f[4])
+            .map_err(|_| anyhow::anyhow!("native_recovery_reconciliation_required"))?;
+        let value: u64 = f[5].parse()?;
+        let address = transparent::address::TransparentAddress::decode(&network, f[6])
+            .map_err(|_| anyhow::anyhow!("native_recovery_reconciliation_required"))?;
+        let encoded_script: transparent::address::Script = address.script().into();
+        if (f[2] != "1" && !authored.contains(&tx.txid().to_string()))
+            || f[7] != "1"
+            || encoded_script.0 .0 != script
+            || !tx.transparent_bundle().is_some_and(|b| {
+                b.vout.get(index).is_some_and(|o| {
+                    o.script_pubkey().0 .0 == script && u64::from(o.value()) == value
+                })
+            })
+        {
+            anyhow::bail!("native_recovery_reconciliation_required");
+        }
+    }
     let transparent = query("SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT hex(parent.txid)||':'||n.output_index||':'||hex(t.txid) AS entry FROM transparent_received_output_spends s JOIN transparent_received_outputs n ON s.transparent_received_output_id=n.id JOIN transactions parent ON n.transaction_id=parent.id_tx JOIN transactions t ON s.transaction_id=t.id_tx WHERE t.mined_height IS NOT NULL ORDER BY parent.txid,n.output_index,t.txid)")?;
     hash.update(transparent.as_bytes());
     hash.update([0]);
-    let pending = query("SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT hex(t.txid)||':'||hex(t.raw)||':'||hex(parent.txid)||':'||n.output_index||':'||(t.created IS NOT NULL) AS entry FROM transparent_received_output_spends s JOIN transparent_received_outputs n ON s.transparent_received_output_id=n.id JOIN transactions parent ON n.transaction_id=parent.id_tx JOIN transactions t ON s.transaction_id=t.id_tx WHERE t.mined_height IS NULL ORDER BY t.txid,parent.txid,n.output_index)")?;
+    let pending = query("SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT hex(t.txid)||':'||hex(t.raw)||':'||hex(parent.txid)||':'||n.output_index||':'||(t.created IS NOT NULL) AS entry FROM transparent_received_output_spends s JOIN transparent_received_outputs n ON s.transparent_received_output_id=n.id JOIN transactions parent ON n.transaction_id=parent.id_tx JOIN transactions t ON s.transaction_id=t.id_tx WHERE t.mined_height IS NULL UNION ALL SELECT hex(t.txid)||':'||hex(t.raw)||':'||hex(s.prevout_txid)||':'||s.prevout_output_index||':'||(t.created IS NOT NULL) FROM transparent_spend_map s JOIN transactions t ON t.id_tx=s.spending_transaction_id WHERE t.mined_height IS NULL)")?;
     for row in pending.split('|').filter(|r| !r.is_empty()) {
         let fields: Vec<_> = row.split(':').collect();
         if fields.len() != 5 {
@@ -221,6 +267,7 @@ fn effect_identity(
         }
     }
     for sql in [
+        "SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT hex(t.txid)||':'||hex(s.prevout_txid)||':'||s.prevout_output_index AS entry FROM transparent_spend_map s JOIN transactions t ON t.id_tx=s.spending_transaction_id WHERE t.mined_height IS NOT NULL ORDER BY t.txid,s.prevout_txid,s.prevout_output_index)",
         "SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT spend_pool||':'||hex(nf)||':'||block_height||':'||tx_index AS entry FROM nullifier_map ORDER BY spend_pool,nf)",
         "SELECT coalesce(group_concat(entry,'|'),'') FROM (SELECT block_height||':'||tx_index||':'||hex(txid) AS entry FROM tx_locator_map ORDER BY block_height,tx_index)",
     ] { hash.update(query(sql)?.as_bytes()); hash.update([0]); }
@@ -530,6 +577,26 @@ impl NativeWallet {
         limits: WorkLimits,
         cancel: &RecoveryCancellation,
     ) -> Result<PirRecoveryReport> {
+        self.recover_regtest_pir_after_replay(
+            chain,
+            evidence,
+            filters,
+            transport,
+            limits,
+            cancel,
+            || {},
+        )
+    }
+    fn recover_regtest_pir_after_replay(
+        &self,
+        chain: &RegtestAcceptedChain,
+        evidence: VerifiedRegtestRecoveryBlocks,
+        filters: &mut impl FilterSource,
+        transport: &mut impl ShardTransport,
+        limits: WorkLimits,
+        cancel: &RecoveryCancellation,
+        after_replay: impl FnOnce(),
+    ) -> Result<PirRecoveryReport> {
         if self.network != ZNetwork::Regtest
             || self.birthday_height() != 1
             || evidence.target_height() != chain.target_height()
@@ -604,7 +671,7 @@ impl NativeWallet {
             })
             .map_err(EngineError::from)
         })?;
-        let pending = self.reset_verified_spend_effects(generation, &evidence, cancel)?;
+        let pending = self.saved_pending_transactions(generation, &evidence, cancel)?;
         cancel.transaction(|| {
             db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<()> {
                 let current: u64 = ext.query_row(
@@ -673,6 +740,8 @@ impl NativeWallet {
             .map_err(EngineError::from)
         })?;
         drop(db);
+        after_replay();
+        self.reconcile_verified_effects(generation, &evidence, &pending, cancel)?;
         let discovery = self.sync_regtest_pir_with_commit_gate(
             chain,
             filters,
@@ -776,7 +845,7 @@ impl NativeWallet {
         })?;
         Ok(report)
     }
-    fn reset_verified_spend_effects(
+    fn saved_pending_transactions(
         &self,
         generation: u64,
         evidence: &VerifiedRegtestRecoveryBlocks,
@@ -813,17 +882,91 @@ impl NativeWallet {
                     }
                 }
             }
-            // Typed extension writers intentionally cannot mutate native tables.
-            // This FULL cleanup has its own exact Pending epoch and cancellation
-            // commit fence. A crash before typed replay cannot publish Complete.
-            for pool in ["sapling", "orchard", "ironwood"] {
-                tx.execute(&format!("DELETE FROM {pool}_received_note_spends"), [])?;
-            }
-            tx.execute("DELETE FROM transparent_received_output_spends", [])?;
-            tx.execute("DELETE FROM tx_locator_map", [])?;
             if cancel.is_cancelled() { anyhow::bail!("native_recovery_cancelled"); }
             tx.commit()?;
             Ok::<_, anyhow::Error>(pending)
+            })().map_err(EngineError::from)
+        })
+    }
+
+    fn reconcile_verified_effects(
+        &self,
+        generation: u64,
+        evidence: &VerifiedRegtestRecoveryBlocks,
+        pending: &[zcash_primitives::transaction::Transaction],
+        cancel: &RecoveryCancellation,
+    ) -> Result<()> {
+        let scope = self.recovery_scope()?;
+        cancel.transaction(|| {
+            (|| -> anyhow::Result<()> {
+                let mut conn = rusqlite::Connection::open(&self.paths.data_db)?;
+                conn.busy_timeout(std::time::Duration::from_secs(5))?;
+                conn.pragma_update(None, "synchronous", "FULL")?;
+                conn.pragma_update(None, "foreign_keys", true)?;
+                let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let state: (u64, bool) = tx.query_row("SELECT generation,blocked FROM ext_coffer_pir_recovery_v1 WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?)))?;
+                if state != (generation, true) { anyhow::bail!("native_recovery_generation_changed"); }
+                tx.execute_batch("CREATE TEMP TABLE expected_spends(pool TEXT,nf BLOB,txid BLOB);
+                    CREATE TEMP TABLE expected_transparent_spends(parent BLOB,output_index INTEGER,txid BLOB);
+                    CREATE TEMP TABLE expected_outputs(txid BLOB,output_index INTEGER,script BLOB,value INTEGER);
+                    CREATE TEMP TABLE expected_owners(script BLOB,account_id INTEGER);
+                    CREATE TEMP TABLE expected_locators(height INTEGER,tx_index INTEGER,txid BLOB);
+                    CREATE TEMP TABLE expected_nullifiers(pool INTEGER,nf BLOB,height INTEGER,tx_index INTEGER);")?;
+                for entry in &scope.0 {
+                    let uuid = crate::web::from_hex(&entry.account.replace('-', "")).map_err(|_|anyhow::anyhow!("native_recovery_reconciliation_required"))?;
+                    let account: i64 = tx.query_row("SELECT id FROM accounts WHERE uuid=?1", [&uuid], |r| r.get(0))?;
+                    tx.execute("INSERT INTO expected_owners VALUES(?1,?2)", rusqlite::params![entry.entry.script,account])?;
+                }
+                let add = |transaction: &zcash_primitives::transaction::Transaction, locator: Option<(u32,usize)>| -> anyhow::Result<()> {
+                    let id = transaction.txid();
+                    let mut nullifiers = Vec::new();
+                    if let Some(b) = transaction.sapling_bundle() { nullifiers.extend(b.shielded_spends().iter().map(|s| ("sapling",2,s.nullifier().0))); }
+                    if let Some(b) = transaction.orchard_bundle() { nullifiers.extend(b.actions().iter().map(|a| ("orchard",3,a.nullifier().to_bytes()))); }
+                    if let Some(b) = transaction.ironwood_bundle() { nullifiers.extend(b.actions().iter().map(|a| ("ironwood",4,a.nullifier().to_bytes()))); }
+                    for (pool,code,nf) in nullifiers {
+                        tx.execute("INSERT INTO expected_spends VALUES(?1,?2,?3)",rusqlite::params![pool,nf.as_slice(),id.as_ref().as_slice()])?;
+                        if let Some((height,index)) = locator { tx.execute("INSERT INTO expected_nullifiers VALUES(?1,?2,?3,?4)",rusqlite::params![code,nf.as_slice(),height,index])?; }
+                    }
+                    if let Some((height,index)) = locator { tx.execute("INSERT INTO expected_locators VALUES(?1,?2,?3)",rusqlite::params![height,index,id.as_ref().as_slice()])?; }
+                    if let Some(b) = transaction.transparent_bundle() {
+                        if !b.is_coinbase() { for input in &b.vin { let p=input.prevout(); tx.execute("INSERT INTO expected_transparent_spends VALUES(?1,?2,?3)",rusqlite::params![p.hash().as_slice(),p.n(),id.as_ref().as_slice()])?; } }
+                        for (index,output) in b.vout.iter().enumerate() { tx.execute("INSERT INTO expected_outputs VALUES(?1,?2,?3,?4)",rusqlite::params![id.as_ref().as_slice(),index,output.script_pubkey().0.0,u64::from(output.value())])?; }
+                    }
+                    Ok(())
+                };
+                for block in &evidence.blocks { for (index,transaction) in block.vtx().iter().enumerate() { add(transaction,Some((u32::from(block.claimed_height()),index)))?; } }
+                let mut previous=BTreeMap::<OutPoint,TxOut>::new();
+                for block in &evidence.blocks { for (index,transaction) in block.vtx().iter().enumerate() {
+                    let fee=if transaction.transparent_bundle().is_some_and(|b|b.is_coinbase()) { None } else { transaction.fee_paid::<anyhow::Error,_>(|outpoint|Ok(previous.get(outpoint).map(|o|o.value())))?.map(u64::from) };
+                    tx.execute("UPDATE transactions SET fee=?1,expiry_height=?2,mined_height=?3,tx_index=?4 WHERE txid=?5",rusqlite::params![fee,u32::from(transaction.expiry_height()),u32::from(block.claimed_height()),index,transaction.txid().as_ref().as_slice()])?;
+                    if let Some(bundle)=transaction.transparent_bundle() { for (index,output) in bundle.vout.iter().enumerate() { previous.insert(OutPoint::new(*transaction.txid().as_ref(),u32::try_from(index)?),output.clone()); } }
+                } }
+                for transaction in pending { add(transaction,None)?; }
+                // Never discard a purported owned parent of an unresolved authored input.
+                for transaction in pending { if let Some(b) = transaction.transparent_bundle() { for input in &b.vin {
+                    let p=input.prevout();
+                    let invalid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM transparent_received_outputs n JOIN transactions t ON n.transaction_id=t.id_tx WHERE t.txid=?1 AND n.output_index=?2 AND NOT EXISTS(SELECT 1 FROM expected_outputs e WHERE e.txid=t.txid AND e.output_index=n.output_index AND e.script=n.script AND e.value=n.value_zat))",rusqlite::params![p.hash().as_slice(),p.n()],|r|r.get(0))?;
+                    if invalid { anyhow::bail!("native_recovery_reconciliation_required"); }
+                } } }
+                super::super::recovery_effects::reconcile_shielded_outputs(&tx,self.network,evidence,pending,cancel)?;
+                // Replay has already committed verified additions. Remove only relations
+                // absent from the exact verified or authored pending inputs, atomically.
+                for pool in ["sapling","orchard","ironwood"] {
+                    tx.execute(&format!("DELETE FROM {pool}_received_note_spends AS s WHERE NOT EXISTS(SELECT 1 FROM {pool}_received_notes n JOIN transactions t ON t.id_tx=s.transaction_id JOIN expected_spends e ON e.pool='{pool}' AND e.nf=n.nf AND e.txid=t.txid WHERE n.id=s.{pool}_received_note_id)"),[])?;
+                }
+                tx.execute("DELETE FROM transparent_received_output_spends AS s WHERE NOT EXISTS(SELECT 1 FROM transparent_received_outputs n JOIN transactions parent ON parent.id_tx=n.transaction_id JOIN transactions t ON t.id_tx=s.transaction_id JOIN expected_transparent_spends e ON e.parent=parent.txid AND e.output_index=n.output_index AND e.txid=t.txid WHERE n.id=s.transparent_received_output_id)",[])?;
+                tx.execute("DELETE FROM transparent_spend_map AS s WHERE NOT EXISTS(SELECT 1 FROM transactions t JOIN expected_transparent_spends e ON e.txid=t.txid AND e.parent=s.prevout_txid AND e.output_index=s.prevout_output_index WHERE t.id_tx=s.spending_transaction_id)",[])?;
+                tx.execute("DELETE FROM nullifier_map AS n WHERE NOT EXISTS(SELECT 1 FROM expected_nullifiers e WHERE e.pool=n.spend_pool AND e.nf=n.nf AND e.height=n.block_height AND e.tx_index=n.tx_index)",[])?;
+                tx.execute("DELETE FROM tx_locator_map AS n WHERE NOT EXISTS(SELECT 1 FROM expected_locators e WHERE e.height=n.block_height AND e.tx_index=n.tx_index AND e.txid=n.txid)",[])?;
+                tx.execute("DELETE FROM transparent_received_output_spends WHERE transparent_received_output_id IN(SELECT n.id FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE NOT EXISTS(SELECT 1 FROM expected_outputs e WHERE e.txid=t.txid AND e.output_index=n.output_index))",[])?;
+                tx.execute("DELETE FROM transparent_received_outputs AS n WHERE NOT EXISTS(SELECT 1 FROM transactions t JOIN expected_outputs e ON e.txid=t.txid AND e.output_index=n.output_index WHERE t.id_tx=n.transaction_id)",[])?;
+                let invalid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE NOT EXISTS(SELECT 1 FROM expected_outputs e JOIN expected_owners o ON o.script=e.script AND o.account_id=n.account_id JOIN addresses a ON a.id=n.address_id AND a.account_id=n.account_id AND a.cached_transparent_receiver_address=n.address WHERE e.txid=t.txid AND e.output_index=n.output_index AND e.script=n.script AND e.value=n.value_zat))",[],|r|r.get(0))?;
+                if invalid { anyhow::bail!("native_recovery_reconciliation_required"); }
+                super::super::recovery_effects::reconcile_sent_outputs(&tx,self.network,evidence,pending,cancel)?;
+                effect_identity(|sql| tx.query_row(sql, [], |r| r.get(0)),self.network,evidence.target_height())?;
+                if cancel.is_cancelled() { anyhow::bail!("native_recovery_cancelled"); }
+                tx.commit()?;
+                Ok(())
             })().map_err(EngineError::from)
         })
     }
@@ -916,6 +1059,16 @@ impl NativeWallet {
             || receipt.scanner_identity != snapshot.identity().map_err(store_failed)?
             || receipt.scope_identity != self.recovery_scope()?.identity()?
             || !receipt_journal_matches(&conn, &receipt)
+            || receipt.effect_identity.as_deref()
+                != Some(
+                    effect_identity(
+                        |sql| conn.query_row(sql, [], |r| r.get(0)),
+                        self.network,
+                        chain.target_height(),
+                    )
+                    .map_err(|_| failed("native_recovery_reconciliation_required"))?
+                    .as_str(),
+                )
         {
             return Err(failed("native_recovery_reconciliation_required"));
         }
@@ -1091,7 +1244,7 @@ pub(in crate::native::wallet) mod tests {
         eprintln!("retained fork offline replay reached verified tip and preserved all saved raw rows; transport remains unavailable and receipt remains Pending");
         assert!(wallet.ensure_pir_recovery_ready().is_err());
     }
-    fn encrypted_orchard_transaction(
+    pub(in crate::native::wallet) fn encrypted_orchard_transaction(
         key: &zcash_keys::keys::UnifiedFullViewingKey,
         seed: u8,
         spend: [u8; 32],
@@ -1167,7 +1320,35 @@ pub(in crate::native::wallet) mod tests {
             )
             .unwrap();
         let scope = wallet.recovery_scope().unwrap();
-        assert!(expected_events(&evidence, &scope).unwrap().is_empty());
+        let expected = expected_events(&evidence, &scope).unwrap();
+        if !expected.is_empty() {
+            let mut store = store::NativePirStore::open_recovery(wallet, &cancel).unwrap();
+            let covered_scripts = scope.0.iter().map(|s| s.entry.script.clone()).collect();
+            store.add_scripts(&scope.scripts()).unwrap();
+            store
+                .commit_shard(ShardCommit {
+                    shard_id: 0,
+                    revision_digest: "verified-events-fixture".into(),
+                    sealed: true,
+                    start_height: 1,
+                    end_height: u64::from(chain.target_height()),
+                    terminal_block_hash: chain.target.hash.clone(),
+                    events: expected
+                        .into_iter()
+                        .map(|((script, bytes), metadata)| StoredEvent {
+                            script,
+                            event: TransparentEvent::from_bytes(&bytes)
+                                .unwrap()
+                                .with_metadata(Some(metadata)),
+                            shard_id: 0,
+                            revision_digest: "verified-events-fixture".into(),
+                        })
+                        .collect(),
+                    covered_scripts,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
         let snapshot =
             NativeScanSnapshot::capture(&wallet.open_db().unwrap(), chain.target_height()).unwrap();
         let discovery = PirDiscoveryReport {
@@ -1237,6 +1418,284 @@ pub(in crate::native::wallet) mod tests {
             Ok(())
         })
         .unwrap();
+    }
+    #[test]
+    fn canonical_replay_removes_invented_transparent_outputs_preserves_locks_and_binds_history_metadata(
+    ) {
+        let (dir, wallet) = wallet();
+        let script = wallet.recovery_scope().unwrap().0[0].entry.script.clone();
+        let (bytes, chain) = fixture_with_script(&script);
+        let recover = || {
+            wallet.recover_regtest_pir(
+                &chain,
+                verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+                &mut Unavailable,
+                &mut Unavailable,
+                WorkLimits {
+                    max_queries: Some(1),
+                    max_private_bytes: Some(1024),
+                },
+                &RecoveryCancellation::new(),
+            )
+        };
+        assert!(recover().is_err());
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let original: i64 = conn
+            .query_row("SELECT id FROM transparent_received_outputs", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        conn.execute("UPDATE transparent_received_outputs SET lock_owner=x'0102',lock_expiry_height=100 WHERE id=?1",[original]).unwrap();
+        conn.execute_batch("INSERT INTO transparent_received_outputs(transaction_id,output_index,account_id,address_id,address,script,value_zat,max_observed_unspent_height) SELECT transaction_id,99,account_id,address_id,address,script,123456,1 FROM transparent_received_outputs LIMIT 1; UPDATE transactions SET fee=12345 WHERE mined_height=1;").unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM transparent_received_outputs",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        assert!(recover().is_err());
+        let retained: (i64, Vec<u8>, u32) = conn
+            .query_row(
+                "SELECT id,lock_owner,lock_expiry_height FROM transparent_received_outputs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(retained.0, original);
+        assert!(retained.1 == [1, 2]);
+        assert_eq!(retained.2, 100);
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM transparent_received_outputs",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert!(conn
+            .query_row(
+                "SELECT fee IS NULL FROM transactions WHERE mined_height=1",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap());
+        finish_fixture_recovery(&wallet, &bytes, &chain);
+        let cold = NativeWallet::open_offline(dir.path()).unwrap();
+        assert!(cold.ensure_pir_recovery_ready().is_ok());
+        assert!(
+            cold.regtest_pir_recovery_for(&chain)
+                .unwrap()
+                .unwrap()
+                .scope_complete
+        );
+        for sql in [
+            "UPDATE transactions SET fee=10000 WHERE mined_height=1",
+            "UPDATE transparent_received_outputs SET value_zat=value_zat+1",
+        ] {
+            conn.execute_batch(sql).unwrap();
+            let cold = NativeWallet::open_offline(dir.path()).unwrap();
+            assert!(cold.ensure_pir_recovery_ready().is_err());
+            assert!(cold.regtest_pir_recovery_for(&chain).is_err());
+            let mut db = cold.open_recovery_db().unwrap();
+            assert!(db
+                .transactionally_with_extension(|wdb, ext| ensure_transaction_receipt(wdb, ext))
+                .is_err());
+        }
+    }
+    #[test]
+    fn replay_failure_and_cancellation_preserve_committed_spends_and_viewing_balance() {
+        use crate::native::wallet::recovery_blocks::tests::fixture_prefix_with_transactions;
+        use prost::Message;
+        for abort_replay in [false, true] {
+            let (dir, wallet) = wallet();
+            let (key, _) = fixture_account();
+            let (prefix, prefix_chain) = fixture_prefix_with_transactions(
+                &[0x51],
+                3,
+                vec![(3, encrypted_orchard_transaction(&key, 7, [0; 32]))],
+            );
+            let scan = |bytes: &[u8], chain: &RegtestAcceptedChain| {
+                let compact = verify_regtest_recovery_blocks(bytes, chain, &AtomicBool::new(false))
+                    .unwrap()
+                    .compact_blocks()
+                    .unwrap();
+                wallet
+                    .scan_public_regtest(
+                        &compact
+                            .iter()
+                            .flat_map(Message::encode_length_delimited_to_vec)
+                            .collect::<Vec<_>>(),
+                        crate::native::RegtestScanSchedule {
+                            nu6_3_height: crate::regtest_nu6_3_height(),
+                            nu7_height: crate::regtest_nu7_height(),
+                        },
+                    )
+                    .unwrap();
+            };
+            scan(&prefix, &prefix_chain);
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            let nf: Vec<u8> = conn
+                .query_row("SELECT nf FROM orchard_received_notes", [], |r| r.get(0))
+                .unwrap();
+            let foreign = crate::native::selective_scan::tests::test_ufvk(8);
+            let (bytes, chain) = fixture_prefix_with_transactions(
+                &[0x51],
+                8,
+                vec![
+                    (3, encrypted_orchard_transaction(&key, 7, [0; 32])),
+                    (
+                        6,
+                        encrypted_orchard_transaction(&foreign, 9, nf.try_into().unwrap()),
+                    ),
+                ],
+            );
+            scan(&bytes, &chain);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM orchard_received_note_spends",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            if abort_replay {
+                conn.execute_batch("CREATE TRIGGER abort_verified_replay BEFORE INSERT ON orchard_received_notes BEGIN SELECT RAISE(ABORT,'fixture_replay_failure'); END;").unwrap();
+            }
+            let cancel = RecoveryCancellation::new();
+            let error = wallet
+                .recover_regtest_pir_after_replay(
+                    &chain,
+                    verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false))
+                        .unwrap(),
+                    &mut Unavailable,
+                    &mut Unavailable,
+                    WorkLimits {
+                        max_queries: Some(1),
+                        max_private_bytes: Some(1024),
+                    },
+                    &cancel,
+                    || cancel.cancel(),
+                )
+                .unwrap_err();
+            assert!(abort_replay || error.to_string().contains("native_recovery_cancelled"));
+            let cold = NativeWallet::open_offline(dir.path()).unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM orchard_received_note_spends",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            assert_eq!(cold.balance().unwrap().orchard_available, 0);
+            assert!(!cold.history(100).unwrap().is_empty());
+            assert!(cold.ensure_pir_recovery_ready().is_err());
+            assert!(cold.regtest_pir_recovery_for(&chain).is_err());
+        }
+    }
+    #[test]
+    fn a_conflicting_mined_spend_refuses_replay_without_unlocking_the_prior_view() {
+        use crate::native::wallet::recovery_blocks::tests::fixture_prefix_with_transactions;
+        use prost::Message;
+        let (dir, wallet) = wallet();
+        let (key, _) = fixture_account();
+        let foreign = crate::native::selective_scan::tests::test_ufvk(8);
+        let (prefix, initial_chain) = fixture_prefix_with_transactions(
+            &[0x51],
+            3,
+            vec![(3, encrypted_orchard_transaction(&key, 7, [0; 32]))],
+        );
+        let schedule = crate::native::RegtestScanSchedule {
+            nu6_3_height: crate::regtest_nu6_3_height(),
+            nu7_height: crate::regtest_nu7_height(),
+        };
+        let initial =
+            verify_regtest_recovery_blocks(&prefix, &initial_chain, &AtomicBool::new(false))
+                .unwrap()
+                .compact_blocks()
+                .unwrap();
+        wallet
+            .scan_public_regtest(
+                &initial
+                    .iter()
+                    .flat_map(Message::encode_length_delimited_to_vec)
+                    .collect::<Vec<_>>(),
+                schedule,
+            )
+            .unwrap();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let nf: Vec<u8> = conn
+            .query_row("SELECT nf FROM orchard_received_notes", [], |r| r.get(0))
+            .unwrap();
+        let (bytes, chain) = fixture_prefix_with_transactions(
+            &[0x51],
+            8,
+            vec![
+                (3, encrypted_orchard_transaction(&key, 7, [0; 32])),
+                (6, encrypted_orchard_transaction(&foreign, 9, [0; 32])),
+                (
+                    7,
+                    encrypted_orchard_transaction(&foreign, 11, nf.clone().try_into().unwrap()),
+                ),
+            ],
+        );
+        let mut forged = verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false))
+            .unwrap()
+            .compact_blocks()
+            .unwrap();
+        forged[5].vtx[1].actions[0].nullifier = nf;
+        forged[6].vtx[1].actions[0].nullifier = vec![0; 32];
+        wallet
+            .scan_public_regtest(
+                &forged
+                    .iter()
+                    .flat_map(Message::encode_length_delimited_to_vec)
+                    .collect::<Vec<_>>(),
+                schedule,
+            )
+            .unwrap();
+        let prior_spend: u64 = conn
+            .query_row(
+                "SELECT transaction_id FROM orchard_received_note_spends",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let prior_history = serde_json::to_value(wallet.history(100).unwrap()).unwrap();
+        assert_eq!(wallet.balance().unwrap().orchard_available, 0);
+        assert!(wallet
+            .recover_regtest_pir(
+                &chain,
+                verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+                &mut Unavailable,
+                &mut Unavailable,
+                WorkLimits {
+                    max_queries: Some(1),
+                    max_private_bytes: Some(1024)
+                },
+                &RecoveryCancellation::new()
+            )
+            .is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT transaction_id FROM orchard_received_note_spends",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            prior_spend
+        );
+        let cold = NativeWallet::open_offline(dir.path()).unwrap();
+        assert_eq!(cold.balance().unwrap().orchard_available, 0);
+        assert!(serde_json::to_value(cold.history(100).unwrap()).unwrap() == prior_history);
+        assert!(cold.ensure_pir_recovery_ready().is_err());
+        assert!(cold.regtest_pir_recovery_for(&chain).is_err());
     }
     #[test]
     fn canonical_replay_removes_forged_nullifiers_and_preserves_verified_spends_and_witnesses() {

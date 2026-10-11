@@ -67,8 +67,10 @@ checkpoint heights rather than claiming an inexact rewind.
 Persisted recovery markers are respected by ordinary native builds: a feature
 downgrade refuses new preparation/signing/send/shield. Submission of an existing
 durable signed intent remains available because it retransmits saved bytes.
-Raw source data differing from an existing wallet transaction is refused before
-canonical changes, including txid-equivalent authorizing-data substitutions.
+Existing canonical transaction bytes are preserved. A txid-equivalent ZIP 244
+authorizing-data variant may supply verified effects only when its canonical
+effect encoding agrees; malformed bytes or different effects are refused. Source
+authorizing data is never substituted into a saved payment for broadcast.
 
 `NativeWallet::open_offline(root)` opens persisted wallet state with instance
 transport capability disabled. Stored endpoint metadata and endpoint edits cannot
@@ -146,3 +148,34 @@ bounded to 30 seconds and 256 candidates per call.
 Balance reads hold a shared database ownership lease across maturity checks and
 the native summary, returning `SyncRequired` while an ordinary scanner owns the
 exclusive lease.
+
+Verified replay and receipt scope
+
+Recovery commits verified replay before reconciling retained effects. Replay
+failure or cancellation preserves previously committed spend associations and
+viewing balances; it cannot release Pending. A subsequent FULL SQLite writer
+compares exact verified and identity-checked wallet-authored pending input sets,
+removes unexplained associations and outputs, and repairs native owned-note and
+sent-output fields from native decryption. Genuine row IDs, locks, saved raw
+transactions and unresolved payment intents remain intact. Unprovable locked
+outputs or unresolved input parents cause refusal rather than unlocking funds.
+
+Receipts bind native account mappings, mined owned outputs, spends, sent-output
+metadata and mined transaction height, index, expiry and fee. Pending owned
+outputs, reservations and decryptable shielded memos are checked dynamically
+against the actual saved authored transaction, so signing may add genuine pending
+change without invalidating the mined receipt. Transparent locally authored
+memos have no raw-transaction equivalent and remain local metadata. Cold status
+and payment writers perform the same effect checks before accepting Complete.
+Prepared payment reviews also bind the exact recovery generation; another
+recovery invalidates an earlier review even on the same accepted chain.
+
+These checks are bounded recovery reconciliation, not arbitrary database repair
+or consensus proof. A stale spend association attached to a different mined
+transaction can make the pinned native replay refuse before reconciliation;
+recovery remains Pending and preserves that prior view. Multiple funding accounts
+in one transaction and unrecoverable authored outgoing metadata under a legacy
+Discard OVK policy are refused. Removing a native commitment-tree mark can make
+witness lookup unavailable even when roots agree; native signing then refuses
+before committing a payment. This availability case does not establish a usable
+witness or expand the feature's repair guarantees.

@@ -7,6 +7,8 @@ mod recovery_blocks;
 mod recovery_bootstrap;
 #[cfg(feature = "native-pir")]
 mod recovery_cancellation;
+#[cfg(feature = "native-pir")]
+mod recovery_effects;
 mod recovery_guard;
 #[cfg(feature = "native-pir")]
 pub use recovery_blocks::{verify_regtest_recovery_blocks, VerifiedRegtestRecoveryBlocks};
