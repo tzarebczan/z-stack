@@ -7,6 +7,16 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+mod verified;
+#[cfg(test)]
+pub(super) use verified::tests::{peer as verified_response_peer, reply as verified_response};
+pub(super) use verified::VerifiedValidator;
+
+/// Verify the validator's chain and genesis, then broadcast on that connection.
+pub fn send_raw_transaction_verified(url: &str, network: Network, raw: &[u8]) -> Result<String> {
+    VerifiedValidator::connect(url, network)?.send(raw)
+}
+
 fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -81,6 +91,11 @@ fn jsonrpc_response(
     params: serde_json::Value,
     limit: Option<usize>,
 ) -> Result<serde_json::Value> {
+    if method.eq_ignore_ascii_case("sendrawtransaction") {
+        return Err(EngineError::Transport(
+            "raw transaction submission requires verified network identity".into(),
+        ));
+    }
     let (host, port) = parse_host_port(url)?;
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -179,15 +194,6 @@ fn jsonrpc_response(
         });
     }
     Ok(v["result"].clone())
-}
-
-/// Submit a raw transaction via Zebra `sendrawtransaction`.
-pub fn send_raw_transaction(url: &str, raw: &[u8]) -> Result<String> {
-    let result = jsonrpc(url, "sendrawtransaction", serde_json::json!([to_hex(raw)]))?;
-    result
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| EngineError::Transport(format!("sendrawtransaction: {result}")))
 }
 
 /// Mine `n` blocks on a regtest validator (`generate`).
@@ -473,10 +479,14 @@ mod tests {
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = closed.local_addr().unwrap().port();
         drop(closed);
-        let refused =
-            send_raw_transaction(&format!("http://127.0.0.1:{port}"), &[1, 2]).unwrap_err();
+        let refused = jsonrpc(
+            &format!("http://127.0.0.1:{port}"),
+            "getblockcount",
+            serde_json::json!([]),
+        )
+        .unwrap_err();
         assert!(never_sent(&refused), "{refused}");
-        // Accepted, then dropped without an answer: the node may hold it.
+        // Accepted, then dropped without an answer: the request reached the node.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let peer = std::thread::spawn(move || {
@@ -484,9 +494,26 @@ mod tests {
             let mut buf = [0u8; 256];
             let _ = std::io::Read::read(&mut stream, &mut buf);
         });
-        let lost = send_raw_transaction(&url, &[1, 2]).unwrap_err();
+        let lost = jsonrpc(&url, "getblockcount", serde_json::json!([])).unwrap_err();
         peer.join().unwrap();
         assert!(!never_sent(&lost), "{lost}");
+    }
+
+    #[test]
+    fn generic_rpc_cannot_submit_raw_transactions_without_identity() {
+        for method in ["sendrawtransaction", "SENDRAWTRANSACTION"] {
+            let error = jsonrpc(
+                "http://127.0.0.1:1",
+                method,
+                serde_json::json!(["faceb00c"]),
+            )
+            .unwrap_err();
+            assert!(!never_sent(&error));
+            assert!(error
+                .to_string()
+                .contains("requires verified network identity"));
+            assert!(!error.to_string().contains("faceb00c"));
+        }
     }
 
     #[test]
@@ -546,7 +573,7 @@ mod tests {
                     std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
                 ) =>
             {
-                return
+                return;
             }
             Err(error) => panic!("IPv6 loopback listener: {error}"),
         };

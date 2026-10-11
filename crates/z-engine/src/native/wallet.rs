@@ -17,6 +17,8 @@ pub use recovery_cancellation::RecoveryCancellation;
 mod payments;
 #[cfg(feature = "native-pir")]
 mod pir;
+#[cfg(test)]
+mod submission_tests;
 #[cfg(feature = "native-pir")]
 pub use pir::{
     PirConfirmedTransaction, PirDiscoveryReport, PirRecoveryReport, RegtestAcceptedChain,
@@ -743,6 +745,11 @@ pub struct LightProbe {
     pub t_scan: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+enum BroadcastConnection {
+    Light(Box<LwdClient>),
+    Validator(super::rpc::VerifiedValidator),
 }
 
 pub struct NativeWallet {
@@ -3190,14 +3197,9 @@ impl NativeWallet {
                 "{outcome}; saved transaction(s) {saved_ids}: {e}"
             ))
         };
-        // An explicit validator endpoint does not require a second light-server
-        // connection. Either transport may lose its response after accepting a
-        // transaction; saved spends and unrelated proposal locks must survive.
-        let mut client = if self.validator_rpc_url().is_some() {
-            None
-        } else {
-            Some(self.connect().await.map_err(&failure)?)
-        };
+        // Identity and submission use the same connection. Saved spends survive
+        // both an identity refusal and an uncertain acknowledgement.
+        let mut client = None;
         let mut out = Vec::new();
         for txid in txids {
             match self.broadcast_one(&mut client, db, txid).await {
@@ -3210,7 +3212,7 @@ impl NativeWallet {
 
     async fn broadcast_one(
         &self,
-        client: &mut Option<LwdClient>,
+        client: &mut Option<BroadcastConnection>,
         db: &mut Db,
         txid: TxId,
     ) -> Result<String> {
@@ -3227,47 +3229,99 @@ impl NativeWallet {
         Ok(txid.to_string())
     }
 
-    /// Submit raw transaction bytes through the validator RPC when one is set,
-    /// else the light server. A validator RPC that could not be reached never
-    /// received the bytes, so the light server takes them rather than the send
-    /// ending as "outcome unknown" with its notes held until expiry.
-    async fn submit_raw(&self, client: &mut Option<LwdClient>, data: Vec<u8>) -> Result<()> {
+    /// Establish canonical identity before exposing any signed bytes. Validator
+    /// requests retain their TCP connection; light requests retain their client.
+    /// A failed identity check never falls back to a different transport.
+    async fn connect_submission(&self) -> Result<BroadcastConnection> {
         self.require_network_access()?;
-        if let Some(rpc) = self.validator_rpc_url() {
-            let bytes = data.clone();
-            let url = rpc.clone();
-            // Blocking socket I/O with a 120 s read timeout: off the runtime.
-            let sent =
-                tokio::task::spawn_blocking(move || super::rpc::send_raw_transaction(&url, &bytes))
-                    .await
-                    .map_err(|e| EngineError::Transport(format!("broadcast task: {e}")))?;
-            match sent {
-                Ok(_hash) => {
-                    info!("broadcast via validator sendrawtransaction");
-                    return Ok(());
+        if let Some(url) = self.validator_rpc_url() {
+            let network = self.network;
+            let connected = tokio::task::spawn_blocking(move || {
+                super::rpc::VerifiedValidator::connect(&url, network)
+            })
+            .await
+            .map_err(|_| EngineError::Transport("broadcast connection task failed".into()))?;
+            match connected {
+                Ok(connection) => return Ok(BroadcastConnection::Validator(connection)),
+                Err(error) if super::rpc::never_sent(&error) => {
+                    warn!("validator RPC unreachable; checking light server identity");
                 }
-                Err(e) if super::rpc::never_sent(&e) => {
-                    warn!("validator RPC unreachable; broadcasting through the light server");
-                }
-                Err(e) => return Err(e),
+                Err(error) => return Err(error),
             }
         }
-        if client.is_none() {
-            *client = Some(self.connect().await?);
-        }
-        let resp = client
-            .as_mut()
-            .expect("light client connected above")
-            .send_transaction(RawTransaction { data, height: 0 })
+        let mut client = super::submission_channel::connect(
+            &self.server.as_url(),
+            Self::skip_ironwood_subtrees(self.network, &self.server.as_url()),
+        )
+        .await?;
+        let info = client
+            .get_lightd_info(Empty {})
             .await
-            .map_err(|e| EngineError::Transport(format!("SendTransaction: {e}")))?
+            .map_err(|_| EngineError::Transport("submission GetLightdInfo failed".into()))?
             .into_inner();
-        if resp.error_code != 0 {
-            return Err(EngineError::BroadcastRejected {
-                code: resp.error_code,
-                message: resp.error_message,
+        // Height zero is an unspecified identifier in lightwalletd. Block one
+        // is available even before Sapling; its parent is the genesis block.
+        let first = client
+            .get_block(BlockId {
+                height: 1,
+                hash: vec![],
+            })
+            .await
+            .map_err(|_| EngineError::Transport("submission genesis lookup failed".into()))?
+            .into_inner();
+        if first.height != 1 || first.prev_hash.len() != 32 {
+            return Err(EngineError::ChainMismatch {
+                wallet: self.network.as_str().into(),
+                server: "submission genesis framing mismatch".into(),
             });
         }
+        let mut genesis = first.prev_hash;
+        genesis.reverse();
+        super::chain_identity::validate(
+            self.network,
+            &info.chain_name,
+            &crate::web::to_hex(&genesis),
+        )?;
+        Ok(BroadcastConnection::Light(Box::new(client)))
+    }
+
+    /// Every broadcast (including automatic rebroadcast) verifies canonical
+    /// network identity. No raw transaction leaves during the identity probe.
+    async fn submit_raw(
+        &self,
+        client: &mut Option<BroadcastConnection>,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        self.require_network_access()?;
+        if client.is_none() {
+            *client = Some(self.connect_submission().await?);
+        }
+        match client
+            .take()
+            .expect("submission connection established above")
+        {
+            BroadcastConnection::Validator(mut connection) => {
+                tokio::task::spawn_blocking(move || connection.send(&data))
+                    .await
+                    .map_err(|_| EngineError::Transport("broadcast task failed".into()))??;
+            }
+            BroadcastConnection::Light(mut connection) => {
+                let result = connection
+                    .send_transaction(RawTransaction { data, height: 0 })
+                    .await;
+                *client = Some(BroadcastConnection::Light(connection));
+                let response = result
+                    .map_err(|_| EngineError::Transport("SendTransaction failed".into()))?
+                    .into_inner();
+                if response.error_code != 0 {
+                    return Err(EngineError::BroadcastRejected {
+                        code: response.error_code,
+                        message: response.error_message,
+                    });
+                }
+            }
+        }
+        info!("broadcast on verified submission connection");
         Ok(())
     }
 
@@ -3737,7 +3791,7 @@ fn unmined_sends(db_path: &Path, tip: u32) -> Result<Vec<(TxId, Vec<u8>)>> {
 /// one of these phrases, or be Zebra's full already-mined sentence. "nullifier
 /// already known" and "conflicts with a transaction already in the mempool" are
 /// real rejections.
-fn already_known_transaction(error: &EngineError) -> bool {
+pub(super) fn already_known_transaction(error: &EngineError) -> bool {
     let EngineError::BroadcastRejected { message, .. } = error else {
         return false;
     };
