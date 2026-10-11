@@ -3,6 +3,116 @@ use super::*;
 use transparent_wallet::ChainView;
 use zcash_primitives::block::BlockHash;
 
+/// Stable ownership outside the wallet: seed-only setup must not gain a database
+/// sidecar that looks like retained wallet state. Never unlink this lease file.
+fn bootstrap_lease(root: &Path) -> Result<std::fs::File> {
+    let busy = || EngineError::Message("native_pir_database_busy".into());
+    let canonical = match std::fs::canonicalize(root) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A dangling root alias must not choose a different lock from its target.
+            if std::fs::symlink_metadata(root).is_ok() {
+                return Err(busy());
+            }
+            let parent = root
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            std::fs::create_dir_all(parent).map_err(|_| busy())?;
+            std::fs::canonicalize(parent)
+                .map_err(|_| busy())?
+                .join(root.file_name().ok_or_else(busy)?)
+        }
+        Err(_) => return Err(busy()),
+    };
+    let parent = canonical.parent().ok_or_else(busy)?;
+    let directory = parent.join(".z-engine-bootstrap-locks");
+    if canonical == directory {
+        return Err(busy());
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(&directory) {
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|_| busy())?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(busy()),
+    }
+    let metadata = std::fs::symlink_metadata(&directory).map_err(|_| busy())?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(busy());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o7777 != 0o700 {
+            return Err(busy());
+        }
+    }
+    // Preserve the filesystem's own case/normalization alias semantics, including
+    // before the wallet exists. Hashing a differently-cased name would not do so.
+    let path = directory.join(canonical.file_name().ok_or_else(busy)?);
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = match options.open(&path) {
+        Ok(file) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                    .map_err(|_| busy())?;
+            }
+            file
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(&path).map_err(|_| busy())?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(busy());
+            }
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|_| busy())?
+        }
+        Err(_) => return Err(busy()),
+    };
+    let metadata = std::fs::symlink_metadata(&path).map_err(|_| busy())?;
+    let opened = file.metadata().map_err(|_| busy())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || !opened.is_file() {
+        return Err(busy());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.permissions().mode() & 0o7777 != 0o600
+            || metadata.dev() != opened.dev()
+            || metadata.ino() != opened.ino()
+        {
+            return Err(busy());
+        }
+    }
+    // Same bounded OS lock semantics as database_lease; the handle owns it through
+    // seed authentication, account creation, Pending publication and metadata.
+    file.try_lock().map_err(|_| busy())?;
+    Ok(file)
+}
+
 impl NativeWallet {
     /// Refuse to reconstruct a wallet that has retained recovery or payment facts.
     /// A seed-only directory or the unpublished initial Pending database can resume.
@@ -22,6 +132,7 @@ impl NativeWallet {
         account_index: u32,
     ) -> Result<(Self, CreatedWallet)> {
         let root = root.into();
+        let _ownership = bootstrap_lease(&root)?;
         let paths = WalletPaths::new(&root);
         if paths.meta_path.exists() || paths.reset_backup().exists() {
             return Err(EngineError::AlreadyExists(paths.root.display().to_string()));
@@ -70,6 +181,8 @@ impl NativeWallet {
         auth: SeedAuth,
         account_index: u32,
     ) -> Result<(Self, String)> {
+        let root = root.into();
+        let _ownership = bootstrap_lease(&root)?;
         let mnemonic = Mnemonic::parse_normalized(mnemonic.trim())
             .map_err(|_| EngineError::Message("native_recovery_mnemonic_invalid".into()))?;
         Self::initialize_regtest_offline(root, &mnemonic, chain, auth, account_index, |_| Ok(()))
@@ -283,6 +396,159 @@ impl NativeWallet {
 mod tests {
     use super::super::recovery_blocks::tests::fixture_with_script;
     use super::*;
+    #[test]
+    fn concurrent_public_creates_publish_one_account_matching_its_retained_encrypted_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("missing/parent/wallet");
+        let (_, chain) = fixture_with_script(&[0x51]);
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let passwords = [
+            "fixture concurrent first password",
+            "fixture concurrent second password",
+        ];
+        let results = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for (index, password) in passwords.iter().enumerate() {
+                let start = start.clone();
+                let root = root.clone();
+                let chain = chain.clone();
+                handles.push(scope.spawn(move || {
+                    start.wait();
+                    (
+                        index,
+                        NativeWallet::create_regtest_offline(
+                            root,
+                            &chain,
+                            SeedAuth::passphrase(*password),
+                            0,
+                        ),
+                    )
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            results.iter().filter(|(_, result)| result.is_ok()).count(),
+            1
+        );
+        for (_, result) in &results {
+            if let Err(error) = result {
+                assert!(
+                    matches!(error, EngineError::AlreadyExists(_))
+                        || error.to_string() == "native_pir_database_busy"
+                );
+            }
+        }
+        let (winner, (wallet, created)) = results
+            .into_iter()
+            .find_map(|(index, result)| result.ok().map(|value| (index, value)))
+            .unwrap();
+        let retained = SeedStore::new(&root)
+            .load(Some(passwords[winner]), false)
+            .unwrap();
+        assert!(retained.expose_secret() == &created.mnemonic);
+        assert!(SeedStore::new(&root)
+            .load(Some(passwords[1 - winner]), false)
+            .is_err());
+        let encrypted = std::fs::read(root.join("seed.enc")).unwrap();
+        let database = std::fs::read(root.join("data.sqlite")).unwrap();
+        drop(wallet);
+        let cold = NativeWallet::open_offline(&root).unwrap();
+        let seed = cold
+            .load_seed(&SeedAuth::passphrase(passwords[winner]))
+            .unwrap();
+        let db = cold.open_recovery_db().unwrap();
+        let accounts = db.get_account_ids().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert!(db.validate_seed(accounts[0], &seed).unwrap());
+        assert!(cold.viewing_key().unwrap() == created.ufvk);
+        drop(db);
+        let rejected = NativeWallet::create_regtest_offline(
+            &root,
+            &chain,
+            SeedAuth::passphrase(passwords[1 - winner]),
+            0,
+        );
+        assert!(matches!(rejected, Err(EngineError::AlreadyExists(_))));
+        assert!(std::fs::read(root.join("seed.enc")).unwrap() == encrypted);
+        assert!(std::fs::read(root.join("data.sqlite")).unwrap() == database);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_ownership_fences_public_create_and_restore_through_parent_aliases() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("real");
+        std::fs::create_dir(&parent).unwrap();
+        let alias = dir.path().join("alias");
+        symlink(&parent, &alias).unwrap();
+        let root = parent.join("wallet");
+        let alias_root = alias.join("wallet");
+        let (_, chain) = fixture_with_script(&[0x51]);
+        let ownership = bootstrap_lease(&root).unwrap();
+        assert!(!root.exists());
+        let refused = NativeWallet::create_regtest_offline(
+            &alias_root,
+            &chain,
+            SeedAuth::passphrase("fixture alias password"),
+            0,
+        );
+        assert!(
+            matches!(refused, Err(EngineError::Message(message)) if message == "native_pir_database_busy")
+        );
+        let refused = NativeWallet::restore_regtest_offline(
+            &alias_root,
+            crate::keys::REGTEST_FAUCET_MNEMONIC,
+            &chain,
+            SeedAuth::passphrase("fixture alias password"),
+            0,
+        );
+        assert!(
+            matches!(refused, Err(EngineError::Message(message)) if message == "native_pir_database_busy")
+        );
+        assert!(!root.exists());
+        let directory = parent.join(".z-engine-bootstrap-locks");
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+        let lock = std::fs::read_dir(&directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            lock.metadata().unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        drop(ownership);
+        let (wallet, _) = NativeWallet::create_regtest_offline(
+            &alias_root,
+            &chain,
+            SeedAuth::passphrase("fixture alias password"),
+            0,
+        )
+        .unwrap();
+        assert!(wallet.paths.meta_path.exists());
+        let ownership = bootstrap_lease(&root).unwrap();
+        let root_alias = dir.path().join("wallet-alias");
+        symlink(&root, &root_alias).unwrap();
+        let refused = NativeWallet::create_regtest_offline(
+            root_alias,
+            &chain,
+            SeedAuth::passphrase("fixture alias password"),
+            0,
+        );
+        assert!(
+            matches!(refused, Err(EngineError::Message(message)) if message == "native_pir_database_busy")
+        );
+        drop(ownership);
+    }
+
     #[cfg(unix)]
     #[test]
     fn bootstrap_metadata_and_retained_temp_publish_with_private_permissions() {
