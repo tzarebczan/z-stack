@@ -28,6 +28,7 @@ the SDK checkout. The [support matrix](SUPPORT.md) lists tested paths and limits
 - [Architecture](ARCHITECTURE.md), [browser engine](WEB.md) and [sync](SYNC.md).
 - [Performance](PERFORMANCE.md): runtime tuning and measurement guidance.
 - [Node tooling](NODE.md) and [mainnet services](MAINNET-NODE.md).
+- [Native accepted Mainnet compact windows](NATIVE-COMPACT-WINDOWS.md), the bounded public-data derivation API.
 - [Upstream dependencies](UPSTREAM.md): pins, aliases and reproducible patches.
 - [Licensing](LICENSING.md) and [third-party provenance](THIRD_PARTY.md).
 
