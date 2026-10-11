@@ -648,3 +648,106 @@ for (const kind of ["http", "grpc"] as const) test(`${kind} counts actual chunk 
   assert.equal(response.body.locked, false);
   assert.equal(requests, 1);
 });
+
+test("HTTP blockStream pauses the idle watchdog while applying a healthy page", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const stream = streamed([delimited(Uint8Array.of(7)), delimited(Uint8Array.of(8))]);
+  let requestSignal: AbortSignal | null | undefined;
+  globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+    requestSignal = init.signal;
+    return stream.response;
+  }) as typeof fetch;
+  let enter!: () => void, finish!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const applying = new Promise<void>(resolve => { finish = resolve; });
+  let pages = 0;
+  const pipe = httpLwdTransport("http://127.0.0.1:1239", "regtest", undefined, undefined, undefined, { blockIdleMs: 20 });
+  const reading = pipe.blockStream!(1, 2, 1, async () => {
+    if (++pages === 1) { enter(); await applying; }
+  });
+  await entered;
+  t.mock.timers.tick(60);
+  assert.equal(requestSignal?.aborted, false, "local apply time is not idle network time");
+  assert.equal(stream.pulls(), 1, "backpressure prevents another body read during apply");
+  finish();
+  await reading;
+  assert.equal(pages, 2);
+  assert.equal(stream.cancelled(), false);
+  assert.equal(stream.body.locked, false);
+});
+
+test("HTTP blockStream rearms the idle watchdog for a stalled read after page apply", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let enter!: () => void, finish!: () => void, stall!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const applying = new Promise<void>(resolve => { finish = resolve; });
+  const stalled = new Promise<void>(resolve => { stall = resolve; });
+  let pulls = 0, cancelled = false, pages = 0, requests = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (pulls++ === 0) controller.enqueue(delimited(Uint8Array.of(7)));
+      else stall();
+    },
+    cancel() { cancelled = true; },
+  }, { highWaterMark: 0 });
+  globalThis.fetch = (async () => { requests++; return new Response(body); }) as typeof fetch;
+  const pipe = httpLwdTransport("http://127.0.0.1:1239", "regtest", undefined, undefined, undefined, { blockIdleMs: 20 });
+  const reading = pipe.blockStream!(1, 2, 1, async () => { pages++; enter(); await applying; });
+  const refused = assert.rejects(reading, error => error instanceof Error && error.name === "TimeoutError");
+  await entered;
+  t.mock.timers.tick(60);
+  finish();
+  await stalled;
+  t.mock.timers.tick(21);
+  await refused;
+  assert.equal(pages, 1, "the completed prefix remains applied");
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
+  assert.equal(requests, 1, "stream failure cannot repeat an already applied page");
+});
+
+test("HTTP blockStream callback cancellation stops a buffered next page and cleans up", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const stream = streamed([Buffer.concat([delimited(Uint8Array.of(7)), delimited(Uint8Array.of(8))])]);
+  let requestSignal: AbortSignal | null | undefined, requests = 0, pages = 0;
+  globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+    requests++; requestSignal = init.signal;
+    return stream.response;
+  }) as typeof fetch;
+  const cancellation = new DOMException("page apply cancelled", "AbortError");
+  const pipe = httpLwdTransport("http://127.0.0.1:1239", "regtest", undefined, undefined, undefined, { blockIdleMs: 20 });
+  await assert.rejects(pipe.blockStream!(1, 2, 1, async () => {
+    pages++;
+    t.mock.timers.tick(60);
+    assert.equal(requestSignal?.aborted, false);
+    throw cancellation;
+  }), error => error === cancellation);
+  assert.equal(pages, 1);
+  assert.equal(requests, 1);
+  assert.equal(stream.cancelled(), true);
+  assert.equal(stream.body.locked, false);
+  assert.equal(requestSignal?.aborted, true);
+});
+
+test("gRPC-Web retains its absolute deadline despite body byte progress", async (t) => {
+  const deadline = new AbortController();
+  const reason = new DOMException("range deadline exceeded", "TimeoutError");
+  t.mock.method(AbortSignal, "timeout", () => deadline.signal);
+  let pulls = 0, cancelled = false, requests = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (pulls++ === 0) controller.enqueue(frame(new Uint8Array([16, 1])));
+      else {
+        deadline.abort(reason);
+        controller.enqueue(frame(new Uint8Array([16, 2])));
+      }
+    },
+    cancel() { cancelled = true; },
+  }, { highWaterMark: 0 });
+  globalThis.fetch = (async () => { requests++; return new Response(body); }) as typeof fetch;
+  await assert.rejects(grpcWebTransport("https://lwd.example").blocks(1, 2), error => error === reason);
+  assert.equal(pulls, 2);
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
+  assert.equal(requests, 1);
+});

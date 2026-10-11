@@ -722,7 +722,11 @@ export function httpLwdTransport(
               }
               checkContentLength(r, RANGE_BODY_MAX);
               if (!r.body) throw new Error("lwd-pipe returned no body");
-              await consumeDelimitedPages(r.body, page, onPage, { messages: rangeMessages(h, last), exact: true }, both, idle.touch);
+              await consumeDelimitedPages(r.body, page, async (blob, blocks) => {
+                // Applying a page deliberately pauses reads; that is not a network stall.
+                idle.stop();
+                try { await onPage(blob, blocks); } finally { idle.touch(); }
+              }, { messages: rangeMessages(h, last), exact: true }, both, idle.touch);
               h = last + 1;
             } catch (error) {
               request.abort();
