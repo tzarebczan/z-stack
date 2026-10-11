@@ -125,7 +125,10 @@ stale receipts after reopen. Rewind enters Pending before searching for an
 accepted overlap, retaining the barrier when no overlap exists, and refuses a
 non-genesis birthday before creating a recovery marker. Interrupted offline
 create authenticates and reuses its retained encrypted seed; a missing seed on
-an existing Pending database cannot be replaced during setup.
+an existing Pending database cannot be replaced during setup. Retained setup must
+use the original provisioned unlock backends. Each requested backend authenticates
+independently; a retry cannot advertise an OS or passphrase backend that was never
+provisioned. Actual platform credential-store support still requires platform tests.
 
 Public compact scans and ordinary sync, catch-up checkpoint repair and gap
 rewind refuse every recovery-marked wallet, including Complete and feature
@@ -170,6 +173,12 @@ removes unexplained associations and outputs, and repairs native owned-note and
 sent-output fields from native decryption. Genuine row IDs, locks, saved raw
 transactions and unresolved payment intents remain intact. Unprovable locked
 outputs or unresolved input parents cause refusal rather than unlocking funds.
+Identity-validated authored transactions absent from the verified prefix are
+replayed explicitly as pending, even when cached mining metadata claims otherwise.
+Only the subsequent reconciliation writer clears those false mining fields and
+derived unspent observations; saved bytes, unknown intents and locks remain intact.
+This retained-pending phase permits at most 4,096 absent authored transactions,
+2 MiB per transaction and 32 MiB total, checking lengths before loading raw bytes.
 
 Receipts bind native account mappings, mined owned outputs, spends, sent-output
 metadata and mined transaction height, index, expiry and fee. Pending owned

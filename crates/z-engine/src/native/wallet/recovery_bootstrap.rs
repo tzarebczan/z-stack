@@ -3,6 +3,37 @@ use super::*;
 use transparent_wallet::ChainView;
 use zcash_primitives::block::BlockHash;
 
+// A retry may authenticate existing material, but cannot provision a different
+// unlock backend while seed saving is deliberately skipped.
+fn load_retained_setup_seed(store: &SeedStore, auth: &SeedAuth) -> Result<SecretString> {
+    let refused = || EngineError::Message("native_recovery_seed_backend_mismatch".into());
+    if store.has_encrypted() != auth.passphrase.is_some()
+        || store.os_unlock_present() != auth.windows_credential
+    {
+        return Err(refused());
+    }
+    let passphrase = auth
+        .passphrase
+        .as_deref()
+        .map(|pass| store.load(Some(pass), false))
+        .transpose()?;
+    if auth.windows_credential {
+        // No passphrase fallback: metadata may advertise only a backend whose
+        // retained credential was independently authenticated.
+        let os = store.load(None, true)?;
+        if let Some(passphrase) = passphrase {
+            if passphrase.expose_secret() != os.expose_secret() {
+                return Err(refused());
+            }
+            Ok(passphrase)
+        } else {
+            Ok(os)
+        }
+    } else {
+        passphrase.ok_or(EngineError::SeedLocked)
+    }
+}
+
 impl NativeWallet {
     /// Refuse to reconstruct a wallet that has retained recovery or payment facts.
     /// A seed-only directory or the unpublished initial Pending database can resume.
@@ -31,7 +62,7 @@ impl NativeWallet {
         let store = SeedStore::new(&root);
         let mnemonic = if store.exists() {
             Self::validate_regtest_offline_setup_resume(&root)?;
-            let retained = store.load(auth.passphrase.as_deref(), auth.windows_credential)?;
+            let retained = load_retained_setup_seed(&store, &auth)?;
             Mnemonic::parse_normalized(retained.expose_secret())
                 .map_err(|_| EngineError::Message("native_recovery_mnemonic_invalid".into()))?
         } else {
@@ -135,7 +166,7 @@ impl NativeWallet {
             ));
         }
         if retained_seed {
-            let retained = store.load(auth.passphrase.as_deref(), auth.windows_credential)?;
+            let retained = load_retained_setup_seed(&store, &auth)?;
             if retained.expose_secret() != &mnemonic.to_string() {
                 return Err(EngineError::AlreadyExists(paths.root.display().to_string()));
             }
@@ -978,6 +1009,59 @@ mod tests {
                     .collect::<std::collections::BTreeSet<_>>(),
                 files
             );
+        }
+    }
+
+    #[test]
+    fn interrupted_setup_refuses_unprovisioned_unlock_backends_without_replacing_seed() {
+        for restore in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (_, chain) = fixture_with_script(&[0x51]);
+            let password = "fixture retained backend passphrase";
+            let (wallet, created) = NativeWallet::create_regtest_offline(
+                dir.path(),
+                &chain,
+                SeedAuth::passphrase(password),
+                0,
+            )
+            .unwrap();
+            std::fs::remove_file(&wallet.paths.meta_path).unwrap();
+            NativeWallet::checkpoint_sqlite(&wallet.paths.data_db).unwrap();
+            let encrypted = std::fs::read(dir.path().join("seed.enc")).unwrap();
+            let database = std::fs::read(&wallet.paths.data_db).unwrap();
+            for auth in [SeedAuth::both(password), SeedAuth::windows_credential()] {
+                let retry = if restore {
+                    NativeWallet::restore_regtest_offline(
+                        dir.path(),
+                        &created.mnemonic,
+                        &chain,
+                        auth,
+                        0,
+                    )
+                    .map(|_| ())
+                } else {
+                    NativeWallet::create_regtest_offline(dir.path(), &chain, auth, 0).map(|_| ())
+                };
+                assert!(matches!(retry, Err(EngineError::Message(code))
+                    if code == "native_recovery_seed_backend_mismatch"));
+                assert!(!wallet.paths.meta_path.exists());
+                assert!(std::fs::read(dir.path().join("seed.enc")).unwrap() == encrypted);
+                assert!(std::fs::read(&wallet.paths.data_db).unwrap() == database);
+                assert!(!wallet.seed_store().os_unlock_present());
+            }
+            let (resumed, recovered) = NativeWallet::create_regtest_offline(
+                dir.path(),
+                &chain,
+                SeedAuth::passphrase(password),
+                0,
+            )
+            .unwrap();
+            assert!(recovered.mnemonic == created.mnemonic);
+            assert!(!resumed.meta.os_unlock);
+            assert!(std::fs::read(dir.path().join("seed.enc")).unwrap() == encrypted);
+            let cold = NativeWallet::open_offline(dir.path()).unwrap();
+            assert!(cold.load_seed(&SeedAuth::passphrase(password)).is_ok());
+            assert!(cold.ensure_recovery_selection_ready().is_err());
         }
     }
 

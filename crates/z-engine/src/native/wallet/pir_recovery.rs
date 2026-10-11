@@ -733,8 +733,17 @@ impl NativeWallet {
                             }
                         }
                     }
+                    let keys = wdb.get_unified_full_viewing_keys()?;
                     for tx in &pending {
-                        decrypt_and_store_transaction(&self.network, wdb, tx, None)?;
+                        // None must stay explicit: the convenience wrapper would
+                        // reuse an untrusted cached mined height for this txid.
+                        wdb.store_decrypted_tx(zcash_client_backend::decrypt_transaction(
+                            &self.network,
+                            None,
+                            wdb.chain_height()?,
+                            tx,
+                            &keys,
+                        ))?;
                     }
                     let scope = native_scope_in_transaction(wdb, ext, 1)?;
                     if scope == prior {
@@ -891,17 +900,29 @@ impl NativeWallet {
                     for id in serde_json::from_str::<Vec<String>>(&row?)? { authored.insert(id); }
                 }
             }
+            tx.execute_batch("CREATE TEMP TABLE authored_pending_ids(txid BLOB PRIMARY KEY); CREATE TEMP TABLE verified_pending_ids(txid BLOB PRIMARY KEY)")?;
+            for id in &verified { tx.execute("INSERT INTO verified_pending_ids VALUES(?1)", [id])?; }
+            for display in &authored {
+                let mut id = crate::web::from_hex(display).map_err(|_|anyhow::anyhow!("native_recovery_raw_conflict"))?;
+                if id.len() != 32 { anyhow::bail!("native_recovery_raw_conflict"); }
+                id.reverse();
+                tx.execute("INSERT OR IGNORE INTO authored_pending_ids VALUES(?1)", [&id])?;
+            }
             let mut pending = Vec::new();
+            let mut bytes = 0usize;
             {
-                let mut stmt = tx.prepare("SELECT txid,raw,created IS NOT NULL FROM transactions WHERE mined_height IS NULL")?;
-                for row in stmt.query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?,r.get::<_, Option<Vec<u8>>>(1)?,r.get::<_, bool>(2)?)))? {
-                    let (id, raw, created) = row?;
+                // Read identities/lengths first. Unrelated cached transactions
+                // never materialize raw bytes, and selected authored bytes are bounded.
+                let mut stmt = tx.prepare("SELECT txid,length(raw) FROM transactions t WHERE (created IS NOT NULL OR EXISTS(SELECT 1 FROM authored_pending_ids a WHERE a.txid=t.txid)) AND NOT EXISTS(SELECT 1 FROM verified_pending_ids v WHERE v.txid=t.txid) LIMIT 4097")?;
+                for (count,row) in stmt.query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?,r.get::<_, Option<usize>>(1)?)))?.enumerate() {
+                    if count >= 4096 { anyhow::bail!("native_recovery_raw_conflict"); }
+                    let (id,len) = row?;
                     if verified.contains(&id) { continue; }
-                    let mut display = id.clone(); display.reverse();
-                    if created || authored.contains(&crate::web::to_hex(&display)) {
-                        let raw = raw.ok_or_else(|| anyhow::anyhow!("native_recovery_raw_conflict"))?;
-                        pending.push(saved_transaction(&raw, &id, zcash_protocol::consensus::BranchId::for_height(&self.network, evidence.target_height().into()))?);
-                    }
+                    let len = len.ok_or_else(||anyhow::anyhow!("native_recovery_raw_conflict"))?;
+                    bytes = bytes.checked_add(len).ok_or_else(||anyhow::anyhow!("native_recovery_raw_conflict"))?;
+                    if len > 2*1024*1024 || bytes > 32*1024*1024 { anyhow::bail!("native_recovery_raw_conflict"); }
+                    let raw: Vec<u8> = tx.query_row("SELECT raw FROM transactions WHERE txid=?1", [&id], |r|r.get(0))?;
+                    pending.push(saved_transaction(&raw, &id, zcash_protocol::consensus::BranchId::for_height(&self.network, evidence.target_height().into()))?);
                 }
             }
             if cancel.is_cancelled() { anyhow::bail!("native_recovery_cancelled"); }
@@ -928,6 +949,14 @@ impl NativeWallet {
                 let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let state: (u64, bool) = tx.query_row("SELECT generation,blocked FROM ext_coffer_pir_recovery_v1 WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?)))?;
                 if state != (generation, true) { anyhow::bail!("native_recovery_generation_changed"); }
+                // Verified absence overrides cached mining claims for these
+                // identity-validated wallet-authored transactions. This runs only
+                // after verified replay committed, under the final FULL writer.
+                for transaction in pending {
+                    let id = transaction.txid();
+                    tx.execute("UPDATE transactions SET block=NULL,mined_height=NULL,tx_index=NULL,confirmed_unmined_at_height=NULL WHERE txid=?1",[id.as_ref().as_slice()])?;
+                    tx.execute("UPDATE transparent_received_outputs SET max_observed_unspent_height=NULL WHERE transaction_id=(SELECT id_tx FROM transactions WHERE txid=?1)",[id.as_ref().as_slice()])?;
+                }
                 tx.execute_batch("CREATE TEMP TABLE expected_spends(pool TEXT,nf BLOB,txid BLOB);
                     CREATE TEMP TABLE expected_transparent_spends(parent BLOB,output_index INTEGER,txid BLOB);
                     CREATE TEMP TABLE expected_outputs(txid BLOB,output_index INTEGER,script BLOB,value INTEGER);
@@ -1965,6 +1994,234 @@ pub(in crate::native::wallet) mod tests {
             }
         }
     }
+    #[test]
+    fn saved_versioned_raw_uses_its_in_band_branch_after_an_activation() {
+        use zcash_primitives::transaction::{Authorized, TransactionData};
+        use zcash_protocol::consensus::BranchId;
+        let (key, _) = fixture_account();
+        let transactions = [
+            encrypted_orchard_transaction(&key, 7, [0; 32]),
+            TransactionData::<Authorized>::from_parts_v6(
+                BranchId::Nu6_3,
+                0,
+                0.into(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .freeze()
+            .unwrap(),
+        ];
+        for transaction in transactions {
+            let mut raw = Vec::new();
+            transaction.write(&mut raw).unwrap();
+            for tip_branch in [BranchId::Nu6_2, BranchId::Nu6_3, BranchId::Nu7] {
+                let parsed =
+                    saved_transaction(&raw, transaction.txid().as_ref().as_slice(), tip_branch)
+                        .unwrap();
+                assert_eq!(
+                    parsed.consensus_branch_id(),
+                    transaction.consensus_branch_id()
+                );
+                assert_eq!(parsed.txid(), transaction.txid());
+                let mut encoded = Vec::new();
+                parsed.write(&mut encoded).unwrap();
+                assert!(encoded == raw);
+            }
+        }
+    }
+
+    #[test]
+    fn verified_absence_demotes_false_mining_without_replacing_saved_intent() {
+        use crate::native::wallet::recovery_blocks::tests::fixture_prefix_with_transactions;
+        use crate::native::wallet::recovery_effects::tests::sender_encrypted_transaction;
+        use prost::Message;
+        let (dir, wallet) = wallet();
+        let (key, _) = fixture_account();
+        let stranger = crate::native::selective_scan::tests::test_ufvk(8);
+        let (bytes, chain) = fixture_prefix_with_transactions(
+            &[0x51],
+            8,
+            vec![(3, encrypted_orchard_transaction(&key, 7, [0; 32]))],
+        );
+        let compact = verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false))
+            .unwrap()
+            .compact_blocks()
+            .unwrap();
+        wallet
+            .scan_public_regtest(
+                &compact
+                    .iter()
+                    .flat_map(Message::encode_length_delimited_to_vec)
+                    .collect::<Vec<_>>(),
+                crate::native::RegtestScanSchedule {
+                    nu6_3_height: crate::regtest_nu6_3_height(),
+                    nu7_height: crate::regtest_nu7_height(),
+                },
+            )
+            .unwrap();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let nf: Vec<u8> = conn
+            .query_row("SELECT nf FROM orchard_received_notes", [], |r| r.get(0))
+            .unwrap();
+        let pending = sender_encrypted_transaction(
+            &key,
+            &stranger,
+            zip32::Scope::External,
+            nf.try_into().unwrap(),
+        );
+        let mut raw = Vec::new();
+        pending.write(&mut raw).unwrap();
+        wallet
+            .open_db()
+            .unwrap()
+            .transactionally(|wdb| {
+                decrypt_and_store_transaction(&wallet.network, wdb, &pending, None)
+            })
+            .unwrap();
+        let id = pending.txid();
+        let sent_id: i64 = conn.query_row("SELECT id FROM sent_notes WHERE transaction_id=(SELECT id_tx FROM transactions WHERE txid=?1)",[id.as_ref().as_slice()],|r|r.get(0)).unwrap();
+        conn.execute_batch("CREATE TABLE ext_native_payments_v1(id TEXT PRIMARY KEY,proposal BLOB NOT NULL,fee INTEGER NOT NULL,created INTEGER NOT NULL,expires INTEGER NOT NULL,height INTEGER NOT NULL,block_hash BLOB NOT NULL,phase TEXT NOT NULL,txids TEXT NOT NULL)").unwrap();
+        let intent = serde_json::to_string(&vec![id.to_string()]).unwrap();
+        conn.execute("INSERT INTO ext_native_payments_v1 VALUES('saved',x'00',10000,1,2,8,x'00','unknown',?1)",[&intent]).unwrap();
+        conn.execute(
+            "UPDATE orchard_received_notes SET lock_owner=x'0102',lock_expiry_height=100",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE transactions SET mined_height=9,block=NULL,tx_index=1,confirmed_unmined_at_height=NULL WHERE txid=?1",[id.as_ref().as_slice()]).unwrap();
+        let recover = || {
+            wallet.recover_regtest_pir(
+                &chain,
+                verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+                &mut Unavailable,
+                &mut Unavailable,
+                WorkLimits {
+                    max_queries: Some(1),
+                    max_private_bytes: Some(1024),
+                },
+                &RecoveryCancellation::new(),
+            )
+        };
+        let cancelled = RecoveryCancellation::new();
+        let interrupted = wallet.recover_regtest_pir_after_replay(
+            &chain,
+            verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap(),
+            &mut Unavailable,
+            &mut Unavailable,
+            WorkLimits {
+                max_queries: Some(1),
+                max_private_bytes: Some(1024),
+            },
+            &cancelled,
+            || {
+                // Explicit pending decryption cannot rewrite the old mined view
+                // before the post-replay reconciliation writer commits.
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT mined_height FROM transactions WHERE txid=?1",
+                        [id.as_ref().as_slice()],
+                        |r| r.get::<_, u32>(0)
+                    )
+                    .unwrap(),
+                    9
+                );
+                cancelled.cancel();
+            },
+        );
+        assert!(interrupted.is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT mined_height FROM transactions WHERE txid=?1",
+                [id.as_ref().as_slice()],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            9
+        );
+        let _ = recover();
+        finish_fixture_recovery(&wallet, &bytes, &chain);
+        NativeWallet::open_offline(dir.path())
+            .unwrap()
+            .ensure_pir_recovery_ready()
+            .unwrap();
+        let mined: (Option<u32>,Option<u32>,Option<u32>,Option<u32>) = conn.query_row("SELECT block,mined_height,tx_index,confirmed_unmined_at_height FROM transactions WHERE txid=?1",[id.as_ref().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        assert_eq!(mined, (None, None, None, None));
+        assert_eq!(conn.query_row("SELECT id FROM sent_notes WHERE transaction_id=(SELECT id_tx FROM transactions WHERE txid=?1)",[id.as_ref().as_slice()],|r|r.get::<_,i64>(0)).unwrap(),sent_id);
+        assert!(
+            conn.query_row(
+                "SELECT raw FROM transactions WHERE txid=?1",
+                [id.as_ref().as_slice()],
+                |r| r.get::<_, Vec<u8>>(0)
+            )
+            .unwrap()
+                == raw
+        );
+        assert!(
+            conn.query_row(
+                "SELECT phase||':'||txids FROM ext_native_payments_v1 WHERE id='saved'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap()
+                == format!("unknown:{intent}")
+        );
+        assert_eq!(conn.query_row("SELECT count(*) FROM orchard_received_notes WHERE lock_owner=x'0102' AND lock_expiry_height=100",[],|r|r.get::<_,u32>(0)).unwrap(),1);
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM orchard_received_note_spends",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            1
+        );
+        // Invalid saved identity must not demote metadata or alter an unresolved intent.
+        let mut malformed = raw;
+        malformed.push(0x42);
+        conn.execute(
+            "UPDATE transactions SET raw=?1,mined_height=9,block=NULL,tx_index=1 WHERE txid=?2",
+            rusqlite::params![malformed, id.as_ref().as_slice()],
+        )
+        .unwrap();
+        assert!(recover()
+            .unwrap_err()
+            .to_string()
+            .contains("native_recovery_raw_conflict"));
+        assert_eq!(
+            conn.query_row(
+                "SELECT mined_height FROM transactions WHERE txid=?1",
+                [id.as_ref().as_slice()],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            9
+        );
+        assert!(
+            conn.query_row(
+                "SELECT raw FROM transactions WHERE txid=?1",
+                [id.as_ref().as_slice()],
+                |r| r.get::<_, Vec<u8>>(0)
+            )
+            .unwrap()
+                == malformed
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT phase FROM ext_native_payments_v1 WHERE id='saved'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "unknown"
+        );
+        assert!(NativeWallet::open_offline(dir.path())
+            .unwrap()
+            .ensure_pir_recovery_ready()
+            .is_err());
+    }
+
     #[test]
     fn canonical_replay_rebuilds_only_actual_saved_pending_reservations_and_refuses_malformed_intents(
     ) {

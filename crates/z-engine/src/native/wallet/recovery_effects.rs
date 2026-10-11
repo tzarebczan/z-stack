@@ -786,7 +786,7 @@ fn sent_effect_identity(
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::native::wallet) mod tests {
     use super::*;
     use crate::native::wallet::{
         pir::recovery::tests::encrypted_orchard_transaction,
@@ -1067,7 +1067,7 @@ mod tests {
         assert!(identity(&conn).is_err());
     }
 
-    fn sender_encrypted_transaction(
+    pub(in crate::native::wallet) fn sender_encrypted_transaction(
         sender: &UnifiedFullViewingKey,
         recipient: &UnifiedFullViewingKey,
         scope: Scope,
