@@ -83,6 +83,27 @@ impl NativeWallet {
         account_index: u32,
         before_publish: impl FnOnce(&Self) -> Result<()>,
     ) -> Result<(Self, String)> {
+        Self::initialize_regtest_offline_before_enrollment(
+            root,
+            mnemonic,
+            chain,
+            auth,
+            account_index,
+            (|_| Ok(()), before_publish),
+        )
+    }
+
+    fn initialize_regtest_offline_before_enrollment(
+        root: impl Into<PathBuf>,
+        mnemonic: &Mnemonic,
+        chain: &RegtestAcceptedChain,
+        auth: SeedAuth,
+        account_index: u32,
+        (before_enrollment, before_publish): (
+            impl FnOnce(&Self) -> Result<()>,
+            impl FnOnce(&Self) -> Result<()>,
+        ),
+    ) -> Result<(Self, String)> {
         auth.validate_for_save()?;
         let zip_account = Zip32AccountId::try_from(account_index)
             .map_err(|_| EngineError::Message("native_recovery_account_invalid".into()))?;
@@ -102,7 +123,7 @@ impl NativeWallet {
             ),
             Some(chain.target_height().into()),
         );
-        let paths = WalletPaths::new(root);
+        let mut paths = WalletPaths::new(root);
         let store = SeedStore::new(&paths.root);
         let retained_seed = store.exists();
         if paths.data_db.exists() && !retained_seed {
@@ -125,14 +146,84 @@ impl NativeWallet {
                 auth.windows_credential,
             )?;
         }
+        // Keep every pre-Pending database outside the wallet directory. A crash here
+        // leaves a seed-only setup, never a markerless live database that resembles
+        // an ordinary wallet whose metadata was lost.
+        let destination = paths.data_db.clone();
+        let mut existing_lease = None;
+        let staging = if destination.exists() {
+            existing_lease = Some(database_lease::exclusive(&destination)?);
+            if paths.meta_path.exists() || paths.reset_backup().exists() {
+                return Err(EngineError::AlreadyExists(paths.root.display().to_string()));
+            }
+            require_initial_recovery_setup(&destination)?;
+            None
+        } else {
+            let parent = paths
+                .root
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let staging = tempfile::Builder::new()
+                .prefix(".z-engine-bootstrap-")
+                .tempdir_in(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(staging.path(), std::fs::Permissions::from_mode(0o700))?;
+            }
+            paths.data_db = staging.path().join("data.sqlite");
+            Some(staging)
+        };
         let seed = SecretVec::new(mnemonic.to_seed("").to_vec());
-        let mut db = open_wallet_db(&paths.data_db, ZNetwork::Regtest)?;
-        init_wallet_db(&mut db, Some(SecretVec::new(seed.expose_secret().clone())))
-            .map_err(|_| EngineError::Message("native_recovery_setup_failed".into()))?;
-        let (_, usk) = db
-            .import_account_hd("primary", &seed, zip_account, &birthday, Some("z-stack"))
-            .map_err(|_| EngineError::Message("native_recovery_setup_failed".into()))?;
-        let ufvk = usk.to_unified_full_viewing_key();
+        let mut db = open_wallet_db_with_durability(&paths.data_db, ZNetwork::Regtest, true)?;
+        let ufvk = if staging.is_some() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&paths.data_db, std::fs::Permissions::from_mode(0o600))?;
+            }
+            init_wallet_db(&mut db, Some(SecretVec::new(seed.expose_secret().clone())))
+                .map_err(|_| EngineError::Message("native_recovery_setup_failed".into()))?;
+            let (_, usk) = db
+                .import_account_hd("primary", &seed, zip_account, &birthday, Some("z-stack"))
+                .map_err(|_| EngineError::Message("native_recovery_setup_failed".into()))?;
+            usk.to_unified_full_viewing_key()
+        } else {
+            let refused = || EngineError::Message("native_recovery_setup_resume_refused".into());
+            let expected = UnifiedSpendingKey::from_seed(
+                &ZNetwork::Regtest,
+                seed.expose_secret(),
+                zip_account,
+            )
+            .map_err(|_| refused())?
+            .to_unified_full_viewing_key();
+            let accounts = db.get_account_ids().map_err(|_| refused())?;
+            if accounts.len() != 1
+                || db
+                    .get_account_birthday(accounts[0])
+                    .map_err(|_| refused())?
+                    != BlockHeight::from_u32(1)
+            {
+                return Err(refused());
+            }
+            if !db
+                .validate_seed(accounts[0], &seed)
+                .map_err(|_| refused())?
+            {
+                return Err(refused());
+            }
+            let account = db
+                .get_account(accounts[0])
+                .map_err(|_| refused())?
+                .ok_or_else(refused)?;
+            if account.ufvk().map(|key| key.encode(&ZNetwork::Regtest))
+                != Some(expected.encode(&ZNetwork::Regtest))
+            {
+                return Err(refused());
+            }
+            expected
+        };
         drop(db);
         let address = ufvk
             .default_address(UnifiedAddressRequest::AllAvailableKeys)
@@ -152,24 +243,38 @@ impl NativeWallet {
             os_unlock: auth.windows_credential,
             allow_deep_sync: false,
         };
-        let wallet = Self {
+        let mut wallet = Self {
             paths,
             network_access: false,
             network: ZNetwork::Regtest,
             server,
             meta,
         };
-        wallet.begin_regtest_pir_recovery(chain, &RecoveryCancellation::new())?;
+        before_enrollment(&wallet)?;
+        if staging.is_some() {
+            wallet.begin_regtest_pir_recovery(chain, &RecoveryCancellation::new())?;
+        }
         Self::checkpoint_sqlite(&wallet.paths.data_db)?;
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&wallet.paths.data_db)?
             .sync_all()?;
+        // All SQLite handles are closed and its WAL is checkpointed. A hard link
+        // publishes the complete file atomically and refuses an existing destination.
+        // The private staging directory is on the same filesystem as the wallet.
+        if let Some(staging) = &staging {
+            #[cfg(unix)]
+            std::fs::File::open(staging.path())?.sync_all()?;
+            std::fs::hard_link(&wallet.paths.data_db, &destination)?;
+        }
         #[cfg(unix)]
         std::fs::File::open(&wallet.paths.root)?.sync_all()?;
+        wallet.paths.data_db = destination;
+        drop(staging);
         before_publish(&wallet)?;
         write_meta(&wallet.paths.meta_path, &wallet.meta)?;
+        drop(existing_lease);
         Ok((wallet, address))
     }
 }
@@ -228,6 +333,197 @@ mod tests {
             std::io::ErrorKind::WouldBlock
         );
     }
+    #[test]
+    fn interrupted_account_import_stays_seed_only_and_public_create_reuses_authenticated_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, chain) = fixture_with_script(&[0x51]);
+        let words = crate::keys::REGTEST_FAUCET_MNEMONIC;
+        let mnemonic = Mnemonic::parse_normalized(words).unwrap();
+        let password = "fixture interrupted account import passphrase";
+        let failed = NativeWallet::initialize_regtest_offline_before_enrollment(
+            dir.path(),
+            &mnemonic,
+            &chain,
+            SeedAuth::passphrase(password),
+            0,
+            (
+                |wallet| {
+                    assert!(!dir.path().join("data.sqlite").exists());
+                    assert!(!wallet.paths.meta_path.exists());
+                    assert!(!has_recovery_marker(&wallet.paths.data_db).unwrap());
+                    let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+                    let accounts: usize = conn
+                        .query_row("SELECT count(*) FROM accounts", [], |row| row.get(0))
+                        .unwrap();
+                    assert_eq!(accounts, 1);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        assert_eq!(
+                            std::fs::metadata(&wallet.paths.data_db)
+                                .unwrap()
+                                .permissions()
+                                .mode()
+                                & 0o777,
+                            0o600
+                        );
+                        assert_eq!(
+                            std::fs::metadata(wallet.paths.data_db.parent().unwrap())
+                                .unwrap()
+                                .permissions()
+                                .mode()
+                                & 0o777,
+                            0o700
+                        );
+                    }
+                    Err(EngineError::Message("fixture_import_interrupted".into()))
+                },
+                |_| Ok(()),
+            ),
+        );
+        assert!(
+            matches!(failed, Err(EngineError::Message(message)) if message == "fixture_import_interrupted")
+        );
+        assert!(!dir.path().join("data.sqlite").exists());
+        assert!(!dir.path().join("wallet.json").exists());
+        let encrypted = std::fs::read(dir.path().join("seed.enc")).unwrap();
+        assert!(NativeWallet::create_regtest_offline(
+            dir.path(),
+            &chain,
+            SeedAuth::passphrase("wrong interrupted password"),
+            0
+        )
+        .is_err());
+        assert!(std::fs::read(dir.path().join("seed.enc")).unwrap() == encrypted);
+        let (wallet, recovered) = NativeWallet::create_regtest_offline(
+            dir.path(),
+            &chain,
+            SeedAuth::passphrase(password),
+            0,
+        )
+        .unwrap();
+        assert!(recovered.mnemonic == words);
+        assert!(std::fs::read(dir.path().join("seed.enc")).unwrap() == encrypted);
+        assert!(wallet.ensure_recovery_selection_ready().is_err());
+        assert!(NativeWallet::open_offline(dir.path())
+            .unwrap()
+            .ensure_recovery_selection_ready()
+            .is_err());
+    }
+
+    #[test]
+    fn bootstrap_publication_never_overwrites_a_markerless_imported_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, chain) = fixture_with_script(&[0x51]);
+        let mnemonic = Mnemonic::parse_normalized(crate::keys::REGTEST_FAUCET_MNEMONIC).unwrap();
+        let password = "fixture no clobber account import passphrase";
+        let mut retained = Vec::new();
+        let failed = NativeWallet::initialize_regtest_offline_before_enrollment(
+            dir.path(),
+            &mnemonic,
+            &chain,
+            SeedAuth::passphrase(password),
+            0,
+            (
+                |wallet| {
+                    NativeWallet::checkpoint_sqlite(&wallet.paths.data_db).unwrap();
+                    std::fs::copy(&wallet.paths.data_db, dir.path().join("data.sqlite")).unwrap();
+                    retained = std::fs::read(dir.path().join("data.sqlite")).unwrap();
+                    Ok(())
+                },
+                |_| Ok(()),
+            ),
+        );
+        assert!(failed.is_err());
+        assert!(!dir.path().join("wallet.json").exists());
+        assert!(std::fs::read(dir.path().join("data.sqlite")).unwrap() == retained);
+        let encrypted = std::fs::read(dir.path().join("seed.enc")).unwrap();
+        let retried = NativeWallet::create_regtest_offline(
+            dir.path(),
+            &chain,
+            SeedAuth::passphrase(password),
+            0,
+        );
+        assert!(
+            matches!(retried, Err(EngineError::Message(message)) if message == "native_recovery_setup_resume_refused")
+        );
+        assert!(std::fs::read(dir.path().join("data.sqlite")).unwrap() == retained);
+        assert!(std::fs::read(dir.path().join("seed.enc")).unwrap() == encrypted);
+    }
+
+    #[test]
+    fn repeated_interrupted_pending_resume_retains_the_live_database_and_same_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, chain) = fixture_with_script(&[0x51]);
+        let password = "fixture repeated interrupted pending passphrase";
+        let (wallet, created) = NativeWallet::create_regtest_offline(
+            dir.path(),
+            &chain,
+            SeedAuth::passphrase(password),
+            0,
+        )
+        .unwrap();
+        std::fs::remove_file(&wallet.paths.meta_path).unwrap();
+        let encrypted = std::fs::read(dir.path().join("seed.enc")).unwrap();
+        let database = std::fs::read(&wallet.paths.data_db).unwrap();
+        let mismatched_account = NativeWallet::create_regtest_offline(
+            dir.path(),
+            &chain,
+            SeedAuth::passphrase(password),
+            1,
+        );
+        assert!(
+            matches!(mismatched_account, Err(EngineError::Message(message)) if message == "native_recovery_setup_resume_refused")
+        );
+        assert!(std::fs::read(&wallet.paths.data_db).unwrap() == database);
+        let mnemonic = Mnemonic::parse_normalized(&created.mnemonic).unwrap();
+        for _ in 0..2 {
+            let interrupted = NativeWallet::initialize_regtest_offline(
+                dir.path(),
+                &mnemonic,
+                &chain,
+                SeedAuth::passphrase(password),
+                0,
+                |_| Err(EngineError::Message("fixture_retry_interrupted".into())),
+            );
+            assert!(
+                matches!(interrupted, Err(EngineError::Message(message)) if message == "fixture_retry_interrupted")
+            );
+            assert!(wallet.paths.data_db.exists());
+            assert!(!wallet.paths.meta_path.exists());
+            assert!(std::fs::read(dir.path().join("seed.enc")).unwrap() == encrypted);
+            assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("incomplete")));
+            NativeWallet::validate_regtest_offline_setup_resume(dir.path()).unwrap();
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            let generation: u64 = conn
+                .query_row(
+                    "SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(generation, 1);
+        }
+        let (resumed, recovered) = NativeWallet::create_regtest_offline(
+            dir.path(),
+            &chain,
+            SeedAuth::passphrase(password),
+            0,
+        )
+        .unwrap();
+        assert!(recovered.mnemonic == created.mnemonic);
+        assert!(std::fs::read(dir.path().join("seed.enc")).unwrap() == encrypted);
+        assert!(resumed.ensure_recovery_selection_ready().is_err());
+        assert!(NativeWallet::open_offline(dir.path())
+            .unwrap()
+            .ensure_recovery_selection_ready()
+            .is_err());
+    }
+
     #[test]
     fn incomplete_seed_setup_cannot_overwrite_authentication_material() {
         let dir = tempfile::tempdir().unwrap();
@@ -351,6 +647,7 @@ mod tests {
             drop(conn);
             NativeWallet::checkpoint_sqlite(&wallet.paths.data_db).unwrap();
             std::fs::remove_file(&wallet.paths.meta_path).unwrap();
+            drop(database_lease::shared(&wallet.paths.data_db).unwrap());
             let read_guard = rusqlite::Connection::open_with_flags(
                 &wallet.paths.data_db,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

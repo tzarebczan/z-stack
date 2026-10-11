@@ -456,6 +456,9 @@ impl WalletPaths {
                 #[cfg(feature = "native-pir")]
                 NewWalletProfile::VerifiedRegtestRecovery => {
                     require_initial_recovery_setup(&self.data_db)?;
+                    // A retained initial Pending database is already enrolled.
+                    // Preserve it across repeated pre-metadata interruptions.
+                    return Ok(());
                 }
             }
             let stamp = std::time::SystemTime::now()
