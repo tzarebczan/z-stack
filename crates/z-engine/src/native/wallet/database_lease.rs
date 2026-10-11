@@ -12,7 +12,6 @@ fn open(path: &Path) -> Result<File> {
         .open(path.with_extension("sqlite.ownership-lock"))
         .map_err(|_| EngineError::Message("native_pir_database_busy".into()))
 }
-#[cfg(feature = "native-pir")]
 pub(super) fn shared(path: &Path) -> Result<File> {
     let file = open(path)?;
     file.try_lock_shared()

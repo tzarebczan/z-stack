@@ -143,3 +143,6 @@ and below-confirmation outputs as well as spendable ones. A balance read returns
 `SyncRequired` while maturity metadata remains unresolved; failed or timed-out
 classification retains validated rows for the next sync. The network phase is
 bounded to 30 seconds and 256 candidates per call.
+Balance reads hold a shared database ownership lease across maturity checks and
+the native summary, returning `SyncRequired` while an ordinary scanner owns the
+exclusive lease.

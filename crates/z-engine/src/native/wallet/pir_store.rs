@@ -5,7 +5,9 @@ use super::pir::{
     native_scope_in_transaction, NativeScanSnapshot, NativeScope, PirDiscoveryReport,
 };
 use super::*;
-use rusqlite::{Connection, OptionalExtension};
+#[cfg(test)]
+use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use transparent_events::TransparentEvent;

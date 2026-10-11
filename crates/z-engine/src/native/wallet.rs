@@ -1989,6 +1989,10 @@ impl NativeWallet {
     }
 
     pub fn balance(&self) -> Result<Balance> {
+        // Ordinary sync holds exclusive ownership through UTXO classification.
+        // Keep its in-flight unknown funding out of this complete balance read.
+        let _lease =
+            database_lease::shared(&self.paths.data_db).map_err(|_| EngineError::SyncRequired)?;
         let db = self.open_db()?;
         #[cfg(feature = "transparent-inputs")]
         if let Some(tip) = db
@@ -4045,6 +4049,85 @@ mod tests {
             server: LightServer::parse(&meta.server, ZNetwork::Regtest),
             meta,
         }
+    }
+
+    #[test]
+    fn public_balance_reader_refuses_an_exclusive_writer_then_resumes() {
+        use prost::Message;
+        use zcash_client_backend::proto::compact_formats::ChainMetadata;
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = fixture_wallet(dir.path());
+        let (key, _) = fixture_account();
+        let mut genesis = crate::web::from_hex(
+            "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327",
+        )
+        .unwrap();
+        genesis.reverse();
+        wallet
+            .replace_scan_db(
+                &key,
+                &AccountBirthday::from_parts(
+                    zcash_client_backend::data_api::chain::ChainState::empty(
+                        0.into(),
+                        zcash_primitives::block::BlockHash::from_slice(&genesis),
+                    ),
+                    None,
+                ),
+            )
+            .unwrap();
+        let mut previous = genesis;
+        let mut size = 0;
+        let mut publication = Vec::new();
+        let mut prefix = Vec::new();
+        for height in 1..=9 {
+            let mut block = crate::native::selective_scan::tests::compact_at(height);
+            block.prev_hash = previous;
+            if height == 3 {
+                crate::native::selective_scan::tests::pay_orchard(&mut block, &key);
+            }
+            size += block
+                .vtx
+                .iter()
+                .map(|tx| tx.actions.len() as u32)
+                .sum::<u32>();
+            block.chain_metadata = Some(ChainMetadata {
+                sapling_commitment_tree_size: 0,
+                orchard_commitment_tree_size: size,
+                ironwood_commitment_tree_size: 0,
+            });
+            previous = block.hash.clone();
+            block.encode_length_delimited(&mut publication).unwrap();
+            if height == 8 {
+                prefix = publication.clone();
+            }
+        }
+        let schedule = RegtestScanSchedule {
+            nu6_3_height: crate::regtest_nu6_3_height(),
+            nu7_height: crate::regtest_nu7_height(),
+        };
+        wallet.scan_public_regtest(&prefix, schedule).unwrap();
+        let writer = NativeWallet::open(dir.path()).unwrap();
+        let reader = NativeWallet::open_offline(dir.path()).unwrap();
+        let baseline = reader.balance().unwrap();
+        assert_eq!(baseline.orchard_available, 50_000);
+        let exclusive = writer.ordinary_scan_lease().unwrap();
+        writer
+            .scan_public_regtest_incremental(&publication, schedule)
+            .unwrap();
+        assert!(matches!(reader.balance(), Err(EngineError::SyncRequired)));
+        drop(exclusive);
+        assert_eq!(reader.scanned_height().unwrap(), 9);
+        let resumed = reader.balance().unwrap();
+        assert_eq!(resumed.total_available, baseline.total_available);
+        assert_eq!(resumed.total_pending, baseline.total_pending);
+        // Readers coexist, including canonical recovery's shared ownership.
+        let shared = database_lease::shared(&writer.paths.data_db).unwrap();
+        assert_eq!(
+            reader.balance().unwrap().total_available,
+            baseline.total_available
+        );
+        drop(shared);
+        assert!(writer.ordinary_scan_lease().is_ok());
     }
 
     #[tokio::test]
