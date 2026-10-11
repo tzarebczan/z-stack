@@ -2,7 +2,7 @@
 // Build a package's dist/: JS + .d.ts from src/ with tsc. For the SDK, also
 // copy the WASM artifacts and point worker URLs at the emitted .js files.
 //
-//   node scripts/build-package.mjs <core|passkey|sdk|base>
+//   node scripts/build-package.mjs <core|passkey|sdk|base|gift-cards>
 import { basePackageInputs } from "./base-package-inputs.mjs";
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -12,20 +12,22 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const name = process.argv[2];
-if (!["core", "passkey", "sdk", "base"].includes(name ?? "")) {
-  console.error("usage: node scripts/build-package.mjs <core|passkey|sdk|base>");
+if (!["core", "passkey", "sdk", "base", "gift-cards"].includes(name ?? "")) {
+  console.error("usage: node scripts/build-package.mjs <core|passkey|sdk|base|gift-cards>");
   process.exit(2);
 }
 const pkg = join(root, "packages", name);
 const dist = join(pkg, "dist");
 
-if (name === "sdk") {
-  for (const dep of ["core", "passkey"]) {
+if (name === "sdk" || name === "gift-cards") {
+  for (const dep of name === "sdk" ? ["core", "passkey"] : ["sdk"]) {
     if (!existsSync(join(root, "packages", dep, "dist", "index.d.ts"))) {
       console.error(`missing packages/${dep}/dist/index.d.ts: run \`pnpm --filter @z-stack/${dep} build\` first`);
       process.exit(1);
     }
   }
+}
+if (name === "sdk") {
   for (const dir of ["generated", "generated-mt"]) {
     for (const file of ["z_wasm.js", "z_wasm_bg.wasm", "integrity.json"]) {
       if (!existsSync(join(pkg, "src", dir, file))) {
@@ -105,7 +107,7 @@ for (const file of emitted(dist)) {
   const next = text.replace(
     /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(["'])(\.{1,2}\/[^"']+?)\2/g,
     (_m, lead, quote, spec) => `${lead}${quote}${qualify(file, spec)}${quote}`,
-  );
+  ).replace(/(new URL\(["']\.\/[\w.-]+\.worker)\.ts(["'])/g, "$1.js$2");
   if (next !== text) writeFileSync(file, next);
 }
 

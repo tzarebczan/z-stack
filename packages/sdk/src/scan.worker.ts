@@ -1,5 +1,6 @@
 /// Compact-block scan worker — MT/ST wasm lives here so the UI thread stays free.
 
+import { minimumConfirmations } from "./confirmation-policy";
 import { allowMissingBuiltWasm, verifyWasmAt } from "./integrity";
 import { runHardware, type HardwareAction, type HardwareStatics, type HardwareWalletHandle } from "./hardware-ops";
 import type { EngineLoadProgress } from "./engine-progress";
@@ -41,6 +42,7 @@ type Wallet = HardwareWalletHandle & {
   applySharedMemos?: (json: string) => number;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
+  rewindToChecked?: (height: number) => number;
   resetScan?: () => void;
   rescanFrom?: (birthday: number) => void;
   recomputePools?: () => void;
@@ -49,15 +51,17 @@ type Wallet = HardwareWalletHandle & {
   ) => void;
   nextUnifiedAddress: () => string;
   attachSeed?: (mnemonic: string) => void;
-  estimateFee?: (to: string, amountZec: string, memo?: string) => string;
+  balanceWithConfirmations?: (minConfirmations: number) => string;
+  estimateFee?: (to: string, amountZec: string, memo?: string, minConfirmations?: number) => string;
   estimateTransparentFee?: (to: string, amountZec: string) => string;
   proveTransparentSend?: (mnemonic: string, to: string, amountZec: string, maxFeeZat?: string) => string;
   maxSend?: (to?: string) => string;
-  proveSend?: (mnemonic: string, to: string, amountZec: string, memo?: string) => string;
+  proveSend?: (mnemonic: string, to: string, amountZec: string, memo?: string, maxFeeZat?: string, minConfirmations?: number) => string;
   proveShield?: (mnemonic: string, thresholdZat: number) => string;
   snapshotJson: (server: string) => string;
   toSnapshot: () => Uint8Array;
   history: (limit: number) => string;
+  historyQuery?: (limit: number, status: string, txid: string) => string;
   pendingRawTxs?: () => string;
   scannedHeight: () => number;
   birthday: () => number;
@@ -90,9 +94,11 @@ type Req = {
   height?: number;
   server?: string;
   limit?: number;
+  status?: string;
   to?: string;
   amountZec?: string;
   maxFeeZat?: string;
+  minConfirmations?: number;
   memo?: string;
   kind?: "send" | "sendTransparent" | "shield";
   thresholdZat?: number;
@@ -319,6 +325,13 @@ async function handle(msg: Req): Promise<void> {
         post({ id: msg.id, height: h });
         return;
       }
+      case "rewindToChecked": {
+        if (!Number.isInteger(msg.height) || msg.height! < 0 || msg.height! > 0xffffffff) throw new Error("invalid rewind height");
+        const w = needWallet();
+        if (typeof w.rewindToChecked !== "function") throw new Error("this wasm build cannot verify a rewind checkpoint");
+        post({ id: msg.id, height: w.rewindToChecked(msg.height!) });
+        return;
+      }
       case "rescanFrom": {
         const w = needWallet();
         if (!w.rescanFrom) throw new Error("this wasm build cannot rescan an earlier birthday");
@@ -358,10 +371,20 @@ async function handle(msg: Req): Promise<void> {
         post({ id: msg.id, ok: true });
         return;
       }
-      case "estimateFee": {
+      case "balanceWithConfirmations": {
+        const minConfirmations = minimumConfirmations(msg.minConfirmations);
+        if (minConfirmations === undefined) throw new Error("confirmation policy is required");
         const w = needWallet();
+        if (typeof w.balanceWithConfirmations !== "function") throw new Error("this wasm build cannot enforce confirmation policies");
+        post({ id: msg.id, json: w.balanceWithConfirmations(minConfirmations) });
+        return;
+      }
+      case "estimateFee": {
+        const minConfirmations = minimumConfirmations(msg.minConfirmations);
+        const w = needWallet();
+        if (minConfirmations !== undefined && typeof w.balanceWithConfirmations !== "function") throw new Error("this wasm build cannot enforce confirmation policies");
         if (typeof w.estimateFee !== "function") throw new Error("this wasm build cannot estimate fees");
-        post({ id: msg.id, json: w.estimateFee(msg.to ?? "", msg.amountZec ?? "", msg.memo) });
+        post({ id: msg.id, json: w.estimateFee(msg.to ?? "", msg.amountZec ?? "", msg.memo, minConfirmations) });
         return;
       }
       case "supportsTransparentSend": {
@@ -386,11 +409,13 @@ async function handle(msg: Req): Promise<void> {
         // the multicore build, the proof runs on the Rayon pool. The wallet
         // records the pending transaction, as a prove-worker round trip did.
         const w = needWallet();
+        const minConfirmations = minimumConfirmations(msg.minConfirmations);
+        if (minConfirmations !== undefined && (msg.kind !== "send" || typeof w.balanceWithConfirmations !== "function")) throw new Error("this wasm build cannot enforce confirmation policies for this payment");
         const out = msg.kind === "shield"
           ? w.proveShield?.(msg.mnemonic ?? "", msg.thresholdZat ?? 100_000)
           : msg.kind === "sendTransparent"
             ? w.proveTransparentSend?.(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.maxFeeZat)
-          : w.proveSend?.(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.memo);
+          : w.proveSend?.(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.memo, msg.maxFeeZat, minConfirmations);
         if (typeof out !== "string") throw new Error("this wasm build cannot prove");
         const { hex, txid } = JSON.parse(out) as { hex?: string; txid?: string };
         if (!hex) throw new Error("prove returned no hex");
@@ -426,6 +451,12 @@ async function handle(msg: Req): Promise<void> {
       }
       case "memoEnhancementTxids": {
         post({ id: msg.id, json: needWallet().memoEnhancementTxids?.(msg.limit ?? 40) ?? null });
+        return;
+      }
+      case "historyQuery": {
+        const w = needWallet();
+        if (typeof w.historyQuery !== "function") throw new Error("this wasm build cannot query complete transaction history");
+        post({ id: msg.id, json: w.historyQuery(msg.limit ?? 50, msg.status ?? "", msg.txid ?? "") });
         return;
       }
       case "history": {

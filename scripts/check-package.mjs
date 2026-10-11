@@ -9,11 +9,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertReleaseVersions } from "./release-versions.mjs";
 import { engineSourceHash } from "./wasm-build-inputs.mjs";
+import { assertWasmVariant } from "./wasm-build-variant.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 assertReleaseVersions(root);
 const name = process.argv[2];
-assert.ok(["core", "passkey", "sdk", "base"].includes(name), "expected core, passkey, sdk or base");
+assert.ok(["core", "passkey", "sdk", "base", "gift-cards"].includes(name), "expected core, passkey, sdk, base or gift-cards");
 const dir = join(root, "packages", name);
 const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
 for (const entry of Object.values(pkg.publishConfig.exports)) {
@@ -28,6 +29,18 @@ for (const [target, source] of [["LICENSE", "LICENSE"], ["NOTICE", "NOTICE"],
 }
 assert.equal(pkg.license, "Apache-2.0", "distribution license must match the approved project license");
 assert.equal(pkg.private, true, "publication remains a separate, intentional release step");
+if (name === "gift-cards") {
+  assert.deepEqual(Object.keys(pkg.dependencies ?? {}), [], "gift-cards root must have no runtime dependencies");
+  assert.deepEqual(Object.keys(pkg.peerDependencies ?? {}), ["@z-stack/sdk"], "browser SDK must be the only peer");
+  assert.equal(pkg.peerDependencies["@z-stack/sdk"], pkg.version, "SDK peer must match the gift-cards release");
+  assert.equal(pkg.peerDependenciesMeta?.["@z-stack/sdk"]?.optional, true, "pure consumers must not install the SDK");
+  assert.ok(existsSync(join(dir, "dist/browser.js")), "missing gift-cards browser adapter");
+  const workers = readdirSync(join(dir, "dist")).filter(file => file.endsWith(".worker.js"));
+  assert.ok(workers.length > 0, "missing isolated gift wallet worker");
+  const browserFiles = readdirSync(join(dir, "dist")).filter(file => file.endsWith(".js")).map(file => readFileSync(join(dir, "dist", file), "utf8")).join("\n");
+  for (const worker of workers) assert.ok(browserFiles.includes(`./${worker}`), `missing emitted URL for ${worker}`);
+  assert.ok(!/new URL\(["'][^"']*\.worker\.ts["']/.test(browserFiles), "gift worker URL points to unpublished source");
+}
 if (name === "base") {
   assert.equal(JSON.parse(readFileSync(join(dir, "dist/build-inputs.json"))).sha256, basePackageInputs(dir), "Base sources/config changed; rebuild before packing");
   const legal = spawnSync(process.execPath, [join(root, "scripts/base-license-inventory.mjs"), "--check"], { stdio: "inherit" });
@@ -46,6 +59,9 @@ if (name === "sdk") {
     const wasm = readFileSync(join(generated, "z_wasm_bg.wasm"));
     assert.ok(wasm.byteLength > 1_000_000, "refusing a fixture/stub WASM artifact");
     const integrity = JSON.parse(readFileSync(join(generated, "integrity.json"), "utf8"));
+    const mode = kind === "generated" ? "single-thread" : "multi-thread";
+    assert.equal(integrity.mode, mode, `${kind} mode mismatch`);
+    assertWasmVariant(wasm, mode);
     assert.equal(createHash("sha256").update(wasm).digest("hex"), integrity.sha256, `${kind} integrity mismatch`);
     assert.equal(integrity.sourceSha256, engineSourceHash(), `${kind} source fingerprint is stale; run pnpm build:sdk`);
   }

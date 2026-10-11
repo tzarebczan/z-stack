@@ -1,5 +1,6 @@
 /// ST wasm prove worker — keeps the UI thread free during orchard proving / keygen.
 
+import { minimumConfirmations } from "./confirmation-policy";
 import { allowMissingBuiltWasm, verifyWasmAt } from "./integrity";
 
 import init, * as glue from "./generated/z_wasm.js";
@@ -21,6 +22,7 @@ type Req = {
   to?: string;
   amountZec?: string;
   maxFeeZat?: string;
+  minConfirmations?: number;
   memo?: string;
   thresholdZat?: number;
 };
@@ -79,9 +81,11 @@ async function handle(msg: Req): Promise<void> {
     if (!msg.snapshot) throw new Error("prove worker needs a wallet snapshot");
     const w = WasmWallet.fromSnapshot(new Uint8Array(msg.snapshot));
     try {
+      const minConfirmations = minimumConfirmations(msg.minConfirmations);
+      if (minConfirmations !== undefined && (msg.kind !== "send" || typeof w.balanceWithConfirmations !== "function")) throw new Error("this wasm build cannot enforce confirmation policies for this payment");
       const out: { hex?: string; txid?: string } = JSON.parse(
         msg.kind === "send"
-          ? w.proveSend(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.memo)
+          ? w.proveSend(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.memo, msg.maxFeeZat, minConfirmations)
           : msg.kind === "sendTransparent"
             ? w.proveTransparentSend(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.maxFeeZat)
           : w.proveShield(msg.mnemonic ?? "", msg.thresholdZat ?? 100_000),

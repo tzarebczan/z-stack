@@ -41,3 +41,7 @@ and need their own artifact-specific notices and source-availability check.
 Rust crate publication also needs a separate review of workspace patches.
 
 The optional `@z-stack/base` package has a separate [runtime inventory](../licenses/base/dependencies.json) and [retained notices](../licenses/base/LICENSES.txt). Regenerate with `node scripts/base-license-inventory.mjs` and verify with `--check`; its archive does not ship the WASM inventory.
+
+The optional `@z-stack/gift-cards` root has no runtime dependencies. Its browser
+adapter uses the matching SDK as an optional peer and retains the same project
+notices and WASM inventory. It introduces no separate cryptography dependency.

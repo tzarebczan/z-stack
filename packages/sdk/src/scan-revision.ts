@@ -3,7 +3,7 @@ import type { ScanSession } from "./scan-host";
 // New operations are conservatively treated as mutations. These reads must
 // remain side-effect free with respect to the persisted Rust wallet state.
 const READS = new Set<keyof ScanSession>([
-  "snapshotJson", "toSnapshot", "persistenceSnapshot", "history", "pendingRawTxs",
+  "snapshotJson", "toSnapshot", "persistenceSnapshot", "history", "historyQuery", "balanceWithConfirmations", "pendingRawTxs",
   "scannedHeight", "birthday", "nextHeight", "treesReady", "sinsemillaLive",
   "subtreeRootCounts", "subtreeRootsStart", "transparentAddress",
   "supportsTransparentBlocks", "supportsTransparentSend", "memoEnhancementTxids", "warmProvingKey",

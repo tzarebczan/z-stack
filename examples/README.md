@@ -16,6 +16,21 @@ integration contracts. Applications own their UI and any iframe integration.
 
 The [Base-only wallet](base-wallet/README.md) uses the optional `@z-stack/base` archive; it does not install Zcash packages or WASM.
 
+## Add the gift-card API
+
+Pack the optional package and select it when scaffolding a Zcash wallet template:
+
+```sh
+pnpm pack:sdk
+pnpm pack:gift-cards
+node scripts/create-example.mjs browser-wallet /path/to/gift-wallet --with-gift-cards --install
+```
+
+This installs the API dependency. Add create/redeem controls with an encrypted
+application vault and explicit payment authorization using the
+[gift-card guide](../docs/GIFT-CARDS.md). Ordinary examples remain independent of
+gift cards. The same flag works with the Next.js, React, passkey, and backup templates.
+
 ## Add Base to an existing wallet example
 
 Choose Base explicitly when scaffolding either complete Zcash wallet:

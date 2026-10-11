@@ -5,6 +5,7 @@ import { appendFileSync, readFileSync, readdirSync, mkdirSync, writeFileSync } f
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { engineSourceHash } from "./wasm-build-inputs.mjs";
+import { assertWasmVariant } from "./wasm-build-variant.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -28,6 +29,7 @@ export function validateWasm(directory, source, mode) {
   const binary = readFileSync(join(directory, "z_wasm_bg.wasm"));
   assert.equal(hash(binary), integrity.sha256, "Cached WASM integrity failed");
   assert.deepEqual([...binary.subarray(0, 8)], [0, 97, 115, 109, 1, 0, 0, 0], "Cache does not contain a WASM module");
+  assertWasmVariant(binary, mode);
   return outputs(directory);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

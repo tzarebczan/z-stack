@@ -5,16 +5,18 @@
  */
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { engineSourceHash } from "./wasm-build-inputs.mjs";
+import { assertWasmVariant, wasmTargetDirectory } from "./wasm-build-variant.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const out = join(root, "packages", "sdk", "src", "generated-mt");
 const sourceSha256 = engineSourceHash();
+const targetDir = wasmTargetDirectory(root, "multi-thread");
 const toolchain = process.env.Z_STACK_WASM_MT_TOOLCHAIN || "nightly-2026-09-22";
 
 const rustflags = [
@@ -93,10 +95,10 @@ run(
     RUSTUP_TOOLCHAIN: toolchain,
     RUSTFLAGS: rustflags,
     CARGO_PROFILE_RELEASE_PANIC: "abort",
+    CARGO_TARGET_DIR: targetDir,
   },
 );
 
-const targetDir = resolve(root, process.env.CARGO_TARGET_DIR || "target");
 const wasm = join(targetDir, "wasm32-unknown-unknown", "release", "z_wasm.wasm");
 const bindgen = process.env.WASM_BINDGEN || findBindgen();
 
@@ -155,6 +157,7 @@ if (!existsSync(bg) || !readFileSync(bg).toString("latin1").includes("simd128"))
   process.exit(1);
 }
 const sha256 = createHash("sha256").update(readFileSync(bg)).digest("hex");
+assertWasmVariant(readFileSync(bg), "multi-thread");
 assert.equal(engineSourceHash(), sourceSha256, "engine source changed during build; rebuild before packing");
 writeFileSync(
   join(out, "integrity.json"),

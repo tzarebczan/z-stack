@@ -27,6 +27,7 @@
     "src/hardware.ts",
     "src/storage.ts",
     "src/diagnostics.ts",
-    "src/lab/adapter-conformance.ts"
+    "src/lab/adapter-conformance.ts",
+    "src/gift-keys.ts"
   ]
 }

@@ -24,6 +24,23 @@ pub use prove::{orchard_proving_key_ready, warm_orchard_proving_key, SHIELD_NOT_
 pub use scan::ScanDelta;
 pub use store::{HardwareAccount, HistoryOutpoint, HistoryOutput, TreeFinalizeTick, WebWallet};
 
+/// An explicit minimum applies equally to received notes and wallet change.
+fn explicit_confirmations_policy(
+    confirmations: u32,
+) -> crate::error::Result<zcash_client_backend::data_api::wallet::ConfirmationsPolicy> {
+    use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
+    let count = std::num::NonZeroU32::new(confirmations)
+        .ok_or_else(|| crate::error::EngineError::Message("confirmations_invalid".into()))?;
+    #[cfg(feature = "transparent-inputs")]
+    {
+        Ok(ConfirmationsPolicy::new_symmetrical(count, false))
+    }
+    #[cfg(not(feature = "transparent-inputs"))]
+    {
+        Ok(ConfirmationsPolicy::new_symmetrical(count))
+    }
+}
+
 /// Kept for SDK compatibility; orchard send now uses `WebWallet::prove_send`.
 pub const PROVE_NOT_READY: &str =
     "wasm snapshot wallet cannot prove yet (needs WalletWrite + orchard notes)";

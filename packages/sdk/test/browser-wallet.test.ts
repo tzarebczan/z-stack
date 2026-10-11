@@ -10,12 +10,14 @@ import { keystoneSigner } from "../src/hardware.ts";
 import { saveWalletSnapshot, readSavedSnapshotRecord, advanceWalletGeneration, clearSavedSnapshot } from "../src/snapshot-storage.ts";
 import { attachScanWorker, restartScanWorker } from "../src/scan-host.ts";
 import { checkWalletSetup } from "../src/diagnostics.ts";
+import { BroadcastRejection, assertCompactBlockHeight } from "../src/lwd.ts";
 
 // Public BIP-39 fixture; no network, real money, environment or private secrets.
 const words = [...Array(23).fill("abandon"), "art"].join(" ");
 const txid = "ab".repeat(32);
 const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 const decode = (bytes: Uint8Array) => JSON.parse(new TextDecoder().decode(bytes));
+const probeBlock = (height: number) => new Uint8Array([0, 0, 0, 36, 16, height, 26, 32, ...new Array(32).fill(0)]);
 before(async () => initialize({ wasmModule: readFileSync(new URL("../src/generated/z_wasm_bg.wasm", import.meta.url)),
   prewarmProveWorker: false, prewarmProvingKey: false }));
 
@@ -37,6 +39,13 @@ function fixture(t: TestContext) {
         balance: { totalAvailable: state.pending || state.reserved ? 0 : 10, orchardAvailable: state.pending || state.reserved ? 0 : 10, transparentAvailable: 0 } }),
       scannedHeight: () => state.scanned ?? 10,
       nextHeight: () => (state.scanned ?? 10) + 1,
+      rewindTo(height: number) { state.scanned = height; return height; },
+      rewindToChecked(height: number) { if ((state.scanned ?? 10) - height > 2048) throw new Error("reorg checkpoint is outside retained history"); state.scanned = height; return height; },
+      applyCompactBlocksSummary(bytes: Uint8Array) {
+        state.scanned = bytes[5];
+        return JSON.stringify({ scanned: state.scanned, notesFound: 0, spendsFound: 0 });
+      },
+      recomputePools() {},
       birthday: () => state.birthday ?? 8,
       pendingRawTxs: () => JSON.stringify(state.pending ? ["synthetic-transaction"] : []),
       rescanFrom(height: number) {
@@ -51,6 +60,7 @@ function fixture(t: TestContext) {
       applySharedMemos(json: string) { state.memoScanHeight = JSON.parse(json).end; return 0; },
       memoEnhancementTxids: () => "[]",
       history: () => JSON.stringify(state.pending ? [{ txid, status: "pending" }] : []),
+      historyQuery: (_limit: number, status: string, id: string) => JSON.stringify(state.pending && (!status || status === "pending") && (!id || id === txid) ? [{ txid, status: "pending" }] : []),
       nextUnifiedAddress() {},
       attachSeed(secret: string) { if (secret === "not a phrase") throw new Error("invalid mnemonic: SYNTHETIC_PRIVATE_WORD"); if (secret !== words) throw new Error("seed fingerprint does not match"); },
       proveSend() { state.pending = true; return JSON.stringify({ hex: "synthetic-transaction", txid }); },
@@ -85,6 +95,46 @@ function fixture(t: TestContext) {
   };
 }
 const code = (expected: string) => (error: unknown) => error instanceof WalletError && error.code === expected;
+
+for (const tip of [9, 10]) {
+  test(`explicit chain verification checks a ${tip === 9 ? "shorter" : "unchanged"} tip and preserves pending payment`, async t => {
+    const f = fixture(t);
+    const ranges: number[][] = [];
+    let currentTip = 10;
+    const wallet = await f.open({ verifyChainTip: true, server: {
+      kind: "fixture", label: "offline", tip: async () => currentTip,
+      blocks: async (start, end) => { ranges.push([start, end]); return probeBlock(end); },
+      submit: async () => txid,
+    } });
+    await wallet.create({ birthday: 8 });
+    await wallet.unlock(words);
+    await wallet.send("fixture", "0.00005");
+    currentTip = tip;
+    const result = await wallet.sync();
+    assert.deepEqual(ranges, [[tip, tip]]);
+    assert.equal(result.scannedHeight, tip);
+    assert.equal((await wallet.history())[0]?.txid, txid);
+    await wallet.close();
+    const reopened = await f.open();
+    assert.equal((await reopened.load())?.scannedHeight, tip);
+    assert.equal((await reopened.history())[0]?.txid, txid);
+  });
+}
+
+test("chain verification fails closed on unavailable overlap blocks", async t => {
+  const f = fixture(t);
+  const wallet = await f.open({ verifyChainTip: true });
+  await wallet.create({ birthday: 8 });
+  await assert.rejects(wallet.sync());
+});
+
+test("chain probes reject wrong heights, missing hashes and extra blocks", () => {
+  const valid = probeBlock(10);
+  assert.doesNotThrow(() => assertCompactBlockHeight(valid, 10));
+  assert.throws(() => assertCompactBlockHeight(valid, 9));
+  assert.throws(() => assertCompactBlockHeight(new Uint8Array([...valid, ...valid]), 10));
+  assert.throws(() => assertCompactBlockHeight(new Uint8Array([0, 0, 0, 2, 16, 10]), 10));
+});
 
 test("runtime subscriptions replay, update on scanner readiness and release on close", async t => {
   const f = fixture(t), wallet = await f.open();
@@ -681,6 +731,7 @@ for (const unlockPolicy of ["each-spend", "session"] as const) for (const { sign
           case "snapshotJson": data = { json: JSON.stringify(preview()) }; break;
           case "toSnapshot": data = { snapshot: encode(this.state).buffer }; break;
           case "persistenceSnapshot": data = { snapshot: encode(this.state).buffer, json: JSON.stringify(preview()) }; break;
+          case "historyQuery":
           case "history": data = { json: JSON.stringify(this.state.pending ? [{ txid, status: "pending" }] : []) }; break;
           case "hardware":
             if (message.action === "createSend") this.state.reserved = true;
@@ -1288,3 +1339,123 @@ test("invalid outage configuration releases the owner for a later client", async
   const f = fixture(t);
   assert.ok(await f.open());
 });
+
+for (const signing of ["software", "hardware"] as const) {
+  test(`${signing} beforeSubmit waits for the application journal after durable reservation`, async t => {
+    const f = fixture(t);
+    let submissions = 0, release!: () => void, entered!: () => void;
+    const journal = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const wallet = await f.open({ server: { kind: "fixture", label: "offline", tip: async () => 10,
+      blocks: async () => new Uint8Array(), submit: async () => { submissions++; return txid; } } });
+    await wallet.create({ birthday: 1 });
+    if (signing === "software") await wallet.unlock(words);
+    const sending = wallet.send("fixture", "0.00005", undefined, {
+      ...(signing === "hardware" ? { signer: keystoneSigner(async bytes => bytes) } : {}),
+      beforeSubmit: async (receipt, signal) => {
+        assert.equal(receipt.txid, txid);
+        signal.throwIfAborted();
+        const saved = await readSavedSnapshotRecord();
+        assert.ok(saved && decode(saved.bytes).pending, "reservation must be committed before the hook");
+        entered(); await journal;
+      },
+    });
+    await waiting;
+    assert.equal(submissions, 0, "network submission cannot race the journal");
+    release(); await sending;
+    assert.equal(submissions, 1);
+  });
+  test(`${signing} failed beforeSubmit rolls back without network submission`, async t => {
+    const f = fixture(t);
+    let submissions = 0;
+    const wallet = await f.open({ server: { kind: "fixture", label: "offline", tip: async () => 10,
+      blocks: async () => new Uint8Array(), submit: async () => { submissions++; return txid; } } });
+    await wallet.create({ birthday: 1 });
+    if (signing === "software") await wallet.unlock(words);
+    await assert.rejects(wallet.send("fixture", "0.00005", undefined, {
+      ...(signing === "hardware" ? { signer: keystoneSigner(async bytes => bytes) } : {}),
+      beforeSubmit: async () => { throw new WalletError("storage_full", "journal full"); },
+    }), code("storage_full"));
+    assert.equal(submissions, 0);
+    assert.deepEqual(await wallet.pending(), []);
+    assert.equal(wallet.hasSpendingSeed(), false);
+  });
+}
+
+for (const signing of ["software", "hardware"] as const) {
+  for (const cancel of ["review", "signal", "close"] as const) {
+    test(`${signing} retains signed bytes when ${cancel} races a successful journal commit`, async t => {
+      const f = fixture(t);
+      let submissions = 0, release!: () => void, entered!: () => void, allowed = true;
+      const abort = new AbortController();
+      const journal = new Promise<void>(resolve => { release = resolve; });
+      const waiting = new Promise<void>(resolve => { entered = resolve; });
+      const wallet = await f.open({ server: { kind: "fixture", label: "offline", tip: async () => 10,
+        blocks: async () => new Uint8Array(), submit: async () => { submissions++; return txid; } } });
+      await wallet.create({ birthday: 1 });
+      if (signing === "software") await wallet.unlock(words);
+      const sending = wallet.send("fixture", "0.00005", undefined, {
+        ...(signing === "hardware" ? { signer: keystoneSigner(async bytes => bytes) } : {}),
+        signal: abort.signal, beforeBroadcast: () => allowed,
+        beforeSubmit: async () => { entered(); await journal; },
+      });
+      // Attach rejection handling before triggering cancellation or Close.
+      const result = assert.rejects(sending, (error: unknown) => error instanceof WalletError &&
+        error.code === "broadcast_failed" && error.txid === txid);
+      await waiting;
+      let closing: Promise<void> | undefined;
+      if (cancel === "review") allowed = false;
+      else if (cancel === "signal") abort.abort();
+      else closing = wallet.close();
+      release();
+      await result;
+      await closing;
+      assert.equal(submissions, 0);
+      if (closing) {
+        const reopened = await f.open();
+        assert.equal((await reopened.load())?.balance?.totalAvailable, 0);
+        assert.deepEqual((await reopened.pending()).map(entry => entry.txid), [txid]);
+      } else {
+        const saved = await readSavedSnapshotRecord();
+        assert.ok(saved && decode(saved.bytes).pending, "committed receipt must retain its signed transaction");
+      }
+    });
+  }
+}
+
+test("chain verification refuses an older tip outside the retained horizon without changing the wallet", async t => {
+  const f = fixture(t);
+  let tip = 5000;
+  const wallet = await f.open({ verifyChainTip: true, server: { kind: "fixture", label: "offline",
+    tip: async () => tip, blocks: async (start: number) => probeBlock(start) } });
+  await wallet.create({ birthday: 1 });
+  // Persist a previously scanned wallet beyond the retained-hash window.
+  const saved = await readSavedSnapshotRecord();
+  assert.ok(saved);
+  await saveWalletSnapshot(encode({ ...decode(saved.bytes), scanned: 5000 }), { ...await wallet.getWallet(), scannedHeight: 5000 }, () => true, saved.generation, saved.key);
+  await wallet.close();
+  tip = 100;
+  const reopened = await f.open({ verifyChainTip: true, server: { kind: "fixture", label: "offline",
+    tip: async () => tip, blocks: async (start: number) => probeBlock(start) } });
+  assert.equal((await reopened.load())?.scannedHeight, 5000);
+  await assert.rejects(reopened.sync());
+  assert.equal((await reopened.getWallet()).scannedHeight, 5000);
+});
+
+for (const signing of ["software", "hardware"] as const) {
+  test(`${signing} definitive rejection retains receipt identity and releases only its reservation`, async t => {
+    const f = fixture(t);
+    let savedId: string | undefined;
+    const wallet = await f.open({ server: { kind: "fixture", label: "offline", tip: async () => 10,
+      blocks: async () => new Uint8Array(), submit: async () => { throw new BroadcastRejection(16, "invalid transaction"); } } });
+    await wallet.create({ birthday: 1 });
+    if (signing === "software") await wallet.unlock(words);
+    await assert.rejects(wallet.send("fixture", "0.00005", undefined, {
+      ...(signing === "hardware" ? { signer: keystoneSigner(async bytes => bytes) } : {}),
+      beforeSubmit: async receipt => { savedId = receipt.txid; },
+    }), (error: unknown) => error instanceof WalletError && error.code === "broadcast_rejected" && error.txid === savedId);
+    assert.equal(savedId, txid);
+    assert.deepEqual(await wallet.pending(), []);
+    assert.equal((await wallet.getWallet()).balance.totalAvailable, 10);
+  });
+}

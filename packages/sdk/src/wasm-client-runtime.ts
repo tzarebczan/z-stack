@@ -198,6 +198,7 @@ export type WasmWalletHandle = {
   applyUtxos?: (json: string) => number;
   applyMempool?: (json: string) => number;
   history: (limit: number) => string;
+  historyQuery?: (limit: number, status: string, txid: string) => string;
   snapshotJson: (server: string) => string;
   scannedHeight: () => number;
   birthday: () => number;
@@ -205,15 +206,17 @@ export type WasmWalletHandle = {
   unifiedAddress: () => string;
   transparentAddress: () => string | undefined;
   nextUnifiedAddress: () => string;
-  estimateFee?: (to: string, amountZec: string, memo?: string) => string;
+  balanceWithConfirmations?: (minConfirmations: number) => string;
+  estimateFee?: (to: string, amountZec: string, memo?: string, minConfirmations?: number) => string;
   estimateTransparentFee?: (to: string, amountZec: string) => string;
   proveTransparentSend?: (mnemonic: string, to: string, amountZec: string, maxFeeZat?: string) => string;
   maxSend?: (to?: string) => string;
-  proveSend: (mnemonic: string, to: string, amountZec: string, memo?: string) => string;
+  proveSend: (mnemonic: string, to: string, amountZec: string, memo?: string, maxFeeZat?: string, minConfirmations?: number) => string;
   proveShield: (mnemonic: string, thresholdZat: number) => string;
   enhanceRawTx?: (hex: string) => number;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
+  rewindToChecked?: (height: number) => number;
   abandon?: (txid: string) => boolean;
   applyMinedTx?: (hex: string, time: number) => string;
   attachSeed?: (mnemonic: string) => void;
@@ -381,6 +384,7 @@ export type WasmClientOpts = {
   /** Compact-block light URL (Zaino / LWD). Drives batch size; t-scan stays loopback-only. */
   lightUrl?: string;
   allowDeepSync?: boolean;
+  verifyChainTip?: boolean;
   lightServerGraceMs?: number;
   /** Opt-in shielding after sync while unlocked. Default false; consumes an each-spend unlock. */
   autoShield?: boolean;

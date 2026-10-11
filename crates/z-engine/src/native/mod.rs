@@ -6,6 +6,7 @@ mod lwd;
 mod lwd_pipe;
 mod pipeline;
 mod rpc;
+mod runtime;
 mod seed;
 mod selective_scan;
 mod transparent_funding;
@@ -18,6 +19,9 @@ pub use lwd_pipe::{
     serve_lwd_pipe, LwdPipeOpts, PIPE_CHANNELS, PIPE_CHUNK, PIPE_CONCURRENCY, PIPE_MAX_BLOCKS,
 };
 pub use rpc::{pick_local_validator, probe_validator, ValidatorProbe};
+pub use runtime::{
+    default_native_threads, initialize_native_threads, NativeThreadPool, MAX_NATIVE_THREADS,
+};
 pub use seed::{SeedStore, SeedUnlock, UnlockPolicy};
 pub use verify::{TreeReport, TreeRootCheck, WitnessCheck};
 pub use wallet::{

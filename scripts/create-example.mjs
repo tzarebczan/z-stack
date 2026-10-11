@@ -44,7 +44,7 @@ export function inspectArchives(directory, version = JSON.parse(readFileSync(joi
     assert.ok(lstatSync(file).isFile() && !lstatSync(file).isSymbolicLink(), 'Archives must be regular files');
     const members = archiveMembers(file);
     const manifest = JSON.parse(members.get('package/package.json')?.toString() || 'null');
-    assert.ok(manifest && /^@z-stack\/(core|passkey|sdk|base)$/.test(manifest.name), 'Unexpected archive package');
+    assert.ok(manifest && /^@z-stack\/(core|passkey|sdk|base|gift-cards)$/.test(manifest.name), 'Unexpected archive package');
     assert.equal(manifest.name, `@z-stack/${names[candidates.indexOf(filename)]}`, "Archive filename does not match its package");
     assert.equal(manifest.version, version, 'Archive manifest version differs from the selected version');
     assert.ok(!packages.has(manifest.name), `Multiple versions of ${manifest.name}: choose a directory with one matching set`);
@@ -116,15 +116,16 @@ export function readPreviewRevision(previewFile, sdk) {
     entry?.sha256 === sdk.sha256 ? preview.revision : null;
 }
 
-export function createExample(template, destination, archives, { withBase = false } = {}) {
+export function createExample(template, destination, archives, { withBase = false, withGiftCards = false } = {}) {
   assert.ok(!withBase || ["browser-wallet", "next-wallet"].includes(template), "--with-base supports browser-wallet and next-wallet");
+  assert.ok(!withGiftCards || template !== "base-wallet", "--with-gift-cards requires a Zcash wallet template");
   assert.ok(templates.includes(template), `Choose ${templates.join(', ')}`);
   const target = resolve(destination);
   if (existsSync(target)) {
     assert.ok(lstatSync(target).isDirectory() && !lstatSync(target).isSymbolicLink(), 'Destination must be an ordinary directory');
     assert.equal(readdirSync(target).length, 0, 'Destination is not empty; choose a new subdirectory or an empty directory. Existing files will not be overwritten');
   }
-  const packages = inspectArchives(resolve(archives), undefined, template === "base-wallet" ? ["base"] : ["core", "passkey", "sdk", ...(withBase ? ["base"] : [])]);
+  const packages = inspectArchives(resolve(archives), undefined, template === "base-wallet" ? ["base"] : ["core", "passkey", "sdk", ...(withBase ? ["base"] : []), ...(withGiftCards ? ["gift-cards"] : [])]);
   mkdirSync(dirname(target), { recursive: true });
   const scratch = mkdtempSync(join(dirname(target), '.z-stack-example-'));
   try {
@@ -143,10 +144,11 @@ export function createExample(template, destination, archives, { withBase = fals
       cpSync(pkg.file, join(scratch, 'vendor', pkg.filename));
       // The SDK archive includes its core/passkey helpers. Installing those again
       // at the app root creates duplicate class identities; use SDK re-exports.
-      if (name === '@z-stack/sdk' || name === '@z-stack/base') {
+      if (name === '@z-stack/sdk' || name === '@z-stack/base' || name === '@z-stack/gift-cards') {
         (manifest.dependencies ??= {})[name] = `file:vendor/${pkg.filename}`;
       }
     }
+    if (withGiftCards) writeFileSync(join(scratch, 'README.md'), readFileSync(join(scratch, 'README.md'), 'utf8') + '\n## Optional gift-card API\n\nThis app includes the matching `@z-stack/gift-cards` archive. Import the pure codec and coordinator from its root; import `createBrowserGiftBackend` from `@z-stack/gift-cards/browser` for isolated gift wallets. The scaffold installs the API dependency. Add gift-card controls using [the integration guide](https://github.com/tzarebczan/z-stack/blob/main/docs/GIFT-CARDS.md). The application supplies its encrypted recovery store, explicit authorization and payment source.\n');
     if (withBase) {
       const addon = join(root, 'examples', 'shared-base');
       const files = template === 'browser-wallet'
@@ -181,15 +183,16 @@ export function createExample(template, destination, archives, { withBase = fals
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [template, destination, ...flags] = process.argv.slice(2);
-    assert.ok(template && destination, 'Usage: node scripts/create-example.mjs <template> <destination> [--archives <directory>] [--with-base] [--install]');
-    let archives = join(root, 'artifacts'), install = false, withBase = false;
+    assert.ok(template && destination, 'Usage: node scripts/create-example.mjs <template> <destination> [--archives <directory>] [--with-base] [--with-gift-cards] [--install]');
+    let archives = join(root, 'artifacts'), install = false, withBase = false, withGiftCards = false;
     for (let i = 0; i < flags.length; i++) {
       if (flags[i] === '--archives') { assert.ok(flags[i + 1], '--archives needs a directory'); archives = flags[++i]; }
       else if (flags[i] === '--with-base') withBase = true;
+      else if (flags[i] === '--with-gift-cards') withGiftCards = true;
       else if (flags[i] === '--install') install = true;
       else throw new Error('Unknown argument: ' + flags[i]);
     }
-    const target = createExample(template, destination, archives, { withBase });
+    const target = createExample(template, destination, archives, { withBase, withGiftCards });
     console.log(`Created ${template}: ${target}`);
     if (install) {
       const result = spawnSync('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'], {

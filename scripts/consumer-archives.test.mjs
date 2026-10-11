@@ -12,7 +12,7 @@ function fixture(t) {
   const source = join(root, "source"), destination = join(root, "consumer");
   mkdirSync(source);
   const file = name => `z-stack-${name}-0.1.0-alpha.fixture.tgz`;
-  for (const name of ["core", "passkey", "sdk", "base"]) writeFileSync(join(source, file(name)), name);
+  for (const name of ["core", "passkey", "sdk", "base", "gift-cards"]) writeFileSync(join(source, file(name)), name);
   return { root, source, destination, file };
 }
 
@@ -31,6 +31,16 @@ test("Base alone and combined consumers select their own archive sets", t => {
   const combined = join(root, "combined");
   reuseConsumerArchives(root, combined, ["core", "passkey", "sdk", "base"], [`--archives=${source}`]);
   assert.equal(readdirSync(combined).length, 4);
+});
+
+test("gift-card pure and browser consumers select only their required archives", t => {
+  const { root, source, destination, file } = fixture(t);
+  reuseConsumerArchives(root, destination, ["gift-cards"], [`--archives=${source}`]);
+  assert.deepEqual(readdirSync(destination), [file("gift-cards")]);
+  const browser = join(root, "browser");
+  reuseConsumerArchives(root, browser, ["core", "passkey", "sdk", "gift-cards"], [`--archives=${source}`]);
+  assert.equal(readdirSync(browser).length, 4);
+  assert.equal(existsSync(join(browser, file("base"))), false);
 });
 
 test("an incomplete or different-version set fails before any consumer files are copied", t => {

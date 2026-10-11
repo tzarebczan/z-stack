@@ -41,6 +41,7 @@ use secrecy::{ExposeSecret, SecretString, SecretVec};
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::net::ToSocketAddrs;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -752,6 +753,19 @@ pub struct NativeWallet {
     meta: WalletMeta,
 }
 
+fn explicit_confirmations_policy(confirmations: u32) -> Result<ConfirmationsPolicy> {
+    let count = NonZeroU32::new(confirmations)
+        .ok_or_else(|| EngineError::Message("confirmations_invalid".into()))?;
+    #[cfg(feature = "transparent-inputs")]
+    {
+        Ok(ConfirmationsPolicy::new_symmetrical(count, false))
+    }
+    #[cfg(not(feature = "transparent-inputs"))]
+    {
+        Ok(ConfirmationsPolicy::new_symmetrical(count))
+    }
+}
+
 impl NativeWallet {
     pub fn paths(&self) -> &WalletPaths {
         &self.paths
@@ -947,6 +961,7 @@ impl NativeWallet {
         account_index: u32,
     ) -> Result<(Self, CreatedWallet)> {
         auth.validate_for_save()?;
+        super::initialize_native_threads(None)?;
         let paths = WalletPaths::new(root);
         let _ownership = database_lease::bootstrap(&paths.root)?;
         paths.prepare_new_wallet()?;
@@ -1085,6 +1100,7 @@ impl NativeWallet {
         account_index: u32,
     ) -> Result<(Self, String)> {
         auth.validate_for_save()?;
+        super::initialize_native_threads(None)?;
         let paths = WalletPaths::new(root);
         let _ownership = database_lease::bootstrap(&paths.root)?;
         paths.prepare_new_wallet()?;
@@ -1202,6 +1218,7 @@ impl NativeWallet {
         birthday_height: u32,
         account_index: u32,
     ) -> Result<(Self, String)> {
+        super::initialize_native_threads(None)?;
         let keys = crate::keys::account_from_ufvk(ufvk_str, network, account_index)?;
         let ufvk = UnifiedFullViewingKey::decode(&network, keys.ufvk.trim())
             .map_err(|e| EngineError::Message(format!("ufvk: {e}")))?;
@@ -1281,6 +1298,7 @@ impl NativeWallet {
     }
 
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
+        super::initialize_native_threads(None)?;
         let paths = WalletPaths::new(root);
         if paths.meta_path.exists() {
             paths.recover_interrupted_reset();
@@ -1997,10 +2015,21 @@ impl NativeWallet {
     }
 
     pub fn balance(&self) -> Result<Balance> {
+        self.balance_with_policy(crate::confirmations_policy(self.network))
+    }
+
+    /// Currently unspent value under a caller's symmetric confirmation policy.
+    /// Both external receipts and wallet change must meet the same positive threshold.
+    pub fn balance_with_confirmations(&self, confirmations: u32) -> Result<Balance> {
+        self.balance_with_policy(explicit_confirmations_policy(confirmations)?)
+    }
+
+    fn balance_with_policy(&self, policy: ConfirmationsPolicy) -> Result<Balance> {
         // Ordinary sync holds exclusive ownership through UTXO classification.
         // Keep its in-flight unknown funding out of this complete balance read.
         let _lease =
             database_lease::shared(&self.paths.data_db).map_err(|_| EngineError::SyncRequired)?;
+
         let db = self.open_db()?;
         #[cfg(feature = "transparent-inputs")]
         if let Some(tip) = db
@@ -2013,7 +2042,7 @@ impl NativeWallet {
             )?;
         }
         let summary = db
-            .get_wallet_summary(crate::confirmations_policy(self.network))
+            .get_wallet_summary(policy)
             .map_err(|e| EngineError::WalletDb(format!("summary: {e}")))?
             .ok_or(EngineError::SyncRequired)?;
 

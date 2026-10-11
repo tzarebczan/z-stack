@@ -77,6 +77,11 @@ export type HardwareSendOptions = {
   signal?: AbortSignal;
   /** Revalidate user review/ownership immediately before submission. */
   beforeBroadcast?: () => boolean;
+  /**
+   * Browser only: await a durable receipt after reservation and before submission.
+   * Reject before an atomic commit; resolve after it, even if cancellation raced it.
+   */
+  beforeSubmit?: (receipt: { txid: string }, signal: AbortSignal) => Promise<void>;
 };
 
 /** The error a signer rejects with when the user cancels (code `hardware_cancelled`). */

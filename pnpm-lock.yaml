@@ -191,6 +191,9 @@ importers:
 
   .:
     devDependencies:
+      fake-indexeddb:
+        specifier: 6.2.4
+        version: 6.2.4
       jsqr:
         specifier: 1.4.0
         version: 1.4.0
@@ -221,6 +224,12 @@ importers:
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
+
+  packages/gift-cards:
+    devDependencies:
+      '@z-stack/sdk':
+        specifier: workspace:*
+        version: link:../sdk
 
   packages/keytool: {}
 
@@ -1061,6 +1070,10 @@ packages:
   expect-type@1.4.0:
     resolution: {integrity: sha512-KfYbmpRm0VbLjEvVa9yGwCi9GI34xvi7A/HXYWQO65CSD2u3MczUJSuwXKFIxlGsgBQizV9q5J9NHj4VG0n+pA==}
     engines: {node: '>=12.0.0'}
+
+  fake-indexeddb@6.2.4:
+    resolution: {integrity: sha512-INKeIKEtSViN4yVtEWEUqbsqmaIy7Ls+MfU0yxQVXg67pOJ/sH1ZxcVrP8XrKULUFohcPD9gnmym+qBfEybACw==}
+    engines: {node: '>=18'}
 
   fdir@6.5.0:
     resolution: {integrity: sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==}
@@ -2028,6 +2041,8 @@ snapshots:
   eventemitter3@5.0.1: {}
 
   expect-type@1.4.0: {}
+
+  fake-indexeddb@6.2.4: {}
 
   fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
