@@ -1,7 +1,7 @@
 use crate::error::{EngineError, Result};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex,
+    Mutex, MutexGuard,
 };
 
 /// Cancellation and canonical commit share a linearization gate. After cancel
@@ -41,14 +41,18 @@ impl RecoveryCancellation {
         &self.cancelled
     }
     pub(super) fn transaction<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-        let _gate = self
+        let _gate = self.commit_guard()?;
+        operation()
+    }
+    pub(super) fn commit_guard(&self) -> Result<MutexGuard<'_, ()>> {
+        let gate = self
             .commit
             .lock()
             .map_err(|_| EngineError::Message("native_recovery_cancelled".into()))?;
         if self.is_cancelled() {
             return Err(EngineError::Message("native_recovery_cancelled".into()));
         }
-        operation()
+        Ok(gate)
     }
 }
 

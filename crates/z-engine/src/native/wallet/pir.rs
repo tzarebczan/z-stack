@@ -478,6 +478,8 @@ impl<T: ShardTransport> ShardTransport for CancelTransport<'_, T> {
 impl NativeWallet {
     /// Rust-only, bounded regtest qualification using caller-owned private transport.
     /// Transport must enforce endpoint consent, deadline and network privacy policy.
+    /// This discovery-only API polls an atomic cancellation flag. Canonical
+    /// recovery also gates every database commit with `RecoveryCancellation`.
     pub fn sync_regtest_pir(
         &self,
         chain: &RegtestAcceptedChain,
@@ -485,6 +487,17 @@ impl NativeWallet {
         transport: &mut impl ShardTransport,
         limits: WorkLimits,
         cancel: &AtomicBool,
+    ) -> Result<PirDiscoveryReport> {
+        self.sync_regtest_pir_with_commit_gate(chain, filters, transport, limits, cancel, None)
+    }
+    fn sync_regtest_pir_with_commit_gate(
+        &self,
+        chain: &RegtestAcceptedChain,
+        filters: &mut impl FilterSource,
+        transport: &mut impl ShardTransport,
+        limits: WorkLimits,
+        cancel: &AtomicBool,
+        recovery_cancel: Option<&RecoveryCancellation>,
     ) -> Result<PirDiscoveryReport> {
         if self.network != ZNetwork::Regtest {
             return Err(failed("native_pir_regtest_only"));
@@ -531,7 +544,8 @@ impl NativeWallet {
         if !native_snapshot.matches_chain(chain) {
             return Err(failed("native_pir_reconciliation_required"));
         }
-        let mut store = store::NativePirStore::open(self, cancel).map_err(store_failed)?;
+        let mut store = store::NativePirStore::open_with_commit_gate(self, cancel, recovery_cancel)
+            .map_err(store_failed)?;
         store
             .enroll(scope.clone(), map.start_height)
             .map_err(store_failed)?;
@@ -1107,13 +1121,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = WalletPaths::new(dir.path());
         paths.ensure_dirs().unwrap();
-        std::fs::write(&paths.data_db, b"unfinished").unwrap();
+        rusqlite::Connection::open(&paths.data_db)
+            .unwrap()
+            .execute_batch("CREATE TABLE unfinished(value INTEGER);")
+            .unwrap();
+        let unfinished = std::fs::read(&paths.data_db).unwrap();
         let lease = database_lease::shared(&paths.data_db).unwrap();
         assert_eq!(
             paths.prepare_new_wallet().unwrap_err().to_string(),
             "native_pir_database_busy"
         );
-        assert_eq!(std::fs::read(&paths.data_db).unwrap(), b"unfinished");
+        assert_eq!(std::fs::read(&paths.data_db).unwrap(), unfinished);
         drop(lease);
         paths.prepare_new_wallet().unwrap();
         assert!(!paths.data_db.exists());

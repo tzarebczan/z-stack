@@ -331,6 +331,72 @@ fn write_meta(path: &Path, meta: &WalletMeta) -> Result<()> {
         .map_err(|e| EngineError::Message(format!("wallet.json: {e}")))
 }
 
+fn has_recovery_marker(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|_| EngineError::Message("native_recovery_storage_failed".into()))?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|_| EngineError::Message("native_recovery_storage_failed".into()))
+}
+
+#[cfg(feature = "native-pir")]
+fn require_initial_recovery_setup(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let refused = || EngineError::Message("native_recovery_setup_resume_refused".into());
+    if !has_recovery_marker(path)? {
+        return Err(refused());
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|_| refused())?;
+    let initial: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ext_coffer_pir_recovery_v1 WHERE id=1 AND blocked=1 AND generation=1 AND receipt IS NULL)
+             AND NOT EXISTS(SELECT 1 FROM blocks WHERE height>0)
+             AND NOT EXISTS(SELECT 1 FROM transactions)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| refused())?;
+    if !initial {
+        return Err(refused());
+    }
+    let intents: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_native_payments_v1')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| refused())?;
+    if intents
+        && conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ext_native_payments_v1)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|_| refused())?
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+enum NewWalletProfile {
+    Ordinary,
+    #[cfg(feature = "native-pir")]
+    VerifiedRegtestRecovery,
+}
+
 #[derive(Debug, Clone)]
 pub struct WalletPaths {
     pub root: PathBuf,
@@ -364,9 +430,13 @@ impl WalletPaths {
     /// written last, so it marks one even when `data.sqlite` is missing (a
     /// rescan interrupted mid-swap); writing a new seed there would destroy the
     /// only copy of the old one. A database without `wallet.json` is a create
-    /// or restore that never returned: nothing was scanned and no address was
-    /// shown, so it is set aside rather than wedging every later attempt.
+    /// or restore that never returned. Ordinary interrupted databases can be
+    /// set aside; a persisted recovery marker requires its recovery profile.
     fn prepare_new_wallet(&self) -> Result<()> {
+        self.prepare_new_wallet_for(NewWalletProfile::Ordinary)
+    }
+
+    fn prepare_new_wallet_for(&self, profile: NewWalletProfile) -> Result<()> {
         if self.meta_path.exists() || self.reset_backup().exists() {
             return Err(EngineError::AlreadyExists(self.root.display().to_string()));
         }
@@ -374,6 +444,19 @@ impl WalletPaths {
             let _lease = database_lease::exclusive(&self.data_db)?;
             if self.meta_path.exists() || self.reset_backup().exists() {
                 return Err(EngineError::AlreadyExists(self.root.display().to_string()));
+            }
+            match profile {
+                NewWalletProfile::Ordinary => {
+                    if has_recovery_marker(&self.data_db)? {
+                        return Err(EngineError::Message(
+                            "native_recovery_profile_required".into(),
+                        ));
+                    }
+                }
+                #[cfg(feature = "native-pir")]
+                NewWalletProfile::VerifiedRegtestRecovery => {
+                    require_initial_recovery_setup(&self.data_db)?;
+                }
             }
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1963,6 +2046,9 @@ impl NativeWallet {
     /// Seed / keyring / wallet.json stay. Next `sync` is a full rescan.
     pub async fn reset_scan(&self) -> Result<()> {
         self.require_network_access()?;
+        if has_recovery_marker(&self.paths.data_db)? {
+            return Err(EngineError::Message("native_recovery_reset_refused".into()));
+        }
         let ufvk_str = match self
             .meta
             .ufvk
@@ -2019,6 +2105,9 @@ impl NativeWallet {
     ) -> Result<()> {
         let db_path = &self.paths.data_db;
         let _lease = database_lease::exclusive(db_path)?;
+        if has_recovery_marker(db_path)? {
+            return Err(EngineError::Message("native_recovery_reset_refused".into()));
+        }
         payments::require_rescan_safe(db_path)?;
         Self::checkpoint_sqlite(db_path)?;
         // Build the replacement beside the live database and swap it in with
@@ -2247,6 +2336,7 @@ impl NativeWallet {
 
     /// Sync if the wallet is behind the light server tip. Returns whether work ran.
     pub async fn catch_up(&self) -> Result<(u32, SyncProgress, bool)> {
+        self.require_network_access()?;
         let scanned = self.scanned_height()?;
         let tip = Self::fetch_tip(&self.server).await?;
         if scanned >= tip {
@@ -3866,6 +3956,88 @@ mod tests {
             network: ZNetwork::Regtest,
             server: LightServer::parse(&meta.server, ZNetwork::Regtest),
             meta,
+        }
+    }
+
+    #[tokio::test]
+    async fn offline_catch_up_refuses_before_any_tip_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wallet = fixture_wallet(dir.path());
+        let (key, birthday) = fixture_account();
+        wallet.replace_scan_db(&key, &birthday).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        wallet
+            .set_light_server(LightServer::parse(
+                &format!("http://{}", listener.local_addr().unwrap()),
+                ZNetwork::Regtest,
+            ))
+            .unwrap();
+        let offline = NativeWallet::open_offline(dir.path()).unwrap();
+        let error = offline.catch_up().await.unwrap_err();
+        assert!(error.to_string().contains("native_offline_wallet"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_scan_preserves_pending_and_completed_recovery_markers_on_ordinary_reopen() {
+        for (blocked, receipt) in [(1, None), (0, Some(b"retained-receipt".as_slice()))] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut wallet = fixture_wallet(dir.path());
+            let (key, birthday) = fixture_account();
+            wallet.replace_scan_db(&key, &birthday).unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            wallet
+                .set_light_server(LightServer::parse(
+                    &format!("http://{}", listener.local_addr().unwrap()),
+                    ZNetwork::Regtest,
+                ))
+                .unwrap();
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            conn.execute_batch("CREATE TABLE ext_coffer_pir_recovery_v1(id INTEGER PRIMARY KEY,blocked INTEGER NOT NULL,generation INTEGER NOT NULL,receipt BLOB);").unwrap();
+            conn.execute(
+                "INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,?1,7,?2)",
+                rusqlite::params![blocked, receipt],
+            )
+            .unwrap();
+            drop(conn);
+            let ordinary = NativeWallet::open(dir.path()).unwrap();
+            let error = ordinary.reset_scan().await.unwrap_err();
+            assert!(error.to_string().contains("native_recovery_reset_refused"));
+            // Repeat the marker check under the replacement's exclusive lease.
+            assert!(ordinary
+                .replace_scan_db(&key, &birthday)
+                .unwrap_err()
+                .to_string()
+                .contains("native_recovery_reset_refused"));
+            let retained: (i32, u64, Option<Vec<u8>>) = rusqlite::Connection::open(
+                &wallet.paths.data_db,
+            )
+            .unwrap()
+            .query_row(
+                "SELECT blocked,generation,receipt FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+            assert_eq!(retained, (blocked, 7, receipt.map(Vec::from)));
+            assert!(!dir.path().join("data.sqlite.new").exists());
+            std::fs::remove_file(&wallet.paths.meta_path).unwrap();
+            assert!(wallet
+                .paths
+                .prepare_new_wallet()
+                .unwrap_err()
+                .to_string()
+                .contains("native_recovery_profile_required"));
+            assert!(has_recovery_marker(&wallet.paths.data_db).unwrap());
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
         }
     }
 

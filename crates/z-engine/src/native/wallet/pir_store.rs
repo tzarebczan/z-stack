@@ -1,5 +1,6 @@
 //! Bounded qualification journal. The pinned upstream store defines semantics;
 //! each accepted operation commits through the wallet's extension transaction.
+use super::super::RecoveryCancellation;
 use super::pir::{
     native_scope_in_transaction, NativeScanSnapshot, NativeScope, PirDiscoveryReport,
 };
@@ -259,6 +260,7 @@ pub(super) struct NativePirStore<'a> {
     bytes: u64,
     digest: String,
     cancel: &'a AtomicBool,
+    recovery_cancel: Option<&'a RecoveryCancellation>,
     scope: Option<NativeScope>,
     publication_start: u64,
     // Fields drop in declaration order: close SQLite before releasing its lease.
@@ -269,6 +271,23 @@ impl<'a> NativePirStore<'a> {
         wallet: &NativeWallet,
         cancel: &'a AtomicBool,
     ) -> std::result::Result<Self, StoreError> {
+        Self::open_with_commit_gate(wallet, cancel, None)
+    }
+    pub(super) fn open_recovery(
+        wallet: &NativeWallet,
+        cancel: &'a RecoveryCancellation,
+    ) -> std::result::Result<Self, StoreError> {
+        Self::open_with_commit_gate(wallet, cancel.flag(), Some(cancel))
+    }
+    pub(super) fn open_with_commit_gate(
+        wallet: &NativeWallet,
+        cancel: &'a AtomicBool,
+        recovery_cancel: Option<&'a RecoveryCancellation>,
+    ) -> std::result::Result<Self, StoreError> {
+        let _gate = recovery_cancel
+            .map(|token| token.commit_guard())
+            .transpose()
+            .map_err(|_| StoreError::Io("native_pir_cancelled".into()))?;
         let database_lease = database_lease::shared(&wallet.paths.data_db)
             .map_err(|_| StoreError::Io("native_pir_database_busy".into()))?;
         // Initialize/migrate the native wallet before introducing extension schema.
@@ -366,6 +385,7 @@ impl<'a> NativePirStore<'a> {
             bytes,
             digest,
             cancel,
+            recovery_cancel,
             scope: None,
             publication_start: 0,
             _database_lease: database_lease,
@@ -453,6 +473,11 @@ impl<'a> NativePirStore<'a> {
         let scope = &self.scope;
         let cancel = self.cancel;
         let start = self.publication_start;
+        let _gate = self
+            .recovery_cancel
+            .map(|token| token.commit_guard())
+            .transpose()
+            .map_err(|_| StoreError::Io("native_pir_cancelled".into()))?;
         self.db
             .transactionally_with_extension(|wdb, ext| -> std::result::Result<(), JournalError> {
                 let current: (u64, String) = ext.query_row(
@@ -691,6 +716,68 @@ mod tests {
                 .confirmed_balance(),
             10_000
         );
+    }
+    #[test]
+    fn recovery_journal_writes_wait_for_the_cancellation_commit_gate() {
+        let (_dir, wallet) = fixture();
+        let token = RecoveryCancellation::new();
+        let mut store = NativePirStore::open_recovery(&wallet, &token).unwrap();
+        let gate = token.commit_guard().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (written_tx, written_rx) = std::sync::mpsc::channel();
+        let (cancelled_tx, cancelled_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|threads| {
+            threads.spawn(move || {
+                started_tx.send(()).unwrap();
+                written_tx
+                    .send(store.commit_shard(commit()).is_err())
+                    .unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                written_rx.recv_timeout(Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            threads.spawn(|| {
+                token.cancel();
+                cancelled_tx.send(()).unwrap();
+            });
+            while !token.is_cancelled() {
+                std::thread::yield_now();
+            }
+            assert!(matches!(
+                cancelled_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            drop(gate);
+            cancelled_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(written_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        });
+        let conn = Connection::open(&wallet.paths.data_db).unwrap();
+        let generation: u64 = conn
+            .query_row(
+                "SELECT generation FROM ext_coffer_pir_head WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(generation, 0);
+    }
+    #[test]
+    fn cancelled_recovery_never_initializes_a_discovery_journal() {
+        let (_dir, wallet) = fixture();
+        let token = RecoveryCancellation::new();
+        token.cancel();
+        assert!(NativePirStore::open_recovery(&wallet, &token).is_err());
+        let conn = Connection::open(&wallet.paths.data_db).unwrap();
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='ext_coffer_pir_head')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!exists);
     }
     #[test]
     fn stale_writer_and_cancel_do_not_advance_coverage() {

@@ -231,7 +231,7 @@ impl NativeWallet {
             return Err(failed("native_recovery_chain_invalid"));
         }
         let _lease = database_lease::shared(&self.paths.data_db)?;
-        schema(self)?;
+        cancel.transaction(|| schema(self))?;
         let mut db = self.open_db()?;
         cancel.transaction(||db.transactionally_with_extension(|_,ext|->anyhow::Result<u64>{
             ext.execute("INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,1,1,NULL) ON CONFLICT(id) DO UPDATE SET blocked=1,generation=generation+1,receipt=NULL",[])?;
@@ -255,7 +255,7 @@ impl NativeWallet {
             return Err(failed("native_recovery_regtest_only"));
         }
         let _lease = database_lease::shared(&self.paths.data_db)?;
-        schema(self)?;
+        cancel.transaction(|| schema(self))?;
         let generation = self.begin_regtest_pir_recovery(chain, cancel)?;
         let mut db = self.open_db()?;
         let compact = evidence.compact_blocks()?;
@@ -304,8 +304,15 @@ impl NativeWallet {
                 super::super::public_scan::scan_in_transaction(
                     wdb,
                     self.network,
-                    compact,
+                    compact.clone(),
                     true,
+                    BlockHash::from_slice(&genesis),
+                )?;
+                super::super::public_scan::scan_in_transaction(
+                    wdb,
+                    self.network,
+                    compact,
+                    false,
                     BlockHash::from_slice(&genesis),
                 )?;
                 for _round in 0..32 {
@@ -356,11 +363,18 @@ impl NativeWallet {
             .map_err(EngineError::from)
         })?;
         drop(db);
-        let discovery = self.sync_regtest_pir(chain, filters, transport, limits, cancel.flag())?;
+        let discovery = self.sync_regtest_pir_with_commit_gate(
+            chain,
+            filters,
+            transport,
+            limits,
+            cancel.flag(),
+            Some(cancel),
+        )?;
         let mut db = self.open_db()?;
         let scope = self.recovery_scope()?;
         let expected = expected_events(&evidence, &scope)?;
-        let store = store::NativePirStore::open(self, cancel.flag()).map_err(store_failed)?;
+        let store = store::NativePirStore::open_recovery(self, cancel).map_err(store_failed)?;
         let mut actual = BTreeMap::new();
         let mut discrepancy = false;
         for event in store.events().map_err(store_failed)? {
@@ -444,7 +458,7 @@ impl NativeWallet {
             return Err(failed("native_recovery_regtest_only"));
         }
         let _lease = database_lease::shared(&self.paths.data_db)?;
-        schema(self)?;
+        cancel.transaction(|| schema(self))?;
         let db = self.open_db()?;
         let current = db
             .block_max_scanned()
@@ -469,8 +483,8 @@ impl NativeWallet {
         }
         let anchor = common.ok_or_else(|| failed("native_recovery_reset_required"))?;
         drop(db);
-        let mut store = store::NativePirStore::open(self, cancel.flag()).map_err(store_failed)?;
-        cancel.transaction(|| store.rewind_native(anchor, &snapshot).map_err(store_failed))
+        let mut store = store::NativePirStore::open_recovery(self, cancel).map_err(store_failed)?;
+        store.rewind_native(anchor, &snapshot).map_err(store_failed)
     }
     pub fn regtest_pir_recovery_for(
         &self,
@@ -891,6 +905,68 @@ mod tests {
         assert_eq!(after, saved);
         assert_eq!(wallet.scanned_height().unwrap(), 1);
         assert!(wallet.ensure_recovery_selection_ready().is_err());
+    }
+    #[test]
+    fn canonical_recovery_refuses_unverified_native_prefix_effects_and_retains_pending() {
+        use crate::native::wallet::recovery_blocks::tests::fixture_prefix;
+
+        for boundary in [4, 8] {
+            let (_dir, wallet) = wallet();
+            let (bytes, chain) = fixture_prefix(&[0x51], 8);
+            let evidence =
+                verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false)).unwrap();
+            let mut forged = evidence.compact_blocks().unwrap();
+            let (key, _) = fixture_account();
+            crate::native::selective_scan::tests::pay_orchard(&mut forged[2], &key);
+            forged[2].vtx.last_mut().unwrap().index = 1;
+            let commitments = forged[2].vtx.iter().map(|tx| tx.actions.len() as u32).sum();
+            for block in forged.iter_mut().skip(2) {
+                block
+                    .chain_metadata
+                    .as_mut()
+                    .unwrap()
+                    .orchard_commitment_tree_size = commitments;
+            }
+            let mut genesis = crate::web::from_hex(GENESIS).unwrap();
+            genesis.reverse();
+            wallet
+                .open_db()
+                .unwrap()
+                .transactionally_with_extension(|wdb, _| {
+                    super::super::super::public_scan::scan_in_transaction(
+                        wdb,
+                        wallet.network,
+                        forged[..boundary].to_vec(),
+                        false,
+                        BlockHash::from_slice(&genesis),
+                    )
+                })
+                .unwrap();
+            let before = NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 8).unwrap();
+            let result = wallet.recover_regtest_pir(
+                &chain,
+                evidence,
+                &mut Unavailable,
+                &mut Unavailable,
+                WorkLimits {
+                    max_queries: Some(1),
+                    max_private_bytes: Some(1024),
+                },
+                &RecoveryCancellation::new(),
+            );
+            assert!(result.is_err());
+            assert!(NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 8).unwrap() == before);
+            assert!(wallet.ensure_pir_recovery_ready().is_err());
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            let blocked: bool = conn
+                .query_row(
+                    "SELECT blocked FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(blocked);
+        }
     }
     #[test]
     fn discovery_writes_bind_the_complete_allocated_canonical_scope() {

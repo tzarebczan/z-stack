@@ -98,3 +98,18 @@ coinbase maturity is retained; ordinary recovered payment preparation permits
 non-coinbase transparent funding. Coinbase shielding follows the existing native
 policy. Persisted foreign/standalone receiver rows are explicitly refused by the
 initial profile instead of silently excluding them.
+
+An existing native scan is not recovery evidence. Canonical recovery compares
+every overlapping pool commitment root and size with the verified full-block
+prefix, then replays the complete bounded prefix in the same SQLite transaction
+to restore owned notes and witness positions. An incompatible native prefix
+refuses recovery and retains Pending. Private discovery schema and journal writes
+share the cancellation commit gate through the actual SQLite commit.
+
+Offline catch-up refuses before querying a tip. Ordinary reopen and feature
+downgrade cannot reset a recovery-marked database. Offline setup persists and
+syncs Pending before publishing wallet metadata. An adapter reconstructing
+metadata must call `NativeWallet::validate_regtest_offline_setup_resume(root)`
+first. Resume permits only an initial Pending setup with no scanned blocks,
+native transactions or durable payment intents. Metadata loss on a completed or
+used wallet requires recovery of its existing state instead of reinitialization.
