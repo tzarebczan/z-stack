@@ -3,7 +3,8 @@
 The experimental `native-pir` feature exports
 `verify_regtest_recovery_blocks(bytes, accepted_chain, cancel)`. It returns an
 opaque `VerifiedRegtestRecoveryBlocks`; verification itself changes no wallet
-state. Native canonical recovery is a separate, subsequent qualification.
+state. The canonical recovery API then inserts verified effects and reconciles
+mandatory private discovery before releasing its durable spending barrier.
 
 V1 framing is the exact ASCII prefix `COFFER-REGTEST-BLOCKS-V1\n`, followed by
 little-endian unsigned 32-bit start height and block count. Start must be 1 and
@@ -19,8 +20,10 @@ The pinned Rust block and transaction parsers own native transaction identifiers
 including ZIP 244 and the configured consensus branch. Verification compares each
 claimed height, previous hash and header hash against the independently accepted
 chain, requires supported versions in that branch, and checks the transaction-ID
-Merkle root with duplicate-sibling mutation rejection. Sprout payloads, V6 and
-Ironwood are currently refused rather than presented as supported recovery.
+Merkle root with duplicate-sibling mutation rejection. Sprout payloads are refused.
+V6 and Ironwood use the pinned native parser and the same full-transaction compact
+conversion as the other supported pools; their qualification tests require the
+explicit bounded NU6.3 schedule described below.
 
 This proves transaction-effect/txid inclusion under the caller's independently
 accepted valid regtest chain. It does not validate consensus, prove the chain's
