@@ -101,7 +101,8 @@ impl NativeWallet {
     /// `bytes` uses protobuf varint-delimited CompactBlock messages. The caller
     /// verifies publication signatures, freshness, digests and anti-rollback first.
     /// This is shielded-wallet integration research, not production chain trust,
-    /// transparent history, or a scalable incremental scanning API.
+    /// transparent history, or a scalable incremental scanning API. Wallets with
+    /// a canonical recovery marker must use verified full-block recovery instead.
     pub fn scan_public_regtest(&self, bytes: &[u8], schedule: RegtestScanSchedule) -> Result<u32> {
         self.scan_public_regtest_inner(bytes, schedule, false)
     }
@@ -128,6 +129,11 @@ impl NativeWallet {
         schedule: RegtestScanSchedule,
         incremental: bool,
     ) -> Result<u32> {
+        if has_recovery_marker(&self.paths.data_db)? {
+            return Err(EngineError::Message(
+                "native_recovery_profile_required".into(),
+            ));
+        }
         if self.network != ZNetwork::Regtest
             || self.birthday_height() != 1
             || schedule.nu6_3_height < 2
@@ -165,7 +171,17 @@ impl NativeWallet {
         }
         let tip = blocks.len() as u32;
         let mut db = self.open_db()?;
-        db.transactionally(|wdb| -> anyhow::Result<()> {
+        db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<()> {
+            // Recheck under the scanner's write transaction so recovery cannot
+            // install its marker between the earlier check and these mutations.
+            let recovery: bool = ext.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",
+                [],
+                |row| row.get(0),
+            )?;
+            if recovery {
+                anyhow::bail!("native_recovery_profile_required");
+            }
             scan_in_transaction(wdb, self.network, blocks, incremental, genesis)
         })
         .map_err(EngineError::from)?;
@@ -494,6 +510,53 @@ mod tests {
         );
         assert_eq!(before, snapshot(&incremental));
     }
+    #[test]
+    fn public_scans_refuse_pending_and_completed_recovery_markers_without_mutation() {
+        for blocked in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let wallet = initialized(dir.path());
+            let mut blocks = encrypted_publication();
+            wallet
+                .scan_public_regtest(&encode(&blocks), schedule())
+                .unwrap();
+            assert_witnesses(&wallet);
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            let nf: Vec<u8> = conn
+                .query_row("SELECT nf FROM orchard_received_notes LIMIT 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            // These compact spend effects preserve hashes and tree commitments.
+            blocks[5].vtx[0].actions[0].nullifier = nf;
+            conn.execute_batch("CREATE TABLE ext_coffer_pir_recovery_v1(id INTEGER PRIMARY KEY, blocked INTEGER NOT NULL, generation INTEGER NOT NULL, receipt BLOB);").unwrap();
+            conn.execute(
+                "INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,?1,1,x'00')",
+                [blocked],
+            )
+            .unwrap();
+            let before = snapshot(&wallet);
+            for incremental in [false, true] {
+                let result =
+                    wallet.scan_public_regtest_inner(&encode(&blocks), schedule(), incremental);
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "native_recovery_profile_required"
+                );
+                assert_eq!(snapshot(&wallet), before);
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT blocked FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                        [],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap(),
+                    blocked
+                );
+                assert_witnesses(&wallet);
+            }
+        }
+    }
+
     #[test]
     fn incremental_rejects_forged_prefix_commitments_at_same_tip_and_before_suffix() {
         let verified = encrypted_publication();

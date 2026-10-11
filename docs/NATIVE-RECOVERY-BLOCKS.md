@@ -122,3 +122,10 @@ accepted overlap, retaining the barrier when no overlap exists, and refuses a
 non-genesis birthday before creating a recovery marker. Interrupted offline
 create authenticates and reuses its retained encrypted seed; a missing seed on
 an existing Pending database cannot be replaced during setup.
+
+Public compact scans and ordinary sync, catch-up checkpoint repair and gap
+rewind refuse every recovery-marked wallet, including Complete and feature
+downgrade. Public scans recheck ownership under the SQLite writer; ordinary
+network scan operations hold an exclusive ownership lease against canonical
+recovery. Offline payment submission refuses before changing a signed intent
+to an unknown outcome and retains the saved transaction bytes.

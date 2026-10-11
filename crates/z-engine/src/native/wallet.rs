@@ -1276,6 +1276,14 @@ impl NativeWallet {
         }
     }
 
+    fn ordinary_scan_lease(&self) -> Result<std::fs::File> {
+        let lease = database_lease::exclusive(&self.paths.data_db)?;
+        if has_recovery_marker(&self.paths.data_db)? {
+            return Err(EngineError::Message("native_recovery_scan_refused".into()));
+        }
+        Ok(lease)
+    }
+
     /// Open and persist a different compact-block URL when the UI field changed.
     pub fn open_with_light(root: impl Into<PathBuf>, server: Option<LightServer>) -> Result<Self> {
         let mut w = Self::open(root)?;
@@ -1439,6 +1447,8 @@ impl NativeWallet {
         &self,
         live: Option<Arc<Mutex<SyncProgress>>>,
     ) -> Result<(u32, SyncProgress)> {
+        self.require_network_access()?;
+        let _lease = self.ordinary_scan_lease()?;
         let mut progress = SyncProgress {
             stage: SyncStage::Connecting,
             percent: 0.0,
@@ -2007,6 +2017,7 @@ impl NativeWallet {
     /// island_end+1→tip. Does not wipe keys or the already-scanned island.
     pub async fn rewind_scan_to_gap(&self) -> Result<u32> {
         self.require_network_access()?;
+        let _lease = self.ordinary_scan_lease()?;
         let mut client = Self::connect_url(
             &self.server.as_url(),
             Self::skip_ironwood_subtrees(self.network, &self.server.as_url()),
@@ -2021,10 +2032,16 @@ impl NativeWallet {
             .height
             .try_into()
             .map_err(|_| EngineError::Message("tip height out of range".into()))?;
-        self.rewind_scan_to_gap_at_tip(tip)
+        self.rewind_scan_to_gap_locked(tip)
     }
 
+    #[cfg(test)]
     fn rewind_scan_to_gap_at_tip(&self, tip: u32) -> Result<u32> {
+        let _lease = self.ordinary_scan_lease()?;
+        self.rewind_scan_to_gap_locked(tip)
+    }
+
+    fn rewind_scan_to_gap_locked(&self, tip: u32) -> Result<u32> {
         let island = last_filled_island_end(&self.paths.data_db, self.meta.birthday_height, tip);
         if island >= tip {
             return Err(EngineError::Message(
@@ -2337,6 +2354,7 @@ impl NativeWallet {
     /// Sync if the wallet is behind the light server tip. Returns whether work ran.
     pub async fn catch_up(&self) -> Result<(u32, SyncProgress, bool)> {
         self.require_network_access()?;
+        let lease = self.ordinary_scan_lease()?;
         let scanned = self.scanned_height()?;
         let tip = Self::fetch_tip(&self.server).await?;
         if scanned >= tip {
@@ -2359,6 +2377,7 @@ impl NativeWallet {
                 false,
             ));
         }
+        drop(lease);
         let (h, p) = self.sync().await?;
         Ok((h, p, true))
     }
@@ -3980,6 +3999,68 @@ mod tests {
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+
+    #[tokio::test]
+    async fn ordinary_scan_paths_preserve_pending_and_completed_recovery_before_network() {
+        for (blocked, receipt) in [(1, None), (0, Some(b"retained-receipt".as_slice()))] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut wallet = fixture_wallet(dir.path());
+            let (key, birthday) = fixture_account();
+            wallet.replace_scan_db(&key, &birthday).unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            wallet
+                .set_light_server(LightServer::parse(
+                    &format!("http://{}", listener.local_addr().unwrap()),
+                    ZNetwork::Regtest,
+                ))
+                .unwrap();
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            conn.execute_batch("CREATE TABLE ext_coffer_pir_recovery_v1(id INTEGER PRIMARY KEY,blocked INTEGER NOT NULL,generation INTEGER NOT NULL,receipt BLOB);").unwrap();
+            conn.execute(
+                "INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,?1,7,?2)",
+                rusqlite::params![blocked, receipt],
+            )
+            .unwrap();
+            drop(conn);
+            NativeWallet::checkpoint_sqlite(&wallet.paths.data_db).unwrap();
+            let before = std::fs::read(&wallet.paths.data_db).unwrap();
+            let reopened = NativeWallet::open(dir.path()).unwrap();
+            for error in [
+                reopened.sync_reported(None).await.unwrap_err(),
+                reopened.sync_reported_resilient(None).await.unwrap_err(),
+                reopened.catch_up().await.unwrap_err(),
+                reopened.rewind_scan_to_gap().await.unwrap_err(),
+                reopened.rewind_scan_to_gap_at_tip(200).unwrap_err(),
+            ] {
+                assert!(error.to_string().contains("native_recovery_scan_refused"));
+            }
+            assert!(std::fs::read(&wallet.paths.data_db).unwrap() == before);
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            let offline = NativeWallet::open_offline(dir.path()).unwrap();
+            assert!(offline
+                .catch_up()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("native_offline_wallet"));
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            let retained: (i32, u64, Option<Vec<u8>>) = conn
+                .query_row(
+                    "SELECT blocked,generation,receipt FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(retained, (blocked, 7, receipt.map(Vec::from)));
+            conn.execute_batch("DROP TABLE ext_coffer_pir_recovery_v1")
+                .unwrap();
+            assert!(reopened.ordinary_scan_lease().is_ok());
+        }
     }
 
     #[tokio::test]

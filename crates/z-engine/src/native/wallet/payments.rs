@@ -184,6 +184,77 @@ mod tests {
         assert!(client.is_none(), "missing bytes must not reach a server");
     }
 
+    #[tokio::test]
+    async fn offline_submission_preserves_saved_signed_and_unknown_intents() {
+        use zcash_primitives::transaction::{Authorized, TransactionData, TxVersion};
+        let dir = tempfile::tempdir().unwrap();
+        let mut wallet = fixture_wallet(dir.path());
+        let (ufvk, birthday) = fixture_account();
+        wallet.replace_scan_db(&ufvk, &birthday).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        wallet
+            .set_light_server(LightServer::parse(
+                &format!("http://{}", listener.local_addr().unwrap()),
+                ZNetwork::Regtest,
+            ))
+            .unwrap();
+        let transaction = TransactionData::<Authorized>::from_parts(
+            TxVersion::V5,
+            BranchId::Nu6_3,
+            0,
+            (crate::regtest_nu6_3_height() + 10).into(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        let txid = transaction.txid();
+        let mut raw = Vec::new();
+        transaction.write(&mut raw).unwrap();
+        let conn = connection(&wallet).unwrap();
+        conn.execute_batch("INSERT INTO blocks (height,hash,time,sapling_tree) VALUES (1,zeroblob(32),0,X'000000')").unwrap();
+        conn.execute("INSERT INTO transactions (txid,created,expiry_height,raw,min_observed_height) VALUES (?1,'2026-09-24T00:00:00Z',?2,?3,1)", params![txid.as_ref(), crate::regtest_nu6_3_height() + 10, raw]).unwrap();
+        // A disposable wallet history row makes the saved authorized transaction
+        // visible through the same receipt lookup used by public submission.
+        conn.execute("INSERT INTO transparent_received_outputs (transaction_id,output_index,account_id,address,script,value_zat,address_id) SELECT (SELECT id_tx FROM transactions WHERE txid=?1),0,account_id,'fixture',x'51',10000,id FROM addresses LIMIT 1", [txid.as_ref()]).unwrap();
+        prepare(&conn);
+        let offline = NativeWallet::open_offline(dir.path()).unwrap();
+        assert!(offline.transaction(&txid.to_string()).unwrap().is_some());
+        for phase in ["signed", "unknown"] {
+            conn.execute(
+                "UPDATE ext_native_payments_v1 SET phase=?1,txids=?2 WHERE id=?3",
+                params![
+                    phase,
+                    serde_json::to_string(&vec![txid.to_string()]).unwrap(),
+                    ID
+                ],
+            )
+            .unwrap();
+            assert_eq!(offline.payment_receipt(ID).unwrap().phase, phase);
+            let before: (String, String, Vec<u8>) = conn.query_row(
+                "SELECT p.phase,p.txids,t.raw FROM ext_native_payments_v1 p JOIN transactions t ON t.txid=?1 WHERE p.id=?2", params![txid.as_ref(),ID], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            ).unwrap();
+            assert!(offline
+                .submit_payment(ID)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("native_offline_wallet"));
+            let after: (String, String, Vec<u8>) = conn.query_row(
+                "SELECT p.phase,p.txids,t.raw FROM ext_native_payments_v1 p JOIN transactions t ON t.txid=?1 WHERE p.id=?2", params![txid.as_ref(),ID], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            ).unwrap();
+            assert!(before == after);
+            assert_eq!(offline.payment_receipt(ID).unwrap().phase, phase);
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
     #[test]
     fn signed_receipts_require_their_wallet_transaction() {
         let dir = tempfile::tempdir().unwrap();
@@ -465,6 +536,7 @@ impl NativeWallet {
     /// create a replacement payment. Lost replies remain unknown; explicit node
     /// rejections surface as errors while the signed receipt remains recoverable.
     pub async fn submit_payment(&self, id: &str) -> Result<PaymentReceipt> {
+        self.require_network_access()?;
         let conn = connection(self)?;
         let receipt = self.payment_receipt(id)?;
         if matches!(receipt.phase.as_str(), "accepted" | "mined") {
