@@ -2285,6 +2285,37 @@ fn expiry_of(w: &WebWallet, raw: &[u8]) -> (String, u32) {
     (to_hex(tx.txid().as_ref()), u32::from(tx.expiry_height()))
 }
 
+#[cfg(feature = "transparent-inputs")]
+#[test]
+fn shielded_fee_cap_is_checked_before_proving_or_reserving_gift_funds() {
+    let (mut w, _) = funded_wallet();
+    let destination = w.unified_address().to_string();
+    let before = w.to_snapshot().unwrap();
+    let fee = w.estimate_fee(&destination, "0.1", None).unwrap();
+    assert!(fee > 0);
+    assert!(w
+        .prove_send_capped(REGTEST_FAUCET_MNEMONIC, &destination, "0.1", None, fee - 1)
+        .unwrap_err()
+        .to_string()
+        .contains("approved maximum"));
+    assert_eq!(w.to_snapshot().unwrap(), before);
+    assert!(w
+        .prove_send_capped(
+            REGTEST_FAUCET_MNEMONIC,
+            &format!("zcash:{destination}?amount=0.1"),
+            "0.1",
+            None,
+            fee
+        )
+        .is_err());
+    assert_eq!(w.to_snapshot().unwrap(), before);
+    let raw = w
+        .prove_send_capped(REGTEST_FAUCET_MNEMONIC, &destination, "0.1", None, fee)
+        .unwrap();
+    assert!(!raw.is_empty());
+    assert_ne!(w.to_snapshot().unwrap(), before);
+}
+
 /// Our send A reserves a note; another transaction B (the same seed on
 /// another device, or another tab) spends it and is mined. When A expires
 /// unmined, releasing its inputs must not make B's spent note spendable.

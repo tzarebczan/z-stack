@@ -204,6 +204,24 @@ pub fn generate_mnemonic() -> Result<String> {
     Ok(mnemonic.to_string())
 }
 
+/// Original BIP-39 entropy for compact bearer gifts; never the derived seed.
+/// Accept only canonical English phrases so serialization cannot change an account.
+pub fn mnemonic_to_entropy(words: &str) -> Result<Vec<u8>> {
+    let mnemonic = Mnemonic::parse_normalized(words)
+        .map_err(|_| EngineError::Message("invalid gift recovery phrase".into()))?;
+    if mnemonic.to_string() != words {
+        return Err(EngineError::Message("invalid gift recovery phrase".into()));
+    }
+    Ok(mnemonic.to_entropy())
+}
+
+/// Reconstruct a compact gift's English phrase. Errors never contain the input.
+pub fn mnemonic_from_entropy(entropy: &[u8]) -> Result<String> {
+    Mnemonic::from_entropy(entropy)
+        .map(|m| m.to_string())
+        .map_err(|_| EngineError::Message("invalid gift entropy".into()))
+}
+
 /// Derive UFVK + default UA (+ transparent receiver) from a BIP-39 mnemonic.
 pub fn account_from_mnemonic(
     mnemonic: &str,
@@ -440,6 +458,35 @@ impl TryFromAddress for ParsedAddress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_gift_entropy_preserves_account_and_rejects_noncanonical_words() {
+        let zero = [0u8; 16];
+        let words = mnemonic_from_entropy(&zero).unwrap();
+        assert_eq!(words, REGTEST_FAUCET_MNEMONIC);
+        assert_eq!(mnemonic_to_entropy(&words).unwrap(), zero);
+        for len in [16, 20, 24, 28, 32] {
+            let entropy = vec![7u8; len];
+            let phrase = mnemonic_from_entropy(&entropy).unwrap();
+            assert_eq!(mnemonic_to_entropy(&phrase).unwrap(), entropy);
+            assert_eq!(
+                seed_fingerprint(&phrase).unwrap(),
+                seed_fingerprint(&mnemonic_from_entropy(&entropy).unwrap()).unwrap()
+            );
+        }
+        for invalid in [
+            format!(" {words}"),
+            words.replace(' ', "  "),
+            words.to_uppercase(),
+            "private invalid words".into(),
+        ] {
+            let error = mnemonic_to_entropy(&invalid).unwrap_err().to_string();
+            assert!(!error.contains(&invalid));
+        }
+        for len in [0, 15, 17, 31, 33, 64] {
+            assert!(mnemonic_from_entropy(&vec![0; len]).is_err());
+        }
+    }
 
     #[test]
     fn seed_fingerprint_matches_zip32() {

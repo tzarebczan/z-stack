@@ -254,6 +254,24 @@ impl WebWallet {
         self.finish_prove_send_capped(mnemonic, request, Some(to), max_fee_zat)
     }
 
+    /// One shielded recipient with the approved fee enforced on the actual proposal.
+    pub fn prove_send_capped(
+        &mut self,
+        mnemonic: &str,
+        to: &str,
+        amount_zec: &str,
+        memo: Option<&str>,
+        max_fee_zat: u64,
+    ) -> Result<Vec<u8>> {
+        if to.trim().to_ascii_lowercase().starts_with("zcash:") {
+            return Err(EngineError::Message(
+                "fee-capped sends require one plain shielded address".into(),
+            ));
+        }
+        let request = self.send_request(to, amount_zec, memo)?;
+        self.finish_prove_send_capped(mnemonic, request, Some(to), Some(max_fee_zat))
+    }
+
     /// Fee for exactly one bare P2PKH/P2SH output, with shielded change.
     pub fn estimate_transparent_fee(&mut self, to: &str, amount_zec: &str) -> Result<u64> {
         let request = self.transparent_send_request(to, amount_zec)?;

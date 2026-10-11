@@ -46,6 +46,17 @@ pub fn generate_mnemonic() -> Result<String, JsValue> {
     keys::generate_mnemonic().map_err(js_err)
 }
 
+/// Original BIP-39 entropy, for optional compact bearer-gift integrations.
+#[wasm_bindgen(js_name = giftMnemonicToEntropy)]
+pub fn gift_mnemonic_to_entropy(words: &str) -> Result<Vec<u8>, JsValue> {
+    keys::mnemonic_to_entropy(words).map_err(js_err)
+}
+
+#[wasm_bindgen(js_name = giftMnemonicFromEntropy)]
+pub fn gift_mnemonic_from_entropy(entropy: &[u8]) -> Result<String, JsValue> {
+    keys::mnemonic_from_entropy(entropy).map_err(js_err)
+}
+
 /// UFVK + default unified address (+ transparent receiver) from a mnemonic.
 #[wasm_bindgen(js_name = accountFromMnemonic)]
 pub fn account_from_mnemonic(
@@ -607,11 +618,21 @@ impl WasmWallet {
         to: &str,
         amount_zec: &str,
         memo: Option<String>,
+        max_fee_zat: Option<String>,
     ) -> Result<String, JsValue> {
-        let raw = self
-            .inner
-            .prove_send(mnemonic, to, amount_zec, memo.as_deref())
-            .map_err(js_err)?;
+        let raw = match max_fee_zat {
+            Some(limit) => {
+                let fee = limit
+                    .parse::<u64>()
+                    .map_err(|_| js_err("invalid maximum fee"))?;
+                self.inner
+                    .prove_send_capped(mnemonic, to, amount_zec, memo.as_deref(), fee)
+            }
+            None => self
+                .inner
+                .prove_send(mnemonic, to, amount_zec, memo.as_deref()),
+        }
+        .map_err(js_err)?;
         let txid = self.inner.raw_txid(&raw).map_err(js_err)?;
         let hex = z_engine::web::to_hex(&raw);
         Ok(serde_json::json!({ "txid": txid, "hex": hex }).to_string())
