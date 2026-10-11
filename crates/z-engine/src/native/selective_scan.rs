@@ -374,7 +374,7 @@ pub(super) fn trial_decrypt(
     if blocks.is_empty() {
         return Err(EngineError::Message("selective-scan empty batch".into()));
     }
-    ensure_scan_threads();
+    super::initialize_native_threads(None)?;
 
     ensure_compact_chain_metadata(&mut blocks, sap0, orch0, iron0);
     let span = compact_span(&blocks)?;
@@ -837,24 +837,6 @@ fn watermark_of(block: &CompactBlock) -> Result<BlockWatermark> {
         ironwood_tree_size: iron,
         ironwood_action_count: iron_n,
     })
-}
-
-fn ensure_scan_threads() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let n = std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(8)
-            .max(1);
-        match rayon::ThreadPoolBuilder::new()
-            .num_threads(n)
-            .thread_name(|i| format!("z-stack-scan-{i}"))
-            .build_global()
-        {
-            Ok(()) => info!("selective-scan rayon scan pool"),
-            Err(_) => info!("selective-scan using existing rayon pool"),
-        }
-    });
 }
 
 fn continuity_or_err(err: zcash_client_backend::scanning::ScanError) -> Result<Continuity> {
