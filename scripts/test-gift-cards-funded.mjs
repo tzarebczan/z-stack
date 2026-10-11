@@ -270,6 +270,7 @@ try {
   await rpc("generate", [3]);
   await sync();
   assert.equal(await page.evaluate(async ({id, destination}) => {
+    await window.f.gifts.inspect(id);
     try { await window.f.gifts.prepareRedeem(id, destination); return "unexpected"; }
     catch (error) { return error.code; }
   }, {id: review.id, destination: before}), "confirming", "three confirmations must not authorize a claim");

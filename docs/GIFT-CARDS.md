@@ -196,6 +196,11 @@ qualification. See [release verification](RELEASE.md).
 The optional SDK policy accepts an integer from 1 through 4,294,967,295:
 
 ```ts
+import type { Wallet } from "@z-stack/sdk";
+
+declare const wallet: Wallet;
+declare const recipient: string;
+
 const mature = await wallet.balance({ minConfirmations: 6 });
 const fee = await wallet.estimateFee(recipient, "0.01", undefined, { minConfirmations: 6 });
 await wallet.send(recipient, "0.01", undefined, { minConfirmations: 6, maxFeeZat: String(fee.feeZat) });
