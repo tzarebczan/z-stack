@@ -167,6 +167,7 @@ enum Operation {
     Shard(Shard),
     Anchor(Anchor, u64, u64),
     Rollback(Anchor, String),
+    NativeRewind(Anchor),
     Promote(u64, String),
     Setup(String, String, bool, u32, SetupBlob),
     Filter(String, String, bool, Vec<u8>),
@@ -190,6 +191,9 @@ impl Replay {
             Operation::Shard(s) => self.memory.commit_shard(s.decode()?)?,
             Operation::Anchor(a, s, c) => self.memory.commit_anchor(&a, s, c)?,
             Operation::Rollback(a, r) => self.memory.rollback_above(&a, &r)?,
+            Operation::NativeRewind(a) => self
+                .memory
+                .rollback_above(&a, "native accepted-chain rewind")?,
             Operation::Promote(i, r) => {
                 self.memory.promote_provisional(i, &r)?;
                 0
@@ -404,6 +408,14 @@ impl<'a> NativePirStore<'a> {
         )
         .map(|_| ())
     }
+    pub(super) fn rewind_native(
+        &mut self,
+        anchor: Anchor,
+        expected: &NativeScanSnapshot,
+    ) -> std::result::Result<u32, StoreError> {
+        self.write_at(Operation::NativeRewind(anchor.clone()), Some(expected))?;
+        Ok(anchor.height as u32)
+    }
     fn write(&mut self, op: Operation) -> std::result::Result<u64, StoreError> {
         self.write_at(op, None)
     }
@@ -415,6 +427,10 @@ impl<'a> NativePirStore<'a> {
         if self.cancel.load(Ordering::Acquire) {
             return Err(StoreError::Io("native_pir_cancelled".into()));
         }
+        let native_rewind = match &op {
+            Operation::NativeRewind(anchor) => Some(anchor.clone()),
+            _ => None,
+        };
         let payload = serde_json::to_vec(&op).map_err(|_| corrupt())?;
         if self.generation >= MAX_ENTRIES
             || self.bytes + payload.len() as u64 > MAX_BYTES
@@ -467,6 +483,11 @@ impl<'a> NativePirStore<'a> {
                             "native_pir_reconciliation_required".into(),
                         )));
                     }
+                }
+                if let Some(anchor)=&native_rewind {
+                    let actual=wdb.truncate_to_height((anchor.height as u32).into()).map_err(|_|JournalError(StoreError::Io("native_recovery_rewind_failed".into())))?;
+                    if u64::from(u32::from(actual))!=anchor.height {return Err(JournalError(StoreError::Io("native_recovery_rewind_checkpoint_required".into())));}
+                    ext.execute("INSERT INTO ext_coffer_pir_recovery_v1 VALUES(1,1,1,NULL) ON CONFLICT(id) DO UPDATE SET blocked=1,generation=generation+1,receipt=NULL",[])?;
                 }
                 ext.execute(
                     "INSERT INTO ext_coffer_pir_journal(id,payload) VALUES(?1,?2)",

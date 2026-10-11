@@ -312,6 +312,7 @@ impl NativeWallet {
         if to.trim().to_ascii_lowercase().starts_with("zcash:") {
             return Err(failed("payment_plain_address_required"));
         }
+        self.ensure_recovery_selection_ready()?;
         let request = self.send_request(to, amount, memo)?;
         let mut db = self.open_db()?;
         let height = db
@@ -323,6 +324,11 @@ impl NativeWallet {
             .map_err(|_| failed("payment_storage_failed"))?
             .ok_or(EngineError::SyncRequired)?;
         let account = Self::primary_account_id(&db)?;
+        let mut spend_policy = shielded_spend_policy();
+        #[cfg(feature = "native-pir")]
+        if self.network == ZNetwork::Regtest && self.has_complete_pir_recovery()? {
+            spend_policy=spend_policy.with_transparent(zcash_client_backend::data_api::wallet::input_selection::TransparentSpendPolicy::any_account_addr());
+        }
         let proposal = propose_transfer::<_, _, _, _, Infallible>(
             &mut db,
             &self.network,
@@ -336,7 +342,7 @@ impl NativeWallet {
             ),
             request,
             crate::confirmations_policy(self.network),
-            &shielded_spend_policy(),
+            &spend_policy,
             None,
             None,
         )
@@ -390,6 +396,7 @@ impl NativeWallet {
     /// receipt commit in ONE SQLite transaction before this returns. No broadcast.
     /// A failed/interrupted transaction leaves the review prepared and sends nothing.
     pub fn sign_payment(&self, auth: &SeedAuth, id: &str) -> Result<PaymentReceipt> {
+        self.ensure_recovery_selection_ready()?;
         // Authentication always precedes an operation that could create spend access.
         let seed = self.load_seed(auth)?;
         let usk = UnifiedSpendingKey::from_seed(
@@ -418,6 +425,13 @@ impl NativeWallet {
         // Keep the phase check inside the write transaction as well. Concurrent
         // callers must fail rather than sign twice or overwrite a saved receipt.
         db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<()> {
+            // Recheck under the writer transaction: a concurrent recovery begin
+            // must win over an earlier read-only preparation/signing check.
+            let recovery_marker: bool = ext.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')", [], |r| r.get(0))?;
+            if recovery_marker {
+                let blocked: Option<bool> = ext.query_row("SELECT blocked FROM ext_coffer_pir_recovery_v1 WHERE id=1", [], |r| r.get(0)).optional()?;
+                if blocked != Some(false) { anyhow::bail!("native_recovery_pending"); }
+            }
             let unchanged = wdb.chain_height()?.map(u32::from) == Some(height)
                 && wdb.get_block_hash(height.into())?.is_some_and(|h| h.0.as_slice() == hash);
             if !unchanged { anyhow::bail!("payment_review_expired"); }

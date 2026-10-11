@@ -1,8 +1,11 @@
 //! Experimental regtest confirmed discovery. No event reaches native coin
 //! selection, signing, balances, history views or transparent fallback RPCs.
+#[path = "pir_recovery.rs"]
+mod recovery;
 #[path = "pir_store.rs"]
 mod store;
 use super::*;
+pub use recovery::PirRecoveryReport;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -183,10 +186,18 @@ pub(super) fn native_scope<D: WalletRead<AccountId = AccountUuid>>(
         let birthday = u64::from(u32::from(
             db.get_account_birthday(account).map_err(|_| invalid())?,
         ));
-        for (address, metadata) in db
+        let mut receivers = db
             .get_transparent_receivers(account, true, true)
-            .map_err(|_| invalid())?
-        {
+            .map_err(|_| invalid())?;
+        // Pinned ephemeral enumeration requires a known chain tip. Canonical
+        // recovery establishes that tip before deriving its completion scope.
+        if db.chain_height().map_err(|_| invalid())?.is_some() {
+            receivers.extend(
+                db.get_ephemeral_transparent_receivers(account, u32::MAX, false)
+                    .map_err(|_| invalid())?,
+            );
+        }
+        for (address, metadata) in receivers {
             let imported = metadata.scope().is_none();
             let required_from = receiver_history_floor(imported, birthday, start)?;
             scope.push(ScopeEntry {

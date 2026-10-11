@@ -68,8 +68,8 @@ pub use transparent_wallet::{
 };
 #[cfg(feature = "native-pir")]
 pub use wallet::{
-    verify_regtest_recovery_blocks, PirConfirmedTransaction, PirDiscoveryReport,
-    RegtestAcceptedChain, VerifiedRegtestRecoveryBlocks,
+    verify_regtest_recovery_blocks, PirConfirmedTransaction, PirDiscoveryReport, PirRecoveryReport,
+    RecoveryCancellation, RegtestAcceptedChain, VerifiedRegtestRecoveryBlocks,
 };
 
 #[cfg(feature = "native-pir")]

@@ -7,7 +7,7 @@ use crate::error::{EngineError, Result};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
 use transparent_wallet::{Acceptance, ChainView};
-use zcash_primitives::{block::Block, transaction::TxVersion};
+use zcash_primitives::block::Block;
 use zcash_protocol::consensus::BranchId;
 
 const MAGIC: &[u8] = b"COFFER-REGTEST-BLOCKS-V1\n";
@@ -30,6 +30,85 @@ impl VerifiedRegtestRecoveryBlocks {
         &self.target_hash
     }
 }
+impl VerifiedRegtestRecoveryBlocks {
+    pub(super) fn compact_blocks(
+        &self,
+    ) -> Result<Vec<zcash_client_backend::proto::compact_formats::CompactBlock>> {
+        use zcash_client_backend::proto::compact_formats::{
+            ChainMetadata, CompactBlock, CompactOrchardAction, CompactSaplingOutput,
+            CompactSaplingSpend, CompactTx,
+        };
+        let mut sizes = [0u32; 3];
+        let mut blocks = Vec::with_capacity(self.blocks.len());
+        for block in &self.blocks {
+            let mut transactions = Vec::with_capacity(block.vtx().len());
+            for (index, tx) in block.vtx().iter().enumerate() {
+                let mut compact = CompactTx {
+                    index: index as u64,
+                    txid: tx.txid().as_ref().to_vec(),
+                    ..Default::default()
+                };
+                if let Some(bundle) = tx.sapling_bundle() {
+                    compact.spends = bundle
+                        .shielded_spends()
+                        .iter()
+                        .map(|spend| CompactSaplingSpend {
+                            nf: spend.nullifier().0.to_vec(),
+                        })
+                        .collect();
+                    compact.outputs = bundle
+                        .shielded_outputs()
+                        .iter()
+                        .map(|output| CompactSaplingOutput {
+                            cmu: output.cmu().to_bytes().to_vec(),
+                            ephemeral_key: output.ephemeral_key().0.to_vec(),
+                            ciphertext: output.enc_ciphertext()[..52].to_vec(),
+                        })
+                        .collect();
+                }
+                if let Some(bundle) = tx.orchard_bundle() {
+                    compact.actions = bundle
+                        .actions()
+                        .iter()
+                        .map(CompactOrchardAction::from)
+                        .collect();
+                }
+                if let Some(bundle) = tx.ironwood_bundle() {
+                    compact.ironwood_actions = bundle
+                        .actions()
+                        .iter()
+                        .map(CompactOrchardAction::from)
+                        .collect();
+                }
+                for (size, count) in sizes.iter_mut().zip([
+                    compact.outputs.len(),
+                    compact.actions.len(),
+                    compact.ironwood_actions.len(),
+                ]) {
+                    *size = size
+                        .checked_add(u32::try_from(count).map_err(|_| invalid())?)
+                        .ok_or_else(invalid)?;
+                }
+                transactions.push(compact);
+            }
+            blocks.push(CompactBlock {
+                height: u64::from(u32::from(block.claimed_height())),
+                hash: block.header().hash().0.to_vec(),
+                prev_hash: block.header().prev_block.0.to_vec(),
+                time: block.header().time,
+                header: vec![],
+                vtx: transactions,
+                chain_metadata: Some(ChainMetadata {
+                    sapling_commitment_tree_size: sizes[0],
+                    orchard_commitment_tree_size: sizes[1],
+                    ironwood_commitment_tree_size: sizes[2],
+                }),
+            });
+        }
+        Ok(blocks)
+    }
+}
+
 fn invalid() -> EngineError {
     EngineError::Message("native_recovery_blocks_invalid".into())
 }
@@ -122,8 +201,7 @@ fn transaction_root(mut nodes: Vec<[u8; 32]>) -> Result<[u8; 32]> {
 
 /// Verify the V1 complete prefix: magic, LE start=1/count, then LE length/raw
 /// blocks. Hash provenance belongs to the accepted chain constructor's caller.
-/// The current profile refuses Sprout payloads, V6 and Ironwood rather than
-/// claiming downstream compact conversion supports them.
+/// Sprout payloads remain unsupported by canonical recovery.
 pub fn verify_regtest_recovery_blocks(
     mut bytes: &[u8],
     chain: &RegtestAcceptedChain,
@@ -168,8 +246,6 @@ pub fn verify_regtest_recovery_blocks(
             cancelled(cancel)?;
             if tx.consensus_branch_id() != branch
                 || !tx.version().valid_in_branch(branch)
-                || tx.version() == TxVersion::V6
-                || tx.ironwood_bundle().is_some()
                 || tx.sprout_bundle().is_some()
             {
                 return Err(invalid());
@@ -193,7 +269,7 @@ pub fn verify_regtest_recovery_blocks(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::native::RegtestScanSchedule;
     use zcash_primitives::{
@@ -202,6 +278,11 @@ mod tests {
     };
 
     fn fixture() -> (Vec<u8>, RegtestAcceptedChain) {
+        fixture_with_script(&[0x51])
+    }
+    pub(in crate::native::wallet) fn fixture_with_script(
+        script: &[u8],
+    ) -> (Vec<u8>, RegtestAcceptedChain) {
         let genesis = "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327";
         let mut hash = crate::web::from_hex(genesis).unwrap();
         hash.reverse();
@@ -215,7 +296,8 @@ mod tests {
         tx.extend(u32::MAX.to_le_bytes());
         tx.push(1);
         tx.extend(50_000u64.to_le_bytes());
-        tx.extend([1, 0x51]);
+        tx.push(script.len() as u8);
+        tx.extend(script);
         tx.extend(0u32.to_le_bytes());
         tx.extend(0u32.to_le_bytes());
         tx.extend(0i64.to_le_bytes());
@@ -303,6 +385,24 @@ mod tests {
         changed[length_offset..length_offset + 4].copy_from_slice(&(length + 1).to_le_bytes());
         changed.push(0);
         assert!(verify_regtest_recovery_blocks(&changed, &chain, &AtomicBool::new(false)).is_err());
+    }
+    #[test]
+    fn nested_transaction_vector_counts_fail_without_unbounded_reserve() {
+        let (bytes, chain) = fixture();
+        // Header(140 + empty solution), vtx count, V4 header precede vin.
+        let raw_start = MAGIC.len() + 12;
+        let vin = raw_start + 141 + 1 + 8;
+        let mut malformed = bytes[..vin].to_vec();
+        malformed.push(255);
+        malformed.extend(u64::MAX.to_le_bytes());
+        malformed.extend([0; 4]);
+        let raw_length = (malformed.len() - raw_start) as u32;
+        malformed[MAGIC.len() + 8..raw_start].copy_from_slice(&raw_length.to_le_bytes());
+        // Pinned Array readers collect io::Result element-by-element and stop on
+        // the first read error; the claimed count never reserves that capacity.
+        assert!(
+            verify_regtest_recovery_blocks(&malformed, &chain, &AtomicBool::new(false)).is_err()
+        );
     }
     #[test]
     fn mutated_merkle_trees_and_unbounded_counts_refused() {

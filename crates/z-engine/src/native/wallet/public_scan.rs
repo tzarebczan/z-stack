@@ -166,145 +166,159 @@ impl NativeWallet {
         let tip = blocks.len() as u32;
         let mut db = self.open_db()?;
         db.transactionally(|wdb| -> anyhow::Result<()> {
-            // Tip, overlap and commitment state must come from this same write transaction.
-            if wdb
-                .chain_height()?
-                .is_some_and(|height| u32::from(height) > tip)
-            {
-                anyhow::bail!("public_scan_invalid");
-            }
-            for b in &blocks {
-                if let Some(hash) = wdb.get_block_hash((b.height as u32).into())? {
-                    if hash.0.as_slice() != b.hash {
-                        anyhow::bail!("public_scan_invalid");
-                    }
-                }
-            }
-            let max = wdb.block_max_scanned()?;
-            if max
-                .as_ref()
-                .is_some_and(|b| u32::from(b.block_height()) > tip)
-            {
-                anyhow::bail!("public_scan_invalid");
-            }
-            let from_state = if incremental {
-                let fully = wdb.block_fully_scanned()?;
-                if fully.as_ref().map(|b| b.block_height())
-                    != max.as_ref().map(|b| b.block_height())
-                {
-                    anyhow::bail!("public_scan_resume_required");
-                }
-                if let Some(boundary) = fully {
-                    let height = u32::from(boundary.block_height());
-                    // Every committed overlap hash is required, not just the boundary.
-                    for b in blocks.iter().take(height as usize) {
-                        if wdb
-                            .get_block_hash((b.height as u32).into())?
-                            .as_ref()
-                            .map(|h| h.0.as_slice())
-                            != Some(b.hash.as_slice())
-                        {
-                            anyhow::bail!("public_scan_resume_required");
-                        }
-                    }
-                    if height == tip {
-                        return Ok(());
-                    }
-                    macro_rules! boundary_tree {
-                        ($tree:expr,$expected:expr) => {{
-                            let size = $expected
-                                .map(u64::from)
-                                .ok_or_else(|| anyhow::anyhow!("public_scan_resume_required"))?;
-                            let maximum = $tree.max_leaf_position(None)?;
-                            let maximum_size = maximum.map(|p| u64::from(p) + 1).unwrap_or(0);
-                            if maximum_size < size {
-                                anyhow::bail!("public_scan_resume_required");
-                            }
-                            // Block metadata fixes the scanned position even when no checkpoint
-                            // was retained for an empty block or prefetched roots extend past it.
-                            let root = if size == 0 {
-                                incrementalmerkletree::Hashable::empty_root(32.into())
-                            } else {
-                                $tree.root(
-                                    incrementalmerkletree::Address::from_parts(32.into(), 0),
-                                    size.into(),
-                                )?
-                            };
-                            let frontier = if maximum_size != size {
-                                None
-                            } else {
-                                match $tree.frontier() {
-                                    Ok(frontier) => Some(frontier),
-                                    Err(shardtree::error::ShardTreeError::Query(
-                                        shardtree::error::QueryError::TreeIncomplete(_),
-                                    )) => None,
-                                    Err(error) => return Err(anyhow::Error::from(error)),
-                                }
-                            };
-                            Ok::<_, anyhow::Error>((root, frontier))
-                        }};
-                    }
-                    let (sapling_root, sapling) = wdb
-                        .with_sapling_tree_mut::<_, _, anyhow::Error>(|tree| {
-                            boundary_tree!(tree, boundary.sapling_tree_size())
-                        })?;
-                    let (orchard_root, orchard) = wdb
-                        .with_orchard_tree_mut::<_, _, anyhow::Error>(|tree| {
-                            boundary_tree!(tree, boundary.orchard_tree_size())
-                        })?;
-                    let (ironwood_root, ironwood) = wdb
-                        .with_ironwood_tree_mut::<_, _, anyhow::Error>(|tree| {
-                            boundary_tree!(tree, boundary.ironwood_tree_size())
-                        })?
-                        .ok_or_else(|| anyhow::anyhow!("public_scan_resume_required"))?;
-                    let resumed = match (sapling, orchard, ironwood) {
-                        (Some(s), Some(o), Some(i))
-                            if boundary.sapling_tree_size().map(u64::from)
-                                == Some(s.tree_size())
-                                && boundary.orchard_tree_size().map(u64::from)
-                                    == Some(o.tree_size())
-                                && boundary.ironwood_tree_size().map(u64::from)
-                                    == Some(i.tree_size()) =>
-                        {
-                            ChainState::new(boundary.block_height(), boundary.block_hash(), s, o, i)
-                        }
-                        _ => prefix_frontiers(&blocks[..height as usize], genesis)?,
-                    };
-                    if boundary.sapling_tree_size().map(u64::from)
-                        != Some(resumed.final_sapling_tree().tree_size())
-                        || boundary.orchard_tree_size().map(u64::from)
-                            != Some(resumed.final_orchard_tree().tree_size())
-                        || boundary.ironwood_tree_size().map(u64::from)
-                            != Some(resumed.final_ironwood_tree().tree_size())
-                        || resumed.final_sapling_tree().root() != sapling_root
-                        || resumed.final_orchard_tree().root() != orchard_root
-                        || resumed.final_ironwood_tree().root() != ironwood_root
-                    {
-                        anyhow::bail!("public_scan_resume_required");
-                    }
-                    resumed
-                } else {
-                    ChainState::empty(0.into(), genesis)
-                }
-            } else {
-                ChainState::empty(0.into(), genesis)
-            };
-            let start = u32::from(from_state.block_height()) + 1;
-            wdb.update_chain_tip(tip.into())?;
-            scan_cached_blocks(
-                &self.network,
-                &Blocks(blocks),
-                wdb,
-                start.into(),
-                &from_state,
-                (tip - start + 1) as usize,
-            )
-            .map_err(|_| anyhow::anyhow!("public_scan_failed"))?;
-            Ok(())
+            scan_in_transaction(wdb, self.network, blocks, incremental, genesis)
         })
         .map_err(EngineError::from)?;
         Ok(tip)
     }
+}
+
+pub(super) type TransactionDb<'a, 'b, 'c, 'd> = WalletDb<
+    zcash_client_sqlite::SqlTransaction<'a>,
+    &'b ZNetwork,
+    &'c SystemClock,
+    &'d mut UnwrapErr<SysRng>,
+>;
+
+pub(super) fn scan_in_transaction(
+    wdb: &mut TransactionDb<'_, '_, '_, '_>,
+    network: ZNetwork,
+    blocks: Vec<CompactBlock>,
+    incremental: bool,
+    genesis: BlockHash,
+) -> anyhow::Result<()> {
+    let tip = blocks.len() as u32;
+
+    // Tip, overlap and commitment state must come from this same write transaction.
+    if wdb
+        .chain_height()?
+        .is_some_and(|height| u32::from(height) > tip)
+    {
+        anyhow::bail!("public_scan_invalid");
+    }
+    for b in &blocks {
+        if let Some(hash) = wdb.get_block_hash((b.height as u32).into())? {
+            if hash.0.as_slice() != b.hash {
+                anyhow::bail!("public_scan_invalid");
+            }
+        }
+    }
+    let max = wdb.block_max_scanned()?;
+    if max
+        .as_ref()
+        .is_some_and(|b| u32::from(b.block_height()) > tip)
+    {
+        anyhow::bail!("public_scan_invalid");
+    }
+    let from_state = if incremental {
+        let fully = wdb.block_fully_scanned()?;
+        if fully.as_ref().map(|b| b.block_height()) != max.as_ref().map(|b| b.block_height()) {
+            anyhow::bail!("public_scan_resume_required");
+        }
+        if let Some(boundary) = fully {
+            let height = u32::from(boundary.block_height());
+            // Every committed overlap hash is required, not just the boundary.
+            for b in blocks.iter().take(height as usize) {
+                if wdb
+                    .get_block_hash((b.height as u32).into())?
+                    .as_ref()
+                    .map(|h| h.0.as_slice())
+                    != Some(b.hash.as_slice())
+                {
+                    anyhow::bail!("public_scan_resume_required");
+                }
+            }
+            if height == tip {
+                return Ok(());
+            }
+            macro_rules! boundary_tree {
+                ($tree:expr,$expected:expr) => {{
+                    let size = $expected
+                        .map(u64::from)
+                        .ok_or_else(|| anyhow::anyhow!("public_scan_resume_required"))?;
+                    let maximum = $tree.max_leaf_position(None)?;
+                    let maximum_size = maximum.map(|p| u64::from(p) + 1).unwrap_or(0);
+                    if maximum_size < size {
+                        anyhow::bail!("public_scan_resume_required");
+                    }
+                    // Block metadata fixes the scanned position even when no checkpoint
+                    // was retained for an empty block or prefetched roots extend past it.
+                    let root = if size == 0 {
+                        incrementalmerkletree::Hashable::empty_root(32.into())
+                    } else {
+                        $tree.root(
+                            incrementalmerkletree::Address::from_parts(32.into(), 0),
+                            size.into(),
+                        )?
+                    };
+                    let frontier = if maximum_size != size {
+                        None
+                    } else {
+                        match $tree.frontier() {
+                            Ok(frontier) => Some(frontier),
+                            Err(shardtree::error::ShardTreeError::Query(
+                                shardtree::error::QueryError::TreeIncomplete(_),
+                            )) => None,
+                            Err(error) => return Err(anyhow::Error::from(error)),
+                        }
+                    };
+                    Ok::<_, anyhow::Error>((root, frontier))
+                }};
+            }
+            let (sapling_root, sapling) =
+                wdb.with_sapling_tree_mut::<_, _, anyhow::Error>(|tree| {
+                    boundary_tree!(tree, boundary.sapling_tree_size())
+                })?;
+            let (orchard_root, orchard) =
+                wdb.with_orchard_tree_mut::<_, _, anyhow::Error>(|tree| {
+                    boundary_tree!(tree, boundary.orchard_tree_size())
+                })?;
+            let (ironwood_root, ironwood) = wdb
+                .with_ironwood_tree_mut::<_, _, anyhow::Error>(|tree| {
+                    boundary_tree!(tree, boundary.ironwood_tree_size())
+                })?
+                .ok_or_else(|| anyhow::anyhow!("public_scan_resume_required"))?;
+            let resumed = match (sapling, orchard, ironwood) {
+                (Some(s), Some(o), Some(i))
+                    if boundary.sapling_tree_size().map(u64::from) == Some(s.tree_size())
+                        && boundary.orchard_tree_size().map(u64::from) == Some(o.tree_size())
+                        && boundary.ironwood_tree_size().map(u64::from) == Some(i.tree_size()) =>
+                {
+                    ChainState::new(boundary.block_height(), boundary.block_hash(), s, o, i)
+                }
+                _ => prefix_frontiers(&blocks[..height as usize], genesis)?,
+            };
+            if boundary.sapling_tree_size().map(u64::from)
+                != Some(resumed.final_sapling_tree().tree_size())
+                || boundary.orchard_tree_size().map(u64::from)
+                    != Some(resumed.final_orchard_tree().tree_size())
+                || boundary.ironwood_tree_size().map(u64::from)
+                    != Some(resumed.final_ironwood_tree().tree_size())
+                || resumed.final_sapling_tree().root() != sapling_root
+                || resumed.final_orchard_tree().root() != orchard_root
+                || resumed.final_ironwood_tree().root() != ironwood_root
+            {
+                anyhow::bail!("public_scan_resume_required");
+            }
+            resumed
+        } else {
+            ChainState::empty(0.into(), genesis)
+        }
+    } else {
+        ChainState::empty(0.into(), genesis)
+    };
+    let start = u32::from(from_state.block_height()) + 1;
+    wdb.update_chain_tip(tip.into())?;
+    scan_cached_blocks(
+        &network,
+        &Blocks(blocks),
+        wdb,
+        start.into(),
+        &from_state,
+        (tip - start + 1) as usize,
+    )
+    .map_err(|_| anyhow::anyhow!("public_scan_failed"))?;
+    Ok(())
 }
 
 #[cfg(test)]

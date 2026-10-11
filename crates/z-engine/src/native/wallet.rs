@@ -4,12 +4,19 @@ mod database_lease;
 #[cfg(feature = "native-pir")]
 mod recovery_blocks;
 #[cfg(feature = "native-pir")]
+mod recovery_cancellation;
+mod recovery_guard;
+#[cfg(feature = "native-pir")]
 pub use recovery_blocks::{verify_regtest_recovery_blocks, VerifiedRegtestRecoveryBlocks};
+#[cfg(feature = "native-pir")]
+pub use recovery_cancellation::RecoveryCancellation;
 mod payments;
 #[cfg(feature = "native-pir")]
 mod pir;
 #[cfg(feature = "native-pir")]
-pub use pir::{PirConfirmedTransaction, PirDiscoveryReport, RegtestAcceptedChain};
+pub use pir::{
+    PirConfirmedTransaction, PirDiscoveryReport, PirRecoveryReport, RegtestAcceptedChain,
+};
 mod public_scan;
 pub use payments::PaymentReceipt;
 pub use public_scan::RegtestScanSchedule;
@@ -2299,6 +2306,7 @@ impl NativeWallet {
 
     #[cfg(feature = "transparent-inputs")]
     pub async fn shield(&self, auth: &SeedAuth, threshold_zat: u64) -> Result<Vec<String>> {
+        self.ensure_recovery_selection_ready()?;
         let mut db = self.open_db()?;
         let account = Self::primary_account_id(&db)?;
         let seed = self.load_seed(auth)?;
@@ -2621,6 +2629,7 @@ impl NativeWallet {
         memo: Option<&str>,
         policy: SpendPolicy,
     ) -> Result<Vec<String>> {
+        self.ensure_recovery_selection_ready()?;
         crate::keys::assert_shielded_send_dest(to, crate::keys::SendDestPolicy::Shielded)?;
         let db = self.open_db()?;
         let account = Self::primary_account_id(&db)?;
@@ -2672,6 +2681,7 @@ impl NativeWallet {
         payments: &[crate::Zip321Payment],
         policy: SpendPolicy,
     ) -> Result<Vec<String>> {
+        self.ensure_recovery_selection_ready()?;
         if payments.is_empty() {
             return Err(EngineError::Message("ZIP-321 URI has no payments".into()));
         }
