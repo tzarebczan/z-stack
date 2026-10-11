@@ -946,6 +946,7 @@ impl NativeWallet {
     ) -> Result<(Self, CreatedWallet)> {
         auth.validate_for_save()?;
         let paths = WalletPaths::new(root);
+        let _ownership = database_lease::bootstrap(&paths.root)?;
         paths.prepare_new_wallet()?;
         paths.ensure_dirs()?;
 
@@ -1083,6 +1084,7 @@ impl NativeWallet {
     ) -> Result<(Self, String)> {
         auth.validate_for_save()?;
         let paths = WalletPaths::new(root);
+        let _ownership = database_lease::bootstrap(&paths.root)?;
         paths.prepare_new_wallet()?;
         paths.ensure_dirs()?;
 
@@ -1202,6 +1204,7 @@ impl NativeWallet {
         let ufvk = UnifiedFullViewingKey::decode(&network, keys.ufvk.trim())
             .map_err(|e| EngineError::Message(format!("ufvk: {e}")))?;
         let paths = WalletPaths::new(root);
+        let _ownership = database_lease::bootstrap(&paths.root)?;
         paths.prepare_new_wallet()?;
         paths.ensure_dirs()?;
         let server = server.unwrap_or_else(|| LightServer::for_network(network));
@@ -3994,6 +3997,66 @@ mod tests {
             )
             .unwrap()
             == 1
+    }
+
+    #[tokio::test]
+    async fn shared_bootstrap_ownership_refuses_all_ordinary_setup_before_network_or_seed_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("missing/parent/wallet");
+        let ownership = database_lease::bootstrap(&root).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = LightServer::parse(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            ZNetwork::Regtest,
+        );
+        let (ufvk, _) = fixture_account();
+        for error in [
+            NativeWallet::create(
+                &root,
+                ZNetwork::Regtest,
+                Some(server.clone()),
+                Some(1),
+                SeedAuth::passphrase("fixture setup ownership password"),
+                0,
+            )
+            .await
+            .err()
+            .unwrap(),
+            NativeWallet::restore(
+                &root,
+                crate::keys::REGTEST_FAUCET_MNEMONIC,
+                ZNetwork::Regtest,
+                Some(server.clone()),
+                1,
+                SeedAuth::passphrase("fixture setup ownership password"),
+                0,
+            )
+            .await
+            .err()
+            .unwrap(),
+            NativeWallet::restore_ufvk(
+                &root,
+                &ufvk.encode(&ZNetwork::Regtest),
+                ZNetwork::Regtest,
+                Some(server),
+                1,
+                0,
+            )
+            .await
+            .err()
+            .unwrap(),
+        ] {
+            assert!(
+                matches!(error, EngineError::Message(message) if message == "native_pir_database_busy")
+            );
+        }
+        assert!(!root.exists());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(ownership);
     }
 
     #[test]
