@@ -893,6 +893,53 @@ mod tests {
         assert!(wallet.ensure_recovery_selection_ready().is_err());
     }
     #[test]
+    fn discovery_writes_bind_the_complete_allocated_canonical_scope() {
+        use transparent_wallet::WalletStore;
+
+        let (_dir, wallet) = wallet();
+        let (_, chain) = fixture_with_script(&[0x51]);
+        let token = RecoveryCancellation::new();
+        wallet.begin_regtest_pir_recovery(&chain, &token).unwrap();
+        let mut db = wallet.open_db().unwrap();
+        db.update_chain_tip(1.into()).unwrap();
+        let scope = wallet.recovery_scope().unwrap();
+        assert!(scope != native_scope(&db, 1).unwrap());
+        let mut store = store::NativePirStore::open(&wallet, token.flag()).unwrap();
+        store.enroll(scope.clone(), 1).unwrap();
+        let identity = transparent_wallet::testing::identity();
+        store.bind_set(&identity).unwrap();
+        drop(store);
+        let mut store = store::NativePirStore::open(&wallet, token.flag()).unwrap();
+        store.enroll(scope.clone(), 1).unwrap();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        assert_eq!(
+            conn.execute(
+                "DELETE FROM addresses WHERE id=(SELECT max(id) FROM addresses WHERE key_scope=2 AND exposed_at_height IS NULL)",
+                [],
+            )
+            .unwrap(),
+            1
+        );
+        assert!(wallet.recovery_scope().unwrap() != scope);
+        let before: u64 = conn
+            .query_row(
+                "SELECT generation FROM ext_coffer_pir_head WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(store.bind_set(&identity).is_err());
+        let after: u64 = conn
+            .query_row(
+                "SELECT generation FROM ext_coffer_pir_head WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, before);
+        assert!(wallet.ensure_pir_recovery_ready().is_err());
+    }
+    #[test]
     fn begin_is_durable_and_all_allocated_native_receiver_scopes_are_enrolled() {
         let (_dir, wallet) = wallet();
         let (_, chain) = fixture_with_script(&[0x51]);

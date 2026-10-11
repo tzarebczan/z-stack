@@ -1,6 +1,8 @@
 //! Bounded qualification journal. The pinned upstream store defines semantics;
 //! each accepted operation commits through the wallet's extension transaction.
-use super::pir::{native_scope, NativeScanSnapshot, NativeScope, PirDiscoveryReport};
+use super::pir::{
+    native_scope_in_transaction, NativeScanSnapshot, NativeScope, PirDiscoveryReport,
+};
 use super::*;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -467,7 +469,9 @@ impl<'a> NativePirStore<'a> {
                     return Err(JournalError(StoreError::Io("native_pir_cancelled".into())));
                 }
                 if let Some(expected) = scope {
-                    let actual = native_scope(wdb, start).map_err(JournalError)?;
+                    let actual = native_scope_in_transaction(wdb, ext, start).map_err(|_| {
+                        JournalError(StoreError::Io("native_pir_scope_invalid".into()))
+                    })?;
                     if &actual != expected {
                         return Err(JournalError(StoreError::Io(
                             "native_pir_scope_changed".into(),
