@@ -212,7 +212,8 @@ async fn a_verified_light_connection_cannot_reconnect_to_a_replacement_endpoint(
             ZNetwork::Regtest,
         ))
         .unwrap();
-    let mut connection = Some(wallet.connect_submission().await.unwrap());
+    let owner = wallet.network_operation_lease().unwrap();
+    let mut connection = Some(wallet.connect_submission(&owner).await.unwrap());
     rusqlite::Connection::open(&wallet.paths.data_db)
         .unwrap()
         .execute("UPDATE ext_native_payments_v1 SET phase='unknown'", [])
@@ -239,7 +240,7 @@ async fn a_verified_light_connection_cannot_reconnect_to_a_replacement_endpoint(
     tokio::task::yield_now().await;
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        wallet.submit_raw(&mut connection, vec![0xfa, 0xce]),
+        wallet.submit_raw(&mut connection, vec![0xfa, 0xce], &owner),
     )
     .await;
     assert!(matches!(result, Ok(Err(EngineError::Transport(_)))));

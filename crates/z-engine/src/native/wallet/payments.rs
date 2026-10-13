@@ -434,8 +434,11 @@ mod tests {
         let mut db = wallet.open_db().unwrap();
         let txid = TxId::from_bytes([0xaa; 32]);
         let mut client = None;
+        let owner = wallet.network_operation_lease().unwrap();
         assert!(matches!(
-            wallet.broadcast_one(&mut client, &mut db, txid).await,
+            wallet
+                .broadcast_one(&mut client, &mut db, txid, &owner)
+                .await,
             Err(EngineError::WalletDb(_))
         ));
         assert!(client.is_none(), "missing bytes must not reach a server");
@@ -849,7 +852,7 @@ impl NativeWallet {
         }
         // Refuse a changed chain before changing the durable receipt. Keep this
         // verified connection for submission; do not reconnect after the check.
-        let mut client = Some(self.connect_submission().await?);
+        let mut client = Some(self.connect_submission(&_source_lease).await?);
         conn.execute(
             "UPDATE ext_native_payments_v1 SET phase='unknown' WHERE id=?1",
             [id],
@@ -858,7 +861,10 @@ impl NativeWallet {
         let mut db = self.open_db()?;
         for id in &receipt.txids {
             let txid = TxId::from_hex(id).ok_or_else(|| failed("payment_storage_failed"))?;
-            if !submission_acknowledged(self.broadcast_one(&mut client, &mut db, txid).await)? {
+            if !submission_acknowledged(
+                self.broadcast_one(&mut client, &mut db, txid, &_source_lease)
+                    .await,
+            )? {
                 return self.payment_receipt(&receipt.id);
             }
         }

@@ -395,10 +395,12 @@ async fn provided_channel_restores_scans_and_cold_opens_without_private_rpc_or_u
     }
     let before = fixture.calls.lock().unwrap().len();
     let cold = NativeWallet::open(root.path()).unwrap();
+    let owner = Arc::new(database_lease::shared(&cold.paths.data_db).unwrap());
     assert!(cold.validator_rpc_url().is_none());
     code(cold.sync_reported(None).await, "native_read_only_source");
     code(
-        cold.enhance_memos(&mut cold.open_db().unwrap()).await,
+        cold.enhance_memos(&mut cold.open_db().unwrap(), &owner)
+            .await,
         "native_read_only_source",
     );
     code(cold.max_send(None), "native_read_only_source");
@@ -830,4 +832,213 @@ async fn source_setup_never_quarantines_an_unmarked_retained_database() {
     assert!(fixture.calls.lock().unwrap().is_empty());
     assert!(!root.path().join("native-source-policy").exists());
     assert!(!root.path().join("seed.enc").exists());
+}
+
+struct StalledValidator {
+    endpoint: String,
+    entered: std::sync::mpsc::Receiver<()>,
+    release: Option<std::sync::mpsc::Sender<()>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StalledValidator {
+    fn new(stall_method: &'static str) -> Self {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "fixture accept deadline");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => panic!("fixture accept failed"),
+                }
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut socket = std::io::BufReader::new(socket);
+            loop {
+                let mut length = None;
+                let mut total = 0;
+                loop {
+                    let mut line = String::new();
+                    socket.read_line(&mut line).unwrap();
+                    assert!(!line.is_empty());
+                    total += line.len();
+                    assert!(total <= 16 * 1024);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            length = Some(value.trim().parse::<usize>().unwrap());
+                        }
+                    }
+                }
+                let length = length.unwrap();
+                assert!(length <= 64 * 1024);
+                let mut body = vec![0; length];
+                socket.read_exact(&mut body).unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let method = request["method"].as_str().unwrap();
+                if method == stall_method {
+                    entered_tx.send(()).unwrap();
+                    let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                    break;
+                }
+                let result = match method {
+                    "getblockchaininfo" => serde_json::json!({"chain":"regtest"}),
+                    "getblockhash" => {
+                        serde_json::json!(super::super::chain_identity::genesis(ZNetwork::Regtest))
+                    }
+                    _ => panic!("unexpected fixture method"),
+                };
+                let response = serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":result,"error":null}).to_string();
+                write!(socket.get_mut(), "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{response}", response.len()).unwrap();
+                socket.get_mut().flush().unwrap();
+            }
+        });
+        Self {
+            endpoint,
+            entered,
+            release: Some(release),
+            worker: Some(worker),
+        }
+    }
+
+    async fn wait_entered(&self) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match self.entered.try_recv() {
+                    Ok(()) => break,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        tokio::time::sleep(Duration::from_millis(5)).await
+                    }
+                    Err(_) => panic!("fixture ended before request"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    fn finish(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            worker.join().unwrap();
+        }
+    }
+}
+
+impl Drop for StalledValidator {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+async fn detached_validator_worker_keeps_policy_owner(operation: &'static str) {
+    let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 2).await;
+    let root = tempfile::tempdir().unwrap();
+    let (mut wallet, _, _) = reset_fixture(root.path());
+    let method = match operation {
+        "connect" => "getblockchaininfo",
+        "send" => "sendrawtransaction",
+        "verbose" | "raw" => "getrawtransaction",
+        _ => unreachable!(),
+    };
+    let mut validator = StalledValidator::new(method);
+    wallet
+        .set_validator_rpc(Some(validator.endpoint.clone()))
+        .unwrap();
+    let task = tokio::spawn(async move {
+        let owner = wallet.network_operation_lease().unwrap();
+        match operation {
+            "connect" => {
+                let _ = wallet.connect_submission(&owner).await;
+            }
+            "send" => {
+                let _ = wallet.submit_raw(&mut None, vec![0xfa, 0xce], &owner).await;
+            }
+            "verbose" => {
+                let _ = wallet
+                    .lookup_transaction(None, TxId::from_bytes([17; 32]), &owner)
+                    .await;
+            }
+            "raw" => {
+                let _ = NativeWallet::fetch_raw_transaction_with_rpc_owned(
+                    &wallet.server,
+                    wallet.validator_rpc_url().as_deref(),
+                    &"11".repeat(32),
+                    owner,
+                )
+                .await;
+            }
+            _ => unreachable!(),
+        }
+    });
+    validator.wait_entered().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let before = std::fs::read(root.path().join("data.sqlite")).unwrap();
+    let enrollment = NativeWallet::open_with_source(root.path(), &fixture.source);
+    let database_was_unchanged = std::fs::read(root.path().join("data.sqlite")).unwrap() == before;
+    let policy_was_absent = !root.path().join("native-source-policy").exists();
+    validator.finish();
+    // Draining the fixture socket lets the detached worker finish and release its owner.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match NativeWallet::open_with_source(root.path(), &fixture.source) {
+                Ok(_) => break,
+                Err(EngineError::Message(code)) if code == "native_pir_database_busy" => {
+                    tokio::time::sleep(Duration::from_millis(5)).await
+                }
+                Err(_) => panic!("unexpected enrollment refusal"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    code(enrollment, "native_pir_database_busy");
+    assert!(policy_was_absent);
+    assert!(database_was_unchanged);
+    assert!(NativeWallet::open(root.path())
+        .unwrap()
+        .uses_read_only_source()
+        .unwrap());
+    assert!(fixture.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aborted_validator_identity_worker_retains_policy_owner() {
+    detached_validator_worker_keeps_policy_owner("connect").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aborted_validator_send_worker_retains_policy_owner() {
+    detached_validator_worker_keeps_policy_owner("send").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aborted_validator_verbose_worker_retains_policy_owner() {
+    detached_validator_worker_keeps_policy_owner("verbose").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aborted_validator_raw_worker_retains_policy_owner() {
+    detached_validator_worker_keeps_policy_owner("raw").await;
 }

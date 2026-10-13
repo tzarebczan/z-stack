@@ -93,12 +93,13 @@ mod tests {
             .set_validator_rpc(Some(format!("http://{}", listener.local_addr().unwrap())))
             .unwrap();
         let offline = NativeWallet::open_offline(dir.path()).unwrap();
+        let owner = Arc::new(database_lease::shared(&offline.paths.data_db).unwrap());
         assert!(offline.validator_rpc_url().is_none());
         for result in [
             offline.connect().await.map(|_| ()),
             offline.rewind_scan_to_gap().await.map(|_| ()),
             offline.reset_scan().await,
-            offline.submit_raw(&mut None, vec![]).await,
+            offline.submit_raw(&mut None, vec![], &owner).await,
         ] {
             assert!(result
                 .unwrap_err()

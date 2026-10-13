@@ -32,6 +32,12 @@ Policy checks run under the same ownership lease as the operation. Reset retains
 exclusive ownership before its first network await through database replacement;
 sends and saved-intent submissions retain shared ownership through signing,
 commit and broadcast. Enrollment cannot interleave with those operations.
+Blocking validator workers retain a clone of that same lease through identity
+checks, broadcast and transaction lookups, even if their async caller is canceled.
+Tree verification retains shared ownership; ordinary public scans retain exclusive
+ownership. Wallet-associated bridge routes recheck sticky policy under ownership,
+and root-associated diagnostics also refuse source-bound seed-only setup. The
+explicit wallet-independent setup probe keeps its existing diagnostic behavior.
 `uses_read_only_source` re-reads both markers under a shared lease without
 networking. Applications must refuse replacement enrollment if a marked wallet
 lacks its original authenticated checkpoint or publisher binding. Those
@@ -76,5 +82,6 @@ unchanged.
 The source is a read-only capability, not an independent consensus verifier or a
 private-send implementation. Applications must qualify their transport and
 publications against the networks and node schedules they support. The SDK tests
-use a memory-only HTTP/2 source and disposable public-vector wallets, with no TCP
-listener, production wallet or production node.
+use a memory-only HTTP/2 source and disposable public-vector wallets. Cancellation
+regressions use ephemeral loopback validator fixtures. No test accesses a
+production wallet or production node.

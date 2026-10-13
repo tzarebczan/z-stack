@@ -791,8 +791,8 @@ pub struct LightProbe {
 }
 
 enum BroadcastConnection {
-    Light(Box<LwdClient>),
-    Validator(super::rpc::VerifiedValidator),
+    Light(Box<LwdClient>, Arc<std::fs::File>),
+    Validator(super::rpc::VerifiedValidator, Arc<std::fs::File>),
 }
 
 pub struct NativeWallet {
@@ -1796,7 +1796,7 @@ impl NativeWallet {
             Duration::from_secs(120),
             Duration::from_secs(2),
             &cancel,
-            || self.sync_reported_locked(progress.clone(), None),
+            || self.sync_reported_locked(progress.clone(), None, &_lease),
         )
         .await
     }
@@ -1817,7 +1817,7 @@ impl NativeWallet {
             Duration::from_secs(120),
             Duration::from_secs(2),
             &cancel,
-            || self.sync_reported_locked(progress.clone(), Some(source)),
+            || self.sync_reported_locked(progress.clone(), Some(source), &_lease),
         )
         .await
     }
@@ -1828,7 +1828,7 @@ impl NativeWallet {
     ) -> Result<(u32, SyncProgress)> {
         self.check_network_capability()?;
         let _lease = self.ordinary_scan_lease()?;
-        self.sync_reported_locked(live, None).await
+        self.sync_reported_locked(live, None, &_lease).await
     }
 
     // Callers retain one exclusive lease for the full scan/retry lifetime.
@@ -1836,6 +1836,7 @@ impl NativeWallet {
         &self,
         live: Option<Arc<Mutex<SyncProgress>>>,
         source: Option<&super::NativeReadOnlySource>,
+        lease: &Arc<std::fs::File>,
     ) -> Result<(u32, SyncProgress)> {
         match source {
             Some(source) => self.require_read_only_source(source)?,
@@ -2096,7 +2097,7 @@ impl NativeWallet {
             // Memos are best effort and retried next sync. A hung validator RPC
             // (120 s read timeout per lookup) must not hold the sync, and with it
             // Send, for many minutes.
-            let enhanced = tokio::time::timeout(ENHANCE_BUDGET, self.enhance_memos(&mut db))
+            let enhanced = tokio::time::timeout(ENHANCE_BUDGET, self.enhance_memos(&mut db, lease))
                 .await
                 .unwrap_or_else(|_| {
                     warn!("memo enhancement ran out of time; the rest waits for the next sync");
@@ -2104,13 +2105,15 @@ impl NativeWallet {
                 })
                 .unwrap_or(0);
             #[cfg(feature = "transparent-inputs")]
-            self.classify_balance_funding(&mut db).await?;
+            self.classify_balance_funding(&mut db, lease).await?;
             info!("memo enhancement completed");
             if enhanced > 0 {
                 info!("memo enhance stored decrypted outputs");
             }
 
-            match tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip)).await {
+            match tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip, lease))
+                .await
+            {
                 Ok(0) => {}
                 Ok(_sent) => info!("saved unmined sends resubmitted"),
                 Err(_) => warn!("rebroadcast ran out of time; the rest waits for the next sync"),
@@ -2139,7 +2142,7 @@ impl NativeWallet {
     /// Enhancements store full data at the server-reported mined height;
     /// status requests and unknown transactions are reported back with
     /// `set_transaction_status`, so they leave the queue instead of blocking it.
-    async fn enhance_memos(&self, db: &mut Db) -> Result<u32> {
+    async fn enhance_memos(&self, db: &mut Db, lease: &Arc<std::fs::File>) -> Result<u32> {
         self.require_network_access()?;
         const MAX: usize = 24;
         let reqs = db
@@ -2178,7 +2181,9 @@ impl NativeWallet {
         let client = Self::connect_url(&self.server.as_url(), skip).await;
         for chunk in wanted.chunks(4) {
             let ids: Vec<TxId> = chunk.iter().map(|(id, _)| *id).collect();
-            let lookups = self.lookup_transactions(client.as_ref().ok(), &ids).await;
+            let lookups = self
+                .lookup_transactions(client.as_ref().ok(), &ids, lease)
+                .await;
             info!("memo transaction RPC batch completed");
             for (&(txid, full), lookup) in chunk.iter().zip(lookups) {
                 let (raw, mined_at) = match lookup {
@@ -2237,10 +2242,15 @@ impl NativeWallet {
     }
 
     /// Up to four lookups at once.
-    async fn lookup_transactions(&self, client: Option<&LwdClient>, ids: &[TxId]) -> Vec<TxLookup> {
+    async fn lookup_transactions(
+        &self,
+        client: Option<&LwdClient>,
+        ids: &[TxId],
+        lease: &Arc<std::fs::File>,
+    ) -> Vec<TxLookup> {
         let lookup = |i: usize| async move {
             match ids.get(i) {
-                Some(id) => Some(self.lookup_transaction(client.cloned(), *id).await),
+                Some(id) => Some(self.lookup_transaction(client.cloned(), *id, lease).await),
                 None => None,
             }
         };
@@ -2250,7 +2260,12 @@ impl NativeWallet {
 
     /// A validator RPC answers with the mined height in one call; the light
     /// server's GetTransaction does too and covers wallets without one.
-    async fn lookup_transaction(&self, client: Option<LwdClient>, txid: TxId) -> TxLookup {
+    async fn lookup_transaction(
+        &self,
+        client: Option<LwdClient>,
+        txid: TxId,
+        lease: &Arc<std::fs::File>,
+    ) -> TxLookup {
         if !self.network_access || self.require_source_spending_access().is_err() {
             return TxLookup::Unavailable(EngineError::Message("native_offline_wallet".into()));
         }
@@ -2260,7 +2275,9 @@ impl NativeWallet {
             .or_else(|| self.server.zebra_rpc_url())
         {
             let id = txid.to_string();
+            let owner = lease.clone();
             let fetched = tokio::task::spawn_blocking(move || {
+                let _owner = owner;
                 super::rpc::get_raw_transaction_verbose(&rpc, &id)
             })
             .await;
@@ -2801,7 +2818,7 @@ impl NativeWallet {
         let scanned = self.scanned_height()?;
         let tip = Self::fetch_tip(&self.server).await?;
         if scanned >= tip {
-            return self.finish_caught_up(scanned, tip).await;
+            return self.finish_caught_up(scanned, tip, &lease).await;
         }
         drop(lease);
         let (h, p) = self.sync().await?;
@@ -2809,20 +2826,26 @@ impl NativeWallet {
     }
 
     // Caller retains the ordinary scan lease for the entire maintenance pass.
-    async fn finish_caught_up(&self, scanned: u32, tip: u32) -> Result<(u32, SyncProgress, bool)> {
+    async fn finish_caught_up(
+        &self,
+        scanned: u32,
+        tip: u32,
+        lease: &Arc<std::fs::File>,
+    ) -> Result<(u32, SyncProgress, bool)> {
         // Older sparse scans could persist notes/rows without a usable
         // checkpoint. A caught-up wallet must recover those anchors too.
         self.recover_spend_checkpoints(scanned).await?;
         let mut db = self.open_db()?;
         // Raw enhancement can be deferred while scanning succeeds. Retry its
         // bounded queue even when no new compact block arrived.
-        let _ = tokio::time::timeout(ENHANCE_BUDGET, self.enhance_memos(&mut db)).await;
+        let _ = tokio::time::timeout(ENHANCE_BUDGET, self.enhance_memos(&mut db, lease)).await;
         #[cfg(feature = "transparent-inputs")]
-        self.classify_balance_funding(&mut db).await?;
+        self.classify_balance_funding(&mut db, lease).await?;
         drop(db);
         // The web bridge syncs through here: resubmit unmined sends even
         // when no block arrived.
-        let _ = tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip)).await;
+        let _ =
+            tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip, lease)).await;
         Ok((
             scanned,
             SyncProgress {
@@ -2838,7 +2861,11 @@ impl NativeWallet {
     }
 
     #[cfg(feature = "transparent-inputs")]
-    async fn classify_balance_funding(&self, db: &mut Db) -> Result<usize> {
+    async fn classify_balance_funding(
+        &self,
+        db: &mut Db,
+        lease: &Arc<std::fs::File>,
+    ) -> Result<usize> {
         self.require_network_access()?;
         let rpc = self.validator_rpc_url();
         let phase = super::transparent_funding::classify_balance_funding(
@@ -2848,7 +2875,11 @@ impl NativeWallet {
             |txid| {
                 let txid = txid.to_string();
                 let rpc = rpc.as_deref();
-                async move { Self::fetch_raw_transaction_with_rpc(&self.server, rpc, &txid).await }
+                let owner = lease.clone();
+                async move {
+                    Self::fetch_raw_transaction_with_rpc_owned(&self.server, rpc, &txid, owner)
+                        .await
+                }
             },
         );
         tokio::time::timeout(Duration::from_secs(30), phase)
@@ -3016,7 +3047,9 @@ impl NativeWallet {
             })
             .map_err(|e| map_funds_err(format!("create shielding tx: {e}")))?;
 
-        let out = self.broadcast_all(&mut db, txids.iter().copied()).await;
+        let out = self
+            .broadcast_all(&mut db, txids.iter().copied(), &_lease)
+            .await;
         info!("shield timings");
         out
     }
@@ -3462,7 +3495,7 @@ impl NativeWallet {
         policy: SpendPolicy,
         after_proposal: impl FnOnce(),
     ) -> Result<Vec<String>> {
-        let _lease = database_lease::shared(&self.paths.data_db)?;
+        let _lease = Arc::new(database_lease::shared(&self.paths.data_db)?);
         self.require_source_spending_access()?;
 
         let (proposal, selected_generation) = db
@@ -3518,7 +3551,9 @@ impl NativeWallet {
             })
             .map_err(|e| map_funds_err(format!("create send tx: {e}")))?;
 
-        let out = self.broadcast_all(&mut db, txids.iter().copied()).await;
+        let out = self
+            .broadcast_all(&mut db, txids.iter().copied(), &_lease)
+            .await;
         info!("send timings");
         out
     }
@@ -3527,6 +3562,7 @@ impl NativeWallet {
         &self,
         db: &mut Db,
         txids: impl IntoIterator<Item = TxId>,
+        lease: &Arc<std::fs::File>,
     ) -> Result<Vec<String>> {
         let txids: Vec<_> = txids.into_iter().collect();
         let saved_ids = txids
@@ -3549,7 +3585,7 @@ impl NativeWallet {
         let mut client = None;
         let mut out = Vec::new();
         for txid in txids {
-            match self.broadcast_one(&mut client, db, txid).await {
+            match self.broadcast_one(&mut client, db, txid, lease).await {
                 Ok(s) => out.push(s),
                 Err(e) => return Err(failure(e)),
             }
@@ -3562,6 +3598,7 @@ impl NativeWallet {
         client: &mut Option<BroadcastConnection>,
         db: &mut Db,
         txid: TxId,
+        lease: &Arc<std::fs::File>,
     ) -> Result<String> {
         let raw = db
             .get_transaction(txid)
@@ -3571,7 +3608,7 @@ impl NativeWallet {
         let mut data = Vec::new();
         raw.write(&mut data)
             .map_err(|e| EngineError::WalletDb(format!("serialize tx: {e}")))?;
-        self.submit_raw(client, data).await?;
+        self.submit_raw(client, data, lease).await?;
         info!("broadcast ok");
         Ok(txid.to_string())
     }
@@ -3579,17 +3616,21 @@ impl NativeWallet {
     /// Establish canonical identity before exposing any signed bytes. Validator
     /// requests retain their TCP connection; light requests retain their client.
     /// A failed identity check never falls back to a different transport.
-    async fn connect_submission(&self) -> Result<BroadcastConnection> {
+    async fn connect_submission(&self, lease: &Arc<std::fs::File>) -> Result<BroadcastConnection> {
         self.require_network_access()?;
         if let Some(url) = self.validator_rpc_url() {
             let network = self.network;
+            let owner = lease.clone();
             let connected = tokio::task::spawn_blocking(move || {
+                let _owner = owner;
                 super::rpc::VerifiedValidator::connect(&url, network)
             })
             .await
             .map_err(|_| EngineError::Transport("broadcast connection task failed".into()))?;
             match connected {
-                Ok(connection) => return Ok(BroadcastConnection::Validator(connection)),
+                Ok(connection) => {
+                    return Ok(BroadcastConnection::Validator(connection, lease.clone()))
+                }
                 Err(error) if super::rpc::never_sent(&error) => {
                     warn!("validator RPC unreachable; checking light server identity");
                 }
@@ -3629,7 +3670,7 @@ impl NativeWallet {
             &info.chain_name,
             &crate::web::to_hex(&genesis),
         )?;
-        Ok(BroadcastConnection::Light(Box::new(client)))
+        Ok(BroadcastConnection::Light(Box::new(client), lease.clone()))
     }
 
     /// Every broadcast (including automatic rebroadcast) verifies canonical
@@ -3638,25 +3679,29 @@ impl NativeWallet {
         &self,
         client: &mut Option<BroadcastConnection>,
         data: Vec<u8>,
+        lease: &Arc<std::fs::File>,
     ) -> Result<()> {
         self.require_network_access()?;
         if client.is_none() {
-            *client = Some(self.connect_submission().await?);
+            *client = Some(self.connect_submission(lease).await?);
         }
         match client
             .take()
             .expect("submission connection established above")
         {
-            BroadcastConnection::Validator(mut connection) => {
-                tokio::task::spawn_blocking(move || connection.send(&data))
-                    .await
-                    .map_err(|_| EngineError::Transport("broadcast task failed".into()))??;
+            BroadcastConnection::Validator(mut connection, owner) => {
+                tokio::task::spawn_blocking(move || {
+                    let _owner = owner;
+                    connection.send(&data)
+                })
+                .await
+                .map_err(|_| EngineError::Transport("broadcast task failed".into()))??;
             }
-            BroadcastConnection::Light(mut connection) => {
+            BroadcastConnection::Light(mut connection, owner) => {
                 let result = connection
                     .send_transaction(RawTransaction { data, height: 0 })
                     .await;
-                *client = Some(BroadcastConnection::Light(connection));
+                *client = Some(BroadcastConnection::Light(connection, owner));
                 let response = result
                     .map_err(|_| EngineError::Transport("SendTransaction failed".into()))?
                     .into_inner();
@@ -3678,7 +3723,7 @@ impl NativeWallet {
     /// broadcast whose outcome was unknown (lost reply, outage, the app closed
     /// between saving and sending) without the user sending again, which picks
     /// other notes and could pay twice. Returns how many were resubmitted.
-    async fn rebroadcast_unmined(&self, tip: u32) -> usize {
+    async fn rebroadcast_unmined(&self, tip: u32, lease: &Arc<std::fs::File>) -> usize {
         let pending = match unmined_sends(&self.paths.data_db, tip) {
             Ok(pending) => pending,
             Err(_e) => {
@@ -3689,7 +3734,7 @@ impl NativeWallet {
         let mut client = None;
         let mut sent = 0;
         for (_txid, raw) in pending {
-            match self.submit_raw(&mut client, raw).await {
+            match self.submit_raw(&mut client, raw, lease).await {
                 Ok(()) => {
                     info!("rebroadcast saved unmined send");
                     sent += 1;
@@ -3969,8 +4014,8 @@ impl NativeWallet {
             let owner = owner.clone();
             async move {
                 let rpc = rpc.ok_or_else(|| EngineError::Message("no validator rpc".into()))?;
-                // The worker owns only request inputs. Dropping a timed-out fetch
-                // cannot leave native database writes running in the background.
+                // Wallet-associated callers retain their policy owner until the
+                // blocking request ends, even after the async caller is dropped.
                 tokio::task::spawn_blocking(move || {
                     let _owner = owner;
                     let hex = super::rpc::get_raw_transaction_hex(&rpc, &id)?;
@@ -4916,10 +4961,10 @@ mod tests {
         let reader = NativeWallet::open_offline(dir.path()).unwrap();
         let baseline = reader.balance().unwrap();
         assert_eq!(baseline.orchard_available, 50_000);
-        let exclusive = writer.ordinary_scan_lease().unwrap();
         writer
             .scan_public_regtest_incremental(&publication, schedule)
             .unwrap();
+        let exclusive = writer.ordinary_scan_lease().unwrap();
         assert!(matches!(reader.balance(), Err(EngineError::SyncRequired)));
         drop(exclusive);
         assert_eq!(reader.scanned_height().unwrap(), 9);
@@ -5072,7 +5117,7 @@ mod tests {
             }
         });
         let lease = wallet.ordinary_scan_lease().unwrap();
-        let first = wallet.finish_caught_up(8, 8).await.unwrap();
+        let first = wallet.finish_caught_up(8, 8, &lease).await.unwrap();
         assert_eq!(first.0, 8);
         assert!(!first.2);
         assert_eq!(fee(), None);
@@ -5082,7 +5127,7 @@ mod tests {
             .transaction_enhancement_work()
             .unwrap()
             .is_empty());
-        let second = wallet.finish_caught_up(8, 8).await.unwrap();
+        let second = wallet.finish_caught_up(8, 8, &lease).await.unwrap();
         assert_eq!(second.0, 8);
         assert!(!second.2);
         assert_eq!(fee(), Some(10_000));

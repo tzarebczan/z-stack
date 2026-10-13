@@ -259,8 +259,9 @@ async fn uncertain_or_partially_rejected_submission_preserves_all_saved_state() 
             },
         };
         let before = contents(&wallet.paths.data_db);
+        let owner = wallet.network_operation_lease().unwrap();
         let error = wallet
-            .broadcast_all(&mut db, ids.iter().copied())
+            .broadcast_all(&mut db, ids.iter().copied(), &owner)
             .await
             .unwrap_err();
         let sent = peer.join().unwrap();
