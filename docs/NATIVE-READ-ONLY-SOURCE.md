@@ -83,7 +83,10 @@ reconcile transparent spends from these compact ranges. Fresh transparent
 balances are therefore unsupported, and retained transparent balances must not
 be presented as verified by a source scan. Remote lookups, ordinary sync,
 send, payment preparation, signing, submission and maximum-send selection refuse
-with `native_read_only_source`. Cached viewing history and addresses remain
+with `native_read_only_source`. Regtest PIR discovery and canonical recovery
+also refuse under their database lease before transport, profile mutation or
+journal initialization. An enrolled Source wallet cannot switch to that capability.
+Cached viewing history and addresses remain
 available. Cold `open`, `open_offline`, stored endpoint edits and handles opened
 before enrollment retain the restriction. Ordinary wallets without either marker
 keep their existing network and offline signing policy; the Mainnet send gate is

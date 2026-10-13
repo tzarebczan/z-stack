@@ -540,6 +540,7 @@ impl NativeWallet {
         }
         check(cancel).map_err(|_| failed("native_pir_cancelled"))?;
         let _database_lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         self.ensure_pir_journal_compatible()?;
         let mut filters = CancelFilters {
             inner: filters,
@@ -697,6 +698,8 @@ impl NativeWallet {
         if self.network != ZNetwork::Regtest {
             return Err(failed("native_pir_regtest_only"));
         }
+        let _database_lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         let cancel = AtomicBool::new(false);
         let store = store::NativePirStore::open(self, &cancel).map_err(store_failed)?;
         let Some((report, scope)) = store.report() else {
