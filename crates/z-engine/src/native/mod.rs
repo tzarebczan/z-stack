@@ -44,8 +44,8 @@ pub use runtime::{
 pub use seed::{SeedStore, SeedUnlock, UnlockPolicy};
 pub use verify::{TreeReport, TreeRootCheck, WitnessCheck};
 pub use wallet::{
-    CreatedWallet, LightProbe, NativeWallet, PaymentReceipt, RegtestScanSchedule, SeedAuth,
-    WalletPaths, BATCH_SIZE, MAX_MEM_SYNC_BLOCKS,
+    CreatedWallet, LightProbe, NativeBirthday, NativeWallet, PaymentReceipt, RegtestScanSchedule,
+    SeedAuth, WalletPaths, BATCH_SIZE, MAX_MEM_SYNC_BLOCKS,
 };
 
 /// Replace `path` with `bytes` so a crash leaves the old file or the new one,

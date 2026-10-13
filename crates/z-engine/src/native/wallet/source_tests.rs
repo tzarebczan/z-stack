@@ -958,9 +958,45 @@ async fn detached_validator_worker_keeps_policy_owner(operation: &'static str) {
     let method = match operation {
         "connect" => "getblockchaininfo",
         "send" => "sendrawtransaction",
-        "verbose" | "raw" => "getrawtransaction",
+        "verbose" | "raw" | "shield" => "getrawtransaction",
         _ => unreachable!(),
     };
+    if operation == "shield" {
+        use zcash_client_backend::{
+            data_api::WalletCommitmentTrees, wallet::WalletTransparentOutput,
+        };
+        use zcash_primitives::transaction::Transaction;
+        let mut db = wallet.open_db().unwrap();
+        let account = NativeWallet::primary_account_id(&db).unwrap();
+        db.update_chain_tip(199.into()).unwrap();
+        db.with_orchard_tree_mut(|tree| tree.checkpoint(199.into()))
+            .unwrap();
+        let addresses = db.get_transparent_receivers(account, true, true).unwrap();
+        let address = addresses.keys().next().unwrap();
+        let script: transparent::address::Script = address.script().into();
+        let mut raw = Vec::new();
+        raw.extend(1u32.to_le_bytes());
+        raw.push(1);
+        raw.extend([0; 32]);
+        raw.extend(u32::MAX.to_le_bytes());
+        raw.extend([2, 1, 1]);
+        raw.extend(u32::MAX.to_le_bytes());
+        raw.push(1);
+        raw.extend(50_000u64.to_le_bytes());
+        script.write(&mut raw).unwrap();
+        raw.extend(0u32.to_le_bytes());
+        let tx = Transaction::read(&raw[..], BranchId::Sprout).unwrap();
+        let output = WalletTransparentOutput::from_parts(
+            transparent::bundle::OutPoint::new(*tx.txid().as_ref(), 0),
+            tx.transparent_bundle().unwrap().vout[0].clone(),
+            Some(101.into()),
+            Some(account),
+            None,
+            None,
+        )
+        .unwrap();
+        db.put_received_transparent_utxo(&output).unwrap();
+    }
     let mut validator = StalledValidator::new(method);
     wallet
         .set_validator_rpc(Some(validator.endpoint.clone()))
@@ -978,6 +1014,11 @@ async fn detached_validator_worker_keeps_policy_owner(operation: &'static str) {
                 let _ = wallet
                     .lookup_transaction(None, TxId::from_bytes([17; 32]), &owner)
                     .await;
+            }
+            "shield" => {
+                let mut unlock = auth();
+                unlock.mnemonic = Some(PUBLIC_SEED.into());
+                let _ = wallet.shield(&unlock, 1).await;
             }
             "raw" => {
                 let _ = NativeWallet::fetch_raw_transaction_with_rpc_owned(
@@ -1041,4 +1082,202 @@ async fn aborted_validator_verbose_worker_retains_policy_owner() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn aborted_validator_raw_worker_retains_policy_owner() {
     detached_validator_worker_keeps_policy_owner("raw").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aborted_shield_funding_worker_retains_policy_owner() {
+    detached_validator_worker_keeps_policy_owner("shield").await;
+}
+
+#[tokio::test]
+async fn next_address_refuses_live_reset_ownership_and_source_rotation_remains_local() {
+    use std::future::Future;
+    let source = Fixture::new(ZNetwork::Regtest, "regtest", 2).await;
+    let root = tempfile::tempdir().unwrap();
+    let (mut wallet, _, _) = reset_fixture(root.path());
+    let endpoint = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    wallet
+        .set_light_server(LightServer::parse(
+            &format!("http://{}", endpoint.local_addr().unwrap()),
+            ZNetwork::Regtest,
+        ))
+        .unwrap();
+    wallet
+        .open_db()
+        .unwrap()
+        .update_chain_tip(2.into())
+        .unwrap();
+    let original = wallet.next_unified_address().unwrap();
+    let mut reset = Box::pin(wallet.reset_scan());
+    assert!(reset
+        .as_mut()
+        .poll(&mut Context::from_waker(std::task::Waker::noop()))
+        .is_pending());
+    code(wallet.next_unified_address(), "native_pir_database_busy");
+    assert!(wallet.unified_address().unwrap() == original);
+    drop(reset);
+    let next = wallet.next_unified_address().unwrap();
+    assert!(next != original);
+    let enrolled = NativeWallet::open_with_source(root.path(), &source.source).unwrap();
+    let source_next = enrolled.next_unified_address().unwrap();
+    assert!(source_next != next);
+    assert!(enrolled.unified_address().unwrap() == source_next);
+    assert!(source.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn guarded_birthday_setup_refuses_seed_only_source_before_date_or_height_io() {
+    let root = tempfile::tempdir().unwrap();
+    super::super::source::enroll(root.path()).unwrap();
+    SeedStore::new(root.path())
+        .save(PUBLIC_SEED, auth().passphrase.as_deref(), false)
+        .unwrap();
+    let seed = std::fs::read(root.path().join("seed.enc")).unwrap();
+    let policy = std::fs::read(root.path().join("native-source-policy")).unwrap();
+    let endpoint = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    endpoint.set_nonblocking(true).unwrap();
+    let server = LightServer::parse(
+        &format!("http://{}", endpoint.local_addr().unwrap()),
+        ZNetwork::Regtest,
+    );
+    let ufvk = crate::keys::account_from_mnemonic(PUBLIC_SEED, ZNetwork::Regtest, 0)
+        .unwrap()
+        .ufvk;
+    for birthday in [
+        NativeBirthday::Date("2026-10-01".into()),
+        NativeBirthday::Height(1),
+    ] {
+        code(
+            NativeWallet::create_with_birthday(
+                root.path(),
+                ZNetwork::Regtest,
+                Some(server.clone()),
+                Some(birthday.clone()),
+                auth(),
+                0,
+            )
+            .await,
+            "native_read_only_source",
+        );
+        code(
+            NativeWallet::restore_with_birthday(
+                root.path(),
+                PUBLIC_SEED,
+                ZNetwork::Regtest,
+                Some(server.clone()),
+                birthday.clone(),
+                auth(),
+                0,
+            )
+            .await,
+            "native_read_only_source",
+        );
+        code(
+            NativeWallet::restore_ufvk_with_birthday(
+                root.path(),
+                &ufvk,
+                ZNetwork::Regtest,
+                Some(server.clone()),
+                birthday,
+                0,
+            )
+            .await,
+            "native_read_only_source",
+        );
+    }
+    assert_eq!(
+        endpoint.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert!(std::fs::read(root.path().join("seed.enc")).unwrap() == seed);
+    assert!(std::fs::read(root.path().join("native-source-policy")).unwrap() == policy);
+    assert!(!root.path().join("data.sqlite").exists());
+    assert!(!root.path().join("wallet.json").exists());
+}
+
+#[tokio::test]
+async fn invalid_date_setup_refuses_before_endpoint_contact_or_seed_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let endpoint = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    endpoint.set_nonblocking(true).unwrap();
+    let server = LightServer::parse(
+        &format!("http://{}", endpoint.local_addr().unwrap()),
+        ZNetwork::Regtest,
+    );
+    let ufvk = crate::keys::account_from_mnemonic(PUBLIC_SEED, ZNetwork::Regtest, 0)
+        .unwrap()
+        .ufvk;
+    for invalid in [
+        "",
+        "auto",
+        "100",
+        "2026-1-1",
+        "not-a-date",
+        "2026-02-30",
+        "2026-13-01",
+    ] {
+        let birthday = NativeBirthday::Date(invalid.into());
+        code(
+            NativeWallet::create_with_birthday(
+                root.path(),
+                ZNetwork::Regtest,
+                Some(server.clone()),
+                Some(birthday.clone()),
+                auth(),
+                0,
+            )
+            .await,
+            "native_birthday_date_invalid",
+        );
+        code(
+            NativeWallet::restore_with_birthday(
+                root.path(),
+                PUBLIC_SEED,
+                ZNetwork::Regtest,
+                Some(server.clone()),
+                birthday.clone(),
+                auth(),
+                0,
+            )
+            .await,
+            "native_birthday_date_invalid",
+        );
+        code(
+            NativeWallet::restore_ufvk_with_birthday(
+                root.path(),
+                &ufvk,
+                ZNetwork::Regtest,
+                Some(server.clone()),
+                birthday,
+                0,
+            )
+            .await,
+            "native_birthday_date_invalid",
+        );
+    }
+    assert_eq!(
+        endpoint.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert!(!root.path().join("seed.enc").exists());
+    assert!(!root.path().join("data.sqlite").exists());
+    assert!(!root.path().join("wallet.json").exists());
+}
+
+#[tokio::test]
+async fn enrollment_network_mismatch_preserves_valid_existing_wallet_before_policy_mutation() {
+    let source = Fixture::new(ZNetwork::Mainnet, "main", 419_201).await;
+    let root = tempfile::tempdir().unwrap();
+    let (wallet, _, _) = reset_fixture(root.path());
+    let database = std::fs::read(&wallet.paths.data_db).unwrap();
+    let metadata = std::fs::read(&wallet.paths.meta_path).unwrap();
+    code(
+        NativeWallet::open_with_source(root.path(), &source.source),
+        "native_source_network_mismatch",
+    );
+    assert!(std::fs::read(&wallet.paths.data_db).unwrap() == database);
+    assert!(std::fs::read(&wallet.paths.meta_path).unwrap() == metadata);
+    assert!(!root.path().join("native-source-policy").exists());
+    assert!(!wallet.uses_read_only_source().unwrap());
+    assert!(source.calls.lock().unwrap().is_empty());
 }

@@ -43,6 +43,16 @@ networking. Applications must refuse replacement enrollment if a marked wallet
 lacks its original authenticated checkpoint or publisher binding. Those
 application-specific records do not belong in the SDK capability marker.
 
+Ordinary date-based setup uses `NativeBirthday::Date` through the guarded
+`create_with_birthday`, `restore_with_birthday` and `restore_ufvk_with_birthday`
+operations. Exact `YYYY-MM-DD` syntax and calendar validity are checked locally
+under bootstrap ownership before a tip request. Empty, automatic and numeric
+Date variants refuse; `Height` is explicit and `create` with `None` stays automatic.
+Source-marked seed-only roots refuse ordinary setup before birthday network I/O.
+Source APIs retain their height-only birthday binding. Address rotation remains
+local in Source mode and holds shared database ownership through derivation, so
+an outstanding reset cannot discard a returned diversifier.
+
 Call `sync_with_source_reported_cancellable` with that source, optional shared
 progress and the owning session's `Arc<AtomicBool>` cancellation flag. Every
 fetch and control worker clones the supplied channel. Retry waits and stall

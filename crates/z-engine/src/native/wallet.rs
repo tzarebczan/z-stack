@@ -790,6 +790,13 @@ pub struct LightProbe {
     pub error: Option<String>,
 }
 
+/// Birthday selection resolved under wallet setup ownership.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeBirthday {
+    Height(u32),
+    Date(String),
+}
+
 enum BroadcastConnection {
     Light(Box<LwdClient>, Arc<std::fs::File>),
     Validator(super::rpc::VerifiedValidator, Arc<std::fs::File>),
@@ -1018,20 +1025,75 @@ impl NativeWallet {
         auth: SeedAuth,
         account_index: u32,
     ) -> Result<(Self, CreatedWallet)> {
-        Self::create_inner(
+        Self::create_with_birthday(
             root,
-            SetupSource::Direct(network, server),
-            birthday_height,
+            network,
+            server,
+            birthday_height.map(NativeBirthday::Height),
             auth,
             account_index,
         )
         .await
     }
 
+    pub async fn create_with_birthday(
+        root: impl Into<PathBuf>,
+        network: ZNetwork,
+        server: Option<LightServer>,
+        birthday: Option<NativeBirthday>,
+        auth: SeedAuth,
+        account_index: u32,
+    ) -> Result<(Self, CreatedWallet)> {
+        Self::create_inner(
+            root,
+            SetupSource::Direct(network, server),
+            birthday,
+            auth,
+            account_index,
+        )
+        .await
+    }
+
+    async fn resolve_setup_birthday(
+        birthday: NativeBirthday,
+        network: ZNetwork,
+        server: &LightServer,
+        provided: bool,
+    ) -> Result<u32> {
+        match birthday {
+            NativeBirthday::Height(height) => Ok(height),
+            NativeBirthday::Date(_) if provided => {
+                Err(EngineError::Message("native_source_setup_mismatch".into()))
+            }
+            NativeBirthday::Date(date) => {
+                let date = date.trim();
+                let invalid = || EngineError::Message("native_birthday_date_invalid".into());
+                if date.len() != 10
+                    || !date.bytes().enumerate().all(|(index, byte)| {
+                        if index == 4 || index == 7 {
+                            byte == b'-'
+                        } else {
+                            byte.is_ascii_digit()
+                        }
+                    })
+                {
+                    return Err(invalid());
+                }
+                // Check the calendar locally before exposing any setup request.
+                crate::height_from_date_for_network(date, 1, network).map_err(|_| invalid())?;
+                crate::parse_birthday_input_for_network(
+                    date,
+                    Self::fetch_tip(server).await?,
+                    network,
+                )
+            }
+        }
+    }
+
     async fn create_inner(
         root: impl Into<PathBuf>,
         setup: SetupSource<'_>,
-        birthday_height: Option<u32>,
+        birthday: Option<NativeBirthday>,
         auth: SeedAuth,
         account_index: u32,
     ) -> Result<(Self, CreatedWallet)> {
@@ -1052,7 +1114,12 @@ impl NativeWallet {
 
         let seed_store = SeedStore::new(&paths.root);
         let retained_seed = source.is_some() && seed_store.exists();
-        let mut birthday_height = birthday_height;
+        let mut birthday_height = match birthday {
+            Some(birthday) => Some(
+                Self::resolve_setup_birthday(birthday, network, &server, source.is_some()).await?,
+            ),
+            None => None,
+        };
         let mut prepared_source = None;
         if let Some(source) = source {
             birthday_height = super::source::setup_birthday(
@@ -1239,11 +1306,32 @@ impl NativeWallet {
         auth: SeedAuth,
         account_index: u32,
     ) -> Result<(Self, String)> {
+        Self::restore_with_birthday(
+            root,
+            mnemonic,
+            network,
+            server,
+            NativeBirthday::Height(birthday_height),
+            auth,
+            account_index,
+        )
+        .await
+    }
+
+    pub async fn restore_with_birthday(
+        root: impl Into<PathBuf>,
+        mnemonic: &str,
+        network: ZNetwork,
+        server: Option<LightServer>,
+        birthday: NativeBirthday,
+        auth: SeedAuth,
+        account_index: u32,
+    ) -> Result<(Self, String)> {
         Self::restore_inner(
             root,
             mnemonic,
             SetupSource::Direct(network, server),
-            birthday_height,
+            birthday,
             auth,
             account_index,
         )
@@ -1254,7 +1342,7 @@ impl NativeWallet {
         root: impl Into<PathBuf>,
         mnemonic: &str,
         setup: SetupSource<'_>,
-        birthday_height: u32,
+        birthday: NativeBirthday,
         auth: SeedAuth,
         account_index: u32,
     ) -> Result<(Self, String)> {
@@ -1272,6 +1360,9 @@ impl NativeWallet {
         if source.is_some() {
             super::source::enroll(&paths.root)?;
         }
+
+        let birthday_height =
+            Self::resolve_setup_birthday(birthday, network, &server, source.is_some()).await?;
 
         let mnemonic = Mnemonic::parse_normalized(mnemonic.trim())
             .map_err(|e| EngineError::Message(format!("invalid mnemonic: {e}")))?;
@@ -1410,7 +1501,7 @@ impl NativeWallet {
         Self::create_inner(
             root,
             SetupSource::Provided(source),
-            birthday_height,
+            birthday_height.map(NativeBirthday::Height),
             auth,
             account_index,
         )
@@ -1429,7 +1520,7 @@ impl NativeWallet {
             root,
             mnemonic,
             SetupSource::Provided(source),
-            birthday_height,
+            NativeBirthday::Height(birthday_height),
             auth,
             account_index,
         )
@@ -1463,6 +1554,25 @@ impl NativeWallet {
         birthday_height: u32,
         account_index: u32,
     ) -> Result<(Self, String)> {
+        Self::restore_ufvk_with_birthday(
+            root,
+            ufvk_str,
+            network,
+            server,
+            NativeBirthday::Height(birthday_height),
+            account_index,
+        )
+        .await
+    }
+
+    pub async fn restore_ufvk_with_birthday(
+        root: impl Into<PathBuf>,
+        ufvk_str: &str,
+        network: ZNetwork,
+        server: Option<LightServer>,
+        birthday: NativeBirthday,
+        account_index: u32,
+    ) -> Result<(Self, String)> {
         super::initialize_native_threads(None)?;
         let keys = crate::keys::account_from_ufvk(ufvk_str, network, account_index)?;
         let ufvk = UnifiedFullViewingKey::decode(&network, keys.ufvk.trim())
@@ -1472,6 +1582,8 @@ impl NativeWallet {
         paths.prepare_new_wallet()?;
         paths.ensure_dirs()?;
         let server = server.unwrap_or_else(|| LightServer::for_network(network));
+        let birthday_height =
+            Self::resolve_setup_birthday(birthday, network, &server, false).await?;
         let mut client = Self::connect_url(
             &server.as_url(),
             Self::skip_ironwood_subtrees(network, &server.as_url()),
@@ -2337,6 +2449,7 @@ impl NativeWallet {
 
     /// Rotate to the next diversified unified address (preferred for privacy).
     pub fn next_unified_address(&self) -> Result<String> {
+        let _ownership = database_lease::shared(&self.paths.data_db)?;
         let mut db = self.open_db()?;
         let account = Self::primary_account_id(&db)?;
         let (addr, _idx) = db
@@ -2985,7 +3098,11 @@ impl NativeWallet {
             |txid| {
                 let txid = txid.to_string();
                 let rpc = rpc.as_deref();
-                async move { Self::fetch_raw_transaction_with_rpc(&self.server, rpc, &txid).await }
+                let owner = _lease.clone();
+                async move {
+                    Self::fetch_raw_transaction_with_rpc_owned(&self.server, rpc, &txid, owner)
+                        .await
+                }
             },
         )
         .await?;
