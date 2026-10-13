@@ -818,6 +818,14 @@ impl NativeWallet {
         &self.paths
     }
 
+    /// Re-read durable source capability without contacting a stored endpoint.
+    /// Applications use this to refuse re-enrollment when their original source
+    /// checkpoint or publisher binding is missing.
+    pub fn uses_read_only_source(&self) -> Result<bool> {
+        let _lease = database_lease::shared(&self.paths.data_db)?;
+        super::source::read_only(&self.paths.root)
+    }
+
     pub fn server_url(&self) -> String {
         self.server.as_url()
     }

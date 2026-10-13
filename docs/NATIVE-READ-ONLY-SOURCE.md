@@ -20,6 +20,10 @@ A strict versioned `native-source-policy` sidecar protects interrupted seed-only
 setup before a database exists. Either marker keeps the wallet read-only. A
 copied marked database without its sidecar remains read-only; malformed or
 non-singleton markers refuse. There is no source-to-direct handover API.
+`uses_read_only_source` re-reads both markers under a shared lease without
+networking. Applications must refuse replacement enrollment if a marked wallet
+lacks its original authenticated checkpoint or publisher binding. Those
+application-specific records do not belong in the SDK capability marker.
 
 Call `sync_with_source_reported_cancellable` with that source, optional shared
 progress and the owning session's `Arc<AtomicBool>` cancellation flag. Every

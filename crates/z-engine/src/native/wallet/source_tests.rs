@@ -305,7 +305,10 @@ async fn source_enrollment_blocks_stale_handles_and_malformed_policy_without_dat
         .unwrap()
         .execute_batch("CREATE TABLE fixture(value); INSERT INTO fixture VALUES (1)")
         .unwrap();
+    assert!(!stale.uses_read_only_source().unwrap());
     let enrolled = NativeWallet::open_with_source(root.path(), &fixture.source).unwrap();
+    assert!(enrolled.uses_read_only_source().unwrap());
+    assert!(stale.uses_read_only_source().unwrap());
     let before = std::fs::read(&stale.paths.data_db).unwrap();
     code(
         stale.sign_payment(&auth(), "irrelevant"),
@@ -317,6 +320,10 @@ async fn source_enrollment_blocks_stale_handles_and_malformed_policy_without_dat
     std::fs::write(root.path().join("native-source-policy"), b"unknown policy").unwrap();
     code(
         NativeWallet::open(root.path()),
+        "native_source_policy_invalid",
+    );
+    code(
+        enrolled.uses_read_only_source(),
         "native_source_policy_invalid",
     );
     code(
@@ -413,6 +420,7 @@ async fn missing_sidecar_and_database_copy_stay_read_only_and_malformed_singleto
     std::fs::copy(&wallet.paths.data_db, copy.path().join("data.sqlite")).unwrap();
     std::fs::copy(&wallet.paths.meta_path, copy.path().join("wallet.json")).unwrap();
     let copied = NativeWallet::open(copy.path()).unwrap();
+    assert!(copied.uses_read_only_source().unwrap());
     code(copied.sync_reported(None).await, "native_read_only_source");
     code(
         copied.sign_payment(&auth(), "irrelevant"),
