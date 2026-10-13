@@ -110,6 +110,16 @@ to restore owned notes and witness positions. An incompatible native prefix
 refuses recovery and retains Pending. Private discovery schema and journal writes
 share the cancellation commit gate through the actual SQLite commit.
 
+The native PIR v2 adapter uses journal version 2. An existing version 1 journal
+returns `native_pir_migration_required` before recovery can replace its receipt
+or replay blocks. Receipt checks and payment writers also refuse that version.
+The SDK retains the existing wallet, journal, receipt, and unresolved intents.
+There is no automatic migration or journal reset. A compatible migration or
+separately accepted recovery of the existing wallet remains a release gate.
+The [upstream pin and migration contract](UPSTREAM.md#native-pir-qualification)
+describe the protocol change. Browser integration and fresh funded qualification
+remain separate gates.
+
 Offline catch-up refuses before querying a tip. Ordinary reopen and feature
 downgrade cannot reset a recovery-marked database. Offline setup persists and
 syncs Pending before publishing wallet metadata. An adapter reconstructing

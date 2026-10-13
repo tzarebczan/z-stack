@@ -278,6 +278,15 @@ fn require_journal_head(
     ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
     expected: Option<&(u64, String)>,
 ) -> anyhow::Result<()> {
+    let version: u32 = ext.query_row("SELECT version FROM ext_coffer_pir_schema", [], |row| {
+        row.get(0)
+    })?;
+    if version == 1 {
+        anyhow::bail!("native_pir_migration_required");
+    }
+    if version != store::JOURNAL_VERSION {
+        anyhow::bail!("native_recovery_reconciliation_required");
+    }
     let expected =
         expected.ok_or_else(|| anyhow::anyhow!("native_recovery_reconciliation_required"))?;
     let actual: (u64, String) = ext.query_row(
@@ -296,7 +305,16 @@ fn require_discovery_scope(discovered: &str, scope: &NativeScope) -> anyhow::Res
     }
     Ok(())
 }
+fn recovery_schema_failed(error: StoreError) -> EngineError {
+    match error {
+        StoreError::Corrupt(_) => failed("native_recovery_reconciliation_required"),
+        error => store_failed(error),
+    }
+}
 fn receipt_journal_matches(conn: &rusqlite::Connection, receipt: &Receipt) -> bool {
+    if store::ensure_compatible_schema(conn).is_err() {
+        return false;
+    }
     if receipt.discovery_scope_identity.as_deref() != Some(receipt.scope_identity.as_str()) {
         return false;
     }
@@ -474,6 +492,7 @@ impl NativeWallet {
         if !exists {
             return Ok(());
         }
+        store::ensure_compatible_schema(&conn).map_err(recovery_schema_failed)?;
         let blocked: Option<bool> = conn
             .query_row(
                 "SELECT blocked FROM ext_coffer_pir_recovery_v1 WHERE id=1",
@@ -562,6 +581,7 @@ impl NativeWallet {
             )?;
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(|_| failed("native_recovery_storage_failed"))?;
+            store::ensure_compatible_schema(&tx).map_err(store_failed)?;
             let generation = (|| -> anyhow::Result<u64> {
                 // Refusal must not leave even an empty marker table: ordinary
                 // scan/reset guards treat table existence as canonical ownership.
@@ -1083,6 +1103,7 @@ impl NativeWallet {
         if !exists {
             return Ok(None);
         }
+        store::ensure_compatible_schema(&conn).map_err(recovery_schema_failed)?;
         let bytes: Option<Vec<u8>> = conn
             .query_row(
                 "SELECT receipt FROM ext_coffer_pir_recovery_v1 WHERE id=1",
@@ -2724,6 +2745,261 @@ pub(in crate::native::wallet) mod tests {
     ) -> (tempfile::TempDir, NativeWallet, RegtestAcceptedChain) {
         let (dir, wallet, chain, _) = completed_fixture();
         (dir, wallet, chain)
+    }
+    #[test]
+    fn legacy_pir_journal_refusal_preserves_receipt_intent_and_native_state() {
+        let (_dir, wallet, chain, mut receipt) = completed_fixture();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        conn.execute_batch("DROP TABLE ext_coffer_pir_schema; CREATE TABLE ext_coffer_pir_schema(version INTEGER PRIMARY KEY CHECK(version=1)); INSERT INTO ext_coffer_pir_schema VALUES(1); CREATE TABLE ext_native_payments_v1(id TEXT PRIMARY KEY,proposal BLOB NOT NULL,fee INTEGER NOT NULL,created INTEGER NOT NULL,expires INTEGER NOT NULL,height INTEGER NOT NULL,block_hash BLOB NOT NULL,phase TEXT NOT NULL,txids TEXT NOT NULL); INSERT INTO ext_native_payments_v1 VALUES('retained',x'010203',10000,1,2,1,x'00','unknown','retained-transaction');").unwrap();
+        let legacy = br#"{"Setup":["set","revision",false,0,{"public_params_base64":"old-setup","public_params_sha256":"old-digest"}]}"#;
+        let digest = format!("{:x}", Sha256::digest(legacy));
+        conn.execute(
+            "INSERT INTO ext_coffer_pir_journal VALUES(1,?1)",
+            [legacy.as_slice()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE ext_coffer_pir_head SET generation=1,bytes=?1,digest=?2 WHERE id=1",
+            (legacy.len(), &digest),
+        )
+        .unwrap();
+        receipt.journal_head = Some((1, digest));
+        conn.execute(
+            "UPDATE ext_coffer_pir_recovery_v1 SET receipt=?1 WHERE id=1",
+            [serde_json::to_vec(&receipt).unwrap()],
+        )
+        .unwrap();
+        let snapshot =
+            || {
+                let receipt: (bool, u64, Vec<u8>) = conn.query_row(
+                "SELECT blocked,generation,receipt FROM ext_coffer_pir_recovery_v1 WHERE id=1", [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+                let head: (u64, u64, String) = conn
+                    .query_row(
+                        "SELECT generation,bytes,digest FROM ext_coffer_pir_head WHERE id=1",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .unwrap();
+                let journal = conn
+                    .prepare("SELECT id,payload FROM ext_coffer_pir_journal ORDER BY id")
+                    .unwrap()
+                    .query_map([], |row| {
+                        Ok((row.get::<_, u64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .unwrap()
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .unwrap();
+                let intent: (Vec<u8>, String, String) = conn.query_row(
+                "SELECT proposal,phase,txids FROM ext_native_payments_v1 WHERE id='retained'", [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+                let scan: (u32, Option<u32>) = (
+                    wallet.scanned_height().unwrap(),
+                    wallet
+                        .open_db()
+                        .unwrap()
+                        .chain_height()
+                        .unwrap()
+                        .map(u32::from),
+                );
+                (receipt, head, journal, intent, scan)
+            };
+        let before = snapshot();
+        assert_eq!(
+            wallet
+                .begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
+                .unwrap_err()
+                .to_string(),
+            "native_pir_migration_required"
+        );
+        assert!(
+            matches!(store::NativePirStore::open(&wallet, &AtomicBool::new(false)), Err(StoreError::Io(code)) if code == "native_pir_migration_required")
+        );
+        assert_eq!(
+            wallet
+                .sync_regtest_pir(
+                    &chain,
+                    &mut Unavailable,
+                    &mut Unavailable,
+                    WorkLimits::default(),
+                    &AtomicBool::new(false),
+                )
+                .unwrap_err()
+                .to_string(),
+            "native_pir_migration_required"
+        );
+        assert_eq!(
+            wallet
+                .open_db()
+                .unwrap()
+                .transactionally_with_extension(|_, ext| {
+                    require_journal_head(ext, receipt.journal_head.as_ref())
+                })
+                .unwrap_err()
+                .to_string(),
+            "native_pir_migration_required"
+        );
+        assert_eq!(
+            wallet
+                .ensure_recovery_selection_ready()
+                .unwrap_err()
+                .to_string(),
+            "native_pir_migration_required"
+        );
+        assert_eq!(
+            wallet
+                .regtest_pir_recovery_for(&chain)
+                .unwrap_err()
+                .to_string(),
+            "native_pir_migration_required"
+        );
+        assert_eq!(snapshot(), before);
+        assert_eq!(
+            conn.query_row("SELECT version FROM ext_coffer_pir_schema", [], |row| row
+                .get::<_, u32>(
+                0
+            ))
+            .unwrap(),
+            1
+        );
+    }
+    #[test]
+    fn missing_pir_schema_refuses_orphaned_journal_and_receipt_without_mutation() {
+        for retain_journal in [true, false] {
+            let (_dir, wallet, chain, _) = completed_fixture();
+            let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+            conn.execute_batch("DROP TABLE ext_coffer_pir_schema; CREATE TABLE ext_native_payments_v1(id TEXT PRIMARY KEY,proposal BLOB NOT NULL,fee INTEGER NOT NULL,created INTEGER NOT NULL,expires INTEGER NOT NULL,height INTEGER NOT NULL,block_hash BLOB NOT NULL,phase TEXT NOT NULL,txids TEXT NOT NULL); INSERT INTO ext_native_payments_v1 VALUES('retained',x'010203',10000,1,2,1,x'00','unknown','retained-transaction');").unwrap();
+            if !retain_journal {
+                conn.execute_batch(
+                    "DROP TABLE ext_coffer_pir_journal; DROP TABLE ext_coffer_pir_head",
+                )
+                .unwrap();
+            }
+            let snapshot = || {
+                let receipt: (bool, u64, Vec<u8>) = conn.query_row(
+                    "SELECT blocked,generation,receipt FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                    [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                ).unwrap();
+                let tables = conn.prepare("SELECT name,sql FROM sqlite_master WHERE name LIKE 'ext_coffer_pir_%' ORDER BY name").unwrap()
+                    .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap()
+                    .collect::<std::result::Result<Vec<_>, _>>().unwrap();
+                let head = if retain_journal {
+                    Some(
+                        conn.query_row(
+                            "SELECT generation,bytes,digest FROM ext_coffer_pir_head WHERE id=1",
+                            [],
+                            |row| {
+                                Ok((
+                                    row.get::<_, u64>(0)?,
+                                    row.get::<_, u64>(1)?,
+                                    row.get::<_, String>(2)?,
+                                ))
+                            },
+                        )
+                        .unwrap(),
+                    )
+                } else {
+                    None
+                };
+                let journal = if retain_journal {
+                    conn.prepare("SELECT id,payload FROM ext_coffer_pir_journal ORDER BY id")
+                        .unwrap()
+                        .query_map([], |row| {
+                            Ok((row.get::<_, u64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                        })
+                        .unwrap()
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .unwrap()
+                } else {
+                    vec![]
+                };
+                let intent: (Vec<u8>, String, String) = conn.query_row(
+                    "SELECT proposal,phase,txids FROM ext_native_payments_v1 WHERE id='retained'",
+                    [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                ).unwrap();
+                let native =
+                    NativeScanSnapshot::capture(&wallet.open_db().unwrap(), chain.target_height())
+                        .unwrap()
+                        .identity()
+                        .unwrap();
+                (receipt, tables, head, journal, intent, native)
+            };
+            let before = snapshot();
+            assert!(matches!(
+                store::NativePirStore::open(&wallet, &AtomicBool::new(false)),
+                Err(StoreError::Corrupt(_))
+            ));
+            assert_eq!(
+                wallet
+                    .ensure_recovery_selection_ready()
+                    .unwrap_err()
+                    .to_string(),
+                "native_recovery_reconciliation_required"
+            );
+            assert_eq!(
+                wallet
+                    .regtest_pir_recovery_for(&chain)
+                    .unwrap_err()
+                    .to_string(),
+                "native_recovery_reconciliation_required"
+            );
+            assert_eq!(
+                wallet
+                    .begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
+                    .unwrap_err()
+                    .to_string(),
+                "native_pir_store_invalid"
+            );
+            assert_eq!(
+                wallet
+                    .sync_regtest_pir(
+                        &chain,
+                        &mut Unavailable,
+                        &mut Unavailable,
+                        WorkLimits::default(),
+                        &AtomicBool::new(false),
+                    )
+                    .unwrap_err()
+                    .to_string(),
+                "native_pir_store_invalid"
+            );
+            assert_eq!(snapshot(), before);
+        }
+    }
+    #[test]
+    fn pending_without_journal_is_the_only_recovery_marker_allowed_for_initialization() {
+        let (_dir, wallet) = wallet();
+        let (_, chain) = fixture_with_script(&[0x51]);
+        let cancel = RecoveryCancellation::new();
+        wallet.begin_regtest_pir_recovery(&chain, &cancel).unwrap();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        assert!(store::ensure_compatible_schema(&conn).is_ok());
+        conn.execute(
+            "UPDATE ext_coffer_pir_recovery_v1 SET receipt=x'00' WHERE id=1",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            store::ensure_compatible_schema(&conn),
+            Err(StoreError::Corrupt(_))
+        ));
+        conn.execute(
+            "UPDATE ext_coffer_pir_recovery_v1 SET blocked=0,receipt=NULL WHERE id=1",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            store::ensure_compatible_schema(&conn),
+            Err(StoreError::Corrupt(_))
+        ));
+        conn.execute(
+            "UPDATE ext_coffer_pir_recovery_v1 SET blocked=1 WHERE id=1",
+            [],
+        )
+        .unwrap();
+        assert!(store::NativePirStore::open_recovery(&wallet, &cancel).is_ok());
     }
     fn completed_fixture() -> (
         tempfile::TempDir,

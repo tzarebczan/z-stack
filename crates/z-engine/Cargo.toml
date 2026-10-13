@@ -167,9 +167,9 @@ zcash_note_encryption = { version = "=0.4.2", optional = true }
 
 sha2 = { version = "0.10", optional = true }
 tempfile = { version = "3", optional = true }
-transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "bec1f41326cf98261d8df7a16ffa4b4686b48231", optional = true }
-transparent-events = { git = "https://github.com/valargroup/wallet-pir", rev = "bec1f41326cf98261d8df7a16ffa4b4686b48231", optional = true }
-transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "bec1f41326cf98261d8df7a16ffa4b4686b48231", optional = true }
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2", optional = true }
+transparent-events = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2", optional = true }
+transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
@@ -178,7 +178,7 @@ getrandom = { version = "0.2", features = ["js"] }
 time = { version = "0.3.22", default-features = false, features = ["std", "wasm-bindgen"] }
 
 [dev-dependencies]
-transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "bec1f41326cf98261d8df7a16ffa4b4686b48231", features = ["testing"] }
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2", features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile = "3"
 zcash_note_encryption = "=0.4.2"
