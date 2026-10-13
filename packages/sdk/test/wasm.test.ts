@@ -353,3 +353,43 @@ for (const failure of ["frontier", "subtree-root"] as const) {
   assert.equal(blocks, 1);
 });
 }
+
+test("scanned legacy reorg restores its birthday anchor before accepting any replacement block", async () => {
+  assert.ok(existsSync(gen), "build the production WASM engine before this reorg test");
+  const { requireBindings } = await import("../src/wasm-client-runtime.ts");
+  const Wallet = requireBindings().WasmWallet;
+  const frame = (height: number, hash: number, previous: number) => {
+    const bytes = Uint8Array.from([16, height, 26, 32, ...Array(32).fill(hash), 34, 32, ...Array(32).fill(previous), 40, 1]);
+    const framed = new Uint8Array(bytes.length + 4);
+    new DataView(framed.buffer).setUint32(0, bytes.length, false);
+    framed.set(bytes, 4);
+    return framed;
+  };
+  const initial = Wallet.create("regtest", REGTEST_FAUCET_MNEMONIC, 12, 0);
+  let legacy: { blockHashes: Record<string, string>; unifiedAddress: string; nextDiversifier: unknown };
+  try {
+    initial.applyTreeState?.(JSON.stringify({ height: 11, hash: "01".repeat(32), network: "regtest" }));
+    initial.applyCompactBlocks(frame(12, 12, 1));
+    initial.applyCompactBlocks(frame(13, 13, 12));
+    initial.applyCompactBlocks(frame(14, 14, 13));
+    legacy = JSON.parse(new TextDecoder().decode(initial.toSnapshot()));
+    delete legacy.blockHashes["11"];
+  } finally { initial.free?.(); }
+  const restored = Wallet.fromSnapshot(new TextEncoder().encode(JSON.stringify(legacy)));
+  try {
+    assert.equal(restored.scannedHeight(), 14);
+    const before = JSON.parse(new TextDecoder().decode(restored.toSnapshot()));
+    assert.equal(before.blockHashes["11"], undefined, "warm restore must not widen retained history");
+    assert.throws(() => restored.applyCompactBlocks(frame(14, 90, 3)), /reorg/);
+    assert.equal(restored.scannedHeight(), 11);
+    const rewound = JSON.parse(new TextDecoder().decode(restored.toSnapshot()));
+    assert.equal(rewound.blockHashes["11"], "01".repeat(32));
+    assert.throws(() => restored.applyCompactBlocks(frame(12, 91, 3)), /reorg/);
+    assert.equal(restored.scannedHeight(), 11);
+    restored.applyCompactBlocks(frame(12, 12, 1));
+    assert.equal(restored.scannedHeight(), 12);
+    const corrected = JSON.parse(new TextDecoder().decode(restored.toSnapshot()));
+    assert.equal(corrected.unifiedAddress, legacy.unifiedAddress);
+    assert.equal(corrected.nextDiversifier, legacy.nextDiversifier);
+  } finally { restored.free?.(); }
+});
