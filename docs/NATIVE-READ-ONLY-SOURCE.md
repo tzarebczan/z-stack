@@ -49,7 +49,11 @@ three separate frontiers. Source mode does not fabricate an empty Ironwood
 response when a server rejects that pool.
 
 Source scans omit transparent address refresh, transaction-ID memo enhancement,
-funding classification and saved-send rebroadcast. Remote lookups, ordinary sync,
+funding classification and saved-send rebroadcast. The current native compact
+scanner handles shielded pools; it does not import transparent outputs or
+reconcile transparent spends from these compact ranges. Fresh transparent
+balances are therefore unsupported, and retained transparent balances must not
+be presented as verified by a source scan. Remote lookups, ordinary sync,
 send, payment preparation, signing, submission and maximum-send selection refuse
 with `native_read_only_source`. Cached viewing history and addresses remain
 available. Cold `open`, `open_offline`, stored endpoint edits and handles opened
