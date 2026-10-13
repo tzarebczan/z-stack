@@ -129,6 +129,7 @@ impl NativeWallet {
         schedule: RegtestScanSchedule,
         incremental: bool,
     ) -> Result<u32> {
+        let _ownership = self.local_mutation_lease()?;
         if has_recovery_marker(&self.paths.data_db)? {
             return Err(EngineError::Message(
                 "native_recovery_profile_required".into(),
@@ -405,6 +406,41 @@ mod tests {
             )
             .unwrap();
         wallet
+    }
+
+    #[test]
+    fn extra_ownership_public_scans_refuse_busy_and_source_marked_databases() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = initialized(dir.path());
+        let publication = first_block();
+        let ownership = wallet.network_operation_lease().unwrap();
+        for incremental in [false, true] {
+            assert_eq!(
+                wallet
+                    .scan_public_regtest_inner(&publication, schedule(), incremental)
+                    .unwrap_err()
+                    .to_string(),
+                "native_pir_database_busy"
+            );
+        }
+        assert_eq!(wallet.scanned_height().unwrap(), 0);
+        drop(ownership);
+        crate::native::source::enroll(dir.path()).unwrap();
+        let before = std::fs::read(&wallet.paths.data_db).unwrap();
+        for incremental in [false, true] {
+            assert_eq!(
+                wallet
+                    .scan_public_regtest_inner(&publication, schedule(), incremental)
+                    .unwrap_err()
+                    .to_string(),
+                "native_read_only_source"
+            );
+        }
+        assert!(
+            std::fs::read(&wallet.paths.data_db).unwrap() == before,
+            "source refusal changed wallet bytes"
+        );
+        assert_eq!(wallet.scanned_height().unwrap(), 0);
     }
     fn snapshot(wallet: &NativeWallet) -> String {
         let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();

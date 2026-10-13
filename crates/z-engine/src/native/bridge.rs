@@ -246,17 +246,21 @@ impl Bridge {
         let wallet = if self.wallet_exists() {
             match NativeWallet::open(&self.wallet) {
                 Ok(wallet) => Some(wallet),
-                Err(error)
-                    if req.method == "POST"
-                        && path == "/lwd/sendraw"
-                        && query_param(&req.path, "network").is_none() =>
-                {
-                    return lwd_err(error);
-                }
-                Err(_) => None,
+                Err(error) => return lwd_err(error),
             }
         } else {
             None
+        };
+        // An existing wallet owns every associated route, including explicit
+        // endpoint overrides. A corrupt/source-marked wallet cannot become a
+        // wallet-independent diagnostic by selecting another query parameter.
+        let ownership = match wallet
+            .as_ref()
+            .map(NativeWallet::network_operation_lease)
+            .transpose()
+        {
+            Ok(ownership) => ownership,
+            Err(error) => return lwd_err(error),
         };
         let network = match query_param(&req.path, "network") {
             Some(network) => match Network::parse(&network) {
@@ -308,7 +312,11 @@ impl Bridge {
                         "no validator RPC (set local Zakura / Zebra, or Z_STACK_VALIDATOR_RPC)",
                     );
                 };
+                let worker_ownership = ownership.clone();
                 let sent = tokio::task::spawn_blocking(move || {
+                    // Async cancellation cannot release policy exclusion while
+                    // this blocking connection or broadcast continues.
+                    let _ownership = worker_ownership;
                     crate::native::rpc::send_raw_transaction_verified(&rpc, network, &raw)
                 })
                 .await
@@ -551,6 +559,7 @@ impl Bridge {
                 let dir = self.wallet.clone();
                 self.locked(async move {
                     let w = NativeWallet::open(&dir)?;
+                    let _ownership = w.network_operation_lease()?;
                     let scanned = w.scanned_height()?;
                     let tip = NativeWallet::fetch_tip(&LightServer::Url(w.server_url())).await?;
                     Ok(json!({
@@ -1399,6 +1408,148 @@ async fn write_http_typed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn extra_ownership_wallet(root: &std::path::Path, server: &str) -> NativeWallet {
+        rusqlite::Connection::open(root.join("data.sqlite")).unwrap();
+        std::fs::write(
+            root.join("wallet.json"),
+            json!({"network":"regtest", "server":server, "birthday_height":1, "account_index":0})
+                .to_string(),
+        )
+        .unwrap();
+        NativeWallet::open(root).unwrap()
+    }
+
+    #[tokio::test]
+    async fn extra_ownership_source_wallet_bridge_routes_refuse_before_network() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let _wallet = extra_ownership_wallet(dir.path(), &endpoint);
+        crate::native::source::enroll(dir.path()).unwrap();
+        let before = std::fs::read(dir.path().join("data.sqlite")).unwrap();
+        let bridge = Bridge::new(dir.path(), SeedAuth::passphrase("disposable-fixture"));
+        for (method, path, body) in [
+            ("GET", "/lwd/tip".to_owned(), vec![]),
+            ("GET", "/lwd/blocks?start=1&end=1".to_owned(), vec![]),
+            ("GET", "/lwd/treestate?height=1".to_owned(), vec![]),
+            (
+                "GET",
+                "/lwd/subtreeroots?protocol=sapling".to_owned(),
+                vec![],
+            ),
+            (
+                "GET",
+                "/lwd/utxos?addresses=public-fixture".to_owned(),
+                vec![],
+            ),
+            ("GET", format!("/lwd/tx?txid={}", "00".repeat(32)), vec![]),
+            ("GET", format!("/lwd/mempool?rpc={endpoint}"), vec![]),
+            ("POST", format!("/lwd/mine?rpc={endpoint}"), vec![]),
+            (
+                "POST",
+                format!("/lwd/sendraw?rpc={endpoint}&network=regtest"),
+                b"faceb00c".to_vec(),
+            ),
+        ] {
+            let request = HttpReq {
+                method: method.into(),
+                path,
+                origin: None,
+                token: None,
+                body,
+            };
+            let (status, _, _, body) = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                bridge.dispatch_lwd(&request),
+            )
+            .await
+            .expect("source refusal must precede any endpoint request");
+            assert!(status >= 400);
+            assert!(String::from_utf8(body)
+                .unwrap()
+                .contains("native_read_only_source"));
+        }
+        let request = HttpReq {
+            method: "GET".into(),
+            path: "/tip".into(),
+            origin: None,
+            token: None,
+            body: vec![],
+        };
+        let (status, _, body) = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            bridge.dispatch(&request),
+        )
+        .await
+        .expect("wallet tip must refuse before endpoint I/O");
+        assert!(status >= 400);
+        assert!(body.contains("native_read_only_source"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert!(
+            std::fs::read(dir.path().join("data.sqlite")).unwrap() == before,
+            "source refusal changed wallet bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn extra_ownership_cancelled_bridge_broadcast_retains_worker_lease() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            socket.read_exact(&mut [0; 1]).unwrap();
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv();
+            // Closing the fixture connection terminates the blocked identity read.
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = extra_ownership_wallet(dir.path(), &endpoint);
+        let bridge = Arc::new(Bridge::new(
+            dir.path(),
+            SeedAuth::passphrase("disposable-fixture"),
+        ));
+        let request = HttpReq {
+            method: "POST".into(),
+            path: format!("/lwd/sendraw?rpc={endpoint}"),
+            origin: None,
+            token: None,
+            body: b"faceb00c".to_vec(),
+        };
+        let task = tokio::spawn(async move { bridge.dispatch_lwd(&request).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            wallet.local_mutation_lease().unwrap_err().to_string(),
+            "native_pir_database_busy"
+        );
+        release_tx.send(()).unwrap();
+        peer.join().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if wallet.local_mutation_lease().is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("finished blocking worker must release ownership");
+    }
 
     #[tokio::test]
     async fn sendraw_relay_verifies_requested_identity_before_receiving_transaction_bytes() {
