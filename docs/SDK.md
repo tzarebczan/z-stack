@@ -346,6 +346,30 @@ still sent to that bridge. These controls do not hide the client's IP address
 from a remote server or provide an anonymity relay. A custom `BlockTransport`
 owns its own network policy.
 
+A supplied transport object is the wallet's only chain-data provider. The SDK
+never creates a URL transport as a fallback for missing methods or failed reads.
+Its required `tip(signal)` and `blocks(start, end, signal)` methods return the
+chain height and inclusive compact ranges. Compact bytes use a four-byte
+big-endian length before each original protobuf block; an adapter can split a
+large SDK range into smaller authenticated requests without decoding wallet data.
+
+Set `requireBirthdayTreeState: true` when a cold scan must have its birthday
+frontier. For birthday heights above one, missing or failed `treeState` refuses
+sync before requesting compact blocks. Rust checks that its height is birthday
+minus one, validates an optional network, decodes the frontiers, and binds the
+first block's parent hash to that state. A different frontier cannot replace
+already seeded or scanned trees. Genesis restores need no preceding frontier.
+`subtreeRoots` supports pruning and remains optional. Signed metadata, endpoint
+consent and durable publication checkpoints belong to the application adapter.
+
+Expose only supported optional transport methods. Without `tx` or `sharedMemos`,
+memo enhancement is unavailable; `memoFetch: "on-demand"` leaves ordinary scans
+free of selective transaction lookups. Without `submit`, the transport cannot
+broadcast. Optional `info`, `mempool` and `submit` accept cancellation signals.
+Cancellation after submission starts still has an unknown outcome and retains
+the original pending payment. Transport reads receive the wallet operation's
+signal; late responses cannot revive a closed or replaced wallet.
+
 The repository's `scripts/grpc-web-proxy.mjs` binds loopback and converts binary
 gRPC-Web to a fixed native gRPC upstream. It forwards protocol headers only and
 streams responses with cancellation and backpressure. For a remote upstream,

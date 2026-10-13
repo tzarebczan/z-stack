@@ -30,7 +30,7 @@ import {
 } from "./scan-host";
 import { fetchSubtreeRoots, SUBTREE_ROOTS_PAGE } from "./subtree-roots";
 import { captureWalletOperation } from "./wallet-lifecycle";
-import { readWalletGeneration, walletStorageAvailable } from "./wallet-storage";
+import { abortable, readWalletGeneration, walletStorageAvailable } from "./wallet-storage";
 import type { WasmClientContext } from './wasm-client-context';
 import * as runtime from './wasm-client-runtime';
 
@@ -292,7 +292,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     if (ctx.transparentScan === "compact" && ctx.transport.transparentBlocks && source.applyTransparentBlocks) {
       const state = await ctx.snap();
       if ((state.transparentScanHeight ?? birthday - 1) === start - 1) {
-        const info = await ctx.transport.info?.().catch(() => undefined);
+        const info = await abortable(signal, async () => ctx.transport.info?.(signal)).catch(() => undefined);
         if (cancelled()) throw new Error("sync cancelled");
         combinedTransparent = !!info?.transparentCompact && supportsTransparentCompact(info.protocolVersion)
           && await source.supportsTransparentBlocks?.() === true;
@@ -475,6 +475,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         signal,
         cancelled,
       });
+    // A required cold frontier must succeed before speculative block retrieval.
+    if (ctx.opts.requireBirthdayTreeState && birthday > 1 && !await source.treesReady()) {
+      await seedBirthdayTrees(undefined, recovery, signal);
+    }
     let pipe = openPrefetch(start);
     let reorgRestarts = 0;
     try {
@@ -758,13 +762,17 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     // roots start at. Asking from shard 0 made Zaino walk every root since the
     // pool activated (about a second each), which never finished, so the scan
     // kept every leaf and hashed all of them after the scan (minutes).
+    const frontierRequired = ctx.opts.requireBirthdayTreeState && birthday > 1 && !treesReady;
+    if (frontierRequired && (!ctx.transport.treeState || scanned > birthday)) {
+      throw new WalletError("sync_required", "This cold wallet requires a birthday tree state from its configured transport before scanning.");
+    }
     let treeApplied = false;
     // GetTreeState would reset *_next onto already-scanned leaves.
     // Genesis needs no preceding frontier, but still needs roots for pruning.
     if (birthday > 1 && !treesReady && scanned <= birthday && ctx.transport.treeState) {
       try {
         const fetchState = () => ctx.transport.treeState!(birthday - 1, signal);
-        const ts = await (recovery ? recovery.run(fetchState) : fetchState());
+        const ts = await (recovery ? recovery.run(fetchState) : abortable(signal ?? operation.signal, fetchState));
         ctx.assertSource(operation, source);
         await source.applyTreeState(JSON.stringify(ts));
         treeApplied = true;
@@ -772,6 +780,8 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         operation.assertCurrent();
         const msg = e instanceof Error ? e.message : String(e);
         if (isTreeConflictError(msg)) throw new Error(treeConflictUserMessage(msg));
+        signal?.throwIfAborted();
+        if (frontierRequired) throw new WalletError("transport", "The configured transport could not supply the required birthday tree state.", e);
         /* scan/history still work; spendReady stays false */
       }
     }
@@ -840,7 +850,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const source = ctx.session;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     try {
-      const txs = await ctx.transport.mempool();
+      const txs = await abortable(operation.signal, () => ctx.transport.mempool!(operation.signal));
       ctx.assertSource(operation, source);
       if (!txs.length) return;
       await source.applyMempool(JSON.stringify({ txs }));
@@ -875,7 +885,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       for (const hex of raws.slice(0, 8)) {
         if (ctx.stateEpoch !== epoch) return;
         try {
-          await ctx.transport.submit!(hex);
+          await abortable(operation.signal, () => ctx.transport.submit!(hex, operation.signal));
         } catch (e) {
           if (runtime.isDuplicateBroadcastError(e)) continue;
           const msg = e instanceof Error ? e.message : String(e);

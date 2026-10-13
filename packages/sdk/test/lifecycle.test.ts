@@ -1042,3 +1042,34 @@ for (const cancellation of ["abort-aware", "late-response"] as const) {
     await forgetWasmWallet();
   });
 }
+
+for (const method of ["create", "restore", "restoreUfvk"] as const) {
+  test(`${method} passes its owner signal and stops waiting for an uncooperative tip on close`, async t => {
+    const { db, counts } = fixture(t);
+    const started = deferred<AbortSignal | undefined>();
+    const answer = deferred<number>();
+    const c = createWasmClient({ network: "regtest", transport: {
+      kind: "custom", label: "custom-only",
+      tip: async signal => { started.resolve(signal); return answer.promise; },
+      blocks: async () => { throw new Error("unexpected block retrieval"); },
+    } });
+    const pending = method === "create" ? c.create("regtest")
+      : method === "restore" ? c.restore("restore-fixture", "regtest", 1)
+        : c.restoreUfvk("uview-fixture", "regtest", 1);
+    const rejected = assert.rejects(pending, /cancelled|AbortError/);
+    const signal = await started.promise;
+    assert.ok(signal);
+    await c.dispose();
+    await Promise.race([rejected, new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => reject(new Error("cancelled tip wait did not settle")), 500);
+      timer.unref();
+    })]);
+    assert.equal(signal.aborted, true);
+    assert.equal(counts.created, 0);
+    assert.equal(db.records.has("default"), false);
+    answer.resolve(10);
+    await turn();
+    assert.equal(db.records.has("default"), false, "late tip cannot revive closed creation");
+    await forgetWasmWallet();
+  });
+}

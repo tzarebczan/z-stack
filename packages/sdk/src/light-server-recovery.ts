@@ -1,3 +1,4 @@
+import { abortable } from "./abort";
 import { WalletError } from "@z-stack/core";
 import { isTransientLightServerError } from "./lwd";
 
@@ -66,7 +67,7 @@ export function createLightServerRecovery(opts: {
       for (;;) {
         checkCancelled();
         try {
-          const value = await work();
+          const value = await abortable(opts.signal, work);
           checkCancelled();
           reset();
           return value;

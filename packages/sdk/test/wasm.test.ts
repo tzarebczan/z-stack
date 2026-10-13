@@ -181,3 +181,79 @@ test("wasm wallet: snapshot, history, orchard prove", async (t) => {
   assert.equal((await client.history(10)).length, 0);
   assert.equal(client.hasSpendingSeed(), true);
 });
+
+for (const failure of ["missing", "unavailable", "wrong-height", "wrong-network"] as const) {
+  test(`strict custom transport refuses ${failure} birthday frontier before requesting blocks`, async t => {
+    assert.ok(existsSync(gen), "build the production WASM engine before this boundary test");
+    const { createWallet } = await import("../src/create-wallet.ts");
+    const { memoryWalletStorage } = await import("../src/storage.ts");
+    const storage = memoryWalletStorage();
+    let blocks = 0;
+    let frontierSignal: AbortSignal | undefined;
+    const treeState = failure === "missing" ? undefined : async (height: number, signal?: AbortSignal) => {
+      frontierSignal = signal;
+      assert.equal(height, 1);
+      if (failure === "unavailable") throw new Error("fixture frontier unavailable");
+      return { height: failure === "wrong-height" ? 0 : 1, hash: "01".repeat(32),
+        network: failure === "wrong-network" ? "testnet" : "regtest" };
+    };
+    const wallet = await createWallet({ network: "regtest", storage,
+      requireBirthdayTreeState: true, prewarmProvingKey: false, memoFetch: "on-demand", transparentScan: "off",
+      server: { kind: "custom-only", label: "custom fixture", tip: async () => 2,
+        blocks: async () => { blocks++; throw new Error("unexpected blocks"); }, treeState } });
+    t.after(() => wallet.close());
+    await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 2 });
+    const before = await wallet.getWallet();
+    await assert.rejects(wallet.sync(), /requires a birthday tree state|required birthday tree state/);
+    assert.equal(blocks, 0);
+    if (failure !== "missing") assert.ok(frontierSignal);
+    const after = await wallet.getWallet();
+    assert.equal(after.scannedHeight, before.scannedHeight);
+    assert.equal(after.unifiedAddress, before.unifiedAddress);
+    assert.equal(after.treesReady, false);
+    await wallet.close();
+  });
+}
+
+test("strict custom transport cold restore and incremental sync use only supplied capabilities", async t => {
+  assert.ok(existsSync(gen), "build the production WASM engine before this boundary test");
+  const { createWallet } = await import("../src/create-wallet.ts");
+  const { memoryWalletStorage } = await import("../src/storage.ts");
+  const calls: string[] = [];
+  let tip = 2;
+  const block = (height: number) => {
+    const protobuf = Uint8Array.from([16, height, 26, 32, ...Array(32).fill(height),
+      34, 32, ...Array(32).fill(height - 1), 40, 1]);
+    const frame = new Uint8Array(protobuf.length + 4);
+    new DataView(frame.buffer).setUint32(0, protobuf.length, false);
+    frame.set(protobuf, 4);
+    return frame;
+  };
+  const wallet = await createWallet({ network: "regtest", storage: memoryWalletStorage(),
+    requireBirthdayTreeState: true, verifyChainTip: true, prewarmProvingKey: false,
+    memoFetch: "on-demand", transparentScan: "off", server: {
+      kind: "custom-only", label: "custom fixture",
+      tip: async signal => { assert.ok(signal); calls.push("tip"); return tip; },
+      treeState: async (height, signal) => {
+        assert.ok(signal); calls.push(`tree:${height}`);
+        return { height, hash: "01".repeat(32), network: "regtest" };
+      },
+      blocks: async (start, end, signal) => {
+        assert.ok(signal); calls.push(`blocks:${start}-${end}`);
+        assert.equal(start, end);
+        return block(start);
+      },
+    } });
+  t.after(() => wallet.close());
+  await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 2 });
+  const cold = await wallet.sync();
+  assert.equal(cold.scannedHeight, 2);
+  assert.equal(cold.treesReady, true);
+  assert.deepEqual(calls, ["tip", "tip", "tree:1", "blocks:2-2"]);
+  calls.length = 0;
+  tip = 3;
+  const incremental = await wallet.sync();
+  assert.equal(incremental.scannedHeight, 3);
+  assert.deepEqual(calls, ["tip", "blocks:2-2", "blocks:3-3"]);
+  await wallet.close();
+});

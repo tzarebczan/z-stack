@@ -729,12 +729,14 @@ test("forget during a pending snapshot read cannot rehydrate the forgotten walle
   const worker = new MemoWorker();
   await restartScanWorker(() => worker as unknown as Worker);
   await saveWalletSnapshot(new TextEncoder().encode("[]"), preview(), () => true);
+  let tipCalls = 0;
   const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
-    kind: "mock", label: "mock", tip: async () => 10, blocks: async () => new Uint8Array(),
+    kind: "mock", label: "mock", tip: async () => { tipCalls++; return 10; }, blocks: async () => new Uint8Array(),
   } });
   await turn(); // Metadata read settles before holding the full wallet read.
   db.holdReadCommits = true;
   const loading = client.tip();
+  const cancelled = assert.rejects(loading, /cancelled|AbortError/);
   await turn();
   assert.equal(db.commits.length, 1);
   const forgetting = forgetWasmWallet();
@@ -742,7 +744,8 @@ test("forget during a pending snapshot read cannot rehydrate the forgotten walle
   db.holdReadCommits = false;
   db.commits.shift()!();
   await forgetting;
-  assert.equal((await loading).scanned, 0);
+  await cancelled;
+  assert.equal(tipCalls, 0, "a forgotten operation must not start a transport request");
   assert.equal(worker.ops.filter((op) => op === "fromSnapshot").length, 0);
   assert.equal(await readSavedSnapshot(), null);
 });
@@ -761,14 +764,17 @@ test("forget during asynchronous Blob hydration cannot reattach the forgotten wa
     converting();
     return new Promise<ArrayBuffer>((resolve) => { release = resolve; });
   });
+  let tipCalls = 0;
   const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
-    kind: "mock", label: "mock", tip: async () => 10, blocks: async () => new Uint8Array(),
+    kind: "mock", label: "mock", tip: async () => { tipCalls++; return 10; }, blocks: async () => new Uint8Array(),
   } });
   const loading = client.tip();
+  const cancelled = assert.rejects(loading, /cancelled|AbortError/);
   await started;
   await forgetWasmWallet();
   release(bytes.buffer);
-  assert.equal((await loading).scanned, 0);
+  await cancelled;
+  assert.equal(tipCalls, 0, "a forgotten operation must not start a transport request");
   assert.equal(worker.ops.filter((op) => op === "fromSnapshot").length, 0);
   assert.equal(await readSavedSnapshot(), null);
 });

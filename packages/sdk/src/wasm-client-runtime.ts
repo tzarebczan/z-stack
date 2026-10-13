@@ -385,6 +385,7 @@ export type WasmClientOpts = {
   lightUrl?: string;
   allowDeepSync?: boolean;
   verifyChainTip?: boolean;
+  requireBirthdayTreeState?: boolean;
   lightServerGraceMs?: number;
   /** Opt-in shielding after sync while unlocked. Default false; consumes an each-spend unlock. */
   autoShield?: boolean;
