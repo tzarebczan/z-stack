@@ -254,11 +254,11 @@ impl Bridge {
         // An existing wallet owns every associated route, including explicit
         // endpoint overrides. A corrupt/source-marked wallet cannot become a
         // wallet-independent diagnostic by selecting another query parameter.
-        let ownership = match wallet
-            .as_ref()
-            .map(NativeWallet::network_operation_lease)
-            .transpose()
-        {
+        let ownership = match wallet.as_ref() {
+            Some(wallet) => wallet.network_operation_lease(),
+            None => NativeWallet::bootstrap_network_lease(&self.wallet),
+        };
+        let ownership = match ownership {
             Ok(ownership) => ownership,
             Err(error) => return lwd_err(error),
         };
@@ -386,7 +386,14 @@ impl Bridge {
                 let Some(txid) = query_param(&req.path, "txid") else {
                     return lwd_msg(400, "txid query param required");
                 };
-                match NativeWallet::fetch_raw_transaction(&server, &txid).await {
+                match NativeWallet::fetch_raw_transaction_with_rpc_owned(
+                    &server,
+                    None,
+                    &txid,
+                    ownership.clone(),
+                )
+                .await
+                {
                     Ok(raw) => json_ok_bytes(serde_json::json!({
                         "txid": txid,
                         "hex": crate::web::to_hex(&raw),
@@ -1549,6 +1556,51 @@ mod tests {
         })
         .await
         .expect("finished blocking worker must release ownership");
+    }
+
+    #[tokio::test]
+    async fn extra_ownership_seed_only_source_roots_refuse_network_diagnostics() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        crate::native::source::enroll(dir.path()).unwrap();
+        let policy = std::fs::read(dir.path().join("native-source-policy")).unwrap();
+        let bridge = Bridge::new(dir.path(), SeedAuth::passphrase("disposable-fixture"));
+        for (method, path, body) in [
+            ("GET", format!("/lwd/tip?server={endpoint}"), vec![]),
+            ("POST", format!("/lwd/mine?rpc={endpoint}"), vec![]),
+            (
+                "POST",
+                format!("/lwd/sendraw?rpc={endpoint}"),
+                b"faceb00c".to_vec(),
+            ),
+        ] {
+            let req = HttpReq {
+                method: method.into(),
+                path,
+                origin: None,
+                token: None,
+                body,
+            };
+            let (status, _, _, body) = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                bridge.dispatch_lwd(&req),
+            )
+            .await
+            .expect("source-bound seed-only root must refuse before endpoint I/O");
+            assert!(status >= 400);
+            assert!(String::from_utf8(body)
+                .unwrap()
+                .contains("native_read_only_source"));
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert!(!dir.path().join("wallet.json").exists());
+        assert!(!dir.path().join("data.sqlite").exists());
+        assert!(std::fs::read(dir.path().join("native-source-policy")).unwrap() == policy);
     }
 
     #[tokio::test]
