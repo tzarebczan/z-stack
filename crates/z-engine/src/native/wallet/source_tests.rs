@@ -16,6 +16,162 @@ use zcash_client_backend::proto::{
 const PUBLIC_SEED: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
+fn reset_fixture(root: &Path) -> (NativeWallet, UnifiedFullViewingKey, AccountBirthday) {
+    let mut wallet = tests::fixture_wallet(root);
+    let keys = crate::keys::account_from_mnemonic(PUBLIC_SEED, ZNetwork::Regtest, 0).unwrap();
+    let ufvk = UnifiedFullViewingKey::decode(&ZNetwork::Regtest, &keys.ufvk).unwrap();
+    wallet.meta.ufvk = Some(keys.ufvk);
+    wallet.save_meta().unwrap();
+    let birthday = AccountBirthday::from_parts(
+        zcash_client_backend::data_api::chain::ChainState::empty(
+            0.into(),
+            zcash_primitives::block::BlockHash([0; 32]),
+        ),
+        None,
+    );
+    wallet.replace_scan_db(&ufvk, &birthday).unwrap();
+    (wallet, ufvk, birthday)
+}
+
+#[tokio::test]
+async fn source_enrollment_between_reset_preflight_and_swap_preserves_marked_database() {
+    let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 2).await;
+    let root = tempfile::tempdir().unwrap();
+    let (stale, ufvk, birthday) = reset_fixture(root.path());
+    stale.require_network_access().unwrap();
+    NativeWallet::open_with_source(root.path(), &fixture.source).unwrap();
+    let before = std::fs::read(&stale.paths.data_db).unwrap();
+    code(
+        stale.replace_scan_db(&ufvk, &birthday),
+        "native_read_only_source",
+    );
+    assert_eq!(std::fs::read(&stale.paths.data_db).unwrap(), before);
+    std::fs::remove_file(root.path().join("native-source-policy")).unwrap();
+    assert!(NativeWallet::open(root.path())
+        .unwrap()
+        .uses_read_only_source()
+        .unwrap());
+    assert!(fixture.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn public_reset_holds_exclusive_policy_ownership_before_first_network_await() {
+    use std::future::Future;
+    let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 2).await;
+    let root = tempfile::tempdir().unwrap();
+    let (mut stale, _, _) = reset_fixture(root.path());
+    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    stale
+        .set_light_server(LightServer::parse(
+            &format!("http://{}", server.local_addr().unwrap()),
+            ZNetwork::Regtest,
+        ))
+        .unwrap();
+    let mut reset = Box::pin(stale.reset_scan());
+    assert!(reset
+        .as_mut()
+        .poll(&mut Context::from_waker(std::task::Waker::noop()))
+        .is_pending());
+    code(
+        NativeWallet::open_with_source(root.path(), &fixture.source),
+        "native_pir_database_busy",
+    );
+    assert!(!root.path().join("native-source-policy").exists());
+    drop(reset);
+    NativeWallet::open_with_source(root.path(), &fixture.source).unwrap();
+    assert!(stale.uses_read_only_source().unwrap());
+    code(stale.reset_scan().await, "native_read_only_source");
+    assert!(fixture.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn source_enrollment_waits_for_network_operation_ownership_and_stale_payments_refuse() {
+    let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 2).await;
+    let root = tempfile::tempdir().unwrap();
+    let (stale, _, _) = reset_fixture(root.path());
+    let operation = stale.network_operation_lease().unwrap();
+    code(
+        NativeWallet::open_with_source(root.path(), &fixture.source),
+        "native_pir_database_busy",
+    );
+    assert!(!root.path().join("native-source-policy").exists());
+    drop(operation);
+    NativeWallet::open_with_source(root.path(), &fixture.source).unwrap();
+    let before = std::fs::read(&stale.paths.data_db).unwrap();
+    code(
+        stale.send(&auth(), "irrelevant", 1, None).await,
+        "native_read_only_source",
+    );
+    code(
+        stale
+            .send_with_policy(&auth(), "irrelevant", 1, None, shielded_spend_policy())
+            .await,
+        "native_read_only_source",
+    );
+    code(
+        stale
+            .send_payments(&auth(), &[], shielded_spend_policy())
+            .await,
+        "native_read_only_source",
+    );
+    #[cfg(feature = "transparent-inputs")]
+    code(stale.shield(&auth(), 1).await, "native_read_only_source");
+    code(
+        stale.submit_payment("irrelevant").await,
+        "native_read_only_source",
+    );
+    code(
+        stale.estimate_fee("irrelevant", 1, None),
+        "native_read_only_source",
+    );
+    assert_eq!(std::fs::read(&stale.paths.data_db).unwrap(), before);
+    assert!(fixture.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_enrollment_cannot_interleave_with_ordinary_retry_endpoint_probes() {
+    let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 2).await;
+    let root = tempfile::tempdir().unwrap();
+    let (mut wallet, _, _) = reset_fixture(root.path());
+    let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    wallet
+        .set_light_server(LightServer::parse(
+            &format!("http://{}", server.local_addr().unwrap()),
+            ZNetwork::Regtest,
+        ))
+        .unwrap();
+    let stopped_server = tokio::spawn(async move {
+        while let Ok((socket, _)) = server.accept().await {
+            drop(socket);
+        }
+    });
+    let progress = Arc::new(Mutex::new(SyncProgress::default()));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (p, c) = (progress.clone(), cancel.clone());
+    let syncing =
+        tokio::spawn(async move { wallet.sync_reported_resilient_cancellable(Some(p), c).await });
+    let waiting = tokio::time::timeout(Duration::from_secs(5), async {
+        while !progress.lock().unwrap().message.contains("reconnecting") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let enrollment = NativeWallet::open_with_source(root.path(), &fixture.source);
+    cancel.store(true, Ordering::Release);
+    let completed = tokio::time::timeout(Duration::from_secs(2), syncing).await;
+    stopped_server.abort();
+    let _ = stopped_server.await;
+    waiting.unwrap();
+    code(
+        completed.unwrap().unwrap(),
+        "sync cancelled; saved scan retained",
+    );
+    code(enrollment, "native_pir_database_busy");
+    assert!(!root.path().join("native-source-policy").exists());
+    NativeWallet::open_with_source(root.path(), &fixture.source).unwrap();
+    assert!(fixture.calls.lock().unwrap().is_empty());
+}
+
 struct Reply(VecDeque<Frame<Bytes>>);
 impl http_body::Body for Reply {
     type Data = Bytes;

@@ -28,6 +28,10 @@ retain that birthday even if the tip advances. Changed setup scope, malformed
 binding, or a retained seed without its binding refuses before source access. Either marker keeps the wallet read-only. A
 copied marked database without its sidecar remains read-only; malformed or
 non-singleton markers refuse. There is no source-to-direct handover API.
+Policy checks run under the same ownership lease as the operation. Reset retains
+exclusive ownership before its first network await through database replacement;
+sends and saved-intent submissions retain shared ownership through signing,
+commit and broadcast. Enrollment cannot interleave with those operations.
 `uses_read_only_source` re-reads both markers under a shared lease without
 networking. Applications must refuse replacement enrollment if a marked wallet
 lacks its original authenticated checkpoint or publisher binding. Those

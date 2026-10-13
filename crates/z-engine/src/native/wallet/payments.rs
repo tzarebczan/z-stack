@@ -838,7 +838,7 @@ impl NativeWallet {
     /// create a replacement payment. Lost replies remain unknown; explicit node
     /// rejections surface as errors while the signed receipt remains recoverable.
     pub async fn submit_payment(&self, id: &str) -> Result<PaymentReceipt> {
-        self.require_network_access()?;
+        let _source_lease = self.network_operation_lease()?;
         let conn = connection(self)?;
         let receipt = self.payment_receipt(id)?;
         if matches!(receipt.phase.as_str(), "accepted" | "mined") {

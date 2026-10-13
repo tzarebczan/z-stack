@@ -1583,6 +1583,23 @@ impl NativeWallet {
         Ok(())
     }
 
+    fn network_operation_lease(&self) -> Result<std::fs::File> {
+        self.check_network_capability()?;
+        let lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_network_access()?;
+        Ok(lease)
+    }
+
+    fn check_network_capability(&self) -> Result<()> {
+        // A disabled handle always refuses; enabled handles check sticky policy
+        // after acquiring ownership, before any transport or database mutation.
+        if self.network_access {
+            Ok(())
+        } else {
+            self.require_network_access()
+        }
+    }
+
     fn require_read_only_source(&self, source: &super::NativeReadOnlySource) -> Result<()> {
         if self.network != source.network() {
             return Err(EngineError::Message(
@@ -1751,6 +1768,9 @@ impl NativeWallet {
         live: Option<Arc<Mutex<SyncProgress>>>,
         cancel: Arc<AtomicBool>,
     ) -> Result<(u32, SyncProgress)> {
+        self.check_network_capability()?;
+        let _lease = self.ordinary_scan_lease()?;
+        self.require_network_access()?;
         // The CLI passes no live progress; keep one anyway so the retry loop
         // can tell an attempt that moved the scan from one that never connected.
         let live = live.or_else(|| Some(Arc::new(Mutex::new(SyncProgress::default()))));
@@ -1762,7 +1782,7 @@ impl NativeWallet {
             Duration::from_secs(120),
             Duration::from_secs(2),
             &cancel,
-            || self.sync_reported(progress.clone()),
+            || self.sync_reported_locked(progress.clone(), None),
         )
         .await
     }
@@ -1773,6 +1793,7 @@ impl NativeWallet {
         live: Option<Arc<Mutex<SyncProgress>>>,
         cancel: Arc<AtomicBool>,
     ) -> Result<(u32, SyncProgress)> {
+        let _lease = self.ordinary_scan_lease()?;
         self.require_read_only_source(source)?;
         let live = live.or_else(|| Some(Arc::new(Mutex::new(SyncProgress::default()))));
         let progress = live.clone();
@@ -1782,7 +1803,7 @@ impl NativeWallet {
             Duration::from_secs(120),
             Duration::from_secs(2),
             &cancel,
-            || self.sync_reported_inner(progress.clone(), Some(source)),
+            || self.sync_reported_locked(progress.clone(), Some(source)),
         )
         .await
     }
@@ -1791,10 +1812,13 @@ impl NativeWallet {
         &self,
         live: Option<Arc<Mutex<SyncProgress>>>,
     ) -> Result<(u32, SyncProgress)> {
-        self.sync_reported_inner(live, None).await
+        self.check_network_capability()?;
+        let _lease = self.ordinary_scan_lease()?;
+        self.sync_reported_locked(live, None).await
     }
 
-    async fn sync_reported_inner(
+    // Callers retain one exclusive lease for the full scan/retry lifetime.
+    async fn sync_reported_locked(
         &self,
         live: Option<Arc<Mutex<SyncProgress>>>,
         source: Option<&super::NativeReadOnlySource>,
@@ -1804,7 +1828,6 @@ impl NativeWallet {
             None => self.require_network_access()?,
         }
         let provided = source.is_some();
-        let _lease = self.ordinary_scan_lease()?;
         let mut progress = SyncProgress {
             stage: SyncStage::Connecting,
             percent: 0.0,
@@ -2411,8 +2434,9 @@ impl NativeWallet {
     /// Rewind scan_queue to the last filled island so the next `sync` trial-decrypts
     /// island_end+1→tip. Does not wipe keys or the already-scanned island.
     pub async fn rewind_scan_to_gap(&self) -> Result<u32> {
-        self.require_network_access()?;
+        self.check_network_capability()?;
         let _lease = self.ordinary_scan_lease()?;
+        self.require_network_access()?;
         let mut client = Self::connect_url(
             &self.server.as_url(),
             Self::skip_ironwood_subtrees(self.network, &self.server.as_url()),
@@ -2433,6 +2457,7 @@ impl NativeWallet {
     #[cfg(test)]
     fn rewind_scan_to_gap_at_tip(&self, tip: u32) -> Result<u32> {
         let _lease = self.ordinary_scan_lease()?;
+        self.require_source_spending_access()?;
         self.rewind_scan_to_gap_locked(tip)
     }
 
@@ -2457,6 +2482,8 @@ impl NativeWallet {
     /// Wipe sqlite + compact-block cache and re-import the UFVK at birthday.
     /// Seed / keyring / wallet.json stay. Next `sync` is a full rescan.
     pub async fn reset_scan(&self) -> Result<()> {
+        self.check_network_capability()?;
+        let _lease = database_lease::exclusive(&self.paths.data_db)?;
         self.require_network_access()?;
         if has_recovery_marker(&self.paths.data_db)? {
             return Err(EngineError::Message("native_recovery_reset_refused".into()));
@@ -2501,9 +2528,10 @@ impl NativeWallet {
         let birthday = AccountBirthday::from_treestate(treestate, Some(BlockHeight::from(tip)))
             .map_err(|e| EngineError::WalletDb(format!("birthday: {e}")))?;
 
-        self.replace_scan_db(&ufvk, &birthday)
+        self.replace_scan_db_locked(&ufvk, &birthday)
     }
 
+    #[cfg(test)]
     fn replace_scan_db(
         &self,
         ufvk: &UnifiedFullViewingKey,
@@ -2511,6 +2539,17 @@ impl NativeWallet {
     ) -> Result<()> {
         let db_path = &self.paths.data_db;
         let _lease = database_lease::exclusive(db_path)?;
+        self.replace_scan_db_locked(ufvk, birthday)
+    }
+
+    fn replace_scan_db_locked(
+        &self,
+        ufvk: &UnifiedFullViewingKey,
+        birthday: &AccountBirthday,
+    ) -> Result<()> {
+        // The caller retains the exclusive ownership lease through the swap.
+        self.require_source_spending_access()?;
+        let db_path = &self.paths.data_db;
         if has_recovery_marker(db_path)? {
             return Err(EngineError::Message("native_recovery_reset_refused".into()));
         }
@@ -2742,8 +2781,9 @@ impl NativeWallet {
 
     /// Sync if the wallet is behind the light server tip. Returns whether work ran.
     pub async fn catch_up(&self) -> Result<(u32, SyncProgress, bool)> {
-        self.require_network_access()?;
+        self.check_network_capability()?;
         let lease = self.ordinary_scan_lease()?;
+        self.require_network_access()?;
         let scanned = self.scanned_height()?;
         let tip = Self::fetch_tip(&self.server).await?;
         if scanned >= tip {
@@ -2869,9 +2909,8 @@ impl NativeWallet {
 
     #[cfg(feature = "transparent-inputs")]
     pub async fn shield(&self, auth: &SeedAuth, threshold_zat: u64) -> Result<Vec<String>> {
-        self.require_network_access()?;
+        let _lease = self.network_operation_lease()?;
         self.ensure_recovery_selection_ready()?;
-        let _lease = database_lease::shared(&self.paths.data_db)?;
         let mut db = self.open_db()?;
         let account = Self::primary_account_id(&db)?;
         let seed = self.load_seed(auth)?;
@@ -3008,9 +3047,10 @@ impl NativeWallet {
 
     /// ZIP-317 fee for a shielded send / ZIP-321 URI. Propose only — no prove or broadcast.
     pub fn estimate_fee(&self, to: &str, amount_zatoshis: u64, memo: Option<&str>) -> Result<u64> {
+        let _lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         self.ensure_recovery_selection_ready()?;
         let request = self.send_request(to, amount_zatoshis, memo)?;
-        let _lease = database_lease::shared(&self.paths.data_db)?;
         let mut db = self.open_db()?;
         self.propose_fee(&mut db, request, shielded_spend_policy())
     }
@@ -3197,6 +3237,7 @@ impl NativeWallet {
         after_guard: impl FnOnce(),
     ) -> Result<(u64, u64)> {
         let _lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         let mut db = self.open_db()?;
         db.transactionally_with_extension(|db, ext| -> anyhow::Result<(u64, u64)> {
             recovery_guard::transaction_recovery_ready(db, ext)?;
@@ -3289,9 +3330,8 @@ impl NativeWallet {
         memo: Option<&str>,
         policy: SpendPolicy,
     ) -> Result<Vec<String>> {
-        self.require_network_access()?;
+        let _lease = self.network_operation_lease()?;
         self.ensure_recovery_selection_ready()?;
-        let _lease = database_lease::shared(&self.paths.data_db)?;
         crate::keys::assert_shielded_send_dest(to, crate::keys::SendDestPolicy::Shielded)?;
         let db = self.open_db()?;
         let account = Self::primary_account_id(&db)?;
@@ -3343,9 +3383,8 @@ impl NativeWallet {
         payments: &[crate::Zip321Payment],
         policy: SpendPolicy,
     ) -> Result<Vec<String>> {
-        self.require_network_access()?;
+        let _lease = self.network_operation_lease()?;
         self.ensure_recovery_selection_ready()?;
-        let _lease = database_lease::shared(&self.paths.data_db)?;
         if payments.is_empty() {
             return Err(EngineError::Message("ZIP-321 URI has no payments".into()));
         }
@@ -3410,6 +3449,7 @@ impl NativeWallet {
         after_proposal: impl FnOnce(),
     ) -> Result<Vec<String>> {
         let _lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
 
         let (proposal, selected_generation) = db
             .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
