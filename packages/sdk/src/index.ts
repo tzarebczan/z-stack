@@ -49,7 +49,7 @@ export {
 export type { WasmProgress } from "./wasm-client";
 export type {
   BalanceEvent, BirthdayInput, ChainTip, ConfirmationOptions, FeeEstimate, MaxSend, SpendResult,
-  SendOptions, SyncEvent, WaitOpts, WalletEventHandler, WalletEventMap, WalletEventName,
+  SendOptions, ShieldOptions, SyncEvent, WaitOpts, WalletEventHandler, WalletEventMap, WalletEventName,
 } from "./engine";
 
 export {

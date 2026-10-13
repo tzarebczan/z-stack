@@ -138,6 +138,9 @@ export type SendOptions = Partial<HardwareSendOptions> & {
   minConfirmations?: number;
 };
 
+/** Browser shielding cancellation. Once submission starts, preserve its outcome. */
+export type ShieldOptions = Pick<SendOptions, "signal" | "beforeBroadcast">;
+
 export type EngineClientOpts = {
   /** Bearer token for `z-wallet serve` / desktop bridge (401 without it on spend routes). */
   token?: string;
@@ -166,7 +169,7 @@ export type EngineClient = {
   balance: (options?: ConfirmationOptions) => Promise<WalletSnapshot["balance"]>;
   sync: () => Promise<WalletSnapshot>;
   /** Shield transparent funds at or above `threshold` zatoshis. Resolves after broadcast. */
-  shield: (threshold?: number) => Promise<SpendResult>;
+  shield: (threshold?: number, options?: ShieldOptions) => Promise<SpendResult>;
   /**
    * Send to a unified address or a ZIP-321 `zcash:` URI (multi-pay `address.N`
    * ok). `amountZec` is decimal ZEC. Shielded destinations only on WASM.
@@ -324,11 +327,14 @@ export function createEngineClient(baseUrl: string, opts?: EngineClientOpts): En
       return (await call<WalletSnapshot>("/wallet")).balance;
     },
     sync: () => snap("/sync", { method: "POST", body: "{}" }, true),
-    shield: async (threshold) =>
-      spendResult(await snap("/shield", {
+    shield: async (threshold, options) => {
+      if (options?.signal || options?.beforeBroadcast)
+        throw new WalletError("unknown", "Shielding cancellation hooks require the browser engine.");
+      return spendResult(await snap("/shield", {
         method: "POST",
         body: JSON.stringify({ threshold }),
-      })),
+      }));
+    },
     send: (to, amountZec, memo, sendOpts) => {
       try {
         if (minimumConfirmations(sendOpts?.minConfirmations) !== undefined)

@@ -110,7 +110,7 @@ they can be cached forever.
 | `wallet.supportsTransparentSend()` | Probes the loaded browser engine for explicit transparent swap-output support; it does not prove ownership, funds or signing readiness. Hardware wallets return false; the native client does not expose this method. |
 | `wallet.estimateTransparentFee(to, amountZec)` | Low-level fee preparation for one bare, network-correct P2PKH/P2SH output funded from shielded notes. |
 | `wallet.sendTransparent(to, amountZec, { maxFeeZat, beforeBroadcast }?)` | Low-level software-wallet transparent output; exposes its public destination and amount while keeping change shielded. See the restrictions below. |
-| `wallet.shield(thresholdZat?)` | Moves transparent funds into the shielded pool. |
+| `wallet.shield(thresholdZat?, { signal, beforeBroadcast }?)` | Moves transparent funds into the shielded pool. Browser cancellation hooks are checked before submission; native clients reject these hooks. |
 | `wallet.forget()` | Deletes this device's wallet. Passkeys are kept unless `{ passkey: true }`. |
 
 Phrase, UFVK and hardware restore share the same birthday rules: omitted means
@@ -421,6 +421,10 @@ client closes or the wallet changes. Check that transaction; do not construct
 another payment merely because the UI could not refresh.
 
 `send(..., { signal, beforeBroadcast })` also guards software and hardware sends.
+`shield(thresholdZat, { signal, beforeBroadcast })` provides the same pre-submission
+authorization check for browser shielding. Abort on logout and bind the predicate to
+the initiating wallet session. Cancellation after submission must preserve the saved
+transaction and its outcome; do not start another shielding transaction automatically.
 The signal/review predicate prevents submission when cancelled before the final
 check. Proof work may finish before cancellation is observed. Cancellation
 cannot retract a request that has already started.

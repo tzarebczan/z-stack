@@ -9,12 +9,13 @@ export type NativeCreateOptions = Pick<CreateOpts, "server" | "validatorRpc" | "
 export type NativeRestoreOptions = Pick<RestoreOpts, "server" | "validatorRpc" | "passphrase" | "unlockPolicy">;
 export type NativeWallet = Omit<EngineClient,
   "restoreHardware" | "sendTransparent" | "estimateTransparentFee" | "supportsTransparentSend" |
-  "hasSpendingSeed" | "create" | "restore" | "restoreUfvk" | "attachSeed" | "send"> & {
+  "hasSpendingSeed" | "create" | "restore" | "restoreUfvk" | "attachSeed" | "send" | "shield"> & {
   create(network: string, birthday?: BirthdayInput, options?: NativeCreateOptions): Promise<WalletSnapshot>;
   restore(mnemonic: string, network: string, birthday?: BirthdayInput, options?: NativeRestoreOptions): Promise<WalletSnapshot>;
   restoreUfvk(ufvk: string, network: string, birthday?: BirthdayInput, options?: NativeRestoreOptions): Promise<WalletSnapshot>;
   attachSeed(mnemonic: string): Promise<WalletSnapshot>;
   send(to: string, amountZec: string, memo?: string): ReturnType<EngineClient["send"]>;
+  shield(threshold?: number): ReturnType<EngineClient["shield"]>;
 };
 export function createNativeWallet(baseUrl: string, options?: NativeWalletOptions): NativeWallet {
   const { restoreHardware, sendTransparent, estimateTransparentFee,

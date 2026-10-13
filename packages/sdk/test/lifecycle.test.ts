@@ -793,3 +793,252 @@ for (const cancellation of ["proof", "reservation", "broadcast event"] as const)
     await forgetWasmWallet();
   });
 }
+
+for (const cancellation of ["proof", "reservation", "broadcast event"] as const) {
+  for (const guard of ["signal", "predicate"] as const) {
+    test(`shielding stops ${guard} cancellation during ${cancellation} before submission`, async (t) => {
+      const controller = new AbortController();
+      let allowed = true;
+      const cancel = () => { allowed = false; controller.abort(); };
+      let proved = false;
+      const { db } = fixture(t, (handle) => {
+        handle.transparentAddress = () => undefined;
+        handle.proveShield = () => {
+          proved = true;
+          if (cancellation === "proof") cancel();
+          return (handle.proveSend as () => string)();
+        };
+      });
+      let submitted = 0;
+      const c = createWasmClient({ unlockPolicy: "session", network: "regtest", autoShield: false, transport: {
+        kind: "mock", label: "shield-fixture", tip: async () => 10,
+        blocks: async () => new Uint8Array(), utxos: async () => [],
+        submit: async () => { submitted++; return "unused"; },
+      } });
+      await c.restore("shield-fixture", "regtest", 1);
+      if (cancellation === "broadcast event") c.on("broadcast", cancel);
+      const before = decode((await readSavedSnapshot())!);
+      if (cancellation === "reservation") db.holdCommits = true;
+      const pending = c.shield(100_000, guard === "signal"
+        ? { signal: controller.signal } : { beforeBroadcast: () => allowed });
+      const rejected = assert.rejects(pending, /cancelled before broadcast/);
+      if (cancellation === "reservation") {
+        await turn();
+        assert.equal(db.commits.length, 1);
+        cancel();
+        db.holdCommits = false;
+        db.commits.shift()!();
+      }
+      await rejected;
+      assert.equal(proved, true);
+      assert.equal(submitted, 0);
+      assert.deepEqual(decode((await readSavedSnapshot())!), before);
+      await forgetWasmWallet();
+    });
+  }
+}
+
+for (const outcome of ["accepted", "unknown"] as const) {
+  test(`shielding cancelled after submission preserves its ${outcome} outcome`, async (t) => {
+    fixture(t, (handle) => {
+      handle.transparentAddress = () => undefined;
+      handle.proveShield = handle.proveSend;
+    });
+    const started = deferred<void>();
+    const finish = deferred<void>();
+    const controller = new AbortController();
+    let submitted = 0;
+    const c = createWasmClient({ unlockPolicy: "session", network: "regtest", autoShield: false, transport: {
+      kind: "mock", label: "shield-fixture", tip: async () => 10,
+      blocks: async () => new Uint8Array(), utxos: async () => [],
+      submit: async () => {
+        submitted++;
+        started.resolve();
+        await finish.promise;
+        if (outcome === "unknown") throw new Error("fixture connection lost");
+        return "ab".repeat(32);
+      },
+    } });
+    await c.restore("shield-fixture", "regtest", 1);
+    const pending = c.shield(100_000, { signal: controller.signal });
+    const checked = outcome === "unknown"
+      ? assert.rejects(pending, /broadcast outcome unknown/)
+      : pending.then(result => assert.equal(result.txid, "ab".repeat(32)));
+    await started.promise;
+    controller.abort();
+    finish.resolve();
+    await checked;
+    assert.equal(submitted, 1);
+    assert.equal(decode((await readSavedSnapshot())!).pending, true);
+    await forgetWasmWallet();
+  });
+}
+
+for (const phase of ["proof", "reservation", "accepted", "unknown"] as const) {
+  test(`sync cancellation during automatic shielding ${phase} cannot broadcast again or publish late balance`, async (t) => {
+    let db!: ReturnType<typeof memoryIndexedDb>;
+    let proved = false;
+    let balances = 0;
+    let balancesAtCancellation = 0;
+    const cancel = () => { balancesAtCancellation = balances; cancelWasmSync(); };
+    ({ db } = fixture(t, handle => {
+      handle.nextHeight = () => 11;
+      handle.birthday = () => 1;
+      handle.treesReady = () => true;
+      handle.transparentAddress = () => undefined;
+      const snapshot = handle.snapshotJson as () => string;
+      handle.snapshotJson = () => {
+        const wallet = JSON.parse(snapshot());
+        wallet.balance.transparentAvailable = wallet.balance.totalAvailable ? 200_000 : 0;
+        wallet.balance.totalAvailable = wallet.balance.transparentAvailable;
+        wallet.balance.orchardAvailable = 0;
+        return JSON.stringify(wallet);
+      };
+      handle.proveShield = () => {
+        proved = true;
+        if (phase === "proof") cancel();
+        if (phase === "reservation") db.holdCommits = true;
+        return (handle.proveSend as () => string)();
+      };
+    }));
+    const started = deferred<void>();
+    const finish = deferred<void>();
+    let submitted = 0;
+    const c = createWasmClient({ unlockPolicy: "session", network: "regtest", autoShield: true,
+      prewarmProvingKey: false, memoFetch: "on-demand", transport: {
+        kind: "mock", label: "automatic-shield-fixture", tip: async () => 10,
+        blocks: async () => new Uint8Array(), utxos: async () => [],
+        submit: async () => {
+          submitted++;
+          started.resolve();
+          if (phase === "accepted" || phase === "unknown") await finish.promise;
+          if (phase === "unknown") throw new Error("fixture acknowledgement lost");
+          return "ab".repeat(32);
+        },
+      } });
+    await c.restore("automatic-shield-fixture", "regtest", 1);
+    const before = decode((await readSavedSnapshot())!);
+    c.on("balance", () => { balances++; });
+    const pending = c.sync();
+    const rejected = assert.rejects(pending, /sync cancelled/);
+    if (phase === "reservation") {
+      for (let i = 0; i < 30 && !db.commits.length; i++) await turn();
+      assert.equal(db.commits.length, 1);
+      cancel();
+      db.holdCommits = false;
+      db.commits.shift()!();
+    } else if (phase === "accepted" || phase === "unknown") {
+      await started.promise;
+      cancel();
+      finish.resolve();
+    }
+    await rejected;
+    assert.equal(proved, true);
+    assert.equal(submitted, phase === "accepted" || phase === "unknown" ? 1 : 0);
+    assert.equal(balances, balancesAtCancellation);
+    const saved = decode((await readSavedSnapshot())!);
+    if (phase === "accepted" || phase === "unknown") assert.equal(saved.pending, true);
+    else assert.deepEqual(saved, before);
+    await forgetWasmWallet();
+  });
+}
+
+for (const expired of ["false", "throw"] as const) {
+  test(`shielding never rechecks a public authorization hook after accepted submission (${expired})`, async (t) => {
+    fixture(t, handle => {
+      handle.transparentAddress = () => undefined;
+      handle.proveShield = handle.proveSend;
+    });
+    let submitted = 0;
+    let lateAuthorizationChecks = 0;
+    let balanceEvents = 0;
+    const c = createWasmClient({ unlockPolicy: "session", network: "regtest", autoShield: false, transport: {
+      kind: "mock", label: "shield-authority-fixture", tip: async () => 10,
+      blocks: async () => new Uint8Array(), utxos: async () => [],
+      submit: async () => { submitted++; return "ab".repeat(32); },
+    } });
+    await c.restore("shield-authority-fixture", "regtest", 1);
+    c.on("balance", () => { balanceEvents++; });
+    const result = await c.shield(100_000, {
+      beforeBroadcast: () => {
+        if (!submitted) return true;
+        lateAuthorizationChecks++;
+        if (expired === "throw") throw new Error("fixture authorization expired");
+        return false;
+      },
+    });
+    assert.equal(result.txid, "ab".repeat(32));
+    assert.equal(submitted, 1);
+    assert.equal(lateAuthorizationChecks, 0);
+    assert.equal(balanceEvents, 1);
+    assert.equal(decode((await readSavedSnapshot())!).pending, true);
+    await forgetWasmWallet();
+  });
+}
+
+for (const cancellation of ["abort-aware", "late-response"] as const) {
+  test(`automatic shielding cancels its UTXO preflight without proving or applying its ${cancellation} response`, async (t) => {
+    let proved = 0;
+    let applied = 0;
+    fixture(t, handle => {
+      handle.nextHeight = () => 11;
+      handle.birthday = () => 1;
+      handle.treesReady = () => true;
+      handle.transparentAddress = () => "tm-automatic-shield-fixture";
+      handle.applyUtxos = () => { applied++; };
+      const snapshot = handle.snapshotJson as () => string;
+      handle.snapshotJson = () => {
+        const wallet = JSON.parse(snapshot());
+        wallet.balance.transparentAvailable = 200_000;
+        wallet.balance.totalAvailable = 200_000;
+        wallet.balance.orchardAvailable = 0;
+        return JSON.stringify(wallet);
+      };
+      handle.proveShield = () => { proved++; return (handle.proveSend as () => string)(); };
+    });
+    const started = deferred<AbortSignal | undefined>();
+    let firstSignal: AbortSignal | undefined;
+    let release = () => {};
+    let aborted = false;
+    let requests = 0;
+    let submitted = 0;
+    const c = createWasmClient({ unlockPolicy: "session", network: "regtest", autoShield: true,
+      prewarmProvingKey: false, memoFetch: "on-demand", transport: {
+        kind: "mock", label: "automatic-shield-utxo-fixture", tip: async () => 10,
+        blocks: async () => new Uint8Array(),
+        utxos: async (_addresses, _start, signal) => {
+          requests++;
+          if (requests === 1) { firstSignal = signal; return []; }
+          return new Promise<[]>((resolve, reject) => {
+            release = () => resolve([]);
+            signal?.addEventListener("abort", () => {
+              aborted = true;
+              if (cancellation === "abort-aware") reject(signal.reason);
+            }, { once: true });
+            started.resolve(signal);
+          });
+        },
+        submit: async () => { submitted++; return "ab".repeat(32); },
+      } });
+    await c.restore("automatic-shield-utxo-fixture", "regtest", 1);
+    const stopped = new AbortController();
+    stopped.abort();
+    await assert.rejects(c.shield(100_000, { signal: stopped.signal }), /cancelled before broadcast/);
+    assert.equal(requests, 0, "already-aborted shielding must not start the UTXO request");
+    const syncing = c.sync();
+    const cancelled = assert.rejects(syncing, /sync cancelled/);
+    const signal = await started.promise;
+    cancelWasmSync();
+    await turn();
+    if (!aborted || cancellation === "late-response") release();
+    await cancelled;
+    assert.equal(aborted, true);
+    assert.ok(signal);
+    assert.equal(signal, firstSignal);
+    assert.equal(signal.aborted, true);
+    assert.equal(proved, 0);
+    assert.equal(submitted, 0);
+    assert.equal(applied, 1, "only the completed post-scan UTXO refresh may apply");
+    await forgetWasmWallet();
+  });
+}

@@ -556,7 +556,9 @@ export function createWasmClient(
         .catch((e) => {
           throw WalletError.fromUnknown(e);
         }),
-    shield: async (threshold) => {
+    shield: async (threshold, options) => {
+      const beforeBroadcast = () => !options?.signal?.aborted && (options?.beforeBroadcast?.() ?? true);
+      if (!beforeBroadcast()) throw new Error("cancelled before broadcast");
       assertReplacementSaved();
       if (!currentSession() && !(await loadIfNeeded())) throw new Error("no wasm wallet");
       const seed = requireSeed("shield");
@@ -569,12 +571,12 @@ export function createWasmClient(
         }
       } else {
         if (!transport.utxos) throw new Error("Transparent scan needs GetAddressUtxos, but address lookup is disabled");
-        await refreshUtxos();
+        await refreshUtxos(true, options?.signal);
       }
       const txid = await proveAndSubmit("shield", seed, {
         thresholdZat: Number(threshold ?? 100_000),
-      });
-      return finishSpend(txid, operation, source);
+      }, beforeBroadcast);
+      return finishSpend(txid, operation, source, options?.signal);
     },
     send: async (to, amountZec, memo, sendOpts) => {
       const minConfirmations = minimumConfirmations(sendOpts?.minConfirmations);
