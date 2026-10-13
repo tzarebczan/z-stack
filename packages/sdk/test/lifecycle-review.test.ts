@@ -3,10 +3,11 @@ import { test, type TestContext } from "node:test";
 import { setImmediate as turn } from "node:timers/promises";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { attachWasmBindings, createWasmClient, forgetWasmWallet } from "../src/wasm-client.ts";
+import { attachWasmBindings, createWasmClient, forgetWasmWallet, cancelWasmSync } from "../src/wasm-client.ts";
 import { attachScanWorker, scanWorkerReady, scanWorkerBusy, workerScanSession, recoverScanWorker } from "../src/scan-host.ts";
 import { advanceWalletGeneration, readSavedSnapshot, saveWalletSnapshot } from "../src/snapshot-storage.ts";
 import { memoryIndexedDb } from "./idb-fixture.ts";
+import { createSyncController } from "../src/wasm-client-sync.ts";
 import type { LwdTransport } from "../src/lwd.ts";
 
 const deferred = <T>() => {
@@ -377,4 +378,47 @@ test("scan worker falls back to verified ST when the MT artifact lacks its threa
   assert.deepEqual(calls.map(value => value.startsWith("file:") ? value.split("/src/")[1] : value), [
     "generated-mt/z_wasm_bg.wasm", "init-mt", "generated/z_wasm_bg.wasm", "init-st",
   ]);
+});
+
+for (const outcome of ["resolve", "reject"] as const) {
+  test(`cancelled progress does not paint a late ${outcome} snapshot`, async () => {
+    let resolve!: (value: unknown) => void;
+    let reject!: (error: Error) => void;
+    const snapshot = new Promise((yes, no) => { resolve = yes; reject = no; });
+    const emitted: string[] = [];
+    const controller = createSyncController({
+      session: {}, snap: () => snapshot,
+      onProgress: () => emitted.push("progress"),
+      bus: { emit: (name: string) => emitted.push(name) },
+    } as never);
+    const pending = controller.paintNoteBalance({ stage: "scanning" } as never);
+    cancelWasmSync();
+    if (outcome === "resolve") resolve({ balance: { totalAvailable: 10 } });
+    else reject(new Error("cancelled fixture"));
+    await pending;
+    assert.deepEqual(emitted, []);
+  });
+}
+
+test("a progress callback cancelling sync prevents its subsequent sync event", async () => {
+  const emitted: string[] = [];
+  const session = { scannedHeight: async () => 10 };
+  const controller = createSyncController({
+    session, currentSession: () => session, preferWorker: async () => {},
+    onProgress: () => { emitted.push("progress"); cancelWasmSync(); },
+    bus: { emit: (name: string) => emitted.push(name) },
+  } as never);
+  await assert.rejects(controller.runSync(), /sync cancelled/);
+  assert.deepEqual(emitted, ["progress"]);
+});
+
+test("a sync event cancelling progress prevents its subsequent balance event", async () => {
+  const emitted: string[] = [];
+  const controller = createSyncController({
+    session: {}, snap: async () => ({ balance: { totalAvailable: 10 } }),
+    onProgress: () => emitted.push("progress"),
+    bus: { emit: (name: string) => { emitted.push(name); cancelWasmSync(); } },
+  } as never);
+  await controller.paintNoteBalance({ stage: "scanning" } as never);
+  assert.deepEqual(emitted, ["progress", "sync"]);
 });

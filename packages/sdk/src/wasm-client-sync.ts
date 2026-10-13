@@ -37,12 +37,20 @@ import * as runtime from './wasm-client-runtime';
 /** Block scanning and optional public-data enhancement. */
 export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" | "bus" | "session" | "snap" | "currentSession" | "syncLock" | "memoLock" | "loadIfNeeded" | "preferWorker" | "transport" | "memoFetch" | "persist" | "opts" | "transparentScan" | "localLight" | "syncOpts" | "grpcWeb" | "lwdPipe" | "retireFailedSession" | "spendingSeed" | "prewarmProvingKey" | "sessionOperation" | "client" | "unlockPolicy" | "rootsChecked" | "assertSource" | "network" | "refreshIfStale" | "stateEpoch" | "transparentScanStatus" | "sharedMemoStatus" | "selectiveMemoStatus" | "memoAbort" | "storageGeneration" | "rescanning">) {
 
-  function report(p: runtime.WasmProgress): void {
-    ctx.onProgress?.(p);
-    emitSyncFromProgress(p);
+  function progressScope(): () => boolean {
+    const epoch = runtime.runtimeState.wasmSyncEpoch;
+    const signal = runtime.runtimeState.syncAbort.signal;
+    return () => epoch === runtime.runtimeState.wasmSyncEpoch && !signal.aborted;
   }
 
-  function emitSyncFromProgress(p: runtime.WasmProgress): void {
+  function report(p: runtime.WasmProgress, current: () => boolean = progressScope()): void {
+    if (!current()) return;
+    ctx.onProgress?.(p);
+    if (!current()) return;
+    emitSyncFromProgress(p, current);
+  }
+
+  function emitSyncFromProgress(p: runtime.WasmProgress, current: () => boolean): void {
     const stage: SyncStage =
       p.stage === "connecting" ||
         p.stage === "downloading" ||
@@ -66,7 +74,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       message: p.message,
       heading: p.heading,
     });
-    if (p.paintWallet && p.availableZat != null) {
+    if (current() && p.paintWallet && p.availableZat != null) {
       ctx.bus.emit("balance", {
         availableZat: p.availableZat,
         pendingZat: p.pendingZat,
@@ -76,9 +84,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     }
   }
 
-  async function paintNoteBalance(partial: runtime.WasmProgress): Promise<void> {
+  async function paintNoteBalance(partial: runtime.WasmProgress, current: () => boolean = progressScope()): Promise<void> {
+    if (!current()) return;
     if (!ctx.session) {
-      report(partial);
+      report(partial, current);
       return;
     }
     try {
@@ -91,9 +100,9 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         availableZec: w.balance.totalZec,
         pendingZec: w.balance.pendingZec,
         orchardAvailable: w.balance.orchardAvailable,
-      });
+      }, current);
     } catch {
-      report(partial);
+      report(partial, current);
     }
   }
 
@@ -121,8 +130,11 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
   async function runSyncInner(): Promise<WalletSnapshot> {
     const g = runtime.runtimeState.wasmSyncEpoch;
     const signal = runtime.runtimeState.syncAbort.signal;
-    const cancelled = () => g !== runtime.runtimeState.wasmSyncEpoch;
-    report({
+    const current = () => g === runtime.runtimeState.wasmSyncEpoch && !signal.aborted;
+    const cancelled = () => !current();
+    const publish = (p: runtime.WasmProgress) => report(p, current);
+    const paint = (p: runtime.WasmProgress) => paintNoteBalance(p, current);
+    publish({
       stage: "connecting",
       heading: ctx.session ? "Catching up" : "Restoring snapshot",
       activity: ctx.session ? "syncing" : "loading",
@@ -141,7 +153,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       );
       if (!ok || !ctx.session) throw new Error("no wasm wallet — create or restore first");
     }
-    await paintNoteBalance({
+    await paint({
       stage: "connecting",
       heading: "Catching up",
       message: "available balance from decrypted notes",
@@ -164,7 +176,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       signal,
       cancelled,
       graceMs: ctx.opts.lightServerGraceMs,
-      onWaiting: () => report({
+      onWaiting: () => publish({
         activity: "waiting_for_server",
         stage: "connecting",
         heading: "Waiting for light server",
@@ -220,7 +232,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     let lastMove = Date.now();
     const catchUpPct = (scanned: number, downloaded = scanned) =>
       catchUpPercent(start, scanned, downloaded, tip);
-    report({
+    publish({
       stage: "connecting",
       heading: tip > start ? "Catching up" : "Connecting",
       scanned: start,
@@ -249,7 +261,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       const after = await ctx.snap();
       const scanned = after.scannedHeight ?? await source.scannedHeight();
       if (cancelled()) throw new Error("sync cancelled");
-      report({
+      publish({
         stage: "synced",
         scanned,
         downloaded: tip,
@@ -373,7 +385,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
               : fetchingNow
                 ? "downloading"
                 : "scanning";
-      report({
+      publish({
         stage,
         heading: stalled
           ? "Download stuck"
@@ -469,7 +481,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       // is installed — but wipe+rescan must not look serial on the wire.
       await seedBirthdayTrees((proto) => {
         const fetching = pipe.inFlight();
-        report({
+        publish({
           stage: fetching > 0 ? "downloading" : "connecting",
           heading: nearTip ? "Catching up" : fetching > 0 ? "Downloading compact blocks" : "Connecting",
           scanned: start,
@@ -486,7 +498,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         });
       }, recovery, signal);
       if (cancelled()) throw new Error("sync cancelled");
-      report({
+      publish({
         stage: "downloading",
         heading: nearTip ? "Catching up" : "Downloading compact blocks",
         scanned: start,
@@ -545,7 +557,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     await drainCheckpoints();
     if (cancelled()) throw new Error("sync cancelled");
     if (!followOn) {
-      report({
+      publish({
         stage: "scanning",
         heading: "Saving snapshot",
         scanned: await source.scannedHeight(),
@@ -572,7 +584,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       if (cancelled()) throw new Error("sync cancelled");
     }
     if (!followOn && !treesLive) {
-      await paintNoteBalance({
+      await paint({
         stage: "scanning",
         heading: "Hashing commitment trees",
         scanned: scannedTrees,
@@ -594,7 +606,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
           if (now - lastTick < 250) return;
           lastTick = now;
           const frac = tick.total > 0 ? tick.hashed / tick.total : 0;
-          report({
+          publish({
             stage: "scanning",
             heading: "Hashing commitment trees",
             scanned: scannedTrees,
@@ -612,7 +624,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
           console.warn("recomputePools still running in the worker after timeout; continuing");
         } else {
           const shown = treeConflictUserMessage(msg);
-          report({
+          publish({
             stage: "scanning",
             heading: isTreeConflictError(msg) ? "Commitment tree conflict" : "Hashing failed",
             scanned: scannedTrees,
@@ -631,7 +643,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     if (cancelled()) throw new Error("sync cancelled");
     const scannedFinal = await source.scannedHeight();
     if (!followOn) {
-      report({
+      publish({
         stage: "enhancing",
         heading: ctx.memoFetch === "on-demand" ? "Updating wallet" : "Reading memos",
         scanned: scannedFinal,
@@ -653,7 +665,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const after = await ctx.snap();
     const scanned = after.scannedHeight ?? await source.scannedHeight();
     if (cancelled()) throw new Error("sync cancelled");
-    report({
+    publish({
       stage: "synced",
       scanned,
       downloaded: tip,

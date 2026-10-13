@@ -63,6 +63,16 @@ test("native send refuses browser cancellation and review hooks before contactin
   assert.equal(requests, 0);
 });
 
+test("native shielding refuses browser cancellation before contacting the bridge", async () => {
+  let requests = 0;
+  globalThis.fetch = (async () => { requests++; return jsonOk({}); }) as typeof fetch;
+  const engine = createEngineClient("http://127.0.0.1:8787");
+  for (const options of [{ signal: new AbortController().signal }, { beforeBroadcast: () => true }]) {
+    await assert.rejects(engine.shield(100_000, options), /require the browser engine/);
+  }
+  assert.equal(requests, 0);
+});
+
 test("createEngineClient routes every SDK op", async () => {
   calls.length = 0;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {

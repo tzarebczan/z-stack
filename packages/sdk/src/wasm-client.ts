@@ -556,7 +556,9 @@ export function createWasmClient(
         .catch((e) => {
           throw WalletError.fromUnknown(e);
         }),
-    shield: async (threshold) => {
+    shield: async (threshold, options) => {
+      const beforeBroadcast = () => !options?.signal?.aborted && (options?.beforeBroadcast?.() ?? true);
+      if (!beforeBroadcast()) throw new Error("cancelled before broadcast");
       assertReplacementSaved();
       if (!currentSession() && !(await loadIfNeeded())) throw new Error("no wasm wallet");
       const seed = requireSeed("shield");
@@ -573,7 +575,7 @@ export function createWasmClient(
       }
       const txid = await proveAndSubmit("shield", seed, {
         thresholdZat: Number(threshold ?? 100_000),
-      });
+      }, beforeBroadcast);
       return finishSpend(txid, operation, source);
     },
     send: async (to, amountZec, memo, sendOpts) => {
