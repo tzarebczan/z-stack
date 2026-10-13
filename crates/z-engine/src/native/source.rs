@@ -173,6 +173,19 @@ pub(super) fn enroll(root: &Path) -> Result<()> {
             .map_err(|_| policy_invalid())?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS ext_native_source_policy_v1 (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL CHECK(version=1), read_only INTEGER NOT NULL CHECK(read_only=1)); INSERT OR IGNORE INTO ext_native_source_policy_v1 VALUES(1,1,1);").map_err(|_|policy_invalid())?;
         tx.commit().map_err(|_| policy_invalid())?;
+        // Successful enrollment must survive a copy of the main database
+        // without its WAL or policy sidecar. A retained reader can prevent
+        // automatic checkpointing when this connection closes.
+        let (busy, frames, checkpointed): (u32, i64, i64) = conn
+            .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|_| policy_invalid())?;
+        if busy != 0 || frames != checkpointed {
+            return Err(EngineError::Message(
+                "native_source_checkpoint_incomplete".into(),
+            ));
+        }
     }
     if !read_only(root)? {
         return Err(policy_invalid());

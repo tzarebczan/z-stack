@@ -16,6 +16,10 @@ network, tip and birthday tree through the supplied channel.
 under its exclusive database lease. A wallet with pending verified recovery
 cannot enter the ordinary scanner. Enrollment adds a singleton
 `ext_native_source_policy_v1` table without resetting wallet data or receipts.
+Successful enrollment also requires a complete WAL checkpoint so that a raw
+main-database copy retains the marker. A reader that prevents checkpointing
+causes `native_source_checkpoint_incomplete`; the original wallet remains
+read-only and its committed marker and existing rows are retained.
 A strict versioned `native-source-policy` sidecar protects interrupted seed-only
 setup before a database exists. Any retained database
 refuses source setup rather than being treated as an unfinished ordinary wallet. A

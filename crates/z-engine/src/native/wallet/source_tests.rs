@@ -573,6 +573,70 @@ async fn source_cancel_stalled_rpc_preserves_committed_wallet_and_resumes_same_c
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enrollment_never_reports_success_with_a_wal_only_source_marker() {
+    let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 2).await;
+    let root = tempfile::tempdir().unwrap();
+    let wallet = tests::fixture_wallet(root.path());
+    let writer = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; CREATE TABLE retained(value); INSERT INTO retained VALUES(1)",
+        )
+        .unwrap();
+    NativeWallet::checkpoint_sqlite(&wallet.paths.data_db).unwrap();
+    let reader = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT * FROM retained")
+        .unwrap();
+    let result = NativeWallet::open_with_source(root.path(), &fixture.source);
+    let copy = tempfile::tempdir().unwrap();
+    std::fs::copy(&wallet.paths.data_db, copy.path().join("data.sqlite")).unwrap();
+    std::fs::copy(&wallet.paths.meta_path, copy.path().join("wallet.json")).unwrap();
+    let copied = NativeWallet::open(copy.path()).unwrap();
+    if result.is_ok() {
+        assert!(
+            copied.uses_read_only_source().unwrap(),
+            "successful enrollment lost its marker in a raw database copy"
+        );
+    }
+    code(result, "native_source_checkpoint_incomplete");
+    assert!(wallet.uses_read_only_source().unwrap());
+    code(wallet.sync_reported(None).await, "native_read_only_source");
+    assert!(fixture.calls.lock().unwrap().is_empty());
+    reader.execute_batch("ROLLBACK").unwrap();
+    drop(reader);
+    {
+        let _lease = super::database_lease::exclusive(&wallet.paths.data_db).unwrap();
+        super::super::source::enroll(root.path()).unwrap();
+    }
+    let copied_root = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        &wallet.paths.data_db,
+        copied_root.path().join("data.sqlite"),
+    )
+    .unwrap();
+    std::fs::copy(
+        &wallet.paths.meta_path,
+        copied_root.path().join("wallet.json"),
+    )
+    .unwrap();
+    let copied = NativeWallet::open(copied_root.path()).unwrap();
+    assert!(copied.uses_read_only_source().unwrap());
+    code(copied.sync_reported(None).await, "native_read_only_source");
+    code(
+        copied.sign_payment(&auth(), "irrelevant"),
+        "native_read_only_source",
+    );
+    assert_eq!(
+        writer
+            .query_row("SELECT value FROM retained", [], |r| r.get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
+    assert!(fixture.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_sidecar_and_database_copy_stay_read_only_and_malformed_singleton_refuses() {
     let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 2).await;
     let root = tempfile::tempdir().unwrap();
