@@ -257,3 +257,32 @@ test("strict custom transport cold restore and incremental sync use only supplie
   assert.deepEqual(calls, ["tip", "blocks:2-2", "blocks:3-3"]);
   await wallet.close();
 });
+
+test("real WASM upgrades a legacy cold snapshot and refuses an unrelated first block", async () => {
+  assert.ok(existsSync(gen), "build the production WASM engine before this upgrade test");
+  const { requireBindings } = await import("../src/wasm-client-runtime.ts");
+  const Wallet = requireBindings().WasmWallet;
+  const initial = Wallet.create("regtest", REGTEST_FAUCET_MNEMONIC, 12, 0);
+  let bytes: Uint8Array;
+  try {
+    assert.equal(typeof initial.applyTreeState, "function");
+    initial.applyTreeState?.(JSON.stringify({ height: 11, hash: `01${"00".repeat(31)}`, network: "regtest" }));
+    bytes = initial.toSnapshot();
+  } finally { initial.free?.(); }
+  const legacy = JSON.parse(new TextDecoder().decode(bytes));
+  legacy.blockHashes = {};
+  const restored = Wallet.fromSnapshot(new TextEncoder().encode(JSON.stringify(legacy)));
+  try {
+    const snapshot = JSON.parse(new TextDecoder().decode(restored.toSnapshot()));
+    assert.equal(snapshot.blockHashes["11"], `${"00".repeat(31)}01`);
+    assert.equal(snapshot.unifiedAddress, legacy.unifiedAddress);
+    assert.equal(snapshot.scannedHeight, 11);
+    const protobuf = Uint8Array.from([16, 12, 26, 32, ...Array(32).fill(12),
+      34, 32, ...Array(32).fill(3), 40, 1]);
+    const frame = new Uint8Array(protobuf.length + 4);
+    new DataView(frame.buffer).setUint32(0, protobuf.length, false);
+    frame.set(protobuf, 4);
+    assert.throws(() => restored.applyCompactBlocks(frame));
+    assert.equal(restored.scannedHeight(), 11);
+  } finally { restored.free?.(); }
+});

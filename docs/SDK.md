@@ -353,8 +353,10 @@ chain height and inclusive compact ranges. Compact bytes use a four-byte
 big-endian length before each original protobuf block; an adapter can split a
 large SDK range into smaller authenticated requests without decoding wallet data.
 
-Set `requireBirthdayTreeState: true` when a cold scan must have its birthday
-frontier. For birthday heights above one, missing or failed `treeState` refuses
+Check `SDK_TRANSPORT_CAPABILITIES.requiredBirthdayTreeState === true` before
+using strict mode with a separately supplied SDK archive. Older archives lack
+this export, even when their package version is the same. Set
+`requireBirthdayTreeState: true` when a cold scan must have its birthday frontier. For birthday heights above one, missing or failed `treeState` refuses
 sync before requesting compact blocks. Rust checks that its height is birthday
 minus one, validates an optional network, decodes the frontiers, and binds the
 first block's parent hash to that state. A different frontier cannot replace

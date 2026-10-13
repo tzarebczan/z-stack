@@ -13,6 +13,12 @@ export const transportFetchOptions = {
   redirect: "error",
 } as const satisfies RequestInit;
 
+/** Check this marker before relying on strict transport policy with older archives. */
+export const SDK_TRANSPORT_CAPABILITIES = Object.freeze({
+  requiredBirthdayTreeState: true,
+  cancellation: true,
+});
+
 export type TransparentUtxo = {
   txid: string;
   index: number;

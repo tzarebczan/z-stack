@@ -51,3 +51,13 @@ test("adapter checks belong to lab and no testing subpath is published", () => {
     await assert.rejects(import('@z-stack/sdk/testing'), {code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});
   `], {cwd:join(root,"sdk"),env:{PATH:process.env.PATH??""},stdio:"pipe"});
 });
+
+test("built SDK exports immutable strict-transport capability evidence", () => {
+  execFileSync(process.execPath, ["--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import { SDK_TRANSPORT_CAPABILITIES } from '@z-stack/sdk';
+    assert.equal(SDK_TRANSPORT_CAPABILITIES.requiredBirthdayTreeState, true);
+    assert.equal(SDK_TRANSPORT_CAPABILITIES.cancellation, true);
+    assert.equal(Object.isFrozen(SDK_TRANSPORT_CAPABILITIES), true);
+  `], {cwd:join(root,"sdk"),env:{PATH:process.env.PATH??""},stdio:"pipe"});
+});
