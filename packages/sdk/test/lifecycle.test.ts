@@ -1034,7 +1034,7 @@ for (const cancellation of ["abort-aware", "late-response"] as const) {
     await cancelled;
     assert.equal(aborted, true);
     assert.ok(signal);
-    assert.equal(signal, firstSignal);
+    assert.equal(firstSignal?.aborted, true, "both post-scan and shield preflight providers must observe cancellation");
     assert.equal(signal.aborted, true);
     assert.equal(proved, 0);
     assert.equal(submitted, 0);
@@ -1074,7 +1074,7 @@ for (const method of ["create", "restore", "restoreUfvk"] as const) {
   });
 }
 
-for (const phase of ["shield-utxos", "selective-memo", "public-info"] as const) {
+for (const phase of ["shield-utxos", "shield-utxos-caller", "selective-memo", "public-info"] as const) {
   test(`close stops waiting for ignored ${phase} responses and prevents late apply`, async t => {
     let applies = 0, proved = 0;
     const { db } = fixture(t, handle => {
@@ -1099,11 +1099,12 @@ for (const phase of ["shield-utxos", "selective-memo", "public-info"] as const) 
         blocks: async () => new Uint8Array(),
         info: phase === "public-info" ? async signal => { started.resolve(signal); await response.promise; return { chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }; } : undefined,
         transparentBlocks: phase === "public-info" ? async () => { throw new Error("unexpected public block retrieval"); } : undefined,
-        utxos: phase === "shield-utxos" ? async (_addresses, _start, signal) => { started.resolve(signal); return response.promise; } : undefined,
+        utxos: phase.startsWith("shield-utxos") ? async (_addresses, _start, signal) => { started.resolve(signal); return response.promise; } : undefined,
         tx: phase === "selective-memo" ? async (_txid, signal) => { started.resolve(signal); await response.promise; return "00"; } : undefined,
       } });
     await c.restore("read-provider-fixture", "regtest", 1);
-    const pending = phase === "shield-utxos" ? c.shield(100_000) : c.sync();
+    const caller = new AbortController();
+    const pending = phase.startsWith("shield-utxos") ? c.shield(100_000, phase === "shield-utxos-caller" ? { signal: caller.signal } : undefined) : c.sync();
     const rejected = assert.rejects(pending, /cancelled|abort/i);
     const signal = await started.promise;
     assert.ok(signal);
@@ -1115,6 +1116,7 @@ for (const phase of ["shield-utxos", "selective-memo", "public-info"] as const) 
     } finally { response.resolve([]); await pending.catch(() => {}); }
     await turn();
     assert.equal(signal.aborted, true);
+    assert.equal(caller.signal.aborted, false, "owner close must abort the provider while caller remains live");
     assert.equal(applies, appliesBeforeClose);
     assert.equal(proved, 0);
     assert.deepEqual(db.records, before);

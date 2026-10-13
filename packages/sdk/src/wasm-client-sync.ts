@@ -758,7 +758,6 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     if (!ctx.session) return;
     const source = ctx.session;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
-    const active = signal ?? operation.signal;
     const wait = signal ? AbortSignal.any([operation.signal, signal]) : operation.signal;
     const scanned = await source.scannedHeight();
     const birthday = await source.birthday();
@@ -781,7 +780,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     // Genesis needs no preceding frontier, but still needs roots for pruning.
     if (birthday > 1 && !treesReady && scanned <= birthday && ctx.transport.treeState) {
       try {
-        const fetchState = () => ctx.transport.treeState!(birthday - 1, active);
+        const fetchState = () => ctx.transport.treeState!(birthday - 1, wait);
         const ts = await abortable(wait, () => recovery ? recovery.run(fetchState) : fetchState());
         ctx.assertSource(operation, source);
         try {
@@ -859,9 +858,8 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     ctx.assertSource(operation, source);
     signal?.throwIfAborted();
     if (!taddr) return;
-    const active = signal ?? operation.signal;
     const wait = signal ? AbortSignal.any([operation.signal, signal]) : operation.signal;
-    const rows = await abortable(wait, () => ctx.transport.utxos!([taddr], 0, active));
+    const rows = await abortable(wait, () => ctx.transport.utxos!([taddr], 0, wait));
     ctx.assertSource(operation, source);
     signal?.throwIfAborted();
     await source.applyUtxos(JSON.stringify({ utxos: rows }));
@@ -897,7 +895,6 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
   async function rebroadcastPending(source: ScanSession, signal?: AbortSignal): Promise<void> {
     if (!ctx.transport.submit) return;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
-    const active = signal ?? operation.signal;
     const wait = signal ? AbortSignal.any([operation.signal, signal]) : operation.signal;
     const run = async () => {
       wait.throwIfAborted();
@@ -914,7 +911,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       for (const hex of raws.slice(0, 8)) {
         if (ctx.stateEpoch !== epoch) return;
         try {
-          await abortable(wait, () => ctx.transport.submit!(hex, active));
+          await abortable(wait, () => ctx.transport.submit!(hex, wait));
         } catch (e) {
           wait.throwIfAborted();
           ctx.assertSource(operation, source);
@@ -976,7 +973,6 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     if (!ctx.session) return;
     const source = ctx.session;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
-    const active = signal ?? operation.signal;
     const wait = signal ? AbortSignal.any([operation.signal, signal]) : operation.signal;
     wait.throwIfAborted();
     const taddr = ctx.transparentScan !== "compact" && ctx.transport.utxos ? await source.transparentAddress() : undefined;
@@ -988,11 +984,11 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const [utxos, mempool] = await Promise.all([
       taddr && ctx.transport.utxos
         ? recovery
-          ? abortable(wait, () => recovery.run(() => ctx.transport.utxos!([taddr], 0, active)))
-          : abortable(wait, () => ctx.transport.utxos!([taddr], 0, active))
+          ? abortable(wait, () => recovery.run(() => ctx.transport.utxos!([taddr], 0, wait)))
+          : abortable(wait, () => ctx.transport.utxos!([taddr], 0, wait))
         : Promise.resolve(null),
       ctx.transport.mempool
-        ? abortable(wait, () => ctx.transport.mempool!(active)).catch((_e) => {
+        ? abortable(wait, () => ctx.transport.mempool!(wait)).catch((_e) => {
           wait.throwIfAborted();
           console.warn("mempool skipped"); return [];
         })
