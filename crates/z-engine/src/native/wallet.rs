@@ -1596,6 +1596,14 @@ impl NativeWallet {
         Ok(lease)
     }
 
+    pub(super) fn bootstrap_network_lease(root: &Path) -> Result<Arc<std::fs::File>> {
+        let lease = Arc::new(database_lease::bootstrap(root)?);
+        if super::source::read_only(root)? {
+            return Err(super::source::refused());
+        }
+        Ok(lease)
+    }
+
     fn check_network_capability(&self) -> Result<()> {
         // A disabled handle always refuses; enabled handles check sticky policy
         // after acquiring ownership, before any transport or database mutation.
