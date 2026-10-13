@@ -137,3 +137,28 @@ test("an overlong public compact response cannot apply deposits or advance cover
   assert.equal(f.state.transparentScanHeight, null);
   assert.deepEqual(checkpoints, [null], "only the existing pre-download incomplete-coverage barrier is checkpointed");
 });
+
+for (const method of ["info", "transparentBlocks", "sharedMemos"] as const) {
+  test(`public ${method} read cancels promptly even when the provider ignores its signal`, async () => {
+    const f = fixture();
+    let ready!: () => void;
+    const started = new Promise<void>(resolve => { ready = resolve; });
+    let release!: () => void;
+    const answer = new Promise<void>(resolve => { release = resolve; });
+    let observed: AbortSignal | undefined;
+    if (method === "info") f.transport.info = async signal => { observed = signal; ready(); await answer; return { chain: "main", protocolVersion: "v0.5.0", transparentCompact: true }; };
+    if (method === "transparentBlocks") f.transport.transparentBlocks = async (_start, end, signal) => { observed = signal; ready(); await answer; const bytes = new Uint8Array(4); new DataView(bytes.buffer).setUint32(0, end); return bytes; };
+    if (method === "sharedMemos") f.transport.sharedMemos = async (start, end, signal) => { observed = signal; ready(); await answer; return JSON.stringify({ start, end }); };
+    const pending = syncPublicData({ ...f.opts, transparent: method !== "sharedMemos", memos: method === "sharedMemos" });
+    const rejected = assert.rejects(pending, /fixture public read cancelled/);
+    await started;
+    const before = structuredClone(f.state);
+    f.controller.abort(new Error("fixture public read cancelled"));
+    try {
+      await Promise.race([rejected, new Promise<never>((_, reject) => { setTimeout(() => reject(new Error("cancelled public read still waited for provider")), 500); })]);
+      assert.equal(observed, f.controller.signal);
+    } finally { release(); await pending.catch(() => {}); }
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(f.state, before);
+  });
+}

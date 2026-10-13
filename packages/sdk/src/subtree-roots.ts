@@ -1,3 +1,5 @@
+import { abortable } from "./abort";
+
 /** One `GetSubtreeRoots` page: at most {@link SUBTREE_ROOTS_PAGE} roots from shard `at`. */
 export type SubtreeRootPage = (at: number) => Promise<Array<{ completingHeight: number; rootHash: string }>>;
 
@@ -19,12 +21,12 @@ export async function fetchSubtreeRoots(
 ): Promise<Array<{ completingHeight: number; rootHash: string }>> {
   const fetchPage = async (at: number) => {
     try {
-      return await page(at);
+      return await abortable(signal, () => page(at));
     } catch {
       signal?.throwIfAborted();
-      await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
+      await abortable(signal, () => new Promise((resolve) => setTimeout(resolve, RETRY_MS)));
       signal?.throwIfAborted();
-      return page(at);
+      return abortable(signal, () => page(at));
     }
   };
   const roots: Array<{ completingHeight: number; rootHash: string }> = [];

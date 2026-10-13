@@ -1,6 +1,7 @@
 import type { WalletSnapshot } from "@z-stack/core";
 import type { BlockTransport } from "./lwd";
 import type { ScanSession } from "./scan-host";
+import { abortable } from "./abort";
 
 export type PublicDataStatus = NonNullable<WalletSnapshot["sharedMemoStatus"]>;
 
@@ -42,7 +43,7 @@ export async function syncPublicData({ source, transport, transparent, memos, si
       current();
       await checkpoint();
       current();
-      const info = await transport.info?.();
+      const info = await abortable(signal, async () => transport.info?.(signal));
       current();
       if (!transport.transparentBlocks || !source.applyTransparentBlocks ||
           !info?.transparentCompact || !supportsTransparentCompact(info.protocolVersion)) {
@@ -53,7 +54,7 @@ export async function syncPublicData({ source, transport, transparent, memos, si
         const last = Math.min(tip, next + 19_999);
         while (next <= last) {
           const end = Math.min(last, next + 999);
-          const bytes = await transport.transparentBlocks(next, end, signal);
+          const bytes = await abortable(signal, () => transport.transparentBlocks!(next, end, signal));
           current();
           await source.applyTransparentBlocks(bytes);
           current();
@@ -83,7 +84,7 @@ export async function syncPublicData({ source, transport, transparent, memos, si
       while (next <= last) {
         // After the birthday range, boundaries are shared by every wallet.
         const end = Math.min(last, Math.floor(next / 10) * 10 + 9);
-        const json = await transport.sharedMemos(next, end, signal);
+        const json = await abortable(signal, () => transport.sharedMemos!(next, end, signal));
         current();
         if (json === null) { status.memos = "unsupported"; break; }
         // Bind the response to this request before it can update coverage.

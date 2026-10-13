@@ -370,6 +370,11 @@ Expose only supported optional transport methods. Without `tx` or `sharedMemos`,
 memo enhancement is unavailable; `memoFetch: "on-demand"` leaves ordinary scans
 free of selective transaction lookups. Without `submit`, the transport cannot
 broadcast. Optional `info`, `mempool` and `submit` accept cancellation signals.
+Provider reads during initialization, scan overlap, backfill, subtree paging,
+UTXO preflight and memo enhancement stop waiting promptly when ownership or
+the active operation is cancelled, even if the provider ignores its signal.
+Late responses cannot update the wallet. Changing memo privacy policy ends
+that optional phase without cancelling the enclosing chain scan.
 Cancellation after submission starts still has an unknown outcome and retains
 the original pending payment. Transport reads receive the wallet operation's
 signal; late responses cannot revive a closed or replaced wallet.

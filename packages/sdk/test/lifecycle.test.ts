@@ -1073,3 +1073,90 @@ for (const method of ["create", "restore", "restoreUfvk"] as const) {
     await forgetWasmWallet();
   });
 }
+
+for (const phase of ["shield-utxos", "selective-memo", "public-info"] as const) {
+  test(`close stops waiting for ignored ${phase} responses and prevents late apply`, async t => {
+    let applies = 0, proved = 0;
+    const { db } = fixture(t, handle => {
+      handle.nextHeight = () => 11;
+      handle.birthday = () => 1;
+      handle.treesReady = () => true;
+      handle.recomputePools = () => {};
+      handle.pendingRawTxs = () => "[]";
+      handle.transparentAddress = () => "fixture-transparent";
+      handle.applyUtxos = () => { applies++; return 0; };
+      handle.applyTransparentBlocks = () => { applies++; return 0; };
+      handle.supportsTransparentBlocks = () => true;
+      handle.memoEnhancementTxids = () => JSON.stringify(["ab".repeat(32)]);
+      handle.enhanceRawTx = () => { applies++; return 0; };
+      handle.proveSend = () => { proved++; throw new Error("unexpected proof"); };
+    });
+    const started = deferred<AbortSignal | undefined>();
+    const response = deferred<never[]>();
+    const c = createWasmClient({ network: "regtest", unlockPolicy: "session", autoShield: false,
+      transparentScan: phase === "public-info" ? "compact" : "off", memoFetch: phase === "selective-memo" ? "auto" : "on-demand",
+      transport: { kind: "fixture", label: "provider-only", tip: async () => 10,
+        blocks: async () => new Uint8Array(),
+        info: phase === "public-info" ? async signal => { started.resolve(signal); await response.promise; return { chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }; } : undefined,
+        transparentBlocks: phase === "public-info" ? async () => { throw new Error("unexpected public block retrieval"); } : undefined,
+        utxos: phase === "shield-utxos" ? async (_addresses, _start, signal) => { started.resolve(signal); return response.promise; } : undefined,
+        tx: phase === "selective-memo" ? async (_txid, signal) => { started.resolve(signal); await response.promise; return "00"; } : undefined,
+      } });
+    await c.restore("read-provider-fixture", "regtest", 1);
+    const pending = phase === "shield-utxos" ? c.shield(100_000) : c.sync();
+    const rejected = assert.rejects(pending, /cancelled|abort/i);
+    const signal = await started.promise;
+    assert.ok(signal);
+    const before = structuredClone(db.records);
+    const appliesBeforeClose = applies;
+    await c.dispose();
+    try {
+      await Promise.race([rejected, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("closed provider wait did not settle")), 500))]);
+    } finally { response.resolve([]); await pending.catch(() => {}); }
+    await turn();
+    assert.equal(signal.aborted, true);
+    assert.equal(applies, appliesBeforeClose);
+    assert.equal(proved, 0);
+    assert.deepEqual(db.records, before);
+    await forgetWasmWallet();
+  });
+}
+
+test("sync cancellation releases an ignored rebroadcast wait and preserves its existing pending bytes", async t => {
+  const raw = "synthetic-existing-pending-transaction";
+  const { db } = fixture(t, (handle, name) => {
+    handle.nextHeight = () => 11;
+    handle.birthday = () => 1;
+    handle.treesReady = () => true;
+    handle.recomputePools = () => {};
+    handle.pendingRawTxs = () => JSON.stringify([raw]);
+    handle.toSnapshot = () => encode({ name, pending: true });
+  });
+  const started = deferred<AbortSignal | undefined>();
+  const response = deferred<string>();
+  const submitted: string[] = [];
+  const c = createWasmClient({ network: "regtest", unlockPolicy: "session", autoShield: false,
+    transparentScan: "off", memoFetch: "on-demand", transport: {
+      kind: "fixture", label: "read-provider-fixture", tip: async () => 10,
+      blocks: async () => new Uint8Array(), submit: async (bytes, signal) => {
+        submitted.push(bytes); started.resolve(signal); return response.promise;
+      },
+    } });
+  await c.restore("pending-fixture", "regtest", 1);
+  const pending = c.sync();
+  const rejected = assert.rejects(pending, /cancelled|abort/i);
+  const signal = await started.promise;
+  assert.ok(signal);
+  const before = structuredClone(db.records);
+  cancelWasmSync();
+  try {
+    await Promise.race([rejected, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("rebroadcast wait did not cancel")), 500))]);
+  } finally { response.resolve("ab".repeat(32)); await pending.catch(() => {}); }
+  await turn();
+  assert.equal(signal.aborted, true);
+  assert.deepEqual(submitted, [raw]);
+  assert.deepEqual(db.records, before);
+  assert.equal(decode((await readSavedSnapshot())!).pending, true);
+  await c.dispose();
+  await forgetWasmWallet();
+});
