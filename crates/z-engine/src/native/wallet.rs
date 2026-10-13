@@ -477,8 +477,11 @@ impl WalletPaths {
     }
 
     fn prepare_new_wallet_for(&self, profile: NewWalletProfile) -> Result<()> {
-        if !matches!(profile, NewWalletProfile::ReadOnlySource)
-            && super::source::read_only(&self.root)?
+        if matches!(profile, NewWalletProfile::ReadOnlySource) && self.data_db.try_exists()? {
+            return Err(super::source::refused());
+        }
+        if super::source::read_only(&self.root)?
+            && !matches!(profile, NewWalletProfile::ReadOnlySource)
         {
             return Err(super::source::refused());
         }
@@ -1047,42 +1050,96 @@ impl NativeWallet {
             super::source::enroll(&paths.root)?;
         }
 
-        let mut entropy = [0u8; 32];
-        UnwrapErr(SysRng)
-            .try_fill_bytes(&mut entropy)
-            .map_err(|e| EngineError::Message(format!("rng: {e}")))?;
-        let mnemonic = Mnemonic::from_entropy(&entropy)
-            .map_err(|e| EngineError::Message(format!("mnemonic: {e}")))?;
-        entropy.zeroize();
+        let seed_store = SeedStore::new(&paths.root);
+        let retained_seed = source.is_some() && seed_store.exists();
+        let mut birthday_height = birthday_height;
+        let mut prepared_source = None;
+        if let Some(source) = source {
+            birthday_height = super::source::setup_birthday(
+                &paths.root,
+                network,
+                birthday_height,
+                account_index,
+                retained_seed,
+            )?;
+            if birthday_height.is_none() {
+                let mut client = source.client();
+                Self::assert_chain(&mut client, network).await?;
+                let tip: u32 = client
+                    .get_latest_block(ChainSpec::default())
+                    .await
+                    .map_err(|e| EngineError::Transport(format!("GetLatestBlock: {e}")))?
+                    .into_inner()
+                    .height
+                    .try_into()
+                    .map_err(|_| EngineError::Message("tip height out of range".into()))?;
+                birthday_height = Some(tip.saturating_sub(BIRTHDAY_SAFETY_BUFFER));
+                prepared_source = Some((client, tip));
+            }
+            super::source::bind_setup(
+                &paths.root,
+                network,
+                birthday_height.ok_or_else(|| {
+                    EngineError::Message("native_source_setup_binding_required".into())
+                })?,
+                account_index,
+            )?;
+        }
+        let mnemonic = if retained_seed {
+            let words = seed_store.load(auth.passphrase.as_deref(), auth.windows_credential)?;
+            Mnemonic::parse_normalized(words.expose_secret())
+                .map_err(|_| EngineError::Message("native_source_seed_invalid".into()))?
+        } else {
+            let mut entropy = [0u8; 32];
+            UnwrapErr(SysRng)
+                .try_fill_bytes(&mut entropy)
+                .map_err(|e| EngineError::Message(format!("rng: {e}")))?;
+            let mnemonic = Mnemonic::from_entropy(&entropy)
+                .map_err(|e| EngineError::Message(format!("mnemonic: {e}")))?;
+            entropy.zeroize();
+            mnemonic
+        };
         let mnemonic_str = mnemonic.to_string();
 
         // Persist seed FIRST so a crash after this cannot orphan a seeded account.
-        SeedStore::new(&paths.root).save(
-            &mnemonic_str,
-            auth.passphrase.as_deref(),
-            auth.windows_credential,
-        )?;
+        if !retained_seed {
+            seed_store.save(
+                &mnemonic_str,
+                auth.passphrase.as_deref(),
+                auth.windows_credential,
+            )?;
+        }
 
-        let mut client = match source {
-            Some(source) => source.client(),
+        let (mut client, prepared_tip) = match prepared_source {
+            Some((client, tip)) => (client, Some(tip)),
+            None => (
+                match source {
+                    Some(source) => source.client(),
+                    None => {
+                        Self::connect_url(
+                            &server.as_url(),
+                            Self::skip_ironwood_subtrees(network, &server.as_url()),
+                        )
+                        .await?
+                    }
+                },
+                None,
+            ),
+        };
+        let tip: u32 = match prepared_tip {
+            Some(tip) => tip,
             None => {
-                Self::connect_url(
-                    &server.as_url(),
-                    Self::skip_ironwood_subtrees(network, &server.as_url()),
-                )
-                .await?
+                Self::assert_chain(&mut client, network).await?;
+                client
+                    .get_latest_block(ChainSpec::default())
+                    .await
+                    .map_err(|e| EngineError::Transport(format!("GetLatestBlock: {e}")))?
+                    .into_inner()
+                    .height
+                    .try_into()
+                    .map_err(|_| EngineError::Message("tip height out of range".into()))?
             }
         };
-        Self::assert_chain(&mut client, network).await?;
-
-        let tip: u32 = client
-            .get_latest_block(ChainSpec::default())
-            .await
-            .map_err(|e| EngineError::Transport(format!("GetLatestBlock: {e}")))?
-            .into_inner()
-            .height
-            .try_into()
-            .map_err(|_| EngineError::Message("tip height out of range".into()))?;
 
         let birthday_h =
             birthday_height.unwrap_or_else(|| tip.saturating_sub(BIRTHDAY_SAFETY_BUFFER));
@@ -1146,7 +1203,11 @@ impl NativeWallet {
             ufvk: Some(ufvk_str.clone()),
             view_only: false,
             unlock_policy: auth.unlock_policy,
-            os_unlock: auth.windows_credential,
+            os_unlock: if retained_seed {
+                seed_store.os_unlock_present()
+            } else {
+                auth.windows_credential
+            },
             allow_deep_sync: false,
         };
         write_meta(&paths.meta_path, &meta)?;
@@ -1216,11 +1277,30 @@ impl NativeWallet {
             .map_err(|e| EngineError::Message(format!("invalid mnemonic: {e}")))?;
         let mnemonic_str = mnemonic.to_string();
 
-        SeedStore::new(&paths.root).save(
-            &mnemonic_str,
-            auth.passphrase.as_deref(),
-            auth.windows_credential,
-        )?;
+        let seed_store = SeedStore::new(&paths.root);
+        let retained_seed = source.is_some() && seed_store.exists();
+        if source.is_some() {
+            super::source::setup_birthday(
+                &paths.root,
+                network,
+                Some(birthday_height),
+                account_index,
+                retained_seed,
+            )?;
+            super::source::bind_setup(&paths.root, network, birthday_height, account_index)?;
+        }
+        if retained_seed {
+            let retained = seed_store.load(auth.passphrase.as_deref(), auth.windows_credential)?;
+            if retained.expose_secret() != &mnemonic_str {
+                return Err(EngineError::Message("native_source_seed_mismatch".into()));
+            }
+        } else {
+            seed_store.save(
+                &mnemonic_str,
+                auth.passphrase.as_deref(),
+                auth.windows_credential,
+            )?;
+        }
 
         let mut client = match source {
             Some(source) => source.client(),
@@ -1297,7 +1377,11 @@ impl NativeWallet {
             ufvk: Some(ufvk_str),
             view_only: false,
             unlock_policy: auth.unlock_policy,
-            os_unlock: auth.windows_credential,
+            os_unlock: if retained_seed {
+                seed_store.os_unlock_present()
+            } else {
+                auth.windows_credential
+            },
             allow_deep_sync: deep,
         };
         write_meta(&paths.meta_path, &meta)?;

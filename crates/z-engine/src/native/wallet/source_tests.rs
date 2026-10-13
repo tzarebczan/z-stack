@@ -6,6 +6,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message;
 use std::collections::VecDeque;
 use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
 use std::task::{Context, Poll};
 use zcash_client_backend::proto::{
     compact_formats::{ChainMetadata, CompactBlock},
@@ -61,6 +62,8 @@ struct Fixture {
     calls: Arc<Mutex<Vec<String>>>,
     connections: Arc<AtomicU32>,
     hang_ranges: Arc<AtomicBool>,
+    fail_tree: Arc<AtomicBool>,
+    tip: Arc<AtomicU64>,
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 impl Drop for Fixture {
@@ -76,6 +79,9 @@ impl Fixture {
         let connections = Arc::new(AtomicU32::new(0));
         let hang_ranges = Arc::new(AtomicBool::new(false));
         let tasks = Arc::new(Mutex::new(Vec::new()));
+        let fail_tree = Arc::new(AtomicBool::new(false));
+        let tip = Arc::new(AtomicU64::new(tip));
+        let (ft, tp) = (fail_tree.clone(), tip.clone());
         let (c, h, t, n) = (
             calls.clone(),
             hang_ranges.clone(),
@@ -84,13 +90,16 @@ impl Fixture {
         );
         let connector = tower::service_fn(move |_: http::Uri| {
             let (c, h, t, n) = (c.clone(), h.clone(), t.clone(), n.clone());
+            let (ft, tp) = (ft.clone(), tp.clone());
             async move {
                 n.fetch_add(1, Ordering::Relaxed);
                 let (client, server) = tokio::io::duplex(1024 * 1024);
                 let service = hyper::service::service_fn(
                     move |request: http::Request<hyper::body::Incoming>| {
                         let (c, h) = (c.clone(), h.clone());
+                        let (ft, tp) = (ft.clone(), tp.clone());
                         async move {
+                            let tip = tp.load(Ordering::Acquire);
                             let method =
                                 request.uri().path().rsplit('/').next().unwrap().to_owned();
                             c.lock().unwrap().push(method.clone());
@@ -118,7 +127,11 @@ impl Fixture {
                                         height: id.height,
                                         hash: format!("{:02x}", id.height as u8).repeat(32),
                                         time: 1,
-                                        sapling_tree: "000000".into(),
+                                        sapling_tree: if ft.load(Ordering::Acquire) {
+                                            "invalid".into()
+                                        } else {
+                                            "000000".into()
+                                        },
                                         orchard_tree: "000000".into(),
                                         ironwood_tree: "000000".into(),
                                     }
@@ -166,6 +179,8 @@ impl Fixture {
             calls,
             connections,
             hang_ranges,
+            fail_tree,
+            tip,
             tasks,
         }
     }
@@ -443,4 +458,220 @@ async fn missing_sidecar_and_database_copy_stay_read_only_and_malformed_singleto
     );
     assert_eq!(std::fs::read(&wallet.paths.data_db).unwrap(), before);
     assert!(fixture.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_setup_refuses_marked_database_without_metadata_before_seed_or_source_access() {
+    let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 2).await;
+    let root = tempfile::tempdir().unwrap();
+    let (wallet, _) =
+        NativeWallet::restore_with_source(root.path(), PUBLIC_SEED, &fixture.source, 1, auth(), 0)
+            .await
+            .unwrap();
+    std::fs::remove_file(&wallet.paths.meta_path).unwrap();
+    let seed = std::fs::read(root.path().join("seed.enc")).unwrap();
+    let db = std::fs::read(&wallet.paths.data_db).unwrap();
+    let before = fixture.calls.lock().unwrap().len();
+    code(
+        NativeWallet::create_with_source(root.path(), &fixture.source, Some(1), auth(), 0).await,
+        "native_read_only_source",
+    );
+    code(
+        NativeWallet::restore_with_source(root.path(), PUBLIC_SEED, &fixture.source, 1, auth(), 0)
+            .await,
+        "native_read_only_source",
+    );
+    assert!(std::fs::read(root.path().join("seed.enc")).unwrap() == seed);
+    assert!(std::fs::read(&wallet.paths.data_db).unwrap() == db);
+    assert_eq!(fixture.calls.lock().unwrap().len(), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_seed_only_create_retry_reuses_original_authenticated_entropy() {
+    let failed = Fixture::new(ZNetwork::Mainnet, "regtest", 2).await;
+    let root = tempfile::tempdir().unwrap();
+    assert!(NativeWallet::create_with_source(
+        root.path(),
+        &failed.source,
+        Some(419_201),
+        auth(),
+        0
+    )
+    .await
+    .is_err());
+    let seed = std::fs::read(root.path().join("seed.enc")).unwrap();
+    let words = SeedStore::new(root.path())
+        .load(auth().passphrase.as_deref(), false)
+        .unwrap();
+    let healthy = Fixture::new(ZNetwork::Mainnet, "main", 419_201).await;
+    let (_, created) =
+        NativeWallet::create_with_source(root.path(), &healthy.source, Some(419_201), auth(), 0)
+            .await
+            .unwrap();
+    assert!(created.mnemonic == *words.expose_secret());
+    assert!(std::fs::read(root.path().join("seed.enc")).unwrap() == seed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_seed_only_restore_rejects_replacement_before_network_or_writes() {
+    let failed = Fixture::new(ZNetwork::Mainnet, "regtest", 2).await;
+    let root = tempfile::tempdir().unwrap();
+    assert!(NativeWallet::restore_with_source(
+        root.path(),
+        PUBLIC_SEED,
+        &failed.source,
+        419_201,
+        auth(),
+        0
+    )
+    .await
+    .is_err());
+    let seed = std::fs::read(root.path().join("seed.enc")).unwrap();
+    let healthy = Fixture::new(ZNetwork::Mainnet, "main", 419_201).await;
+    code(
+        NativeWallet::restore_with_source(
+            root.path(),
+            "legal winner thank year wave sausage worth useful legal winner thank yellow",
+            &healthy.source,
+            419_201,
+            auth(),
+            0,
+        )
+        .await,
+        "native_source_seed_mismatch",
+    );
+    assert!(std::fs::read(root.path().join("seed.enc")).unwrap() == seed);
+    assert!(healthy.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_source_birthday_is_bound_before_seed_and_survives_newer_tip_retry() {
+    let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 200).await;
+    fixture.fail_tree.store(true, Ordering::Release);
+    let root = tempfile::tempdir().unwrap();
+    assert!(
+        NativeWallet::create_with_source(root.path(), &fixture.source, None, auth(), 0)
+            .await
+            .is_err()
+    );
+    let setup = super::super::source::setup(root.path()).unwrap().unwrap();
+    assert_eq!(setup.birthday_height, 100);
+    let seed = std::fs::read(root.path().join("seed.enc")).unwrap();
+    let retained = SeedStore::new(root.path())
+        .load(auth().passphrase.as_deref(), false)
+        .unwrap();
+    fixture.tip.store(400, Ordering::Release);
+    fixture.fail_tree.store(false, Ordering::Release);
+    let (wallet, created) =
+        NativeWallet::create_with_source(root.path(), &fixture.source, None, auth(), 0)
+            .await
+            .unwrap();
+    assert_eq!(created.birthday_height, 100);
+    assert_eq!(wallet.birthday_height(), 100);
+    assert!(created.mnemonic == *retained.expose_secret());
+    assert!(std::fs::read(root.path().join("seed.enc")).unwrap() == seed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_seed_only_binding_refuses_changed_scope_missing_or_malformed_record() {
+    let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 200).await;
+    fixture.fail_tree.store(true, Ordering::Release);
+    let root = tempfile::tempdir().unwrap();
+    assert!(NativeWallet::restore_with_source(
+        root.path(),
+        PUBLIC_SEED,
+        &fixture.source,
+        100,
+        auth(),
+        0
+    )
+    .await
+    .is_err());
+    let seed = std::fs::read(root.path().join("seed.enc")).unwrap();
+    let before = fixture.calls.lock().unwrap().len();
+    fixture.fail_tree.store(false, Ordering::Release);
+    code(
+        NativeWallet::restore_with_source(
+            root.path(),
+            PUBLIC_SEED,
+            &fixture.source,
+            101,
+            auth(),
+            0,
+        )
+        .await,
+        "native_source_setup_mismatch",
+    );
+    code(
+        NativeWallet::restore_with_source(
+            root.path(),
+            PUBLIC_SEED,
+            &fixture.source,
+            100,
+            auth(),
+            1,
+        )
+        .await,
+        "native_source_setup_mismatch",
+    );
+    let mainnet = Fixture::new(ZNetwork::Mainnet, "main", 419_201).await;
+    code(
+        NativeWallet::restore_with_source(
+            root.path(),
+            PUBLIC_SEED,
+            &mainnet.source,
+            100,
+            auth(),
+            0,
+        )
+        .await,
+        "native_source_setup_mismatch",
+    );
+    assert!(mainnet.calls.lock().unwrap().is_empty());
+    std::fs::remove_file(root.path().join("native-source-setup.json")).unwrap();
+    code(
+        NativeWallet::create_with_source(root.path(), &fixture.source, None, auth(), 0).await,
+        "native_source_setup_binding_required",
+    );
+    std::fs::write(root.path().join("native-source-setup.json"), b"{broken").unwrap();
+    code(
+        NativeWallet::restore_with_source(
+            root.path(),
+            PUBLIC_SEED,
+            &fixture.source,
+            100,
+            auth(),
+            0,
+        )
+        .await,
+        "native_source_policy_invalid",
+    );
+    assert!(std::fs::read(root.path().join("seed.enc")).unwrap() == seed);
+    assert_eq!(fixture.calls.lock().unwrap().len(), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_setup_never_quarantines_an_unmarked_retained_database() {
+    let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 2).await;
+    let root = tempfile::tempdir().unwrap();
+    let wallet = tests::fixture_wallet(root.path());
+    rusqlite::Connection::open(&wallet.paths.data_db)
+        .unwrap()
+        .execute_batch("CREATE TABLE fixture(value); INSERT INTO fixture VALUES(1)")
+        .unwrap();
+    std::fs::remove_file(&wallet.paths.meta_path).unwrap();
+    let original = std::fs::read(&wallet.paths.data_db).unwrap();
+    code(
+        NativeWallet::create_with_source(root.path(), &fixture.source, Some(1), auth(), 0).await,
+        "native_read_only_source",
+    );
+    code(
+        NativeWallet::restore_with_source(root.path(), PUBLIC_SEED, &fixture.source, 1, auth(), 0)
+            .await,
+        "native_read_only_source",
+    );
+    assert!(std::fs::read(&wallet.paths.data_db).unwrap() == original);
+    assert!(fixture.calls.lock().unwrap().is_empty());
+    assert!(!root.path().join("native-source-policy").exists());
+    assert!(!root.path().join("seed.enc").exists());
 }

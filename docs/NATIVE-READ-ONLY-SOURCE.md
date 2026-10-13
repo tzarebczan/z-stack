@@ -17,7 +17,15 @@ under its exclusive database lease. A wallet with pending verified recovery
 cannot enter the ordinary scanner. Enrollment adds a singleton
 `ext_native_source_policy_v1` table without resetting wallet data or receipts.
 A strict versioned `native-source-policy` sidecar protects interrupted seed-only
-setup before a database exists. Either marker keeps the wallet read-only. A
+setup before a database exists. Any retained database
+refuses source setup rather than being treated as an unfinished ordinary wallet. A
+seed-only create retry authenticates and reuses the retained encrypted seed;
+seed-only restore must match it before making any source request. Setup cannot
+replace an existing source seed or quarantine a retained source database.
+`native-source-setup.json` binds network, birthday and account before creating a
+source seed. An automatic birthday uses the authenticated tip once, and retries
+retain that birthday even if the tip advances. Changed setup scope, malformed
+binding, or a retained seed without its binding refuses before source access. Either marker keeps the wallet read-only. A
 copied marked database without its sidecar remains read-only; malformed or
 non-singleton markers refuse. There is no source-to-direct handover API.
 `uses_read_only_source` re-reads both markers under a shared lease without
