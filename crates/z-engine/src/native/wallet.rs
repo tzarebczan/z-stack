@@ -3942,16 +3942,37 @@ impl NativeWallet {
         validator_rpc: Option<&str>,
         txid_hex: &str,
     ) -> Result<Vec<u8>> {
+        Self::fetch_raw_transaction_with_rpc_inner(server, validator_rpc, txid_hex, None).await
+    }
+
+    pub(super) async fn fetch_raw_transaction_with_rpc_owned(
+        server: &LightServer,
+        validator_rpc: Option<&str>,
+        txid_hex: &str,
+        owner: Arc<std::fs::File>,
+    ) -> Result<Vec<u8>> {
+        Self::fetch_raw_transaction_with_rpc_inner(server, validator_rpc, txid_hex, Some(owner))
+            .await
+    }
+
+    async fn fetch_raw_transaction_with_rpc_inner(
+        server: &LightServer,
+        validator_rpc: Option<&str>,
+        txid_hex: &str,
+        owner: Option<Arc<std::fs::File>>,
+    ) -> Result<Vec<u8>> {
         let rpc = validator_rpc
             .map(str::to_string)
             .or_else(|| server.zebra_rpc_url());
         let try_rpc = |id: String| {
             let rpc = rpc.clone();
+            let owner = owner.clone();
             async move {
                 let rpc = rpc.ok_or_else(|| EngineError::Message("no validator rpc".into()))?;
                 // The worker owns only request inputs. Dropping a timed-out fetch
                 // cannot leave native database writes running in the background.
                 tokio::task::spawn_blocking(move || {
+                    let _owner = owner;
                     let hex = super::rpc::get_raw_transaction_hex(&rpc, &id)?;
                     crate::web::from_hex(&hex).map_err(EngineError::Message)
                 })
