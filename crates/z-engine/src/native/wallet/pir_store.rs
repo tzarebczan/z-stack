@@ -306,15 +306,16 @@ pub(super) fn ensure_compatible_schema(
         [], |row| row.get(0),
     ).map_err(io)?;
     if exists {
-        let version: Option<u32> = conn
-            .query_row("SELECT version FROM ext_coffer_pir_schema", [], |row| {
-                row.get(0)
-            })
-            .optional()
+        let schema: (u64, Option<u32>) = conn
+            .query_row(
+                "SELECT COUNT(*),MIN(version) FROM ext_coffer_pir_schema",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .map_err(io)?;
-        match version {
-            Some(1) => return Err(StoreError::Io("native_pir_migration_required".into())),
-            Some(JOURNAL_VERSION) => {}
+        match schema {
+            (1, Some(1)) => return Err(StoreError::Io("native_pir_migration_required".into())),
+            (1, Some(JOURNAL_VERSION)) => {}
             _ => return Err(corrupt()),
         }
     } else {

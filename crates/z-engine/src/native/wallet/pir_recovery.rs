@@ -278,14 +278,15 @@ fn require_journal_head(
     ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
     expected: Option<&(u64, String)>,
 ) -> anyhow::Result<()> {
-    let version: u32 = ext.query_row("SELECT version FROM ext_coffer_pir_schema", [], |row| {
-        row.get(0)
-    })?;
-    if version == 1 {
-        anyhow::bail!("native_pir_migration_required");
-    }
-    if version != store::JOURNAL_VERSION {
-        anyhow::bail!("native_recovery_reconciliation_required");
+    let schema: (u64, Option<u32>) = ext.query_row(
+        "SELECT COUNT(*),MIN(version) FROM ext_coffer_pir_schema",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    match schema {
+        (1, Some(1)) => anyhow::bail!("native_pir_migration_required"),
+        (1, Some(store::JOURNAL_VERSION)) => {}
+        _ => anyhow::bail!("native_recovery_reconciliation_required"),
     }
     let expected =
         expected.ok_or_else(|| anyhow::anyhow!("native_recovery_reconciliation_required"))?;
@@ -3000,6 +3001,94 @@ pub(in crate::native::wallet) mod tests {
         )
         .unwrap();
         assert!(store::NativePirStore::open_recovery(&wallet, &cancel).is_ok());
+    }
+    #[test]
+    fn multiple_pir_schema_rows_refuse_receipt_and_preserve_wallet_state() {
+        let (_dir, wallet, chain, receipt) = completed_fixture();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        conn.execute_batch(
+            "PRAGMA ignore_check_constraints=ON; INSERT INTO ext_coffer_pir_schema VALUES(99)",
+        )
+        .unwrap();
+        let snapshot =
+            || {
+                let versions = conn
+                    .prepare("SELECT version FROM ext_coffer_pir_schema ORDER BY version")
+                    .unwrap()
+                    .query_map([], |row| row.get::<_, u32>(0))
+                    .unwrap()
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .unwrap();
+                let marker: (bool, u64, Vec<u8>) = conn.query_row(
+                "SELECT blocked,generation,receipt FROM ext_coffer_pir_recovery_v1 WHERE id=1", [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+                let head: (u64, u64, String) = conn
+                    .query_row(
+                        "SELECT generation,bytes,digest FROM ext_coffer_pir_head WHERE id=1",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .unwrap();
+                let native =
+                    NativeScanSnapshot::capture(&wallet.open_db().unwrap(), chain.target_height())
+                        .unwrap()
+                        .identity()
+                        .unwrap();
+                (versions, marker, head, native)
+            };
+        let before = snapshot();
+        assert_eq!(before.0, vec![2, 99]);
+        assert_eq!(
+            wallet
+                .ensure_recovery_selection_ready()
+                .unwrap_err()
+                .to_string(),
+            "native_recovery_reconciliation_required"
+        );
+        assert_eq!(
+            wallet
+                .regtest_pir_recovery_for(&chain)
+                .unwrap_err()
+                .to_string(),
+            "native_recovery_reconciliation_required"
+        );
+        assert!(matches!(
+            store::NativePirStore::open(&wallet, &AtomicBool::new(false)),
+            Err(StoreError::Corrupt(_))
+        ));
+        assert_eq!(
+            wallet
+                .open_db()
+                .unwrap()
+                .transactionally_with_extension(|_, ext| {
+                    require_journal_head(ext, receipt.journal_head.as_ref())
+                })
+                .unwrap_err()
+                .to_string(),
+            "native_recovery_reconciliation_required"
+        );
+        assert_eq!(
+            wallet
+                .sync_regtest_pir(
+                    &chain,
+                    &mut Unavailable,
+                    &mut Unavailable,
+                    WorkLimits::default(),
+                    &AtomicBool::new(false),
+                )
+                .unwrap_err()
+                .to_string(),
+            "native_pir_store_invalid"
+        );
+        assert_eq!(
+            wallet
+                .begin_regtest_pir_recovery(&chain, &RecoveryCancellation::new())
+                .unwrap_err()
+                .to_string(),
+            "native_pir_store_invalid"
+        );
+        assert_eq!(snapshot(), before);
     }
     fn completed_fixture() -> (
         tempfile::TempDir,

@@ -235,6 +235,8 @@ funded qualifications at the previous pin do not qualify this dependency change.
 Missing schema metadata also refuses an existing journal, head, or finalized
 receipt. Initial offline setup can create a Pending marker before its journal;
 only a single blocked marker with no receipt permits that initialization.
+Schema metadata requires exactly one version row; extra rows refuse receipt
+authorization and discovery without changing the wallet.
 After reading bounded publication metadata, sync captures native scope and scanner
 state in one read transaction. It checks all retained native hashes within the
 independently accepted prefix, including fully/max scanned frontiers. A known
