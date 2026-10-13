@@ -51,6 +51,7 @@ pub(super) async fn run(
     db_path: &Path,
     birthday: u32,
     light_url: &str,
+    provided: bool,
     downloaded: &Arc<AtomicU32>,
     scanned: &Arc<AtomicU32>,
     progress: Option<Arc<Mutex<SyncProgress>>>,
@@ -60,7 +61,8 @@ pub(super) async fn run(
     tip: u32,
 ) -> Result<()> {
     let tuning = sync_tuning(crate::uses_fast_sync(light_url));
-    let skip_ironwood = super::wallet::NativeWallet::skip_ironwood_subtrees(network, light_url);
+    let skip_ironwood =
+        !provided && super::wallet::NativeWallet::skip_ironwood_subtrees(network, light_url);
     super::wallet::validate_empty_walk_scan(db_path)?;
     if let Some(height) = reconcile_chain_checkpoint(client, network, db, db_path, tip).await? {
         cache
@@ -116,6 +118,7 @@ pub(super) async fn run(
     let mut pool = FetchPool::start(
         light_url,
         skip_ironwood,
+        provided,
         client,
         Arc::clone(downloaded),
         prefetch_n,
@@ -268,7 +271,7 @@ pub(super) async fn run(
         continue;
     }
     finish_roots(db, &mut roots_job, &mut selective_scan).await;
-    if crate::is_loopback_light_url(light_url) {
+    if !provided && crate::is_loopback_light_url(light_url) {
         // After compact scan. Blocking GetAddressUtxos before the first
         // GetBlockRange left the birthday overlay at 4% with no heights.
         if let Err(_e) = refresh_utxos(client, network, db).await {
@@ -513,6 +516,7 @@ impl FetchPool {
     async fn start(
         light_url: &str,
         skip_ironwood: bool,
+        provided: bool,
         fallback: &LwdClient,
         downloaded: Arc<AtomicU32>,
         prefetch: usize,
@@ -535,6 +539,13 @@ impl FetchPool {
             if let Err(_e) = pool.fill() {
                 warn!("warmup prefetch failed");
             }
+        }
+        if provided {
+            if prefetch > 1 {
+                pool.fetch_b = Some(fallback.clone());
+                pool.fetch_n = 2;
+            }
+            return pool;
         }
         let connect = || super::wallet::NativeWallet::connect_url_hot(light_url, skip_ironwood);
         let (second, control) = tokio::join!(

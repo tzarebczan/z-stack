@@ -85,6 +85,7 @@ impl http_body::Body for TreeStatusBody {
 pub struct LwdChannel {
     inner: Channel,
     skip_ironwood_subtrees: bool,
+    read_only: bool,
 }
 
 impl LwdChannel {
@@ -92,6 +93,7 @@ impl LwdChannel {
         Self {
             inner,
             skip_ironwood_subtrees,
+            read_only: false,
         }
     }
 }
@@ -170,6 +172,7 @@ impl Service<http::Request<Body>> for LwdChannel {
     fn call(&mut self, req: http::Request<Body>) -> Self::Future {
         let mut inner = self.inner.clone();
         let skip = self.skip_ironwood_subtrees;
+        let read_only = self.read_only;
         Box::pin(async move {
             async fn ready_call(
                 inner: &mut Channel,
@@ -185,6 +188,19 @@ impl Service<http::Request<Body>> for LwdChannel {
             }
 
             let path = req.uri().path().to_string();
+            if read_only
+                && !matches!(
+                    path.as_str(),
+                    "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo"
+                        | "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLatestBlock"
+                        | "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetTreeState"
+                        | "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlock"
+                        | "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlockRange"
+                        | "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetSubtreeRoots"
+                )
+            {
+                return Err(super::source::refused());
+            }
             let is_subtrees = path.ends_with("/GetSubtreeRoots");
             if is_subtrees {
                 let (parts, body) = req.into_parts();
@@ -200,7 +216,7 @@ impl Service<http::Request<Body>> for LwdChannel {
                 let rebuilt =
                     http::Request::from_parts(parts, Body::new(http_body_util::Full::new(bytes)));
                 let resp = ready_call(&mut inner, rebuilt).await?;
-                if ironwood && grpc_invalid_argument(&resp) {
+                if !read_only && ironwood && grpc_invalid_argument(&resp) {
                     tracing::warn!(
                         "GetSubtreeRoots(Ironwood) rejected by light server; treating as empty"
                     );
@@ -224,6 +240,12 @@ impl Service<http::Request<Body>> for LwdChannel {
 
 pub fn client(channel: Channel, skip_ironwood_subtrees: bool) -> LwdClient {
     CompactTxStreamerClient::new(LwdChannel::new(channel, skip_ironwood_subtrees))
+}
+
+pub(super) fn read_only_client(channel: Channel) -> LwdClient {
+    let mut channel = LwdChannel::new(channel, false);
+    channel.read_only = true;
+    CompactTxStreamerClient::new(channel)
 }
 
 #[cfg(test)]

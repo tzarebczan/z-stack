@@ -669,6 +669,8 @@ impl NativeWallet {
         memo: Option<&str>,
         policy: ConfirmationsPolicy,
     ) -> Result<PaymentReceipt> {
+        let _source_lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         if to.trim().to_ascii_lowercase().starts_with("zcash:") {
             return Err(failed("payment_plain_address_required"));
         }
@@ -747,6 +749,8 @@ impl NativeWallet {
     /// receipt commit in ONE SQLite transaction before this returns. No broadcast.
     /// A failed/interrupted transaction leaves the review prepared and sends nothing.
     pub fn sign_payment(&self, auth: &SeedAuth, id: &str) -> Result<PaymentReceipt> {
+        let _source_lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         self.ensure_recovery_selection_ready()?;
         let conn = connection(self)?;
         let receipt = read(&conn, id)?;

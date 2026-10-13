@@ -178,6 +178,7 @@ getrandom = { version = "0.2", features = ["js"] }
 time = { version = "0.3.22", default-features = false, features = ["std", "wasm-bindgen"] }
 
 [dev-dependencies]
+hyper = { version = "1", features = ["server", "http2"] }
 transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2", features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile = "3"
