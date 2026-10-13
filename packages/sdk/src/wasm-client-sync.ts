@@ -942,14 +942,20 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     const mode = ctx.memoFetch;
     const deposits = ctx.transparentScan;
-    const current = () => {
-      ctx.assertSource(operation, source);
-      if (mode !== ctx.memoFetch || deposits !== ctx.transparentScan) throw new Error("Privacy settings changed during retrieval");
-    };
     const run = async (kind: "transparent" | "memos") => {
+      const controller = kind === "memos" ? new AbortController() : undefined;
+      if (controller) ctx.memoAbort = controller;
+      const wait = AbortSignal.any([operation.signal, signal, ...(controller ? [controller.signal] : [])]);
+      const current = () => {
+        wait.throwIfAborted();
+        ctx.assertSource(operation, source);
+        if (kind === "memos" ? mode !== ctx.memoFetch : deposits !== ctx.transparentScan) {
+          throw new Error("Privacy settings changed during retrieval");
+        }
+      };
       try {
         const status = await syncPublicData({
-          source, transport: ctx.transport, signal,
+          source, transport: ctx.transport, signal: wait,
           transparent: kind === "transparent", memos: kind === "memos",
           assertCurrent: current, checkpoint: ctx.persist
         });
@@ -958,6 +964,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         if (status.memos) ctx.sharedMemoStatus = status.memos;
       } catch (error) {
         signal.throwIfAborted();
+        operation.signal.throwIfAborted();
+        // Changing memo policy ends only this optional phase. Whole-sync and
+        // wallet cancellation retain priority over that policy change.
+        if (controller?.signal.aborted && mode !== ctx.memoFetch) return;
         current();
         // A stale/forgotten wallet is not a light-server outage. Stop before
         // later phases can issue selective queries for that obsolete state.
@@ -967,10 +977,12 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         if (manual) throw error;
         // Deposit coverage and memo availability are independent. Neither
         // failure permits a selective address/transaction fallback.
+      } finally {
+        if (controller && ctx.memoAbort === controller) ctx.memoAbort = null;
       }
     };
     if (!manual && deposits === "compact") await run("transparent");
-    if (mode === "shared") await run("memos");
+    if (mode === "shared" && ctx.memoFetch === mode) await run("memos");
     if (manual && ctx.sharedMemoStatus === "unsupported") throw new Error("This server does not support shared payment notes yet");
   }
 

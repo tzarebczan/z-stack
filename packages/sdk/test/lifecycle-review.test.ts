@@ -449,3 +449,34 @@ test("post-scan mempool cancellation rejects promptly and discards a late provid
   assert.equal(scanner.ops.includes("applyMempool"), false);
   assert.deepEqual(db.records, before);
 });
+
+for (const cancelSync of [false, true]) {
+  test(`shared memo policy changes abort retrieval${cancelSync ? " without masking sync cancellation" : " and permit sync to finish"}`, async t => {
+    const { db } = fixture(t);
+    const scanner = new ScanFixture();
+    await attachScanWorker(scanner as unknown as Worker, { threads: 1, preferMulticore: false });
+    const entered = deferred<AbortSignal | undefined>();
+    const response = deferred<string>();
+    const c = client({ sharedMemos: async (_start, _end, signal) => { entered.resolve(signal); return response.promise; } });
+    await c.restore("shared-memo-owner", "regtest", 1);
+    c.setMemoFetch("shared");
+    const syncing = c.sync();
+    const finished = cancelSync ? assert.rejects(syncing, /cancelled|aborted|AbortError/i) : syncing;
+    const signal = await entered.promise;
+    const before = structuredClone(db.records);
+    c.setMemoFetch("on-demand");
+    if (cancelSync) cancelWasmSync();
+    const settled = await Promise.race([
+      finished.then(() => true),
+      new Promise<boolean>(resolve => setTimeout(() => resolve(false), 30)),
+    ]);
+    response.resolve(JSON.stringify({ start: 1, end: 9 }));
+    await finished;
+    await turn();
+    assert.equal(settled, true, "policy change must not wait for an uncooperative shared provider");
+    assert.ok(signal);
+    assert.equal(signal.aborted, true);
+    assert.equal(scanner.ops.includes("applySharedMemos"), false);
+    assert.deepEqual(db.records, before);
+  });
+}
