@@ -1583,10 +1583,16 @@ impl NativeWallet {
         Ok(())
     }
 
-    fn network_operation_lease(&self) -> Result<std::fs::File> {
+    pub(super) fn network_operation_lease(&self) -> Result<Arc<std::fs::File>> {
         self.check_network_capability()?;
-        let lease = database_lease::shared(&self.paths.data_db)?;
+        let lease = Arc::new(database_lease::shared(&self.paths.data_db)?);
         self.require_network_access()?;
+        Ok(lease)
+    }
+
+    pub(super) fn local_mutation_lease(&self) -> Result<Arc<std::fs::File>> {
+        let lease = Arc::new(database_lease::exclusive(&self.paths.data_db)?);
+        self.require_source_spending_access()?;
         Ok(lease)
     }
 
@@ -1614,8 +1620,8 @@ impl NativeWallet {
         Ok(())
     }
 
-    fn ordinary_scan_lease(&self) -> Result<std::fs::File> {
-        let lease = database_lease::exclusive(&self.paths.data_db)?;
+    fn ordinary_scan_lease(&self) -> Result<Arc<std::fs::File>> {
+        let lease = Arc::new(database_lease::exclusive(&self.paths.data_db)?);
         if has_recovery_marker(&self.paths.data_db)? {
             return Err(EngineError::Message("native_recovery_scan_refused".into()));
         }
