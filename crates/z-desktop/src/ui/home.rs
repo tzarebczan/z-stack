@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 use z_engine::keys::{inspect_address, unified_address_for_set, InspectedAddress, UaReceiverSet};
 use z_engine::native::{
-    pick_local_validator, probe_validator, Bridge, NativeWallet, SeedAuth, SeedStore, UnlockPolicy,
+    pick_local_validator, probe_validator, Bridge, NativeBirthday, NativeWallet, SeedAuth,
+    SeedStore, UnlockPolicy,
 };
 use z_engine::{
     date_from_height_for_network, describe_light_url, display_anyhow, display_catch_up_percent,
@@ -40,6 +41,19 @@ enum Field {
 enum RestoreKind {
     Seed,
     Ufvk,
+}
+
+fn setup_birthday_input(raw: &str, network: Network) -> anyhow::Result<NativeBirthday> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        anyhow::bail!("Set birthday height or first-used date (YYYY-MM-DD).");
+    }
+    let parsed = parse_birthday_input_for_network(raw, 1, network)?;
+    if raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        Ok(NativeBirthday::Height(parsed))
+    } else {
+        Ok(NativeBirthday::Date(raw.to_owned()))
+    }
 }
 
 /// Compact-block sync needs a worker that can poll tonic while sqlite persist
@@ -1303,7 +1317,7 @@ impl HomeView {
         let auth = self.auth(cx);
         let height_raw = self.field_text(&self.birthday, cx);
         let date_raw = self.field_text(&self.birthday_date, cx);
-        let birthday: Option<u32> = {
+        let birthday: Option<NativeBirthday> = {
             let raw = if !height_raw.trim().is_empty() {
                 height_raw
             } else {
@@ -1311,7 +1325,14 @@ impl HomeView {
             };
             match raw.trim() {
                 "" | "auto" => None,
-                s => parse_birthday_input_for_network(s, self.eta_tip(), network).ok(),
+                s => match setup_birthday_input(s, network) {
+                    Ok(input) => Some(input),
+                    Err(error) => {
+                        self.status = display_anyhow(&error).into();
+                        cx.notify();
+                        return;
+                    }
+                },
             }
         };
         self.begin_work(WorkKind::Sync, cx);
@@ -1321,7 +1342,7 @@ impl HomeView {
             move || {
                 let rt = chain_sync_runtime()?;
                 rt.block_on(async {
-                    let (mut w, created) = NativeWallet::create(
+                    let (mut w, created) = NativeWallet::create_with_birthday(
                         &dir,
                         network,
                         Some(server),
@@ -1407,19 +1428,25 @@ impl HomeView {
             move || {
                 let rt = chain_sync_runtime()?;
                 rt.block_on(async {
-                    let tip_now = NativeWallet::fetch_tip(&server).await.unwrap_or(1);
                     let birthday = if !date_raw.trim().is_empty() {
-                        parse_birthday_input_for_network(&date_raw, tip_now, network)?
+                        setup_birthday_input(&date_raw, network)?
                     } else if !height_raw.trim().is_empty() {
-                        parse_birthday_input_for_network(&height_raw, tip_now, network)?
+                        setup_birthday_input(&height_raw, network)?
                     } else {
                         anyhow::bail!("Set birthday height or first-used date (YYYY-MM-DD).");
                     };
                     let (mut w, _ua) = if kind == RestoreKind::Ufvk {
-                        NativeWallet::restore_ufvk(&dir, &ufvk, network, Some(server), birthday, 0)
-                            .await?
+                        NativeWallet::restore_ufvk_with_birthday(
+                            &dir,
+                            &ufvk,
+                            network,
+                            Some(server),
+                            birthday,
+                            0,
+                        )
+                        .await?
                     } else {
-                        NativeWallet::restore(
+                        NativeWallet::restore_with_birthday(
                             &dir,
                             &words,
                             network,
@@ -1434,7 +1461,7 @@ impl HomeView {
                         w.set_validator_rpc(Some(rpc))?;
                     }
                     let snap = HomeView::snapshot(&w)?;
-                    Ok((birthday, snap))
+                    Ok((w.birthday_height(), snap))
                 })
             },
             move |view, (birthday, snap), cx| {
@@ -4837,7 +4864,24 @@ impl Render for HomeView {
 
 #[cfg(test)]
 mod job_tests {
-    use super::unpanicked;
+    use super::{setup_birthday_input, unpanicked};
+    use z_engine::native::NativeBirthday;
+    use z_engine::Network;
+
+    #[test]
+    fn setup_birthday_keeps_dates_for_the_guarded_engine() {
+        assert!(matches!(
+            setup_birthday_input("9999-12-31", Network::Mainnet).unwrap(),
+            NativeBirthday::Date(raw) if raw == "9999-12-31"
+        ));
+        assert!(matches!(
+            setup_birthday_input("4500000", Network::Mainnet).unwrap(),
+            NativeBirthday::Height(4_500_000)
+        ));
+        for invalid in ["", "not-a-date", "2026-13-40", "4294967296"] {
+            assert!(setup_birthday_input(invalid, Network::Mainnet).is_err());
+        }
+    }
 
     #[test]
     fn a_panicking_wallet_job_becomes_an_error_instead_of_ending_the_app() {

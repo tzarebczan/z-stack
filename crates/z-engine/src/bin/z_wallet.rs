@@ -3,8 +3,8 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use z_engine::native::{
-    pick_local_validator, probe_validator, serve_lwd_pipe, Bridge, LwdPipeOpts, NativeWallet,
-    SeedAuth, MAX_MEM_SYNC_BLOCKS, PIPE_CHANNELS, PIPE_CHUNK, PIPE_CONCURRENCY,
+    pick_local_validator, probe_validator, serve_lwd_pipe, Bridge, LwdPipeOpts, NativeBirthday,
+    NativeWallet, SeedAuth, MAX_MEM_SYNC_BLOCKS, PIPE_CHANNELS, PIPE_CHUNK, PIPE_CONCURRENCY,
 };
 use z_engine::{format_zatoshis, LightServer, Network};
 
@@ -337,17 +337,14 @@ async fn main() -> anyhow::Result<()> {
             let server = parse_server(server, network);
             let _ = MAX_MEM_SYNC_BLOCKS;
             let birthday = match (birthday, date.as_deref()) {
-                (Some(h), _) => h,
-                (None, Some(d)) => {
-                    let tip = NativeWallet::fetch_tip(&server).await?;
-                    z_engine::parse_birthday_input_for_network(d, tip, network)?
-                }
+                (Some(h), _) => NativeBirthday::Height(h),
+                (None, Some(d)) => NativeBirthday::Date(d.to_owned()),
                 (None, None) => {
                     anyhow::bail!("restore needs --birthday HEIGHT or --date YYYY-MM-DD")
                 }
             };
             let (mut wallet, ua) = if let Some(ufvk) = ufvk {
-                NativeWallet::restore_ufvk(
+                NativeWallet::restore_ufvk_with_birthday(
                     &wallet_dir,
                     &ufvk,
                     network,
@@ -362,7 +359,7 @@ async fn main() -> anyhow::Result<()> {
                 if auth.passphrase.is_none() && !auth.windows_credential {
                     anyhow::bail!("provide --passphrase and/or --windows-credential");
                 }
-                NativeWallet::restore(
+                NativeWallet::restore_with_birthday(
                     &wallet_dir,
                     &mnemonic,
                     network,
@@ -375,7 +372,7 @@ async fn main() -> anyhow::Result<()> {
             };
             wallet.set_validator_rpc(rpc)?;
             println!("wallet:   {}", wallet.paths().root.display());
-            println!("birthday: {birthday}");
+            println!("birthday: {}", wallet.birthday_height());
             println!("address:  {ua}");
             println!("server:   {}", wallet.server_url());
             if wallet.is_view_only() {

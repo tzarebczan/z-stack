@@ -5,7 +5,7 @@
 
 use crate::error::{EngineError, Result};
 use crate::native::rpc::{pick_local_validator, probe_validator};
-use crate::native::wallet::{NativeWallet, SeedAuth};
+use crate::native::wallet::{NativeBirthday, NativeWallet, SeedAuth};
 use crate::{format_zatoshis, parse_zec_to_zatoshis, zip321_uri, Balance, LightServer, Network};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -689,16 +689,15 @@ impl Bridge {
                     let dir = self.wallet.clone();
                     let remembered = Arc::clone(&self.auth);
                     self.locked(async move {
-                        let birthday = match birthday {
-                            Some(input) => Some(
-                                resolve_birthday(input, network, NativeWallet::fetch_tip(&server))
-                                    .await?,
-                            ),
-                            None => None,
-                        };
-                        let (mut w, created) =
-                            NativeWallet::create(&dir, network, Some(server), birthday, auth, 0)
-                                .await?;
+                        let (mut w, created) = NativeWallet::create_with_birthday(
+                            &dir,
+                            network,
+                            Some(server),
+                            birthday,
+                            auth,
+                            0,
+                        )
+                        .await?;
                         w.set_validator_rpc(rpc)?;
                         remember_passphrase(&remembered, pass);
                         let mut v = snapshot_json(&dir)?;
@@ -720,11 +719,8 @@ impl Bridge {
                     let dir = self.wallet.clone();
                     let remembered = Arc::clone(&self.auth);
                     self.locked(async move {
-                        let birthday =
-                            resolve_birthday(birthday, network, NativeWallet::fetch_tip(&server))
-                                .await?;
                         if let Some(ufvk) = ufvk {
-                            let (mut w, _) = NativeWallet::restore_ufvk(
+                            let (mut w, _) = NativeWallet::restore_ufvk_with_birthday(
                                 &dir,
                                 &ufvk,
                                 network,
@@ -738,7 +734,7 @@ impl Bridge {
                             }
                             w.set_validator_rpc(rpc)?;
                         } else {
-                            let (mut w, _) = NativeWallet::restore(
+                            let (mut w, _) = NativeWallet::restore_with_birthday(
                                 &dir,
                                 &mnemonic,
                                 network,
@@ -843,7 +839,7 @@ fn parse_create(
 ) -> std::result::Result<
     (
         Network,
-        Option<BridgeBirthday>,
+        Option<NativeBirthday>,
         LightServer,
         Option<String>,
         Option<String>,
@@ -869,24 +865,18 @@ fn parse_create(
     ))
 }
 
-#[derive(Debug, PartialEq)]
-enum BridgeBirthday {
-    Height(u32),
-    Estimate(String),
-}
-
 fn parse_birthday_value(
     raw: Option<&serde_json::Value>,
     network: Network,
-) -> std::result::Result<BridgeBirthday, String> {
+) -> std::result::Result<NativeBirthday, String> {
     let invalid = || "birthday must be a block height or YYYY-MM-DD".to_string();
     match raw {
-        None if network == Network::Regtest => Ok(BridgeBirthday::Height(1)),
+        None if network == Network::Regtest => Ok(NativeBirthday::Height(1)),
         Some(serde_json::Value::Number(n)) => n
             .as_u64()
             .and_then(|h| u32::try_from(h).ok())
             .filter(|h| *h > 0)
-            .map(BridgeBirthday::Height)
+            .map(NativeBirthday::Height)
             .ok_or_else(invalid),
         Some(serde_json::Value::String(s)) => {
             let s = s.trim();
@@ -895,28 +885,15 @@ fn parse_birthday_value(
                     .parse::<u32>()
                     .ok()
                     .filter(|h| *h > 0)
-                    .map(BridgeBirthday::Height)
+                    .map(NativeBirthday::Height)
                     .ok_or_else(invalid);
             }
-            // Validate syntax only. Resolve the estimate later against the live
-            // server tip, before creating files or saving a seed.
+            // Validate syntax only. The engine resolves the estimate against
+            // its live tip while holding setup ownership.
             crate::parse_birthday_input_for_network(s, 1, network).map_err(|e| e.to_string())?;
-            Ok(BridgeBirthday::Estimate(s.to_string()))
+            Ok(NativeBirthday::Date(s.to_string()))
         }
         _ => Err(invalid()),
-    }
-}
-
-async fn resolve_birthday(
-    input: BridgeBirthday,
-    network: Network,
-    live_tip: impl std::future::Future<Output = Result<u32>>,
-) -> Result<u32> {
-    match input {
-        BridgeBirthday::Height(height) => Ok(height),
-        BridgeBirthday::Estimate(raw) => {
-            crate::parse_birthday_input_for_network(&raw, live_tip.await?, network)
-        }
     }
 }
 
@@ -926,7 +903,7 @@ fn parse_restore(
     (
         String,
         Option<String>,
-        BridgeBirthday,
+        NativeBirthday,
         Network,
         LightServer,
         Option<String>,
@@ -1603,6 +1580,67 @@ mod tests {
         assert!(std::fs::read(dir.path().join("native-source-policy")).unwrap() == policy);
     }
 
+    async fn source_date_setup_refuses_before_endpoint_io(path: &str, mut body: Value) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        body["network"] = json!("mainnet");
+        body["server"] = json!(format!("http://{}", listener.local_addr().unwrap()));
+        body["birthday"] = json!("9999-12-31");
+        let dir = tempfile::tempdir().unwrap();
+        crate::native::source::enroll(dir.path()).unwrap();
+        let policy = std::fs::read(dir.path().join("native-source-policy")).unwrap();
+        let bridge = Bridge::new(dir.path(), SeedAuth::passphrase("disposable-fixture"));
+        let request = HttpReq {
+            method: "POST".into(),
+            path: path.into(),
+            origin: None,
+            token: None,
+            body: serde_json::to_vec(&body).unwrap(),
+        };
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            bridge.dispatch(&request),
+        )
+        .await;
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "source-marked date setup must not contact the endpoint"
+        );
+        let (status, _, response) = reply.expect("source policy refuses before date lookup");
+        assert!(status >= 400);
+        assert!(response.contains("native_read_only_source"));
+        assert!(!dir.path().join("wallet.json").exists());
+        assert!(!dir.path().join("data.sqlite").exists());
+        assert!(std::fs::read(dir.path().join("native-source-policy")).unwrap() == policy);
+    }
+
+    #[tokio::test]
+    async fn source_date_create_refuses_before_endpoint_io() {
+        source_date_setup_refuses_before_endpoint_io("/create", json!({})).await;
+    }
+
+    #[tokio::test]
+    async fn source_date_seed_restore_refuses_before_endpoint_io() {
+        source_date_setup_refuses_before_endpoint_io(
+            "/restore",
+            json!({"mnemonic":crate::keys::REGTEST_FAUCET_MNEMONIC}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn source_date_ufvk_restore_refuses_before_endpoint_io() {
+        let ufvk = crate::keys::account_from_mnemonic(
+            crate::keys::REGTEST_FAUCET_MNEMONIC,
+            Network::Mainnet,
+            0,
+        )
+        .unwrap()
+        .ufvk;
+        source_date_setup_refuses_before_endpoint_io("/restore", json!({"ufvk":ufvk})).await;
+    }
+
     #[tokio::test]
     async fn sendraw_relay_verifies_requested_identity_before_receiving_transaction_bytes() {
         use crate::native::rpc::{verified_response, verified_response_peer};
@@ -1734,20 +1772,12 @@ mod tests {
         assert!(parse_loopback_bind("192.168.1.4:8787").is_err());
     }
 
-    #[tokio::test]
-    async fn date_bodies_resolve_against_live_tip_for_create_and_both_restore_keys() {
-        // A future date clips to the live tip, avoiding wall-clock rounding races.
-        let date = "9999-12-31".to_string();
+    #[test]
+    fn create_and_restore_parse_owned_birthday_inputs() {
+        let date = "9999-12-31";
         let create = json!({"network":"testnet", "birthday": date});
         let (_, input, _, _, _) = parse_create(create.to_string().as_bytes()).unwrap();
-        let input = input.unwrap();
-        assert_eq!(input, BridgeBirthday::Estimate(date.clone()));
-        let first = resolve_birthday(input, Network::Testnet, async { Ok(4_500_000) })
-            .await
-            .unwrap();
-        let expected =
-            crate::parse_birthday_input_for_network(&date, 4_500_000, Network::Testnet).unwrap();
-        assert_eq!(first, expected);
+        assert!(matches!(input, Some(NativeBirthday::Date(raw)) if raw == date));
         for key in [
             json!({"mnemonic":crate::keys::REGTEST_FAUCET_MNEMONIC}),
             json!({"ufvk":"uview1fixture"}),
@@ -1756,34 +1786,13 @@ mod tests {
             body["network"] = json!("testnet");
             body["birthday"] = json!(date);
             let (_, _, input, _, _, _, _, _) = parse_restore(body.to_string().as_bytes()).unwrap();
-            let second = resolve_birthday(input, Network::Testnet, async { Ok(4_501_000) })
-                .await
-                .unwrap();
-            assert_eq!(
-                second - first,
-                1_000,
-                "live tips must move the estimated birthday"
-            );
+            assert!(matches!(input, NativeBirthday::Date(raw) if raw == date));
         }
         let exact = parse_birthday_value(Some(&json!(12345)), Network::Testnet).unwrap();
-        assert_eq!(
-            resolve_birthday(exact, Network::Testnet, async {
-                panic!("exact heights must not fetch a tip")
-            })
-            .await
-            .unwrap(),
-            12345
-        );
+        assert!(matches!(exact, NativeBirthday::Height(12345)));
         assert!(parse_create(br#"{"birthday":4294967297}"#).is_err());
         assert!(parse_create(br#"{"birthday":0}"#).is_err());
         assert!(parse_restore(br#"{"ufvk":"uview1fixture","birthday":"2026-13-40"}"#).is_err());
-        assert!(
-            resolve_birthday(BridgeBirthday::Estimate(date), Network::Testnet, async {
-                Err(EngineError::Transport("unavailable".into()))
-            })
-            .await
-            .is_err()
-        );
     }
 
     #[test]
@@ -1897,7 +1906,7 @@ mod tests {
         assert!(policy.is_none());
         assert_eq!(m, words);
         assert!(ufvk.is_none());
-        assert_eq!(h, BridgeBirthday::Height(1));
+        assert!(matches!(h, NativeBirthday::Height(1)));
         assert_eq!(n, Network::Regtest);
         assert!(parse_restore(br#"{"mnemonic":"too short"}"#).is_err());
         let (_, u, _, _, _, _, _, _) =
@@ -1906,6 +1915,6 @@ mod tests {
         let (_, _, date_h, _, _, _, _, _) =
             parse_restore(br#"{"ufvk":"uview1xyz","network":"testnet","birthday":"2022-05-31"}"#)
                 .unwrap();
-        assert_eq!(date_h, BridgeBirthday::Estimate("2022-05-31".into()));
+        assert!(matches!(date_h, NativeBirthday::Date(raw) if raw == "2022-05-31"));
     }
 }
