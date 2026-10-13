@@ -217,7 +217,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         await source.applyBlob(blob);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (!/reorg/i.test(message)) throw error;
+        if (!/reorg/i.test(message)) {
+          if (!isTreeConflictError(message)) ctx.retireFailedSession(source);
+          throw error;
+        }
         // The engine rewinds on a hash mismatch while retaining signed
         // pending payments. The normal scan below fills the replacement chain.
         if (await source.nextHeight() > overlap) throw error;
@@ -773,6 +776,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       throw new WalletError("sync_required", "This cold wallet requires a birthday tree state from its configured transport before scanning.");
     }
     let treeApplied = false;
+    let treeApplyFailed = false;
     // GetTreeState would reset *_next onto already-scanned leaves.
     // Genesis needs no preceding frontier, but still needs roots for pruning.
     if (birthday > 1 && !treesReady && scanned <= birthday && ctx.transport.treeState) {
@@ -780,7 +784,14 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         const fetchState = () => ctx.transport.treeState!(birthday - 1, active);
         const ts = await abortable(wait, () => recovery ? recovery.run(fetchState) : fetchState());
         ctx.assertSource(operation, source);
-        await source.applyTreeState(JSON.stringify(ts));
+        try {
+          await source.applyTreeState(JSON.stringify(ts));
+        } catch (error) {
+          treeApplyFailed = true;
+          const message = error instanceof Error ? error.message : String(error);
+          if (!isTreeConflictError(message)) ctx.retireFailedSession(source);
+          throw error;
+        }
         treeApplied = true;
       } catch (e) {
         operation.assertCurrent();
@@ -788,7 +799,8 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         if (isTreeConflictError(msg)) throw new Error(treeConflictUserMessage(msg));
         wait.throwIfAborted();
         if (frontierRequired) throw new WalletError("transport", "The configured transport could not supply the required birthday tree state.", e);
-        /* scan/history still work; spendReady stays false */
+        if (treeApplyFailed) throw e;
+        /* An optional retrieval failure still permits history-only scanning. */
       }
     }
     let rootsApplied = false;
@@ -820,7 +832,13 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       for (const { proto, startIndex, roots } of fetched) {
         if (!roots.length) continue;
         ctx.assertSource(operation, source);
-        await source.applySubtreeRoots(proto, JSON.stringify({ startIndex, roots }));
+        try {
+          await source.applySubtreeRoots(proto, JSON.stringify({ startIndex, roots }));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!isTreeConflictError(message)) ctx.retireFailedSession(source);
+          throw error;
+        }
         rootsApplied = true;
       }
     }

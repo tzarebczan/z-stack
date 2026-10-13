@@ -314,3 +314,42 @@ test("real WASM refuses omitted and short compact hashes before snapshot mutatio
     }
   }
 });
+
+for (const failure of ["frontier", "subtree-root"] as const) {
+  test(`strict ${failure} decode failure preserves saved wallet and a corrected ordinary retry succeeds`, async t => {
+  assert.ok(existsSync(gen), "build the production WASM engine before this recovery test");
+  const { createWallet } = await import("../src/create-wallet.ts");
+  const { memoryWalletStorage } = await import("../src/storage.ts");
+  const { readSavedSnapshot } = await import("../src/snapshot-storage.ts");
+  let malformed = true;
+  let blocks = 0;
+  const wallet = await createWallet({ network: "regtest", storage: memoryWalletStorage(),
+    requireBirthdayTreeState: true, memoFetch: "on-demand", transparentScan: "off", prewarmProvingKey: false,
+    server: { kind: "custom-only", label: "retry fixture", tip: async () => 2,
+      treeState: async height => ({ height, network: "regtest", hash: "01".repeat(32), saplingTree: malformed && failure === "frontier" ? "zz" : "" }),
+      subtreeRoots: async protocol => malformed && failure === "subtree-root" && protocol === "sapling" ? [{ completingHeight: 1, rootHash: "ff".repeat(32) }] : [],
+      blocks: async () => {
+        blocks++;
+        const bytes = Uint8Array.from([16, 2, 26, 32, ...Array(32).fill(2), 34, 32, ...Array(32).fill(1), 40, 1]);
+        const frame = new Uint8Array(bytes.length + 4);
+        new DataView(frame.buffer).setUint32(0, bytes.length, false);
+        frame.set(bytes, 4);
+        return frame;
+      },
+    } });
+  t.after(() => wallet.close());
+  const initial = await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 2 });
+  const saved = await readSavedSnapshot();
+  assert.ok(saved);
+  await assert.rejects(wallet.sync(), failure === "frontier" ? /required birthday tree state/ : /root|invalid|decode/i);
+  assert.equal(blocks, 0);
+  const afterFailure = await readSavedSnapshot();
+  assert.ok(afterFailure && saved.every((byte, index) => afterFailure[index] === byte) && afterFailure.length === saved.length, "failed frontier changed saved wallet bytes");
+  malformed = false;
+  const restored = await wallet.sync();
+  assert.equal(restored.scannedHeight, 2);
+  assert.equal(restored.unifiedAddress, initial.unifiedAddress);
+  assert.equal(restored.birthdayHeight, 2);
+  assert.equal(blocks, 1);
+});
+}

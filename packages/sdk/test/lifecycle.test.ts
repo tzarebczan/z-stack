@@ -1160,3 +1160,41 @@ test("sync cancellation releases an ignored rebroadcast wait and preserves its e
   await c.dispose();
   await forgetWasmWallet();
 });
+
+test("an overlap apply failure retires the failed engine and ordinary retry reloads saved state", async t => {
+  let failOnce = true;
+  let applies = 0;
+  const { db, counts } = fixture(t, handle => {
+    let poisoned = false;
+    handle.nextHeight = () => 11;
+    handle.birthday = () => 1;
+    handle.treesReady = () => true;
+    handle.recomputePools = () => {};
+    handle.pendingRawTxs = () => "[]";
+    handle.applyCompactBlocksSummary = () => {
+      applies++;
+      if (poisoned) throw new Error("engine remains poisoned");
+      if (failOnce) { failOnce = false; poisoned = true; throw new Error("invalid compact transaction"); }
+      return JSON.stringify({ scanned: 10, notesFound: 0, spendsFound: 0 });
+    };
+  });
+  const protobuf = Uint8Array.from([16, 10, 26, 32, ...Array(32).fill(10), 34, 32, ...Array(32).fill(9)]);
+  const frame = new Uint8Array(protobuf.length + 4);
+  new DataView(frame.buffer).setUint32(0, protobuf.length, false);
+  frame.set(protobuf, 4);
+  const c = createWasmClient({ network: "regtest", autoShield: false, verifyChainTip: true,
+    transparentScan: "off", memoFetch: "on-demand", transport: {
+      kind: "fixture", label: "overlap retry fixture", tip: async () => 10, blocks: async () => frame,
+    } });
+  await c.restore("overlap-fixture", "regtest", 1);
+  const before = structuredClone(db.records);
+  await assert.rejects(c.sync(), /invalid compact transaction/);
+  assert.deepEqual(db.records, before);
+  assert.equal(counts.freed, 1);
+  const result = await c.sync();
+  assert.equal(result.unifiedAddress, "overlap-fixture");
+  assert.equal(result.scannedHeight, 10);
+  assert.equal(applies, 2);
+  await c.dispose();
+  await forgetWasmWallet();
+});

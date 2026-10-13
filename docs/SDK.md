@@ -361,7 +361,9 @@ sync before requesting compact blocks, including chain-tip overlap probes. Rust 
 minus one, validates an optional network, decodes the frontiers, and binds the
 first block's parent hash to that state. Every compact block must carry 32-byte
 hash and parent-hash fields; malformed single blocks and batches refuse before
-scan mutation. A different frontier cannot replace
+scan mutation. Engine apply failures retire the failed in-memory session; an
+ordinary corrected retry hydrates the last saved wallet without resetting it.
+A different frontier cannot replace
 already seeded or scanned trees. Genesis restores need no preceding frontier.
 `subtreeRoots` supports pruning and remains optional. Signed metadata, endpoint
 consent and durable publication checkpoints belong to the application adapter.
