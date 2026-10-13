@@ -942,3 +942,36 @@ for (const phase of ["proof", "reservation", "accepted", "unknown"] as const) {
     await forgetWasmWallet();
   });
 }
+
+for (const expired of ["false", "throw"] as const) {
+  test(`shielding never rechecks a public authorization hook after accepted submission (${expired})`, async (t) => {
+    fixture(t, handle => {
+      handle.transparentAddress = () => undefined;
+      handle.proveShield = handle.proveSend;
+    });
+    let submitted = 0;
+    let lateAuthorizationChecks = 0;
+    let balanceEvents = 0;
+    const c = createWasmClient({ unlockPolicy: "session", network: "regtest", autoShield: false, transport: {
+      kind: "mock", label: "shield-authority-fixture", tip: async () => 10,
+      blocks: async () => new Uint8Array(), utxos: async () => [],
+      submit: async () => { submitted++; return "ab".repeat(32); },
+    } });
+    await c.restore("shield-authority-fixture", "regtest", 1);
+    c.on("balance", () => { balanceEvents++; });
+    const result = await c.shield(100_000, {
+      beforeBroadcast: () => {
+        if (!submitted) return true;
+        lateAuthorizationChecks++;
+        if (expired === "throw") throw new Error("fixture authorization expired");
+        return false;
+      },
+    });
+    assert.equal(result.txid, "ab".repeat(32));
+    assert.equal(submitted, 1);
+    assert.equal(lateAuthorizationChecks, 0);
+    assert.equal(balanceEvents, 1);
+    assert.equal(decode((await readSavedSnapshot())!).pending, true);
+    await forgetWasmWallet();
+  });
+}
