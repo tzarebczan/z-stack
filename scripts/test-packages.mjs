@@ -42,6 +42,9 @@ try {
     const services = await import('@z-stack/sdk/services');
     const lab = await import('@z-stack/sdk/lab');
     assert.equal(typeof sdk.createWallet, 'function');
+    assert.equal(sdk.SDK_TRANSPORT_CAPABILITIES.requiredBirthdayTreeState, true);
+    assert.equal(sdk.SDK_TRANSPORT_CAPABILITIES.cancellation, true);
+    assert.equal(Object.isFrozen(sdk.SDK_TRANSPORT_CAPABILITIES), true);
     assert.equal(sdk.WalletError.fromMessage('propose_transfer: Must scan blocks first').code, 'sync_required');
     assert.equal(sdk.WalletError.fromMessage('invalid recovery phrase: private detail').code, 'invalid_recovery_phrase');
     assert.equal(await services.memoryVaultStore().get('missing'), undefined);

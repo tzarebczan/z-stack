@@ -7,7 +7,7 @@ export function checkSignal(signal?: AbortSignal): void {
   if (signal?.aborted) throw signal.reason ?? aborted();
 }
 
-/** WebCrypto is not interruptible; discard its late result and reject promptly. */
+/** Discard late results and reject promptly even when the provider cannot stop. */
 export function abortable<T>(signal: AbortSignal | undefined, start: () => Promise<T>): Promise<T> {
   checkSignal(signal);
   return new Promise<T>((resolve, reject) => {

@@ -127,7 +127,7 @@ pub(crate) struct TreeLeaf {
     pub position: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct BirthdayTrees {
     height: u32,
@@ -1093,6 +1093,7 @@ impl WebWallet {
             cached_scan_keys: None,
             transparent_scripts: None,
         };
+        w.restore_birthday_hash()?;
         for coverage in [&w.transparent_scan, &w.memo_scan].into_iter().flatten() {
             if coverage.height < w.birthday
                 || coverage.height > w.scanned_height
@@ -2986,37 +2987,75 @@ impl WebWallet {
         Ok(())
     }
 
-    /// Import GetTreeState JSON (`{height,hash,saplingTree,orchardTree,ironwoodTree}`).
+    /// Import the exact birthday-1 GetTreeState. Transport authentication belongs
+    /// to the application; height, network and frontier decoding stay in Rust.
     pub fn apply_tree_state_json(&mut self, json: &str) -> Result<()> {
         self.ensure_scan_healthy()?;
-        let result = self.apply_tree_state_json_inner(json);
+        let bt = self.parse_birthday_trees(json)?;
+        if self.birthday_trees.as_ref() == Some(&bt) {
+            return Ok(());
+        }
+        if self.scanned_height >= self.birthday || self.birthday_trees.is_some() {
+            return Err(EngineError::Message(
+                "birthday tree state cannot replace scanned commitment trees".into(),
+            ));
+        }
+        let result = self.apply_tree_state_inner(bt);
         self.finish_scan_update(result)
     }
 
-    fn apply_tree_state_json_inner(&mut self, json: &str) -> Result<()> {
+    fn parse_birthday_trees(&self, json: &str) -> Result<BirthdayTrees> {
         let v: serde_json::Value = serde_json::from_str(json)
             .map_err(|e| EngineError::Message(format!("tree state json: {e}")))?;
-        let str_field = |k: &str, alt: &str| {
-            v.get(k)
-                .or_else(|| v.get(alt))
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string()
+        let height = v
+            .get("height")
+            .and_then(|x| x.as_u64())
+            .and_then(|h| u32::try_from(h).ok())
+            .ok_or_else(|| EngineError::Message("invalid birthday tree state height".into()))?;
+        if height != self.birthday.saturating_sub(1) {
+            return Err(EngineError::Message(
+                "tree state must precede the wallet birthday".into(),
+            ));
+        }
+        if let Some(network) = v.get("network") {
+            let network = match network.as_str() {
+                Some("main") => Some(Network::Mainnet),
+                Some("test") => Some(Network::Testnet),
+                Some(name) => Network::parse(name),
+                None => None,
+            };
+            if network != Some(self.network) {
+                return Err(EngineError::Message(
+                    "birthday tree state network mismatch".into(),
+                ));
+            }
+        }
+        let str_field = |k: &str, alt: &str| -> Result<String> {
+            match v.get(k).or_else(|| v.get(alt)) {
+                None => Ok(String::new()),
+                Some(value) => value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| EngineError::Message(format!("invalid tree state {k}"))),
+            }
         };
-        let bt = BirthdayTrees {
-            height: v.get("height").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-            hash: str_field("hash", "hash"),
-            sapling: str_field("saplingTree", "sapling_tree"),
-            orchard: str_field("orchardTree", "orchard_tree"),
-            ironwood: str_field("ironwoodTree", "ironwood_tree"),
-        };
+        Ok(BirthdayTrees {
+            height,
+            hash: str_field("hash", "hash")?,
+            sapling: str_field("saplingTree", "sapling_tree")?,
+            orchard: str_field("orchardTree", "orchard_tree")?,
+            ironwood: str_field("ironwoodTree", "ironwood_tree")?,
+        })
+    }
+
+    fn apply_tree_state_inner(&mut self, bt: BirthdayTrees) -> Result<()> {
         self.install_frontiers(&bt)?;
         self.birthday_trees = Some(bt);
         self.trees_ready = true;
         Ok(())
     }
 
-    fn install_frontiers(&mut self, bt: &BirthdayTrees) -> Result<()> {
+    fn birthday_chain_state(bt: &BirthdayTrees) -> Result<ChainState> {
         let ts = TreeState {
             network: String::new(),
             height: u64::from(bt.height),
@@ -3026,9 +3065,45 @@ impl WebWallet {
             orchard_tree: bt.orchard.clone(),
             ironwood_tree: bt.ironwood.clone(),
         };
-        let state: ChainState = ts
-            .to_chain_state()
-            .map_err(|e| EngineError::Message(format!("tree state: {e}")))?;
+        ts.to_chain_state()
+            .map_err(|e| EngineError::Message(format!("tree state: {e}")))
+    }
+
+    fn restore_birthday_hash(&mut self) -> Result<()> {
+        let Some(bt) = &self.birthday_trees else {
+            if self.birthday > 1 && self.scanned_height < self.birthday && self.trees_ready {
+                return Err(EngineError::Message(
+                    "cold snapshot is missing birthday tree state".into(),
+                ));
+            }
+            return Ok(());
+        };
+        if bt.height != self.birthday.saturating_sub(1) {
+            return Err(EngineError::Message(
+                "snapshot birthday tree height mismatch".into(),
+            ));
+        }
+        let state = Self::birthday_chain_state(bt)?;
+        let hash = to_hex(&state.block_hash().0);
+        if self
+            .block_hashes
+            .get(&bt.height)
+            .is_some_and(|stored| stored != &hash)
+        {
+            return Err(EngineError::Message(
+                "snapshot birthday tree hash mismatch".into(),
+            ));
+        }
+        // Older cold snapshots saved the frontier without its hash map entry.
+        // Add only that evidence; leave identities, balances and scan history.
+        if self.scanned_height < self.birthday {
+            self.block_hashes.insert(bt.height, hash);
+        }
+        Ok(())
+    }
+
+    fn install_frontiers(&mut self, bt: &BirthdayTrees) -> Result<()> {
+        let state = Self::birthday_chain_state(bt)?;
         let h = state.block_height();
         let sap = state.final_sapling_tree();
         self.sapling_tree
@@ -3068,6 +3143,10 @@ impl WebWallet {
             self.ironwood_base = iron.tree_size();
             self.ironwood_next = self.ironwood_base;
         }
+        // Bind the first compact block's prev_hash to the decoded frontier's
+        // block hash. TreeState uses display order; ChainState owns conversion.
+        self.block_hashes
+            .insert(bt.height, to_hex(&state.block_hash().0));
         Ok(())
     }
 
@@ -4122,6 +4201,135 @@ mod tests {
         let acct =
             account_from_mnemonic(REGTEST_FAUCET_MNEMONIC, crate::Network::Regtest, 0).unwrap();
         WebWallet::from_account(acct, 1).unwrap()
+    }
+
+    #[test]
+    fn legacy_cold_snapshot_restores_its_frontier_hash_without_resetting_identity() {
+        let acct = account_from_mnemonic(REGTEST_FAUCET_MNEMONIC, Network::Regtest, 0).unwrap();
+        let mut w = WebWallet::from_account(acct, 12).unwrap();
+        w.next_unified_address().unwrap();
+        let tree = serde_json::json!({"height": 11, "hash": format!("01{}", "00".repeat(31)), "network": "regtest"});
+        w.apply_tree_state_json(&tree.to_string()).unwrap();
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+        legacy["blockHashes"] = serde_json::json!({});
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        let mut restored = WebWallet::from_snapshot(&bytes).unwrap();
+        assert_eq!(restored.unified_address, w.unified_address);
+        assert_eq!(restored.next_diversifier, w.next_diversifier);
+        assert_eq!(restored.scanned_height, 11);
+        assert!(restored.trees_ready());
+        let expected = format!("{}01", "00".repeat(31));
+        assert_eq!(restored.hash_at(11), Some(expected.as_str()));
+        let mut wrong = WebWallet::from_snapshot(&bytes).unwrap();
+        assert!(wrong
+            .apply_compact_block(&empty_block(12, vec![3; 32]).encode_to_vec())
+            .is_err());
+        assert_eq!(wrong.scanned_height, 11);
+        let mut parent = vec![0; 32];
+        parent[31] = 1;
+        restored
+            .apply_compact_block(&empty_block(12, parent).encode_to_vec())
+            .unwrap();
+        assert_eq!(restored.scanned_height, 12);
+        legacy["blockHashes"] = serde_json::json!({"11": "03".repeat(32)});
+        assert!(WebWallet::from_snapshot(&serde_json::to_vec(&legacy).unwrap()).is_err());
+        legacy["blockHashes"] = serde_json::json!({});
+        legacy["birthdayTrees"]["height"] = serde_json::json!(10);
+        assert!(WebWallet::from_snapshot(&serde_json::to_vec(&legacy).unwrap()).is_err());
+    }
+
+    #[test]
+    fn malformed_compact_hashes_cannot_bypass_birthday_frontier_or_mutate_batches() {
+        let acct = account_from_mnemonic(REGTEST_FAUCET_MNEMONIC, Network::Regtest, 0).unwrap();
+        let mut wallet = WebWallet::from_account(acct, 12).unwrap();
+        wallet
+            .apply_tree_state_json(
+                &serde_json::json!({"height": 11, "hash": "01".repeat(32), "network": "regtest"})
+                    .to_string(),
+            )
+            .unwrap();
+        let before = wallet.to_snapshot().unwrap();
+        for length in [0, 1, 31, 33] {
+            for parent in [false, true] {
+                let mut block = empty_block(12, vec![1; 32]);
+                if parent {
+                    block.prev_hash = vec![1; length];
+                } else {
+                    block.hash = vec![1; length];
+                }
+                let mut single = WebWallet::from_snapshot(&before).unwrap();
+                assert!(single.apply_compact_block(&block.encode_to_vec()).is_err());
+                assert!(single.to_snapshot().unwrap() == before);
+                for count in [2, 33] {
+                    let mut blocks = Vec::new();
+                    let mut previous = vec![1; 32];
+                    for index in 0..count {
+                        let mut next = empty_block(12 + index, previous);
+                        if index == count - 1 {
+                            if parent {
+                                next.prev_hash = vec![1; length];
+                            } else {
+                                next.hash = vec![1; length];
+                            }
+                        }
+                        previous = next.hash.clone();
+                        blocks.push(next);
+                    }
+                    let mut batch = WebWallet::from_snapshot(&before).unwrap();
+                    assert!(batch
+                        .apply_compact_blocks_blob(&super::super::encode_delimited(blocks))
+                        .is_err());
+                    assert!(batch.to_snapshot().unwrap() == before);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn birthday_frontier_rejects_wrong_metadata_without_changing_wallet() {
+        let acct = account_from_mnemonic(REGTEST_FAUCET_MNEMONIC, Network::Regtest, 0).unwrap();
+        let mut w = WebWallet::from_account(acct, 12).unwrap();
+        let before = w.to_snapshot().unwrap();
+        for json in [
+            serde_json::json!({"height": 10, "hash": "01".repeat(32)}),
+            serde_json::json!({"height": u64::from(u32::MAX) + 12, "hash": "01".repeat(32)}),
+            serde_json::json!({"hash": "01".repeat(32)}),
+            serde_json::json!({"height": 11, "hash": "01".repeat(32), "network": "testnet"}),
+            serde_json::json!({"height": 11, "hash": "01".repeat(32), "network": 2}),
+            serde_json::json!({"height": 11, "hash": "01".repeat(32), "saplingTree": 2}),
+        ] {
+            assert!(w.apply_tree_state_json(&json.to_string()).is_err());
+            assert_eq!(w.to_snapshot().unwrap(), before);
+            assert!(!w.trees_ready());
+        }
+        let valid = serde_json::json!({"height": 11, "hash": format!("01{}", "00".repeat(31)), "network": "regtest"});
+        w.apply_tree_state_json(&valid.to_string()).unwrap();
+        assert!(w.trees_ready());
+        let seeded = w.to_snapshot().unwrap();
+        w.apply_tree_state_json(&valid.to_string()).unwrap();
+        assert_eq!(w.to_snapshot().unwrap(), seeded);
+        let changed =
+            serde_json::json!({"height": 11, "hash": "02".repeat(32), "network": "regtest"});
+        assert!(w.apply_tree_state_json(&changed.to_string()).is_err());
+        assert_eq!(w.to_snapshot().unwrap(), seeded);
+        let mut bad = WebWallet::from_snapshot(&seeded).unwrap();
+        let wrong_parent = empty_block(12, vec![3; 32]);
+        assert!(bad
+            .apply_compact_block(&wrong_parent.encode_to_vec())
+            .is_err());
+        assert_eq!(bad.scanned_height, 11);
+        assert!(bad.notes.is_empty());
+        let mut parent = vec![0; 32];
+        parent[31] = 1;
+        let valid_block = empty_block(12, parent);
+        w.apply_compact_block(&valid_block.encode_to_vec()).unwrap();
+        assert_eq!(w.scanned_height, 12);
+        let scanned = w.to_snapshot().unwrap();
+        w.apply_tree_state_json(&valid.to_string()).unwrap();
+        assert_eq!(w.to_snapshot().unwrap(), scanned);
+        assert!(w.apply_tree_state_json(&changed.to_string()).is_err());
+        assert_eq!(w.to_snapshot().unwrap(), scanned);
     }
 
     #[test]

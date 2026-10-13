@@ -65,3 +65,18 @@ test("cancellation propagates instead of returning a partial list", async () => 
   };
   await assert.rejects(fetchSubtreeRoots(page, 0, controller.signal), /abort/i);
 });
+
+test("subtree pagination stops waiting for an ignored provider signal", async () => {
+  const controller = new AbortController();
+  let started!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const late = new Promise<Array<{ completingHeight: number; rootHash: string }>>(resolve => { release = () => resolve([root(0)]); });
+  const pending = fetchSubtreeRoots(async () => { started(); return late; }, 0, controller.signal);
+  const rejected = assert.rejects(pending, /subtree read cancelled/);
+  await ready;
+  controller.abort(new Error("subtree read cancelled"));
+  try {
+    await Promise.race([rejected, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("subtree read did not cancel")), 500))]);
+  } finally { release(); await pending.catch(() => {}); }
+});

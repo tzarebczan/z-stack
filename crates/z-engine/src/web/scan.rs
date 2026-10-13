@@ -48,6 +48,15 @@ pub struct ScanDelta {
     pub spends_found: u32,
 }
 
+fn validate_compact_hashes(block: &CompactBlock) -> Result<()> {
+    if block.hash.len() != 32 || block.prev_hash.len() != 32 {
+        return Err(EngineError::Message(
+            "compact block hash and prev_hash must be 32 bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl WebWallet {
     fn scan_keys(&mut self) -> Result<std::sync::Arc<ScanKeys>> {
         if let Some(keys) = &self.cached_scan_keys {
@@ -79,6 +88,9 @@ impl WebWallet {
         if blocks.is_empty() {
             return Ok(Vec::new());
         }
+        for block in &blocks {
+            validate_compact_hashes(block)?;
+        }
         // Pool aggregates are rebuilt once after a full sync (notes are the source of truth).
         // Recomputing after every blob clones the note list and dominates catch-up time.
         // Fill missing chain_metadata so we never fall back to sequential scan_block
@@ -101,6 +113,7 @@ impl WebWallet {
         self.ensure_scan_healthy()?;
         let block = CompactBlock::decode(bytes)
             .map_err(|e| EngineError::Message(format!("compact block: {e}")))?;
+        validate_compact_hashes(&block)?;
         self.prepare_scan_window(
             u32::try_from(block.height)
                 .map_err(|_| EngineError::Message("block height overflow".into()))?,
@@ -195,6 +208,7 @@ impl WebWallet {
     }
 
     fn ensure_chain(&mut self, block: &CompactBlock) -> Result<Option<u32>> {
+        validate_compact_hashes(block)?;
         let height = u32::try_from(block.height)
             .map_err(|_| EngineError::Message("block height overflow".into()))?;
         let incoming = to_hex(&block.hash);

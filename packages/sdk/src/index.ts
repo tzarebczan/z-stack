@@ -55,6 +55,7 @@ export type {
 export {
   grpcWebTransport,
   httpLwdTransport,
+  SDK_TRANSPORT_CAPABILITIES,
   // A custom transport's `submit` throws this for the node's explicit refusal.
   BroadcastRejection,
   type BlockTransport,

@@ -694,8 +694,9 @@ export function createWasmClient(
           tip = birthday;
         } else {
           try {
-            tip = await transport.tip();
+            tip = await abortable(operation.signal, () => transport.tip(operation.signal));
           } catch (e) {
+            operation.assertCurrent();
             throw tipFailure(e);
           }
         }
@@ -778,7 +779,7 @@ export function createWasmClient(
         if (restoreOpts?.passkey) passkeyWrite = await runtime.persistPasskeyIfBrowser(words, operation);
         let tip: number;
         try {
-          tip = await transport.tip();
+          tip = await abortable(operation.signal, () => transport.tip(operation.signal));
           operation.assertCurrent();
         } catch (e) {
           operation.assertCurrent();
@@ -837,7 +838,7 @@ export function createWasmClient(
       try {
         let tip: number;
         try {
-          tip = await transport.tip(operation.signal);
+          tip = await abortable(operation.signal, () => transport.tip(operation.signal));
           operation.assertCurrent();
         } catch (e) {
           operation.assertCurrent();
@@ -899,7 +900,7 @@ export function createWasmClient(
       runtime.replacementConsent.set(operation.signal, restoreOpts?.replace === true);
       let tip: number;
       try {
-        tip = await transport.tip();
+        tip = await abortable(operation.signal, () => transport.tip(operation.signal));
         operation.assertCurrent();
       } catch (e) {
         operation.assertCurrent();
@@ -1000,27 +1001,31 @@ export function createWasmClient(
     },
     pending: (limit = 50) => loadHistory(limit, { status: "pending" }),
     tip: async () => {
+      const operation = captureWalletOperation();
       const scanned = currentSession()
         ? await session!.scannedHeight()
         : (await loadIfNeeded())
           ? await session!.scannedHeight()
           : 0;
-      const t = await transport.tip();
+      const t = await abortable(operation.signal, () => transport.tip(operation.signal));
+      operation.assertCurrent();
       return { tip: t, scanned, behind: Math.max(0, t - scanned) } satisfies ChainTip;
     },
     probeSetup: async (net, server, rpc) => {
+      const operation = captureWalletOperation();
       let tip: number | undefined;
       let chain = net;
       let ok = true;
       let error: string | undefined;
       try {
         if (transport.info) {
-          const inf = await transport.info();
+          const inf = await abortable(operation.signal, () => transport.info!(operation.signal));
           if (inf.chain) chain = inf.chain;
           tip = inf.blockHeight;
         }
-        if (tip == null) tip = await transport.tip();
+        if (tip == null) tip = await abortable(operation.signal, () => transport.tip(operation.signal));
       } catch (e) {
+        operation.assertCurrent();
         ok = false;
         error = e instanceof Error ? e.message : String(e);
       }
@@ -1091,7 +1096,7 @@ export function createWasmClient(
           try {
             await refreshIfStale(source, operation);
             assertSource(operation, source);
-            const tip = await transport.tip(operation.signal);
+            const tip = await abortable(operation.signal, () => transport.tip(operation.signal));
             const height = await runtime.resolveBirthday(birthday, tip, 1, { network, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
             assertSource(operation, source);
             if (height > tip) throw new WalletError("birthday_above_tip", "birthday is above chain tip");

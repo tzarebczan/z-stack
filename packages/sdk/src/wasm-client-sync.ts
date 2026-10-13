@@ -30,7 +30,7 @@ import {
 } from "./scan-host";
 import { fetchSubtreeRoots, SUBTREE_ROOTS_PAGE } from "./subtree-roots";
 import { captureWalletOperation } from "./wallet-lifecycle";
-import { readWalletGeneration, walletStorageAvailable } from "./wallet-storage";
+import { abortable, readWalletGeneration, walletStorageAvailable } from "./wallet-storage";
 import type { WasmClientContext } from './wasm-client-context';
 import * as runtime from './wasm-client-runtime';
 
@@ -194,6 +194,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     if (cancelled()) throw new Error("sync cancelled");
     let start = await source.nextHeight();
     const birthday = await source.birthday();
+    // Refuse an unseeded strict wallet before overlap reads can rewind it.
+    if (ctx.opts.requireBirthdayTreeState && birthday > 1 && !await source.treesReady()) {
+      await seedBirthdayTrees(undefined, recovery, signal, true);
+    }
     if (ctx.opts.verifyChainTip && start > birthday) {
       // A height alone cannot establish that a previously mined payment is
       // still mined. Check the overlap even when no new block has arrived.
@@ -213,7 +217,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         await source.applyBlob(blob);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (!/reorg/i.test(message)) throw error;
+        if (!/reorg/i.test(message)) {
+          if (!isTreeConflictError(message)) ctx.retireFailedSession(source);
+          throw error;
+        }
         // The engine rewinds on a hash mismatch while retaining signed
         // pending payments. The normal scan below fills the replacement chain.
         if (await source.nextHeight() > overlap) throw error;
@@ -256,7 +263,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       // compact block has arrived. Completed blank memos are excluded by Rust.
       if (ctx.memoFetch === "auto") await enhanceMemos(true);
       if (cancelled()) throw new Error("sync cancelled");
-      await rebroadcastPending(source);
+      await rebroadcastPending(source, signal);
       await ctx.persist();
       const after = await ctx.snap();
       const scanned = after.scannedHeight ?? await source.scannedHeight();
@@ -292,7 +299,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     if (ctx.transparentScan === "compact" && ctx.transport.transparentBlocks && source.applyTransparentBlocks) {
       const state = await ctx.snap();
       if ((state.transparentScanHeight ?? birthday - 1) === start - 1) {
-        const info = await ctx.transport.info?.().catch(() => undefined);
+        const info = await abortable(signal, async () => ctx.transport.info?.(signal)).catch(() => undefined);
         if (cancelled()) throw new Error("sync cancelled");
         combinedTransparent = !!info?.transparentCompact && supportsTransparentCompact(info.protocolVersion)
           && await source.supportsTransparentBlocks?.() === true;
@@ -475,6 +482,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         signal,
         cancelled,
       });
+    // A required cold frontier must succeed before speculative block retrieval.
+    if (ctx.opts.requireBirthdayTreeState && birthday > 1 && !await source.treesReady()) {
+      await seedBirthdayTrees(undefined, recovery, signal, true);
+    }
     let pipe = openPrefetch(start);
     let reorgRestarts = 0;
     try {
@@ -662,7 +673,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     if (cancelled()) throw new Error("sync cancelled");
     if (ctx.memoFetch === "auto") await enhanceMemos(true);
     if (cancelled()) throw new Error("sync cancelled");
-    await rebroadcastPending(source);
+    await rebroadcastPending(source, signal);
     await ctx.persist();
     const after = await ctx.snap();
     const scanned = after.scannedHeight ?? await source.scannedHeight();
@@ -743,10 +754,12 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     onProto?: (proto: "sapling" | "orchard" | "ironwood") => void,
     recovery?: LightServerRecovery,
     signal?: AbortSignal,
+    frontierOnly = false,
   ): Promise<void> {
     if (!ctx.session) return;
     const source = ctx.session;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
+    const wait = signal ? AbortSignal.any([operation.signal, signal]) : operation.signal;
     const scanned = await source.scannedHeight();
     const birthday = await source.birthday();
     const treesReady = await source.treesReady();
@@ -758,22 +771,41 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     // roots start at. Asking from shard 0 made Zaino walk every root since the
     // pool activated (about a second each), which never finished, so the scan
     // kept every leaf and hashed all of them after the scan (minutes).
+    const frontierRequired = ctx.opts.requireBirthdayTreeState && birthday > 1 && !treesReady;
+    if (frontierRequired && (!ctx.transport.treeState || scanned > birthday)) {
+      throw new WalletError("sync_required", "This cold wallet requires a birthday tree state from its configured transport before scanning.");
+    }
     let treeApplied = false;
+    let treeApplyFailed = false;
     // GetTreeState would reset *_next onto already-scanned leaves.
     // Genesis needs no preceding frontier, but still needs roots for pruning.
     if (birthday > 1 && !treesReady && scanned <= birthday && ctx.transport.treeState) {
       try {
-        const fetchState = () => ctx.transport.treeState!(birthday - 1, signal);
-        const ts = await (recovery ? recovery.run(fetchState) : fetchState());
+        const fetchState = () => ctx.transport.treeState!(birthday - 1, wait);
+        const ts = await abortable(wait, () => recovery ? recovery.run(fetchState) : fetchState());
         ctx.assertSource(operation, source);
-        await source.applyTreeState(JSON.stringify(ts));
+        try {
+          await source.applyTreeState(JSON.stringify(ts));
+        } catch (error) {
+          treeApplyFailed = true;
+          const message = error instanceof Error ? error.message : String(error);
+          if (!isTreeConflictError(message)) ctx.retireFailedSession(source);
+          throw error;
+        }
         treeApplied = true;
       } catch (e) {
         operation.assertCurrent();
         const msg = e instanceof Error ? e.message : String(e);
         if (isTreeConflictError(msg)) throw new Error(treeConflictUserMessage(msg));
-        /* scan/history still work; spendReady stays false */
+        wait.throwIfAborted();
+        if (frontierRequired) throw new WalletError("transport", "The configured transport could not supply the required birthday tree state.", e);
+        if (treeApplyFailed) throw e;
+        /* An optional retrieval failure still permits history-only scanning. */
       }
+    }
+    if (frontierOnly) {
+      ctx.assertSource(operation, source);
+      return;
     }
     let rootsApplied = false;
     if (ctx.transport.subtreeRoots) {
@@ -781,7 +813,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       // transport's full RPC timeout. Keep any completed prefix on a deadline;
       // user cancellation still rejects the whole operation via `signal`.
       const rootsSignal = AbortSignal.any([
-        ...(signal ? [signal] : []), AbortSignal.timeout(treesReady ? 15_000 : 30_000),
+        wait, AbortSignal.timeout(treesReady ? 15_000 : 30_000),
       ]);
       const protos =
         ctx.network === "regtest" ? (["sapling", "orchard"] as const) : (["sapling", "orchard", "ironwood"] as const);
@@ -792,11 +824,11 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
           const startIndex = starts?.[proto] ?? 0;
           onProto?.(proto);
           try {
-            const page = (at: number) => ctx.transport.subtreeRoots!(proto, at, rootsSignal, SUBTREE_ROOTS_PAGE);
-            return { proto, startIndex, roots: await fetchSubtreeRoots(page, startIndex, signal) };
+            const page = (at: number) => abortable(rootsSignal, () => ctx.transport.subtreeRoots!(proto, at, rootsSignal, SUBTREE_ROOTS_PAGE));
+            return { proto, startIndex, roots: await fetchSubtreeRoots(page, startIndex, wait) };
           } catch {
             // Roots only let the scan skip hashing note-free shards.
-            signal?.throwIfAborted();
+            wait.throwIfAborted();
             return { proto, startIndex, roots: [] };
           }
         }),
@@ -804,12 +836,18 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       for (const { proto, startIndex, roots } of fetched) {
         if (!roots.length) continue;
         ctx.assertSource(operation, source);
-        await source.applySubtreeRoots(proto, JSON.stringify({ startIndex, roots }));
+        try {
+          await source.applySubtreeRoots(proto, JSON.stringify({ startIndex, roots }));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!isTreeConflictError(message)) ctx.retireFailedSession(source);
+          throw error;
+        }
         rootsApplied = true;
       }
     }
-    // Store roots and the birthday frontier in one snapshot. Serializing
-    // twice here blocks the scan worker before its first compact block.
+    // Store roots and the birthday frontier together while compact downloads
+    // are in flight. Failed optional root decoding must not save partial state.
     if (rootsApplied || treeApplied) await ctx.persist();
     ctx.assertSource(operation, source);
     ctx.rootsChecked = { source, at: Date.now() };
@@ -825,7 +863,8 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     ctx.assertSource(operation, source);
     signal?.throwIfAborted();
     if (!taddr) return;
-    const rows = await ctx.transport.utxos([taddr], 0, signal);
+    const wait = signal ? AbortSignal.any([operation.signal, signal]) : operation.signal;
+    const rows = await abortable(wait, () => ctx.transport.utxos!([taddr], 0, wait));
     ctx.assertSource(operation, source);
     signal?.throwIfAborted();
     await source.applyUtxos(JSON.stringify({ utxos: rows }));
@@ -840,7 +879,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const source = ctx.session;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     try {
-      const txs = await ctx.transport.mempool();
+      const txs = await abortable(operation.signal, () => ctx.transport.mempool!(operation.signal));
       ctx.assertSource(operation, source);
       if (!txs.length) return;
       await source.applyMempool(JSON.stringify({ txs }));
@@ -858,10 +897,12 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
    * one a refresh interrupted, reaches the network without a second send that
    * would pick other notes and could pay twice.
    */
-  async function rebroadcastPending(source: ScanSession): Promise<void> {
+  async function rebroadcastPending(source: ScanSession, signal?: AbortSignal): Promise<void> {
     if (!ctx.transport.submit) return;
+    const operation = ctx.sessionOperation ?? captureWalletOperation();
+    const wait = signal ? AbortSignal.any([operation.signal, signal]) : operation.signal;
     const run = async () => {
-      const operation = ctx.sessionOperation ?? captureWalletOperation();
+      wait.throwIfAborted();
       try {
         await ctx.refreshIfStale(source, operation);
       } catch (e) {
@@ -875,8 +916,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       for (const hex of raws.slice(0, 8)) {
         if (ctx.stateEpoch !== epoch) return;
         try {
-          await ctx.transport.submit!(hex);
+          await abortable(wait, () => ctx.transport.submit!(hex, wait));
         } catch (e) {
+          wait.throwIfAborted();
+          ctx.assertSource(operation, source);
           if (runtime.isDuplicateBroadcastError(e)) continue;
           const msg = e instanceof Error ? e.message : String(e);
           // No broadcast route or the server is down: try again next sync.
@@ -890,7 +933,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       await run();
       return;
     }
-    await locks.request("z-stack-wallet-spend", { ifAvailable: true }, (lock) => (lock ? run() : undefined));
+    await abortable(wait, () => locks.request("z-stack-wallet-spend", { ifAvailable: true }, (lock) => (lock ? run() : undefined)));
   }
 
   async function refreshPublicData(signal: AbortSignal, manual = false): Promise<void> {
@@ -899,14 +942,20 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     const mode = ctx.memoFetch;
     const deposits = ctx.transparentScan;
-    const current = () => {
-      ctx.assertSource(operation, source);
-      if (mode !== ctx.memoFetch || deposits !== ctx.transparentScan) throw new Error("Privacy settings changed during retrieval");
-    };
     const run = async (kind: "transparent" | "memos") => {
+      const controller = kind === "memos" ? new AbortController() : undefined;
+      if (controller) ctx.memoAbort = controller;
+      const wait = AbortSignal.any([operation.signal, signal, ...(controller ? [controller.signal] : [])]);
+      const current = () => {
+        wait.throwIfAborted();
+        ctx.assertSource(operation, source);
+        if (kind === "memos" ? mode !== ctx.memoFetch : deposits !== ctx.transparentScan) {
+          throw new Error("Privacy settings changed during retrieval");
+        }
+      };
       try {
         const status = await syncPublicData({
-          source, transport: ctx.transport, signal,
+          source, transport: ctx.transport, signal: wait,
           transparent: kind === "transparent", memos: kind === "memos",
           assertCurrent: current, checkpoint: ctx.persist
         });
@@ -915,6 +964,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         if (status.memos) ctx.sharedMemoStatus = status.memos;
       } catch (error) {
         signal.throwIfAborted();
+        operation.signal.throwIfAborted();
+        // Changing memo policy ends only this optional phase. Whole-sync and
+        // wallet cancellation retain priority over that policy change.
+        if (controller?.signal.aborted && mode !== ctx.memoFetch) return;
         current();
         // A stale/forgotten wallet is not a light-server outage. Stop before
         // later phases can issue selective queries for that obsolete state.
@@ -924,10 +977,12 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         if (manual) throw error;
         // Deposit coverage and memo availability are independent. Neither
         // failure permits a selective address/transaction fallback.
+      } finally {
+        if (controller && ctx.memoAbort === controller) ctx.memoAbort = null;
       }
     };
     if (!manual && deposits === "compact") await run("transparent");
-    if (mode === "shared") await run("memos");
+    if (mode === "shared" && ctx.memoFetch === mode) await run("memos");
     if (manual && ctx.sharedMemoStatus === "unsupported") throw new Error("This server does not support shared payment notes yet");
   }
 
@@ -935,26 +990,35 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     if (!ctx.session) return;
     const source = ctx.session;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
+    const wait = signal ? AbortSignal.any([operation.signal, signal]) : operation.signal;
+    wait.throwIfAborted();
     const taddr = ctx.transparentScan !== "compact" && ctx.transport.utxos ? await source.transparentAddress() : undefined;
     ctx.assertSource(operation, source);
+    wait.throwIfAborted();
     // Network reads overlap, but wallet mutations retain the original UTXO →
     // mempool order. A failed UTXO query cannot leave a late mempool apply
     // running after sync has rejected.
     const [utxos, mempool] = await Promise.all([
       taddr && ctx.transport.utxos
         ? recovery
-          ? recovery.run(() => ctx.transport.utxos!([taddr], 0, signal))
-          : ctx.transport.utxos([taddr], 0, signal)
+          ? abortable(wait, () => recovery.run(() => ctx.transport.utxos!([taddr], 0, wait)))
+          : abortable(wait, () => ctx.transport.utxos!([taddr], 0, wait))
         : Promise.resolve(null),
       ctx.transport.mempool
-        ? ctx.transport.mempool().catch((_e) => { console.warn("mempool skipped"); return []; })
+        ? abortable(wait, () => ctx.transport.mempool!(wait)).catch((_e) => {
+          wait.throwIfAborted();
+          console.warn("mempool skipped"); return [];
+        })
         : Promise.resolve([]),
     ]);
     ctx.assertSource(operation, source);
+    wait.throwIfAborted();
     if (utxos) await source.applyUtxos(JSON.stringify({ utxos }));
     ctx.assertSource(operation, source);
+    wait.throwIfAborted();
     if (mempool.length) await source.applyMempool(JSON.stringify({ txs: mempool }));
     ctx.assertSource(operation, source);
+    wait.throwIfAborted();
   }
 
   async function enhanceMemos(automatic = false): Promise<void> {
@@ -996,7 +1060,8 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         let outages = 0;
         const hexes = await Promise.all(
           chunk.map((txid) =>
-            ctx.transport.tx!(txid, signal).catch((error) => {
+            abortable(signal, () => ctx.transport.tx!(txid, signal)).catch((error) => {
+              signal.throwIfAborted();
               if (isTransientLightServerError(error)) outages++;
               return null;
             }),
@@ -1024,6 +1089,12 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       await ctx.persist();
       const pending = legacy ? need.length >= 40 : (await source.memoEnhancementTxids(1))?.length;
       if (current()) ctx.selectiveMemoStatus = pending ? (failed || need.length < (legacy ? 40 : 500) ? "unavailable" : "scanning") : failed ? "unavailable" : "complete";
+    } catch (error) {
+      operation.signal.throwIfAborted();
+      // Changing memo privacy policy stops this optional phase, while owner
+      // or whole-sync cancellation still rejects the enclosing operation.
+      if (controller.signal.aborted && ctx.memoFetch !== mode) return;
+      throw error;
     } finally {
       if (ctx.memoAbort === controller) ctx.memoAbort = null;
     }

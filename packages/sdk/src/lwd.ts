@@ -13,6 +13,12 @@ export const transportFetchOptions = {
   redirect: "error",
 } as const satisfies RequestInit;
 
+/** Check this marker before relying on strict transport policy with older archives. */
+export const SDK_TRANSPORT_CAPABILITIES = Object.freeze({
+  requiredBirthdayTreeState: true,
+  cancellation: true,
+});
+
 export type TransparentUtxo = {
   txid: string;
   index: number;
@@ -37,13 +43,13 @@ export type BlockTransport = {
    * The node's explicit refusal throws a {@link BroadcastRejection}; any
    * other error is an unknown outcome.
    */
-  submit?: (rawHex: string) => Promise<string>;
+  submit?: (rawHex: string, signal?: AbortSignal) => Promise<string>;
   /** Loopback-only. Leaks t-addrs to local Zaino; never call against public LWD. */
   utxos?: (addresses: string[], startHeight?: number, signal?: AbortSignal) => Promise<TransparentUtxo[]>;
   /** Loopback-only regtest mine via Zebra `generate`. */
   mine?: (blocks: number) => Promise<{ mined: number }>;
   /** Loopback-only raw mempool txs (hex). WASM trial-decrypts; no t-addrs sent. */
-  mempool?: () => Promise<Array<{ txid?: string; hex: string }>>;
+  mempool?: (signal?: AbortSignal) => Promise<Array<{ txid?: string; hex: string }>>;
   /**
    * Full transaction hex for memo enhancement. `txid` is the 64-character
    * explorer/display-order hex ID, as returned by wallet history. Built-in
@@ -62,7 +68,7 @@ export type BlockTransport = {
     time?: number;
   }>;
   /** CompactTxStreamer `GetLightdInfo` (chain name / vendor). */
-  info?: () => Promise<{ chain: string; blockHeight?: number; vendor?: string; version?: string; consensusBranchId?: string; protocolVersion?: string; transparentCompact?: boolean }>;
+  info?: (signal?: AbortSignal) => Promise<{ chain: string; blockHeight?: number; vendor?: string; version?: string; consensusBranchId?: string; protocolVersion?: string; transparentCompact?: boolean }>;
   /**
    * Complete shard roots (`GetSubtreeRoots`) from shard `startIndex`, at most
    * `maxEntries` of them (0 = all). A pipe older than `maxEntries` returns
@@ -738,8 +744,8 @@ export function httpLwdTransport(
         }
       : undefined,
     info: isPipe
-      ? async () => {
-          const r = await fetch(`${base}/lwd/info?${qs("")}`, authed({ signal: AbortSignal.timeout(10_000) }));
+      ? async (signal) => {
+          const r = await fetch(`${base}/lwd/info?${qs("")}`, authed({ signal: requestSignal(signal, 10_000) }));
           const j = (await r.json().catch(() => ({}))) as {
             chain?: string;
             blockHeight?: number;
@@ -760,7 +766,7 @@ export function httpLwdTransport(
           };
         }
       : undefined,
-    submit: async (rawHex) => {
+    submit: async (rawHex, signal) => {
       const r = await fetch(
         `${base}/lwd/sendraw?${qs("")}`,
         authed({
@@ -769,7 +775,7 @@ export function httpLwdTransport(
           body: JSON.stringify({ hex: rawHex }),
           // Past the validator RPC's own 120 s read limit; a timeout is an
           // unknown outcome, which keeps the send pending for rebroadcast.
-          signal: AbortSignal.timeout(150_000),
+          signal: requestSignal(signal, 150_000),
         }),
       );
       const j = (await r.json().catch(() => ({}))) as {
@@ -794,12 +800,13 @@ export function httpLwdTransport(
           return j.utxos ?? [];
         }
       : undefined,
-    mempool: async () => {
+    mempool: async (signal) => {
       if (mempoolUnsupported) return [];
       let r: Response;
       try {
-        r = await fetch(`${base}/lwd/mempool?${qs("")}`, authed({ signal: AbortSignal.timeout(30_000) }));
+        r = await fetch(`${base}/lwd/mempool?${qs("")}`, authed({ signal: requestSignal(signal, 30_000) }));
       } catch (error) {
+        signal?.throwIfAborted();
         // Mempool is best effort; a stalled answer must not hold the sync.
         if (!isRequestCancellation(error)) throw error;
         console.warn("mempool timed out");
@@ -1063,8 +1070,8 @@ export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}
       // outage clock; prefetch will abort and restart from the in-memory cursor.
       return compactRange(start, end, false, signal);
     },
-    info: async () => {
-      const msgs = await call("GetLightdInfo", new Uint8Array());
+    info: async (signal) => {
+      const msgs = await call("GetLightdInfo", new Uint8Array(), 15_000, signal);
       if (!msgs[0]) throw new Error("empty GetLightdInfo");
       return {
         protocolVersion: protoString(msgs[0], 18),
@@ -1102,10 +1109,10 @@ export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}
       );
       return msgs.map(decodeSubtreeRoot);
     },
-    submit: async (rawHex) => {
+    submit: async (rawHex, signal) => {
       // Past a validator's own 120 s limit; a timeout is an unknown outcome,
       // which keeps the send pending for rebroadcast.
-      const msgs = await call("SendTransaction", encodeRawTransaction(fromHex(rawHex)), 150_000);
+      const msgs = await call("SendTransaction", encodeRawTransaction(fromHex(rawHex)), 150_000, signal);
       // Only a completed call counts: a SendResponse and an OK status. A cut
       // stream is an unknown outcome, so the send stays pending.
       if (!msgs[0]) throw new Error("SendTransaction returned no response");

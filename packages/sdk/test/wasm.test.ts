@@ -181,3 +181,249 @@ test("wasm wallet: snapshot, history, orchard prove", async (t) => {
   assert.equal((await client.history(10)).length, 0);
   assert.equal(client.hasSpendingSeed(), true);
 });
+
+for (const failure of ["missing", "unavailable", "wrong-height", "wrong-network"] as const) {
+  test(`strict custom transport refuses ${failure} birthday frontier before requesting blocks`, async t => {
+    assert.ok(existsSync(gen), "build the production WASM engine before this boundary test");
+    const { createWallet } = await import("../src/create-wallet.ts");
+    const { memoryWalletStorage } = await import("../src/storage.ts");
+    const storage = memoryWalletStorage();
+    let blocks = 0;
+    let frontierSignal: AbortSignal | undefined;
+    const treeState = failure === "missing" ? undefined : async (height: number, signal?: AbortSignal) => {
+      frontierSignal = signal;
+      assert.equal(height, 1);
+      if (failure === "unavailable") throw new Error("fixture frontier unavailable");
+      return { height: failure === "wrong-height" ? 0 : 1, hash: "01".repeat(32),
+        network: failure === "wrong-network" ? "testnet" : "regtest" };
+    };
+    const wallet = await createWallet({ network: "regtest", storage,
+      requireBirthdayTreeState: true, prewarmProvingKey: false, memoFetch: "on-demand", transparentScan: "off",
+      server: { kind: "custom-only", label: "custom fixture", tip: async () => 2,
+        blocks: async () => { blocks++; throw new Error("unexpected blocks"); }, treeState } });
+    t.after(() => wallet.close());
+    await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 2 });
+    const before = await wallet.getWallet();
+    await assert.rejects(wallet.sync(), /requires a birthday tree state|required birthday tree state/);
+    assert.equal(blocks, 0);
+    if (failure !== "missing") assert.ok(frontierSignal);
+    const after = await wallet.getWallet();
+    assert.equal(after.scannedHeight, before.scannedHeight);
+    assert.equal(after.unifiedAddress, before.unifiedAddress);
+    assert.equal(after.treesReady, false);
+    await wallet.close();
+  });
+}
+
+test("strict custom transport cold restore and incremental sync use only supplied capabilities", async t => {
+  assert.ok(existsSync(gen), "build the production WASM engine before this boundary test");
+  const { createWallet } = await import("../src/create-wallet.ts");
+  const { memoryWalletStorage } = await import("../src/storage.ts");
+  const calls: string[] = [];
+  let tip = 2;
+  const block = (height: number) => {
+    const protobuf = Uint8Array.from([16, height, 26, 32, ...Array(32).fill(height),
+      34, 32, ...Array(32).fill(height - 1), 40, 1]);
+    const frame = new Uint8Array(protobuf.length + 4);
+    new DataView(frame.buffer).setUint32(0, protobuf.length, false);
+    frame.set(protobuf, 4);
+    return frame;
+  };
+  const wallet = await createWallet({ network: "regtest", storage: memoryWalletStorage(),
+    requireBirthdayTreeState: true, verifyChainTip: true, prewarmProvingKey: false,
+    memoFetch: "on-demand", transparentScan: "off", server: {
+      kind: "custom-only", label: "custom fixture",
+      tip: async signal => { assert.ok(signal); calls.push("tip"); return tip; },
+      treeState: async (height, signal) => {
+        assert.ok(signal); calls.push(`tree:${height}`);
+        return { height, hash: "01".repeat(32), network: "regtest" };
+      },
+      blocks: async (start, end, signal) => {
+        assert.ok(signal); calls.push(`blocks:${start}-${end}`);
+        assert.equal(start, end);
+        return block(start);
+      },
+    } });
+  t.after(() => wallet.close());
+  await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 2 });
+  const cold = await wallet.sync();
+  assert.equal(cold.scannedHeight, 2);
+  assert.equal(cold.treesReady, true);
+  assert.deepEqual(calls, ["tip", "tip", "tree:1", "blocks:2-2"]);
+  calls.length = 0;
+  tip = 3;
+  const incremental = await wallet.sync();
+  assert.equal(incremental.scannedHeight, 3);
+  assert.deepEqual(calls, ["tip", "blocks:2-2", "blocks:3-3"]);
+  await wallet.close();
+});
+
+test("real WASM upgrades a legacy cold snapshot and refuses an unrelated first block", async () => {
+  assert.ok(existsSync(gen), "build the production WASM engine before this upgrade test");
+  const { requireBindings } = await import("../src/wasm-client-runtime.ts");
+  const Wallet = requireBindings().WasmWallet;
+  const initial = Wallet.create("regtest", REGTEST_FAUCET_MNEMONIC, 12, 0);
+  let bytes: Uint8Array;
+  try {
+    assert.equal(typeof initial.applyTreeState, "function");
+    initial.applyTreeState?.(JSON.stringify({ height: 11, hash: `01${"00".repeat(31)}`, network: "regtest" }));
+    bytes = initial.toSnapshot();
+  } finally { initial.free?.(); }
+  const legacy = JSON.parse(new TextDecoder().decode(bytes));
+  legacy.blockHashes = {};
+  const restored = Wallet.fromSnapshot(new TextEncoder().encode(JSON.stringify(legacy)));
+  try {
+    const snapshot = JSON.parse(new TextDecoder().decode(restored.toSnapshot()));
+    assert.equal(snapshot.blockHashes["11"], `${"00".repeat(31)}01`);
+    assert.equal(snapshot.unifiedAddress, legacy.unifiedAddress);
+    assert.equal(snapshot.scannedHeight, 11);
+    const protobuf = Uint8Array.from([16, 12, 26, 32, ...Array(32).fill(12),
+      34, 32, ...Array(32).fill(3), 40, 1]);
+    const frame = new Uint8Array(protobuf.length + 4);
+    new DataView(frame.buffer).setUint32(0, protobuf.length, false);
+    frame.set(protobuf, 4);
+    assert.throws(() => restored.applyCompactBlocks(frame));
+    assert.equal(restored.scannedHeight(), 11);
+  } finally { restored.free?.(); }
+});
+
+test("real WASM refuses omitted and short compact hashes before snapshot mutation", async () => {
+  assert.ok(existsSync(gen), "build the production WASM engine before this boundary test");
+  const { requireBindings } = await import("../src/wasm-client-runtime.ts");
+  const Wallet = requireBindings().WasmWallet;
+  const initial = Wallet.create("regtest", REGTEST_FAUCET_MNEMONIC, 12, 0);
+  let seeded: Uint8Array;
+  try {
+    initial.applyTreeState?.(JSON.stringify({ height: 11, hash: "01".repeat(32), network: "regtest" }));
+    seeded = initial.toSnapshot();
+  } finally { initial.free?.(); }
+  for (const length of [0, 1, 31, 33]) {
+    for (const parent of [false, true]) {
+      const hash = Array(parent ? 32 : length).fill(12);
+      const previous = Array(parent ? length : 32).fill(1);
+      const protobuf = Uint8Array.from([16, 12, 26, hash.length, ...hash,
+        34, previous.length, ...previous, 40, 1]);
+      const frame = new Uint8Array(protobuf.length + 4);
+      new DataView(frame.buffer).setUint32(0, protobuf.length, false);
+      frame.set(protobuf, 4);
+      const wallet = Wallet.fromSnapshot(seeded);
+      try {
+        assert.throws(() => wallet.applyCompactBlocks(frame), /hash and prev_hash must be 32 bytes/);
+        assert.deepEqual(wallet.toSnapshot(), seeded);
+      } finally { wallet.free?.(); }
+    }
+  }
+});
+
+for (const failure of ["frontier", "subtree-root"] as const) {
+  test(`strict ${failure} decode failure preserves saved wallet and a corrected ordinary retry succeeds`, async t => {
+  assert.ok(existsSync(gen), "build the production WASM engine before this recovery test");
+  const { createWallet } = await import("../src/create-wallet.ts");
+  const { memoryWalletStorage } = await import("../src/storage.ts");
+  const { readSavedSnapshot } = await import("../src/snapshot-storage.ts");
+  let malformed = true;
+  let blocks = 0;
+  const wallet = await createWallet({ network: "regtest", storage: memoryWalletStorage(),
+    requireBirthdayTreeState: true, memoFetch: "on-demand", transparentScan: "off", prewarmProvingKey: false,
+    server: { kind: "custom-only", label: "retry fixture", tip: async () => 2,
+      treeState: async height => ({ height, network: "regtest", hash: "01".repeat(32), saplingTree: malformed && failure === "frontier" ? "zz" : "" }),
+      subtreeRoots: async protocol => malformed && failure === "subtree-root" && protocol === "sapling" ? [{ completingHeight: 1, rootHash: "ff".repeat(32) }] : [],
+      blocks: async () => {
+        blocks++;
+        const bytes = Uint8Array.from([16, 2, 26, 32, ...Array(32).fill(2), 34, 32, ...Array(32).fill(1), 40, 1]);
+        const frame = new Uint8Array(bytes.length + 4);
+        new DataView(frame.buffer).setUint32(0, bytes.length, false);
+        frame.set(bytes, 4);
+        return frame;
+      },
+    } });
+  t.after(() => wallet.close());
+  const initial = await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 2 });
+  const saved = await readSavedSnapshot();
+  assert.ok(saved);
+  await assert.rejects(wallet.sync(), failure === "frontier" ? /required birthday tree state/ : /root|invalid|decode/i);
+  assert.equal(blocks, failure === "frontier" ? 0 : 1);
+  const afterFailure = await readSavedSnapshot();
+  assert.ok(afterFailure && saved.every((byte, index) => afterFailure[index] === byte) && afterFailure.length === saved.length, "failed frontier changed saved wallet bytes");
+  malformed = false;
+  const restored = await wallet.sync();
+  assert.equal(restored.scannedHeight, 2);
+  assert.equal(restored.unifiedAddress, initial.unifiedAddress);
+  assert.equal(restored.birthdayHeight, 2);
+  assert.equal(blocks, failure === "frontier" ? 1 : 2);
+});
+}
+
+test("scanned legacy reorg restores its birthday anchor before accepting any replacement block", async () => {
+  assert.ok(existsSync(gen), "build the production WASM engine before this reorg test");
+  const { requireBindings } = await import("../src/wasm-client-runtime.ts");
+  const Wallet = requireBindings().WasmWallet;
+  const frame = (height: number, hash: number, previous: number) => {
+    const bytes = Uint8Array.from([16, height, 26, 32, ...Array(32).fill(hash), 34, 32, ...Array(32).fill(previous), 40, 1]);
+    const framed = new Uint8Array(bytes.length + 4);
+    new DataView(framed.buffer).setUint32(0, bytes.length, false);
+    framed.set(bytes, 4);
+    return framed;
+  };
+  const initial = Wallet.create("regtest", REGTEST_FAUCET_MNEMONIC, 12, 0);
+  let legacy: { blockHashes: Record<string, string>; unifiedAddress: string; nextDiversifier: unknown };
+  try {
+    initial.applyTreeState?.(JSON.stringify({ height: 11, hash: "01".repeat(32), network: "regtest" }));
+    initial.applyCompactBlocks(frame(12, 12, 1));
+    initial.applyCompactBlocks(frame(13, 13, 12));
+    initial.applyCompactBlocks(frame(14, 14, 13));
+    legacy = JSON.parse(new TextDecoder().decode(initial.toSnapshot()));
+    delete legacy.blockHashes["11"];
+  } finally { initial.free?.(); }
+  const restored = Wallet.fromSnapshot(new TextEncoder().encode(JSON.stringify(legacy)));
+  try {
+    assert.equal(restored.scannedHeight(), 14);
+    const before = JSON.parse(new TextDecoder().decode(restored.toSnapshot()));
+    assert.equal(before.blockHashes["11"], undefined, "warm restore must not widen retained history");
+    assert.throws(() => restored.applyCompactBlocks(frame(14, 90, 3)), /reorg/);
+    assert.equal(restored.scannedHeight(), 11);
+    const rewound = JSON.parse(new TextDecoder().decode(restored.toSnapshot()));
+    assert.equal(rewound.blockHashes["11"], "01".repeat(32));
+    assert.throws(() => restored.applyCompactBlocks(frame(12, 91, 3)), /reorg/);
+    assert.equal(restored.scannedHeight(), 11);
+    restored.applyCompactBlocks(frame(12, 12, 1));
+    assert.equal(restored.scannedHeight(), 12);
+    const corrected = JSON.parse(new TextDecoder().decode(restored.toSnapshot()));
+    assert.equal(corrected.unifiedAddress, legacy.unifiedAddress);
+    assert.equal(corrected.nextDiversifier, legacy.nextDiversifier);
+  } finally { restored.free?.(); }
+});
+
+test("strict cold scan downloads blocks while optional subtree roots are still pending", async t => {
+  assert.ok(existsSync(gen), "build the production WASM engine before this overlap test");
+  const { createWallet } = await import("../src/create-wallet.ts");
+  const { memoryWalletStorage } = await import("../src/storage.ts");
+  let releaseRoots!: () => void;
+  const rootsAnswer = new Promise<void>(resolve => { releaseRoots = resolve; });
+  let rootsStarted!: () => void;
+  const rootsReady = new Promise<void>(resolve => { rootsStarted = resolve; });
+  let blockStarted!: () => void;
+  const blockReady = new Promise<void>(resolve => { blockStarted = resolve; });
+  let frontierVerified = false;
+  const wallet = await createWallet({ network: "regtest", storage: memoryWalletStorage(),
+    requireBirthdayTreeState: true, memoFetch: "on-demand", transparentScan: "off", prewarmProvingKey: false,
+    server: { kind: "custom-only", label: "overlapped roots fixture", tip: async () => 2,
+      treeState: async height => { frontierVerified = true; return { height, hash: "01".repeat(32), network: "regtest" }; },
+      subtreeRoots: async () => { rootsStarted(); await rootsAnswer; return []; },
+      blocks: async () => {
+        assert.equal(frontierVerified, true);
+        blockStarted();
+        const bytes = Uint8Array.from([16, 2, 26, 32, ...Array(32).fill(2), 34, 32, ...Array(32).fill(1), 40, 1]);
+        const frame = new Uint8Array(bytes.length + 4);
+        new DataView(frame.buffer).setUint32(0, bytes.length, false);
+        frame.set(bytes, 4); return frame;
+      },
+    } });
+  t.after(() => wallet.close());
+  await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 2 });
+  const syncing = wallet.sync();
+  await rootsReady;
+  try {
+    await Promise.race([blockReady, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("optional roots delayed first block request")), 500))]);
+  } finally { releaseRoots(); await syncing; }
+});

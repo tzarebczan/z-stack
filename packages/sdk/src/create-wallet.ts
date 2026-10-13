@@ -83,6 +83,8 @@ export type WalletOptions = {
   deepSync?: boolean;
   /** Compare the last scanned compact block with the server on every sync, including unchanged or shorter tips. Adds one public block request. Default false. */
   verifyChainTip?: boolean;
+  /** Require a birthday-1 frontier before cold scanning. Missing or failed treeState refuses sync; no retrieval fallback. Default false. */
+  requireBirthdayTreeState?: boolean;
   /** Retry transient sync outages for this many milliseconds after the first failure. Default 90,000; zero disables retry. Transport request timeouts are separate. */
   lightServerGraceMs?: number;
   /**
@@ -219,6 +221,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
         ...(lightUrl ? { lightUrl } : {}),
         allowDeepSync: opts.deepSync ?? transport.kind === "lwd-pipe",
         verifyChainTip: opts.verifyChainTip,
+        requireBirthdayTreeState: opts.requireBirthdayTreeState,
         ...(opts.lightServerGraceMs !== undefined ? { lightServerGraceMs: opts.lightServerGraceMs } : {}),
         ...(opts.autoShield !== undefined ? { autoShield: opts.autoShield } : {}),
         ...(opts.prewarmProvingKey !== undefined ? { prewarmProvingKey: opts.prewarmProvingKey } : {}),

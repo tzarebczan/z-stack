@@ -75,7 +75,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       await ctx.refreshIfStale(source, operation);
       // The transaction expires 40 blocks past the scanned height. Far behind the
       // tip, the node would reject it as expired while its inputs stay reserved.
-      const [scanned, tip] = await Promise.all([source.scannedHeight(), ctx.transport.tip()]);
+      const [scanned, tip] = await Promise.all([source.scannedHeight(), abortable(operation.signal, () => ctx.transport.tip(operation.signal))]);
       ctx.assertSource(operation, source);
       if (tip - scanned > runtime.SPEND_MAX_LAG_BLOCKS) {
         throw new WalletError(
@@ -211,7 +211,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       finishDrain?.();
       // Stop waiting on close/replacement without claiming the already-started
       // request was cancelled. The pending transaction and known ID survive.
-      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(hex));
+      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(hex, operation.signal));
       ctx.assertSource(operation, source);
       return txid ?? (/^[0-9a-f]{64}$/i.test(submitted) ? submitted.toLowerCase() : undefined);
     } catch (e) {
@@ -379,7 +379,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       stateAtHardware = ctx.stateEpoch;
       const baseAtHardware = ctx.savedKeySeen;
       if (!ctx.transport.submit) throw new Error("this block transport cannot broadcast (use the loopback /lwd proxy)");
-      const [scanned, tip] = await Promise.all([source.scannedHeight(), ctx.transport.tip()]);
+      const [scanned, tip] = await Promise.all([source.scannedHeight(), abortable(operation.signal, () => ctx.transport.tip(operation.signal))]);
       ctx.assertSource(operation, source);
       if (tip - scanned > runtime.SPEND_MAX_LAG_BLOCKS) {
         throw new WalletError("sync_required", `wallet is ${tip - scanned} blocks behind the chain tip; sync before sending`);
@@ -479,7 +479,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       assertReviewCurrent();
       broadcastStarted = true;
       finishDrain?.();
-      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(done.hex!));
+      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(done.hex!, operation.signal));
       ctx.assertSource(operation, source);
       return done.txid ?? (/^[0-9a-f]{64}$/i.test(submitted) ? submitted.toLowerCase() : undefined);
     } catch (e) {

@@ -1034,7 +1034,7 @@ for (const cancellation of ["abort-aware", "late-response"] as const) {
     await cancelled;
     assert.equal(aborted, true);
     assert.ok(signal);
-    assert.equal(signal, firstSignal);
+    assert.equal(firstSignal?.aborted, true, "both post-scan and shield preflight providers must observe cancellation");
     assert.equal(signal.aborted, true);
     assert.equal(proved, 0);
     assert.equal(submitted, 0);
@@ -1042,3 +1042,161 @@ for (const cancellation of ["abort-aware", "late-response"] as const) {
     await forgetWasmWallet();
   });
 }
+
+for (const method of ["create", "restore", "restoreUfvk"] as const) {
+  test(`${method} passes its owner signal and stops waiting for an uncooperative tip on close`, async t => {
+    const { db, counts } = fixture(t);
+    const started = deferred<AbortSignal | undefined>();
+    const answer = deferred<number>();
+    const c = createWasmClient({ network: "regtest", transport: {
+      kind: "custom", label: "custom-only",
+      tip: async signal => { started.resolve(signal); return answer.promise; },
+      blocks: async () => { throw new Error("unexpected block retrieval"); },
+    } });
+    const pending = method === "create" ? c.create("regtest")
+      : method === "restore" ? c.restore("restore-fixture", "regtest", 1)
+        : c.restoreUfvk("uview-fixture", "regtest", 1);
+    const rejected = assert.rejects(pending, /cancelled|AbortError/);
+    const signal = await started.promise;
+    assert.ok(signal);
+    await c.dispose();
+    await Promise.race([rejected, new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => reject(new Error("cancelled tip wait did not settle")), 500);
+      timer.unref();
+    })]);
+    assert.equal(signal.aborted, true);
+    assert.equal(counts.created, 0);
+    assert.equal(db.records.has("default"), false);
+    answer.resolve(10);
+    await turn();
+    assert.equal(db.records.has("default"), false, "late tip cannot revive closed creation");
+    await forgetWasmWallet();
+  });
+}
+
+for (const phase of ["shield-utxos", "shield-utxos-caller", "selective-memo", "public-info"] as const) {
+  test(`close stops waiting for ignored ${phase} responses and prevents late apply`, async t => {
+    let applies = 0, proved = 0;
+    const { db } = fixture(t, handle => {
+      handle.nextHeight = () => 11;
+      handle.birthday = () => 1;
+      handle.treesReady = () => true;
+      handle.recomputePools = () => {};
+      handle.pendingRawTxs = () => "[]";
+      handle.transparentAddress = () => "fixture-transparent";
+      handle.applyUtxos = () => { applies++; return 0; };
+      handle.applyTransparentBlocks = () => { applies++; return 0; };
+      handle.supportsTransparentBlocks = () => true;
+      handle.memoEnhancementTxids = () => JSON.stringify(["ab".repeat(32)]);
+      handle.enhanceRawTx = () => { applies++; return 0; };
+      handle.proveSend = () => { proved++; throw new Error("unexpected proof"); };
+    });
+    const started = deferred<AbortSignal | undefined>();
+    const response = deferred<never[]>();
+    const c = createWasmClient({ network: "regtest", unlockPolicy: "session", autoShield: false,
+      transparentScan: phase === "public-info" ? "compact" : "off", memoFetch: phase === "selective-memo" ? "auto" : "on-demand",
+      transport: { kind: "fixture", label: "provider-only", tip: async () => 10,
+        blocks: async () => new Uint8Array(),
+        info: phase === "public-info" ? async signal => { started.resolve(signal); await response.promise; return { chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }; } : undefined,
+        transparentBlocks: phase === "public-info" ? async () => { throw new Error("unexpected public block retrieval"); } : undefined,
+        utxos: phase.startsWith("shield-utxos") ? async (_addresses, _start, signal) => { started.resolve(signal); return response.promise; } : undefined,
+        tx: phase === "selective-memo" ? async (_txid, signal) => { started.resolve(signal); await response.promise; return "00"; } : undefined,
+      } });
+    await c.restore("read-provider-fixture", "regtest", 1);
+    const caller = new AbortController();
+    const pending = phase.startsWith("shield-utxos") ? c.shield(100_000, phase === "shield-utxos-caller" ? { signal: caller.signal } : undefined) : c.sync();
+    const rejected = assert.rejects(pending, /cancelled|abort/i);
+    const signal = await started.promise;
+    assert.ok(signal);
+    const before = structuredClone(db.records);
+    const appliesBeforeClose = applies;
+    await c.dispose();
+    try {
+      await Promise.race([rejected, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("closed provider wait did not settle")), 500))]);
+    } finally { response.resolve([]); await pending.catch(() => {}); }
+    await turn();
+    assert.equal(signal.aborted, true);
+    assert.equal(caller.signal.aborted, false, "owner close must abort the provider while caller remains live");
+    assert.equal(applies, appliesBeforeClose);
+    assert.equal(proved, 0);
+    assert.deepEqual(db.records, before);
+    await forgetWasmWallet();
+  });
+}
+
+test("sync cancellation releases an ignored rebroadcast wait and preserves its existing pending bytes", async t => {
+  const raw = "synthetic-existing-pending-transaction";
+  const { db } = fixture(t, (handle, name) => {
+    handle.nextHeight = () => 11;
+    handle.birthday = () => 1;
+    handle.treesReady = () => true;
+    handle.recomputePools = () => {};
+    handle.pendingRawTxs = () => JSON.stringify([raw]);
+    handle.toSnapshot = () => encode({ name, pending: true });
+  });
+  const started = deferred<AbortSignal | undefined>();
+  const response = deferred<string>();
+  const submitted: string[] = [];
+  const c = createWasmClient({ network: "regtest", unlockPolicy: "session", autoShield: false,
+    transparentScan: "off", memoFetch: "on-demand", transport: {
+      kind: "fixture", label: "read-provider-fixture", tip: async () => 10,
+      blocks: async () => new Uint8Array(), submit: async (bytes, signal) => {
+        submitted.push(bytes); started.resolve(signal); return response.promise;
+      },
+    } });
+  await c.restore("pending-fixture", "regtest", 1);
+  const pending = c.sync();
+  const rejected = assert.rejects(pending, /cancelled|abort/i);
+  const signal = await started.promise;
+  assert.ok(signal);
+  const before = structuredClone(db.records);
+  cancelWasmSync();
+  try {
+    await Promise.race([rejected, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("rebroadcast wait did not cancel")), 500))]);
+  } finally { response.resolve("ab".repeat(32)); await pending.catch(() => {}); }
+  await turn();
+  assert.equal(signal.aborted, true);
+  assert.deepEqual(submitted, [raw]);
+  assert.deepEqual(db.records, before);
+  assert.equal(decode((await readSavedSnapshot())!).pending, true);
+  await c.dispose();
+  await forgetWasmWallet();
+});
+
+test("an overlap apply failure retires the failed engine and ordinary retry reloads saved state", async t => {
+  let failOnce = true;
+  let applies = 0;
+  const { db, counts } = fixture(t, handle => {
+    let poisoned = false;
+    handle.nextHeight = () => 11;
+    handle.birthday = () => 1;
+    handle.treesReady = () => true;
+    handle.recomputePools = () => {};
+    handle.pendingRawTxs = () => "[]";
+    handle.applyCompactBlocksSummary = () => {
+      applies++;
+      if (poisoned) throw new Error("engine remains poisoned");
+      if (failOnce) { failOnce = false; poisoned = true; throw new Error("invalid compact transaction"); }
+      return JSON.stringify({ scanned: 10, notesFound: 0, spendsFound: 0 });
+    };
+  });
+  const protobuf = Uint8Array.from([16, 10, 26, 32, ...Array(32).fill(10), 34, 32, ...Array(32).fill(9)]);
+  const frame = new Uint8Array(protobuf.length + 4);
+  new DataView(frame.buffer).setUint32(0, protobuf.length, false);
+  frame.set(protobuf, 4);
+  const c = createWasmClient({ network: "regtest", autoShield: false, verifyChainTip: true,
+    transparentScan: "off", memoFetch: "on-demand", transport: {
+      kind: "fixture", label: "overlap retry fixture", tip: async () => 10, blocks: async () => frame,
+    } });
+  await c.restore("overlap-fixture", "regtest", 1);
+  const before = structuredClone(db.records);
+  await assert.rejects(c.sync(), /invalid compact transaction/);
+  assert.deepEqual(db.records, before);
+  assert.equal(counts.freed, 1);
+  const result = await c.sync();
+  assert.equal(result.unifiedAddress, "overlap-fixture");
+  assert.equal(result.scannedHeight, 10);
+  assert.equal(applies, 2);
+  await c.dispose();
+  await forgetWasmWallet();
+});

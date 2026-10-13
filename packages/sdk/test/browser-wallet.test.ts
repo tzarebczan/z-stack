@@ -47,6 +47,7 @@ function fixture(t: TestContext) {
       },
       recomputePools() {},
       birthday: () => state.birthday ?? 8,
+      treesReady: () => false,
       pendingRawTxs: () => JSON.stringify(state.pending ? ["synthetic-transaction"] : []),
       rescanFrom(height: number) {
         state.birthday = height; state.scanned = height - 1;
@@ -126,6 +127,20 @@ test("chain verification fails closed on unavailable overlap blocks", async t =>
   const wallet = await f.open({ verifyChainTip: true });
   await wallet.create({ birthday: 8 });
   await assert.rejects(wallet.sync());
+});
+
+test("strict missing frontier refuses before overlap retrieval or wallet rewind", async t => {
+  const f = fixture(t);
+  const ranges: number[][] = [];
+  const wallet = await f.open({ verifyChainTip: true, requireBirthdayTreeState: true, server: {
+    kind: "fixture", label: "offline", tip: async () => 9,
+    blocks: async (start, end) => { ranges.push([start, end]); return probeBlock(end); },
+  } });
+  await wallet.create({ birthday: 8 });
+  const before = await wallet.getWallet();
+  await assert.rejects(wallet.sync(), /requires a birthday tree state/);
+  assert.deepEqual(ranges, []);
+  assert.equal((await wallet.getWallet()).scannedHeight, before.scannedHeight);
 });
 
 test("chain probes reject wrong heights, missing hashes and extra blocks", () => {
