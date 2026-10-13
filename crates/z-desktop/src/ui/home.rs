@@ -3666,7 +3666,7 @@ impl HomeView {
         let height_raw = self.field_text(&self.birthday, cx);
         let date_raw = self.field_text(&self.birthday_date, cx);
         let raw = self.birthday_mode.selected(&height_raw, &date_raw);
-        let parsed = parse_birthday_input_for_network(&raw, tip, self.network).ok();
+        let parsed = parse_birthday_input_for_network(raw, tip, self.network).ok();
         let eta = parsed.map(|b| {
             let fast = uses_fast_sync(&self.field_text(&self.light, cx));
             SyncEta::from_span(b, tip, fast)
