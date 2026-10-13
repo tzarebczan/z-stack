@@ -11,8 +11,10 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use transparent_events::TransparentEvent;
+use transparent_wallet::store::{CachedRun, RunCursor};
 use transparent_wallet::{client::Table, *};
 
+pub(super) const JOURNAL_VERSION: u32 = 2;
 const MAX_ENTRIES: u64 = 16_384;
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_OPERATION_BYTES: usize = 8 * 1024 * 1024;
@@ -45,18 +47,18 @@ impl Event {
     }
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Pending {
     id: Option<u64>,
     shard_id: u64,
     revision: String,
     script: Vec<u8>,
-    first_page: u32,
-    page_count: u32,
-    inline: Vec<Vec<u8>>,
-    next: u32,
+    child: u8,
+    row: u32,
+    older_runs: Option<u8>,
+    carried: Vec<Vec<u8>>,
+    fragments: Vec<Vec<u8>>,
     attempts: u32,
-    validated: u32,
-    boundary: Option<(u32, Vec<u8>)>,
     target: Option<Anchor>,
 }
 impl From<PendingPages> for Pending {
@@ -66,13 +68,12 @@ impl From<PendingPages> for Pending {
             shard_id: p.shard_id,
             revision: p.revision_digest,
             script: p.script,
-            first_page: p.first_page,
-            page_count: p.page_count,
-            inline: p.inline.into_iter().map(|e| e.to_bytes()).collect(),
-            next: p.next_ordinal,
+            child: p.cursor.child,
+            row: p.cursor.row,
+            older_runs: p.cursor.older_runs,
+            carried: p.carried.into_iter().map(|e| e.to_bytes()).collect(),
+            fragments: p.fragments,
             attempts: p.attempts,
-            validated: p.validated_events,
-            boundary: p.boundary.map(|b| (b.event_bytes, b.last_event.to_bytes())),
             target: p.target_anchor,
         }
     }
@@ -85,30 +86,63 @@ impl Pending {
             shard_id: self.shard_id,
             revision_digest: self.revision,
             script: self.script,
-            first_page: self.first_page,
-            page_count: self.page_count,
-            inline: self
-                .inline
+            cursor: RunCursor {
+                child: self.child,
+                row: self.row,
+                older_runs: self.older_runs,
+            },
+            carried: self
+                .carried
                 .into_iter()
                 .map(decode)
                 .collect::<std::result::Result<_, _>>()?,
-            next_ordinal: self.next,
+            fragments: self.fragments,
             attempts: self.attempts,
-            validated_events: self.validated,
-            boundary: self
-                .boundary
-                .map(|(event_bytes, b)| {
-                    decode(b).map(|last_event| transparent_wallet::store::PageBoundary {
-                        event_bytes,
-                        last_event,
-                    })
-                })
-                .transpose()?,
             target_anchor: self.target,
         })
     }
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Run {
+    child_digest: String,
+    script: Vec<u8>,
+    shard_id: u64,
+    events: Vec<Vec<u8>>,
+    older: Option<String>,
+}
+impl From<CachedRun> for Run {
+    fn from(run: CachedRun) -> Self {
+        Self {
+            child_digest: run.child_digest,
+            script: run.script,
+            shard_id: run.shard_id,
+            events: run
+                .events
+                .into_iter()
+                .map(|event| event.to_bytes())
+                .collect(),
+            older: run.older,
+        }
+    }
+}
+impl Run {
+    fn decode(self) -> std::result::Result<CachedRun, StoreError> {
+        Ok(CachedRun {
+            child_digest: self.child_digest,
+            script: self.script,
+            shard_id: self.shard_id,
+            events: self
+                .events
+                .into_iter()
+                .map(|bytes| TransparentEvent::from_bytes(&bytes).map_err(|_| corrupt()))
+                .collect::<std::result::Result<_, _>>()?,
+            older: self.older,
+        })
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Shard {
     source: Option<Anchor>,
     id: u64,
@@ -121,6 +155,8 @@ struct Shard {
     scripts: Vec<Vec<u8>>,
     pending: Vec<Pending>,
     complete: Vec<u64>,
+    cached_runs: Vec<Run>,
+    failed_entries: Vec<Vec<u8>>,
 }
 impl From<ShardCommit> for Shard {
     fn from(c: ShardCommit) -> Self {
@@ -136,6 +172,8 @@ impl From<ShardCommit> for Shard {
             scripts: c.covered_scripts,
             pending: c.pending_upsert.into_iter().map(Pending::from).collect(),
             complete: c.pending_complete,
+            cached_runs: c.cached_runs.into_iter().map(Run::from).collect(),
+            failed_entries: c.failed_entries,
         }
     }
 }
@@ -161,6 +199,12 @@ impl Shard {
                 .map(Pending::decode)
                 .collect::<std::result::Result<_, _>>()?,
             pending_complete: self.complete,
+            cached_runs: self
+                .cached_runs
+                .into_iter()
+                .map(Run::decode)
+                .collect::<std::result::Result<_, _>>()?,
+            failed_entries: self.failed_entries,
         })
     }
 }
@@ -174,7 +218,8 @@ enum Operation {
     Rollback(Anchor, String),
     NativeRewind(Anchor),
     Promote(u64, String),
-    Setup(String, String, bool, u32, SetupBlob),
+    Setup(String, String, String, u32, SetupBlob),
+    DropSetup(String, String, String, u32),
     Filter(String, String, bool, Vec<u8>),
     Report(PirDiscoveryReport, NativeScope),
     Enroll(NativeScope),
@@ -203,20 +248,25 @@ impl Replay {
                 self.memory.promote_provisional(i, &r)?;
                 0
             }
-            Operation::Setup(set_digest, revision_digest, directory, segment, b) => {
+            Operation::Setup(set_digest, revision_digest, table, segment, b) => {
                 self.memory.put_setup(
                     &SetupKey {
                         set_digest,
                         revision_digest,
-                        table: if directory {
-                            Table::Directory
-                        } else {
-                            Table::Pages
-                        },
+                        table: Table::parse(&table).ok_or_else(corrupt)?,
                         segment,
                     },
                     &b,
                 )?;
+                0
+            }
+            Operation::DropSetup(set_digest, revision_digest, table, segment) => {
+                self.memory.drop_setup(&SetupKey {
+                    set_digest,
+                    revision_digest,
+                    table: Table::parse(&table).ok_or_else(corrupt)?,
+                    segment,
+                })?;
                 0
             }
             Operation::Filter(r, h, s, b) => {
@@ -247,6 +297,52 @@ fn corrupt() -> StoreError {
 }
 fn io(_: rusqlite::Error) -> StoreError {
     StoreError::Io("native_pir_database_failed".into())
+}
+pub(super) fn ensure_compatible_schema(
+    conn: &rusqlite::Connection,
+) -> std::result::Result<(), StoreError> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_schema')",
+        [], |row| row.get(0),
+    ).map_err(io)?;
+    if exists {
+        let schema: (u64, Option<u32>) = conn
+            .query_row(
+                "SELECT COUNT(*),MIN(version) FROM ext_coffer_pir_schema",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(io)?;
+        match schema {
+            (1, Some(1)) => return Err(StoreError::Io("native_pir_migration_required".into())),
+            (1, Some(JOURNAL_VERSION)) => {}
+            _ => return Err(corrupt()),
+        }
+    } else {
+        let journal: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('ext_coffer_pir_journal','ext_coffer_pir_head'))",
+            [], |row| row.get(0),
+        ).map_err(io)?;
+        if journal {
+            return Err(corrupt());
+        }
+        let recovery: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='ext_coffer_pir_recovery_v1')",
+            [], |row| row.get(0),
+        ).map_err(io)?;
+        if recovery {
+            // Offline setup creates Pending before the first discovery journal.
+            // A receipt or an incomplete marker is never a fresh initialization.
+            let marker: (u64, u64) = conn.query_row(
+                "SELECT COUNT(*),coalesce(sum(id=1 AND blocked=1 AND receipt IS NULL),0) FROM ext_coffer_pir_recovery_v1",
+                [], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).map_err(io)?;
+            if marker != (1, 1) {
+                return Err(corrupt());
+            }
+        }
+    }
+    Ok(())
 }
 impl From<rusqlite::Error> for JournalError {
     fn from(_: rusqlite::Error) -> Self {
@@ -292,6 +388,13 @@ impl<'a> NativePirStore<'a> {
             .map_err(|_| StoreError::Io("native_pir_cancelled".into()))?;
         let database_lease = database_lease::shared(&wallet.paths.data_db)
             .map_err(|_| StoreError::Io("native_pir_database_busy".into()))?;
+        let existing = rusqlite::Connection::open_with_flags(
+            &wallet.paths.data_db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(io)?;
+        ensure_compatible_schema(&existing)?;
+        drop(existing);
         // Initialize/migrate the native wallet before introducing extension schema.
         drop(
             (if recovery_cancel.is_some() {
@@ -310,14 +413,15 @@ impl<'a> NativePirStore<'a> {
         conn.busy_timeout(Duration::from_secs(5)).map_err(io)?;
         conn.pragma_update(None, "foreign_keys", true).map_err(io)?;
         let tx = conn.transaction().map_err(io)?;
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS ext_coffer_pir_schema (version INTEGER PRIMARY KEY CHECK(version=1)); CREATE TABLE IF NOT EXISTS ext_coffer_pir_journal (id INTEGER PRIMARY KEY, payload BLOB NOT NULL); CREATE TABLE IF NOT EXISTS ext_coffer_pir_head (id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL, bytes INTEGER NOT NULL, digest TEXT NOT NULL);").map_err(io)?;
+        ensure_compatible_schema(&tx)?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS ext_coffer_pir_schema (version INTEGER PRIMARY KEY CHECK(version=2)); CREATE TABLE IF NOT EXISTS ext_coffer_pir_journal (id INTEGER PRIMARY KEY, payload BLOB NOT NULL); CREATE TABLE IF NOT EXISTS ext_coffer_pir_head (id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL, bytes INTEGER NOT NULL, digest TEXT NOT NULL);").map_err(io)?;
         let version: Option<u32> = tx
             .query_row("SELECT version FROM ext_coffer_pir_schema", [], |r| {
                 r.get(0)
             })
             .optional()
             .map_err(io)?;
-        if version.is_some_and(|v| v != 1) {
+        if version.is_some_and(|v| v != JOURNAL_VERSION) {
             return Err(corrupt());
         }
         if version.is_none() {
@@ -329,7 +433,7 @@ impl<'a> NativePirStore<'a> {
             if existing != 0 {
                 return Err(corrupt());
             }
-            tx.execute("INSERT INTO ext_coffer_pir_schema(version) VALUES(1)", [])
+            tx.execute("INSERT INTO ext_coffer_pir_schema(version) VALUES(2)", [])
                 .map_err(io)?;
             tx.execute(
                 "INSERT INTO ext_coffer_pir_head(id,generation,bytes,digest) VALUES(1,0,0,'')",
@@ -606,6 +710,13 @@ impl WalletStore for NativePirStore<'_> {
     fn pending_limit(&self) -> usize {
         self.state.memory.pending_limit()
     }
+    fn cached_run(
+        &self,
+        child_digest: &str,
+        script: &[u8],
+    ) -> std::result::Result<Option<CachedRun>, StoreError> {
+        self.state.memory.cached_run(child_digest, script)
+    }
     fn setup(&self, k: &SetupKey) -> std::result::Result<Option<SetupBlob>, StoreError> {
         self.state.memory.setup(k)
     }
@@ -613,9 +724,18 @@ impl WalletStore for NativePirStore<'_> {
         self.write(Operation::Setup(
             k.set_digest.clone(),
             k.revision_digest.clone(),
-            k.table == Table::Directory,
+            k.table.name(),
             k.segment,
             b.clone(),
+        ))
+        .map(|_| ())
+    }
+    fn drop_setup(&mut self, k: &SetupKey) -> std::result::Result<(), StoreError> {
+        self.write(Operation::DropSetup(
+            k.set_digest.clone(),
+            k.revision_digest.clone(),
+            k.table.name(),
+            k.segment,
         ))
         .map(|_| ())
     }
@@ -634,6 +754,9 @@ impl WalletStore for NativePirStore<'_> {
     }
     fn last_commit(&self) -> std::result::Result<u64, StoreError> {
         self.state.memory.last_commit()
+    }
+    fn entry_failures(&self, shard_id: u64, script: &[u8]) -> std::result::Result<u32, StoreError> {
+        self.state.memory.entry_failures(shard_id, script)
     }
 }
 
@@ -672,6 +795,83 @@ mod tests {
             keep.borrow_mut().push(dir);
             store
         });
+    }
+    #[test]
+    fn run_cursor_fragments_cache_and_failure_counts_survive_reopen() {
+        let (_dir, wallet) = fixture();
+        let mut store = NativePirStore::open(&wallet, &LIVE).unwrap();
+        store.bind_set(&testing::identity()).unwrap();
+        let mut pending = testing::pending(4, "r1");
+        pending.cursor.older_runs = Some(2);
+        pending.fragments = vec![vec![1, 2, 3], vec![4, 5]];
+        pending.attempts = 2;
+        pending.target_anchor = Some(Anchor {
+            height: 99,
+            hash: "h99".into(),
+        });
+        let run = testing::cached_run("child-identity", 4, &[10, 20]);
+        let mut commit = testing::commit(1, "r1", false, (0, 99), vec![], vec![]);
+        commit.pending_upsert = vec![pending.clone()];
+        commit.cached_runs = vec![run.clone()];
+        commit.failed_entries = vec![testing::script(5)];
+        store.commit_shard(commit).unwrap();
+        pending.id = store.pending().unwrap()[0].id;
+        let head = store.journal_head();
+        drop(store);
+        let mut store = NativePirStore::open(&wallet, &LIVE).unwrap();
+        assert_eq!(store.pending().unwrap(), vec![pending]);
+        assert_eq!(
+            store
+                .cached_run("child-identity", &testing::script(4))
+                .unwrap(),
+            Some(run.clone())
+        );
+        assert_eq!(store.entry_failures(1, &testing::script(5)).unwrap(), 1);
+        assert_eq!(store.journal_head(), head);
+        store
+            .rollback_above(
+                &Anchor {
+                    height: 0,
+                    hash: "h0".into(),
+                },
+                "fixture fork",
+            )
+            .unwrap();
+        drop(store);
+        let store = NativePirStore::open(&wallet, &LIVE).unwrap();
+        assert_eq!(store.entry_failures(1, &testing::script(5)).unwrap(), 1);
+        assert_eq!(
+            store
+                .cached_run("child-identity", &testing::script(4))
+                .unwrap(),
+            Some(run)
+        );
+    }
+    #[test]
+    fn setup_children_and_invalidation_survive_reopen() {
+        let (_dir, wallet) = fixture();
+        let key = |child| SetupKey {
+            set_digest: "set".into(),
+            revision_digest: "revision".into(),
+            table: Table::Pages(child),
+            segment: 0,
+        };
+        let blob = |child| SetupBlob {
+            public_params_base64: format!("child-{child}"),
+            public_params_sha256: format!("digest-{child}"),
+        };
+        let mut store = NativePirStore::open(&wallet, &LIVE).unwrap();
+        store.put_setup(&key(0), &blob(0)).unwrap();
+        store.put_setup(&key(31), &blob(31)).unwrap();
+        drop(store);
+        let mut store = NativePirStore::open(&wallet, &LIVE).unwrap();
+        assert_eq!(store.setup(&key(0)).unwrap(), Some(blob(0)));
+        assert_eq!(store.setup(&key(31)).unwrap(), Some(blob(31)));
+        store.drop_setup(&key(31)).unwrap();
+        drop(store);
+        let store = NativePirStore::open(&wallet, &LIVE).unwrap();
+        assert_eq!(store.setup(&key(0)).unwrap(), Some(blob(0)));
+        assert_eq!(store.setup(&key(31)).unwrap(), None);
     }
     #[test]
     fn durable_reopen_rollback_and_contradiction_preserve_native_balance() {

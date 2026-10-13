@@ -179,13 +179,22 @@ Native selective shard scanning uses public `zakura-client-backend::data_api::ll
 ## Native PIR qualification
 
 Optional `z-engine/native-pir` pins [wallet-pir](https://github.com/valargroup/wallet-pir)
-revision `bec1f41326cf98261d8df7a16ffa4b4686b48231`. Its transparent-wallet,
+revision `c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2`. Its transparent-wallet,
 transparent-events and transparent-filter crates define PIR, ledger and store
 semantics; the [original MIT license](../licenses/upstream/wallet-pir-LICENSE)
-is retained. Its transitive ipir-sp tag is `v0.1.0-rc.6` (locked commit
-`1f2aec65`). No upstream source is patched. The narrowly scoped
+is retained. This pin includes the content-failure and query-reaction repairs
+through `17a5e6cc0a10063d87da7e8c6217d4bf6f13e7ce`. Its transitive registry
+dependencies include `ipir-sp =0.1.0-rc.7` and `reinspiring =0.1.3-rc.1`.
+No upstream source is patched. The narrowly scoped
 `valar-spiral-rs` dev/test profile disables overflow checks for its intentionally
 wrapping Barrett reduction, matching the pinned upstream profile.
+
+The protocol accepts `transparent-shard-v12`, `/v2` routes, and the
+`decoupled-2k-8k` and `decoupled-32k-32k` geometries. `PirTable::name()`
+returns the wire table name, `directory` or `pages-<j>` for child 0 through 31.
+`PirTable::kind()` returns the parameter kind, `directory` or `pages`.
+The caller's transport must preserve that child distinction for queries and
+setup cache entries. The native feature does not provide a browser transport.
 
 `NativeWallet::sync_regtest_pir` is a Rust-only, bounded qualification API.
 The caller supplies separate public filters/private transport and a regtest
@@ -210,6 +219,24 @@ refuse changed native scope/scanner state until another independently anchored
 sync reconciles it. Every committed journal mutation after a final report
 invalidates the current completion; a failed later attempt cannot restore it.
 Journal replay and its head use one read snapshot.
+Journal version 2 stores the complete run cursor, carried events, checked
+fragments, immutable run cache, and content-failure counts. Setup entries bind
+the page child. A setup mismatch durably removes only its matching cached setup.
+Content failure returns incomplete `content-failed` status; failure counts survive
+successful retries, new revisions, rollback, and reopening.
+
+Version 1 journals return `native_pir_migration_required` before new discovery,
+recovery replay, or receipt authorization. The SDK preserves the old journal,
+head, canonical receipt, native wallet data, and unresolved intents. It does not
+convert old page ordinals to run cursors, clear the journal, or recreate the
+wallet. A compatible migration or separately accepted recovery of the existing
+wallet remains required. Fresh disposable wallets can use version 2. Historical
+funded qualifications at the previous pin do not qualify this dependency change.
+Missing schema metadata also refuses an existing journal, head, or finalized
+receipt. Initial offline setup can create a Pending marker before its journal;
+only a single blocked marker with no receipt permits that initialization.
+Schema metadata requires exactly one version row; extra rows refuse receipt
+authorization and discovery without changing the wallet.
 After reading bounded publication metadata, sync captures native scope and scanner
 state in one read transaction. It checks all retained native hashes within the
 independently accepted prefix, including fully/max scanned frontiers. A known

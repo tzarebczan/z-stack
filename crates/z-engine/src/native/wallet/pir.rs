@@ -496,7 +496,16 @@ impl<T: ShardTransport> ShardTransport for CancelTransport<'_, T> {
     }
 }
 impl NativeWallet {
+    fn ensure_pir_journal_compatible(&self) -> Result<()> {
+        let conn = rusqlite::Connection::open_with_flags(
+            &self.paths.data_db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|_| failed("native_pir_database_failed"))?;
+        store::ensure_compatible_schema(&conn).map_err(store_failed)
+    }
     fn open_pir_db(&self, cancel: Option<&RecoveryCancellation>) -> Result<Db> {
+        self.ensure_pir_journal_compatible()?;
         match cancel {
             Some(cancel) => cancel.transaction(|| self.open_recovery_db()),
             None => self.open_db(),
@@ -531,6 +540,7 @@ impl NativeWallet {
         }
         check(cancel).map_err(|_| failed("native_pir_cancelled"))?;
         let _database_lease = database_lease::shared(&self.paths.data_db)?;
+        self.ensure_pir_journal_compatible()?;
         let mut filters = CancelFilters {
             inner: filters,
             cancel,
@@ -605,6 +615,7 @@ impl NativeWallet {
                 IncompleteReason::Overloaded { .. } => "overloaded",
                 IncompleteReason::ChainUnknown { .. } => "chain-unknown",
                 IncompleteReason::DiscoveryUnbounded => "discovery-unbounded",
+                IncompleteReason::ContentFailed => "content-failed",
                 IncompleteReason::PublicationBehind { .. } => "publication-behind",
                 IncompleteReason::UnresolvedSpends => "unresolved-spends",
             }
