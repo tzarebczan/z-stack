@@ -348,6 +348,136 @@ fn code<T>(result: Result<T>, expected: &str) {
     assert!(matches!(result,Err(EngineError::Message(ref message)) if message == expected));
 }
 
+fn unbound_setup(root: &Path) {
+    assert!(!root.join("seed.enc").exists());
+    assert!(!root.join("native-source-setup.json").exists());
+    assert!(!root.join("data.sqlite").exists());
+    assert!(!root.join("wallet.json").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_above_tip_create_can_correct_height_without_stranding_new_entropy() {
+    let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 200).await;
+    let root = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        NativeWallet::create_with_source(root.path(), &fixture.source, Some(201), auth(), 0).await,
+        Err(EngineError::BirthdayAboveTip {
+            birthday: 201,
+            tip: 200
+        })
+    ));
+    unbound_setup(root.path());
+    let (_, created) =
+        NativeWallet::create_with_source(root.path(), &fixture.source, Some(100), auth(), 0)
+            .await
+            .unwrap();
+    assert_eq!(created.birthday_height, 100);
+    assert!(
+        SeedStore::new(root.path())
+            .load(auth().passphrase.as_deref(), false)
+            .unwrap()
+            .expose_secret()
+            == &created.mnemonic
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_deep_create_can_correct_height_without_stranding_new_entropy() {
+    assert_ne!(
+        std::env::var("Z_STACK_ALLOW_DEEP_SYNC").ok().as_deref(),
+        Some("1")
+    );
+    let tip = MAX_MEM_SYNC_BLOCKS + 201;
+    let fixture = Fixture::new(ZNetwork::Regtest, "regtest", u64::from(tip)).await;
+    let root = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        NativeWallet::create_with_source(root.path(), &fixture.source, Some(100), auth(), 0).await,
+        Err(EngineError::DeepSyncRejected { .. })
+    ));
+    unbound_setup(root.path());
+    let (_, created) =
+        NativeWallet::create_with_source(root.path(), &fixture.source, Some(tip - 1), auth(), 0)
+            .await
+            .unwrap();
+    assert_eq!(created.birthday_height, tip - 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_above_tip_restore_can_correct_height_without_stranding_seed() {
+    let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 200).await;
+    let root = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        NativeWallet::restore_with_source(
+            root.path(),
+            PUBLIC_SEED,
+            &fixture.source,
+            201,
+            auth(),
+            0
+        )
+        .await,
+        Err(EngineError::BirthdayAboveTip {
+            birthday: 201,
+            tip: 200
+        })
+    ));
+    unbound_setup(root.path());
+    let (wallet, _) = NativeWallet::restore_with_source(
+        root.path(),
+        PUBLIC_SEED,
+        &fixture.source,
+        100,
+        auth(),
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(wallet.birthday_height(), 100);
+    assert!(
+        SeedStore::new(root.path())
+            .load(auth().passphrase.as_deref(), false)
+            .unwrap()
+            .expose_secret()
+            == PUBLIC_SEED
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_chain_refusal_does_not_bind_height_or_store_seed() {
+    let fixture = Fixture::new(ZNetwork::Mainnet, "regtest", 419_201).await;
+    for restoring in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let refused = if restoring {
+            matches!(
+                NativeWallet::restore_with_source(
+                    root.path(),
+                    PUBLIC_SEED,
+                    &fixture.source,
+                    419_201,
+                    auth(),
+                    0
+                )
+                .await,
+                Err(EngineError::ChainMismatch { .. })
+            )
+        } else {
+            matches!(
+                NativeWallet::create_with_source(
+                    root.path(),
+                    &fixture.source,
+                    Some(419_201),
+                    auth(),
+                    0
+                )
+                .await,
+                Err(EngineError::ChainMismatch { .. })
+            )
+        };
+        assert!(refused);
+        unbound_setup(root.path());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provided_channel_restores_scans_and_cold_opens_without_private_rpc_or_url_fallback() {
     let fixture = Fixture::new(ZNetwork::Regtest, "regtest", 2).await;
@@ -710,7 +840,8 @@ async fn source_setup_refuses_marked_database_without_metadata_before_seed_or_so
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_seed_only_create_retry_reuses_original_authenticated_entropy() {
-    let failed = Fixture::new(ZNetwork::Mainnet, "regtest", 2).await;
+    let failed = Fixture::new(ZNetwork::Mainnet, "main", 419_201).await;
+    failed.fail_tree.store(true, Ordering::Release);
     let root = tempfile::tempdir().unwrap();
     assert!(NativeWallet::create_with_source(
         root.path(),
@@ -736,7 +867,8 @@ async fn source_seed_only_create_retry_reuses_original_authenticated_entropy() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_seed_only_restore_rejects_replacement_before_network_or_writes() {
-    let failed = Fixture::new(ZNetwork::Mainnet, "regtest", 2).await;
+    let failed = Fixture::new(ZNetwork::Mainnet, "main", 419_201).await;
+    failed.fail_tree.store(true, Ordering::Release);
     let root = tempfile::tempdir().unwrap();
     assert!(NativeWallet::restore_with_source(
         root.path(),

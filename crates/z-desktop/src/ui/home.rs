@@ -4972,14 +4972,14 @@ mod job_tests {
     #[test]
     fn setup_birthday_keeps_dates_for_the_guarded_engine() {
         assert!(matches!(
-            setup_birthday_input("9999-12-31", Network::Mainnet).unwrap(),
-            NativeBirthday::Date(raw) if raw == "9999-12-31"
+            setup_birthday_input("2020-01-01", Network::Mainnet).unwrap(),
+            NativeBirthday::Date(raw) if raw == "2020-01-01"
         ));
         assert!(matches!(
             setup_birthday_input("4500000", Network::Mainnet).unwrap(),
             NativeBirthday::Height(4_500_000)
         ));
-        for invalid in ["", "not-a-date", "2026-13-40", "4294967296"] {
+        for invalid in ["", "not-a-date", "2026-13-40", "4294967296", "9999-12-31"] {
             assert!(setup_birthday_input(invalid, Network::Mainnet).is_err());
         }
     }

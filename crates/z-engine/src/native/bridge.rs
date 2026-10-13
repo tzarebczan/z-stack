@@ -1585,7 +1585,7 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         body["network"] = json!("mainnet");
         body["server"] = json!(format!("http://{}", listener.local_addr().unwrap()));
-        body["birthday"] = json!("9999-12-31");
+        body["birthday"] = json!("2020-01-01");
         let dir = tempfile::tempdir().unwrap();
         crate::native::source::enroll(dir.path()).unwrap();
         let policy = std::fs::read(dir.path().join("native-source-policy")).unwrap();
@@ -1618,6 +1618,48 @@ mod tests {
     #[tokio::test]
     async fn source_date_create_refuses_before_endpoint_io() {
         source_date_setup_refuses_before_endpoint_io("/create", json!({})).await;
+    }
+
+    #[tokio::test]
+    async fn future_date_setup_refuses_before_endpoint_io_or_seed_write() {
+        for (path, mut body) in [
+            ("/create", json!({})),
+            (
+                "/restore",
+                json!({"mnemonic":crate::keys::REGTEST_FAUCET_MNEMONIC}),
+            ),
+            ("/restore", json!({"ufvk":"uview1fixture"})),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            body["network"] = json!("mainnet");
+            body["server"] = json!(format!("http://{}", listener.local_addr().unwrap()));
+            body["birthday"] = json!("9999-12-31");
+            let dir = tempfile::tempdir().unwrap();
+            let bridge = Bridge::new(dir.path(), SeedAuth::passphrase("disposable-fixture"));
+            let request = HttpReq {
+                method: "POST".into(),
+                path: path.into(),
+                origin: None,
+                token: None,
+                body: serde_json::to_vec(&body).unwrap(),
+            };
+            let (status, _, response) = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                bridge.dispatch(&request),
+            )
+            .await
+            .expect("future date must refuse without network delay");
+            assert!(status >= 400);
+            assert!(response.contains("above tip"));
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            for file in ["seed.enc", "wallet.json", "data.sqlite"] {
+                assert!(!dir.path().join(file).exists());
+            }
+        }
     }
 
     #[tokio::test]
@@ -1774,7 +1816,7 @@ mod tests {
 
     #[test]
     fn create_and_restore_parse_owned_birthday_inputs() {
-        let date = "9999-12-31";
+        let date = "2020-01-01";
         let create = json!({"network":"testnet", "birthday": date});
         let (_, input, _, _, _) = parse_create(create.to_string().as_bytes()).unwrap();
         assert!(matches!(input, Some(NativeBirthday::Date(raw)) if raw == date));

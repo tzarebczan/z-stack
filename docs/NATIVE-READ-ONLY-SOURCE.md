@@ -27,7 +27,9 @@ seed-only create retry authenticates and reuses the retained encrypted seed;
 seed-only restore must match it before making any source request. Setup cannot
 replace an existing source seed or quarantine a retained source database.
 `native-source-setup.json` binds network, birthday and account before creating a
-source seed. An automatic birthday uses the authenticated tip once, and retries
+source seed. A first setup validates the source chain, tip and permitted scan depth
+before writing that binding or seed, so an invalid height can be corrected safely.
+An automatic birthday uses the authenticated tip once, and retries
 retain that birthday even if the tip advances. Changed setup scope, malformed
 binding, or a retained seed without its binding refuses before source access. Either marker keeps the wallet read-only. A
 copied marked database without its sidecar remains read-only; malformed or
@@ -52,6 +54,8 @@ Ordinary date-based setup uses `NativeBirthday::Date` through the guarded
 operations. Exact `YYYY-MM-DD` syntax and calendar validity are checked locally
 under bootstrap ownership before a tip request. Empty, automatic and numeric
 Date variants refuse; `Height` is explicit and `create` with `None` stays automatic.
+Dates more than one day ahead of the UTC clock refuse locally with
+`birthday_above_tip`; the one-day allowance covers timezone differences.
 Source-marked seed-only roots refuse ordinary setup before birthday network I/O.
 Source APIs retain their height-only birthday binding. Address rotation remains
 local in Source mode and holds shared database ownership through derivation, so

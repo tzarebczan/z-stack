@@ -1080,7 +1080,13 @@ impl NativeWallet {
                     return Err(invalid());
                 }
                 // Check the calendar locally before exposing any setup request.
-                crate::height_from_date_for_network(date, 1, network).map_err(|_| invalid())?;
+                crate::height_from_date_for_network(date, 1, network).map_err(|error| {
+                    if error.code() == "birthday_above_tip" {
+                        error
+                    } else {
+                        invalid()
+                    }
+                })?;
                 crate::parse_birthday_input_for_network(
                     date,
                     Self::fetch_tip(server).await?,
@@ -1129,7 +1135,8 @@ impl NativeWallet {
                 account_index,
                 retained_seed,
             )?;
-            if birthday_height.is_none() {
+            let new_binding = super::source::setup(&paths.root)?.is_none();
+            if birthday_height.is_none() || new_binding {
                 let mut client = source.client();
                 Self::assert_chain(&mut client, network).await?;
                 let tip: u32 = client
@@ -1140,7 +1147,16 @@ impl NativeWallet {
                     .height
                     .try_into()
                     .map_err(|_| EngineError::Message("tip height out of range".into()))?;
-                birthday_height = Some(tip.saturating_sub(BIRTHDAY_SAFETY_BUFFER));
+                let height =
+                    birthday_height.unwrap_or_else(|| tip.saturating_sub(BIRTHDAY_SAFETY_BUFFER));
+                if height > tip {
+                    return Err(EngineError::BirthdayAboveTip {
+                        birthday: height,
+                        tip,
+                    });
+                }
+                Self::check_sync_gap(height, tip, false)?;
+                birthday_height = Some(height);
                 prepared_source = Some((client, tip));
             }
             super::source::bind_setup(
@@ -1370,7 +1386,8 @@ impl NativeWallet {
 
         let seed_store = SeedStore::new(&paths.root);
         let retained_seed = source.is_some() && seed_store.exists();
-        if source.is_some() {
+        let mut prepared_source = None;
+        if let Some(source) = source {
             super::source::setup_birthday(
                 &paths.root,
                 network,
@@ -1378,6 +1395,26 @@ impl NativeWallet {
                 account_index,
                 retained_seed,
             )?;
+            if super::source::setup(&paths.root)?.is_none() {
+                let mut client = source.client();
+                Self::assert_chain(&mut client, network).await?;
+                let tip: u32 = client
+                    .get_latest_block(ChainSpec::default())
+                    .await
+                    .map_err(|e| EngineError::Transport(format!("GetLatestBlock: {e}")))?
+                    .into_inner()
+                    .height
+                    .try_into()
+                    .map_err(|_| EngineError::Message("tip height out of range".into()))?;
+                if birthday_height > tip {
+                    return Err(EngineError::BirthdayAboveTip {
+                        birthday: birthday_height,
+                        tip,
+                    });
+                }
+                Self::check_sync_gap(birthday_height, tip, true)?;
+                prepared_source = Some((client, tip));
+            }
             super::source::bind_setup(&paths.root, network, birthday_height, account_index)?;
         }
         if retained_seed {
@@ -1393,26 +1430,36 @@ impl NativeWallet {
             )?;
         }
 
-        let mut client = match source {
-            Some(source) => source.client(),
+        let (mut client, prepared_tip) = match prepared_source {
+            Some((client, tip)) => (client, Some(tip)),
+            None => (
+                match source {
+                    Some(source) => source.client(),
+                    None => {
+                        Self::connect_url(
+                            &server.as_url(),
+                            Self::skip_ironwood_subtrees(network, &server.as_url()),
+                        )
+                        .await?
+                    }
+                },
+                None,
+            ),
+        };
+        let tip: u32 = match prepared_tip {
+            Some(tip) => tip,
             None => {
-                Self::connect_url(
-                    &server.as_url(),
-                    Self::skip_ironwood_subtrees(network, &server.as_url()),
-                )
-                .await?
+                Self::assert_chain(&mut client, network).await?;
+                client
+                    .get_latest_block(ChainSpec::default())
+                    .await
+                    .map_err(|e| EngineError::Transport(format!("GetLatestBlock: {e}")))?
+                    .into_inner()
+                    .height
+                    .try_into()
+                    .map_err(|_| EngineError::Message("tip height out of range".into()))?
             }
         };
-        Self::assert_chain(&mut client, network).await?;
-
-        let tip: u32 = client
-            .get_latest_block(ChainSpec::default())
-            .await
-            .map_err(|e| EngineError::Transport(format!("GetLatestBlock: {e}")))?
-            .into_inner()
-            .height
-            .try_into()
-            .map_err(|_| EngineError::Message("tip height out of range".into()))?;
 
         if birthday_height > tip {
             return Err(EngineError::BirthdayAboveTip {
