@@ -275,7 +275,9 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       });
       if (cancelled()) throw new Error("sync cancelled");
       warmProvingKeyAfterSync(after);
-      return autoShieldSnapshot(after);
+      const shielded = await autoShieldSnapshot(after, signal, current);
+      if (cancelled()) throw new Error("sync cancelled");
+      return shielded;
     }
     const gap = tip - start + 1;
     if (gap > runtime.MAX_GAP && !ctx.opts.allowDeepSync) {
@@ -679,7 +681,9 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     });
     if (cancelled()) throw new Error("sync cancelled");
     warmProvingKeyAfterSync(after);
-    return autoShieldSnapshot(after);
+    const shielded = await autoShieldSnapshot(after, signal, current);
+    if (cancelled()) throw new Error("sync cancelled");
+    return shielded;
   }
 
   function warmProvingKeyAfterSync(after: WalletSnapshot): void {
@@ -694,22 +698,34 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     }
   }
 
-  async function autoShieldSnapshot(after: WalletSnapshot): Promise<WalletSnapshot> {
+  async function autoShieldSnapshot(after: WalletSnapshot, signal: AbortSignal, syncCurrent: () => boolean): Promise<WalletSnapshot> {
+    const source = ctx.session;
+    const operation = ctx.sessionOperation;
+    const current = () => syncCurrent() && ctx.session === source &&
+      ctx.sessionOperation === operation && !operation?.signal.aborted;
+    const assertCurrent = () => { if (!current()) throw new Error("sync cancelled"); };
+    assertCurrent();
     if (
       ctx.opts.autoShield === true &&
       (ctx.spendingSeed || runtime.runtimeState.moduleSpendingSeed) &&
       canShield(after.balance.transparentAvailable, BigInt(ctx.opts.shieldThresholdZat ?? Number(SHIELD_THRESHOLD_ZAT)))
     ) {
-      const source = ctx.session;
-      const operation = ctx.sessionOperation;
       try {
-        return await ctx.client.shield(ctx.opts.shieldThresholdZat ?? Number(SHIELD_THRESHOLD_ZAT));
+        const shielded = await ctx.client.shield(ctx.opts.shieldThresholdZat ?? Number(SHIELD_THRESHOLD_ZAT), {
+          signal, beforeBroadcast: current,
+        });
+        assertCurrent();
+        return shielded;
       } catch (e) {
+        assertCurrent();
         // A timed-out broadcast may already have saved the pending shield.
         // The pre-shield snapshot would still show those transparent funds.
         try {
-          return await ctx.snap();
+          const snapshot = await ctx.snap();
+          assertCurrent();
+          return snapshot;
         } catch {
+          assertCurrent();
           if (isWalletError(e) && e.code === "broadcast_failed") throw e;
           return after;
         }

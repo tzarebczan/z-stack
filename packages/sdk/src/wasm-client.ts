@@ -576,7 +576,7 @@ export function createWasmClient(
       const txid = await proveAndSubmit("shield", seed, {
         thresholdZat: Number(threshold ?? 100_000),
       }, beforeBroadcast);
-      return finishSpend(txid, operation, source);
+      return finishSpend(txid, operation, source, beforeBroadcast);
     },
     send: async (to, amountZec, memo, sendOpts) => {
       const minConfirmations = minimumConfirmations(sendOpts?.minConfirmations);

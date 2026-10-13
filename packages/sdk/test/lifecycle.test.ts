@@ -873,3 +873,72 @@ for (const outcome of ["accepted", "unknown"] as const) {
     await forgetWasmWallet();
   });
 }
+
+for (const phase of ["proof", "reservation", "accepted", "unknown"] as const) {
+  test(`sync cancellation during automatic shielding ${phase} cannot broadcast again or publish late balance`, async (t) => {
+    let db!: ReturnType<typeof memoryIndexedDb>;
+    let proved = false;
+    let balances = 0;
+    let balancesAtCancellation = 0;
+    const cancel = () => { balancesAtCancellation = balances; cancelWasmSync(); };
+    ({ db } = fixture(t, handle => {
+      handle.nextHeight = () => 11;
+      handle.birthday = () => 1;
+      handle.treesReady = () => true;
+      handle.transparentAddress = () => undefined;
+      const snapshot = handle.snapshotJson as () => string;
+      handle.snapshotJson = () => {
+        const wallet = JSON.parse(snapshot());
+        wallet.balance.transparentAvailable = wallet.balance.totalAvailable ? 200_000 : 0;
+        wallet.balance.totalAvailable = wallet.balance.transparentAvailable;
+        wallet.balance.orchardAvailable = 0;
+        return JSON.stringify(wallet);
+      };
+      handle.proveShield = () => {
+        proved = true;
+        if (phase === "proof") cancel();
+        if (phase === "reservation") db.holdCommits = true;
+        return (handle.proveSend as () => string)();
+      };
+    }));
+    const started = deferred<void>();
+    const finish = deferred<void>();
+    let submitted = 0;
+    const c = createWasmClient({ unlockPolicy: "session", network: "regtest", autoShield: true,
+      prewarmProvingKey: false, memoFetch: "on-demand", transport: {
+        kind: "mock", label: "automatic-shield-fixture", tip: async () => 10,
+        blocks: async () => new Uint8Array(), utxos: async () => [],
+        submit: async () => {
+          submitted++;
+          started.resolve();
+          if (phase === "accepted" || phase === "unknown") await finish.promise;
+          if (phase === "unknown") throw new Error("fixture acknowledgement lost");
+          return "ab".repeat(32);
+        },
+      } });
+    await c.restore("automatic-shield-fixture", "regtest", 1);
+    const before = decode((await readSavedSnapshot())!);
+    c.on("balance", () => { balances++; });
+    const pending = c.sync();
+    const rejected = assert.rejects(pending, /sync cancelled/);
+    if (phase === "reservation") {
+      for (let i = 0; i < 30 && !db.commits.length; i++) await turn();
+      assert.equal(db.commits.length, 1);
+      cancel();
+      db.holdCommits = false;
+      db.commits.shift()!();
+    } else if (phase === "accepted" || phase === "unknown") {
+      await started.promise;
+      cancel();
+      finish.resolve();
+    }
+    await rejected;
+    assert.equal(proved, true);
+    assert.equal(submitted, phase === "accepted" || phase === "unknown" ? 1 : 0);
+    assert.equal(balances, balancesAtCancellation);
+    const saved = decode((await readSavedSnapshot())!);
+    if (phase === "accepted" || phase === "unknown") assert.equal(saved.pending, true);
+    else assert.deepEqual(saved, before);
+    await forgetWasmWallet();
+  });
+}

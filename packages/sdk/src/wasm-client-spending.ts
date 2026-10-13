@@ -556,7 +556,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
   }
 
   /** Once submitted, even a failed UI refresh must retain the receipt. */
-  async function finishSpend(txid: string | undefined, operation: WalletOperation, source: ScanSession) {
+  async function finishSpend(txid: string | undefined, operation: WalletOperation, source: ScanSession, beforePublish?: () => boolean) {
     try {
       ctx.assertSource(operation, source);
       await ctx.refreshMempool();
@@ -564,7 +564,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       const wallet = await ctx.snap();
       ctx.assertSource(operation, source);
       const balance = balanceEvent(wallet);
-      if (balance) ctx.bus.emit("balance", balance);
+      if (balance && (beforePublish?.() ?? true)) ctx.bus.emit("balance", balance);
       return txid ? { ...wallet, txid } : wallet;
     } catch (error) {
       throw new WalletError("broadcast_failed", "Submission finished but the wallet could not refresh. Check this transaction before sending another payment.", error, { txid });
