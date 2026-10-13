@@ -342,7 +342,7 @@ for (const failure of ["frontier", "subtree-root"] as const) {
   const saved = await readSavedSnapshot();
   assert.ok(saved);
   await assert.rejects(wallet.sync(), failure === "frontier" ? /required birthday tree state/ : /root|invalid|decode/i);
-  assert.equal(blocks, 0);
+  assert.equal(blocks, failure === "frontier" ? 0 : 1);
   const afterFailure = await readSavedSnapshot();
   assert.ok(afterFailure && saved.every((byte, index) => afterFailure[index] === byte) && afterFailure.length === saved.length, "failed frontier changed saved wallet bytes");
   malformed = false;
@@ -350,7 +350,7 @@ for (const failure of ["frontier", "subtree-root"] as const) {
   assert.equal(restored.scannedHeight, 2);
   assert.equal(restored.unifiedAddress, initial.unifiedAddress);
   assert.equal(restored.birthdayHeight, 2);
-  assert.equal(blocks, 1);
+  assert.equal(blocks, failure === "frontier" ? 1 : 2);
 });
 }
 
@@ -392,4 +392,38 @@ test("scanned legacy reorg restores its birthday anchor before accepting any rep
     assert.equal(corrected.unifiedAddress, legacy.unifiedAddress);
     assert.equal(corrected.nextDiversifier, legacy.nextDiversifier);
   } finally { restored.free?.(); }
+});
+
+test("strict cold scan downloads blocks while optional subtree roots are still pending", async t => {
+  assert.ok(existsSync(gen), "build the production WASM engine before this overlap test");
+  const { createWallet } = await import("../src/create-wallet.ts");
+  const { memoryWalletStorage } = await import("../src/storage.ts");
+  let releaseRoots!: () => void;
+  const rootsAnswer = new Promise<void>(resolve => { releaseRoots = resolve; });
+  let rootsStarted!: () => void;
+  const rootsReady = new Promise<void>(resolve => { rootsStarted = resolve; });
+  let blockStarted!: () => void;
+  const blockReady = new Promise<void>(resolve => { blockStarted = resolve; });
+  let frontierVerified = false;
+  const wallet = await createWallet({ network: "regtest", storage: memoryWalletStorage(),
+    requireBirthdayTreeState: true, memoFetch: "on-demand", transparentScan: "off", prewarmProvingKey: false,
+    server: { kind: "custom-only", label: "overlapped roots fixture", tip: async () => 2,
+      treeState: async height => { frontierVerified = true; return { height, hash: "01".repeat(32), network: "regtest" }; },
+      subtreeRoots: async () => { rootsStarted(); await rootsAnswer; return []; },
+      blocks: async () => {
+        assert.equal(frontierVerified, true);
+        blockStarted();
+        const bytes = Uint8Array.from([16, 2, 26, 32, ...Array(32).fill(2), 34, 32, ...Array(32).fill(1), 40, 1]);
+        const frame = new Uint8Array(bytes.length + 4);
+        new DataView(frame.buffer).setUint32(0, bytes.length, false);
+        frame.set(bytes, 4); return frame;
+      },
+    } });
+  t.after(() => wallet.close());
+  await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 2 });
+  const syncing = wallet.sync();
+  await rootsReady;
+  try {
+    await Promise.race([blockReady, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("optional roots delayed first block request")), 500))]);
+  } finally { releaseRoots(); await syncing; }
 });

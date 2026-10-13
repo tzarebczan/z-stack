@@ -196,7 +196,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const birthday = await source.birthday();
     // Refuse an unseeded strict wallet before overlap reads can rewind it.
     if (ctx.opts.requireBirthdayTreeState && birthday > 1 && !await source.treesReady()) {
-      await seedBirthdayTrees(undefined, recovery, signal);
+      await seedBirthdayTrees(undefined, recovery, signal, true);
     }
     if (ctx.opts.verifyChainTip && start > birthday) {
       // A height alone cannot establish that a previously mined payment is
@@ -484,7 +484,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       });
     // A required cold frontier must succeed before speculative block retrieval.
     if (ctx.opts.requireBirthdayTreeState && birthday > 1 && !await source.treesReady()) {
-      await seedBirthdayTrees(undefined, recovery, signal);
+      await seedBirthdayTrees(undefined, recovery, signal, true);
     }
     let pipe = openPrefetch(start);
     let reorgRestarts = 0;
@@ -754,6 +754,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     onProto?: (proto: "sapling" | "orchard" | "ironwood") => void,
     recovery?: LightServerRecovery,
     signal?: AbortSignal,
+    frontierOnly = false,
   ): Promise<void> {
     if (!ctx.session) return;
     const source = ctx.session;
@@ -802,6 +803,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         /* An optional retrieval failure still permits history-only scanning. */
       }
     }
+    if (frontierOnly) {
+      ctx.assertSource(operation, source);
+      return;
+    }
     let rootsApplied = false;
     if (ctx.transport.subtreeRoots) {
       // Optional pruning must not stall an otherwise caught-up wallet for the
@@ -841,8 +846,8 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         rootsApplied = true;
       }
     }
-    // Store roots and the birthday frontier in one snapshot. Serializing
-    // twice here blocks the scan worker before its first compact block.
+    // Store roots and the birthday frontier together while compact downloads
+    // are in flight. Failed optional root decoding must not save partial state.
     if (rootsApplied || treeApplied) await ctx.persist();
     ctx.assertSource(operation, source);
     ctx.rootsChecked = { source, at: Date.now() };
