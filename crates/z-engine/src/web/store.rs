@@ -4240,6 +4240,53 @@ mod tests {
     }
 
     #[test]
+    fn malformed_compact_hashes_cannot_bypass_birthday_frontier_or_mutate_batches() {
+        let acct = account_from_mnemonic(REGTEST_FAUCET_MNEMONIC, Network::Regtest, 0).unwrap();
+        let mut wallet = WebWallet::from_account(acct, 12).unwrap();
+        wallet
+            .apply_tree_state_json(
+                &serde_json::json!({"height": 11, "hash": "01".repeat(32), "network": "regtest"})
+                    .to_string(),
+            )
+            .unwrap();
+        let before = wallet.to_snapshot().unwrap();
+        for length in [0, 1, 31, 33] {
+            for parent in [false, true] {
+                let mut block = empty_block(12, vec![1; 32]);
+                if parent {
+                    block.prev_hash = vec![1; length];
+                } else {
+                    block.hash = vec![1; length];
+                }
+                let mut single = WebWallet::from_snapshot(&before).unwrap();
+                assert!(single.apply_compact_block(&block.encode_to_vec()).is_err());
+                assert!(single.to_snapshot().unwrap() == before);
+                for count in [2, 33] {
+                    let mut blocks = Vec::new();
+                    let mut previous = vec![1; 32];
+                    for index in 0..count {
+                        let mut next = empty_block(12 + index, previous);
+                        if index == count - 1 {
+                            if parent {
+                                next.prev_hash = vec![1; length];
+                            } else {
+                                next.hash = vec![1; length];
+                            }
+                        }
+                        previous = next.hash.clone();
+                        blocks.push(next);
+                    }
+                    let mut batch = WebWallet::from_snapshot(&before).unwrap();
+                    assert!(batch
+                        .apply_compact_blocks_blob(&super::super::encode_delimited(blocks))
+                        .is_err());
+                    assert!(batch.to_snapshot().unwrap() == before);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn birthday_frontier_rejects_wrong_metadata_without_changing_wallet() {
         let acct = account_from_mnemonic(REGTEST_FAUCET_MNEMONIC, Network::Regtest, 0).unwrap();
         let mut w = WebWallet::from_account(acct, 12).unwrap();

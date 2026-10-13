@@ -194,6 +194,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     if (cancelled()) throw new Error("sync cancelled");
     let start = await source.nextHeight();
     const birthday = await source.birthday();
+    // Refuse an unseeded strict wallet before overlap reads can rewind it.
+    if (ctx.opts.requireBirthdayTreeState && birthday > 1 && !await source.treesReady()) {
+      await seedBirthdayTrees(undefined, recovery, signal);
+    }
     if (ctx.opts.verifyChainTip && start > birthday) {
       // A height alone cannot establish that a previously mined payment is
       // still mined. Check the overlap even when no new block has arrived.

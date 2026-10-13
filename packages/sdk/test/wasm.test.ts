@@ -286,3 +286,31 @@ test("real WASM upgrades a legacy cold snapshot and refuses an unrelated first b
     assert.equal(restored.scannedHeight(), 11);
   } finally { restored.free?.(); }
 });
+
+test("real WASM refuses omitted and short compact hashes before snapshot mutation", async () => {
+  assert.ok(existsSync(gen), "build the production WASM engine before this boundary test");
+  const { requireBindings } = await import("../src/wasm-client-runtime.ts");
+  const Wallet = requireBindings().WasmWallet;
+  const initial = Wallet.create("regtest", REGTEST_FAUCET_MNEMONIC, 12, 0);
+  let seeded: Uint8Array;
+  try {
+    initial.applyTreeState?.(JSON.stringify({ height: 11, hash: "01".repeat(32), network: "regtest" }));
+    seeded = initial.toSnapshot();
+  } finally { initial.free?.(); }
+  for (const length of [0, 1, 31, 33]) {
+    for (const parent of [false, true]) {
+      const hash = Array(parent ? 32 : length).fill(12);
+      const previous = Array(parent ? length : 32).fill(1);
+      const protobuf = Uint8Array.from([16, 12, 26, hash.length, ...hash,
+        34, previous.length, ...previous, 40, 1]);
+      const frame = new Uint8Array(protobuf.length + 4);
+      new DataView(frame.buffer).setUint32(0, protobuf.length, false);
+      frame.set(protobuf, 4);
+      const wallet = Wallet.fromSnapshot(seeded);
+      try {
+        assert.throws(() => wallet.applyCompactBlocks(frame), /hash and prev_hash must be 32 bytes/);
+        assert.deepEqual(wallet.toSnapshot(), seeded);
+      } finally { wallet.free?.(); }
+    }
+  }
+});

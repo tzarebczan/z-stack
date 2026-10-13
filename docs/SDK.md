@@ -357,9 +357,11 @@ Check `SDK_TRANSPORT_CAPABILITIES.requiredBirthdayTreeState === true` before
 using strict mode with a separately supplied SDK archive. Older archives lack
 this export, even when their package version is the same. Set
 `requireBirthdayTreeState: true` when a cold scan must have its birthday frontier. For birthday heights above one, missing or failed `treeState` refuses
-sync before requesting compact blocks. Rust checks that its height is birthday
+sync before requesting compact blocks, including chain-tip overlap probes. Rust checks that its height is birthday
 minus one, validates an optional network, decodes the frontiers, and binds the
-first block's parent hash to that state. A different frontier cannot replace
+first block's parent hash to that state. Every compact block must carry 32-byte
+hash and parent-hash fields; malformed single blocks and batches refuse before
+scan mutation. A different frontier cannot replace
 already seeded or scanned trees. Genesis restores need no preceding frontier.
 `subtreeRoots` supports pruning and remains optional. Signed metadata, endpoint
 consent and durable publication checkpoints belong to the application adapter.
