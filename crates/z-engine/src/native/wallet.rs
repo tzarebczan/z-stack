@@ -18,6 +18,8 @@ mod payments;
 #[cfg(feature = "native-pir")]
 mod pir;
 #[cfg(test)]
+mod source_tests;
+#[cfg(test)]
 mod submission_tests;
 #[cfg(feature = "native-pir")]
 pub use pir::{
@@ -180,9 +182,13 @@ where
     let mut retries = 0u32;
     let mut reached = sync_mark(&live);
     loop {
+        if cancel.load(Ordering::Acquire) {
+            return Err(sync_cancelled());
+        }
         let result = tokio::select! {
-            result = run() => result,
+            biased;
             () = wait_for_sync_cancellation(cancel) => return Err(sync_cancelled()),
+            result = run() => result,
         };
         if cancel.load(Ordering::Acquire) {
             return Err(sync_cancelled());
@@ -396,8 +402,37 @@ fn require_initial_recovery_setup(path: &Path) -> Result<()> {
     Ok(())
 }
 
+enum SetupSource<'a> {
+    Direct(ZNetwork, Option<LightServer>),
+    Provided(&'a super::NativeReadOnlySource),
+}
+
+impl<'a> SetupSource<'a> {
+    fn parts(
+        self,
+    ) -> (
+        ZNetwork,
+        LightServer,
+        Option<&'a super::NativeReadOnlySource>,
+    ) {
+        match self {
+            Self::Direct(network, server) => (
+                network,
+                server.unwrap_or_else(|| LightServer::for_network(network)),
+                None,
+            ),
+            Self::Provided(source) => (
+                source.network(),
+                LightServer::for_network(source.network()),
+                Some(source),
+            ),
+        }
+    }
+}
+
 enum NewWalletProfile {
     Ordinary,
+    ReadOnlySource,
     #[cfg(feature = "native-pir")]
     VerifiedRegtestRecovery,
 }
@@ -442,6 +477,14 @@ impl WalletPaths {
     }
 
     fn prepare_new_wallet_for(&self, profile: NewWalletProfile) -> Result<()> {
+        if matches!(profile, NewWalletProfile::ReadOnlySource) && self.data_db.try_exists()? {
+            return Err(super::source::refused());
+        }
+        if super::source::read_only(&self.root)?
+            && !matches!(profile, NewWalletProfile::ReadOnlySource)
+        {
+            return Err(super::source::refused());
+        }
         if self.meta_path.exists() || self.reset_backup().exists() {
             return Err(EngineError::AlreadyExists(self.root.display().to_string()));
         }
@@ -451,7 +494,7 @@ impl WalletPaths {
                 return Err(EngineError::AlreadyExists(self.root.display().to_string()));
             }
             match profile {
-                NewWalletProfile::Ordinary => {
+                NewWalletProfile::Ordinary | NewWalletProfile::ReadOnlySource => {
                     if has_recovery_marker(&self.data_db)? {
                         return Err(EngineError::Message(
                             "native_recovery_profile_required".into(),
@@ -747,9 +790,16 @@ pub struct LightProbe {
     pub error: Option<String>,
 }
 
+/// Birthday selection resolved under wallet setup ownership.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeBirthday {
+    Height(u32),
+    Date(String),
+}
+
 enum BroadcastConnection {
-    Light(Box<LwdClient>),
-    Validator(super::rpc::VerifiedValidator),
+    Light(Box<LwdClient>, Arc<std::fs::File>),
+    Validator(super::rpc::VerifiedValidator, Arc<std::fs::File>),
 }
 
 pub struct NativeWallet {
@@ -778,13 +828,21 @@ impl NativeWallet {
         &self.paths
     }
 
+    /// Re-read durable source capability without contacting a stored endpoint.
+    /// Applications use this to refuse re-enrollment when their original source
+    /// checkpoint or publisher binding is missing.
+    pub fn uses_read_only_source(&self) -> Result<bool> {
+        let _lease = database_lease::shared(&self.paths.data_db)?;
+        super::source::read_only(&self.paths.root)
+    }
+
     pub fn server_url(&self) -> String {
         self.server.as_url()
     }
 
     /// Validator JSON-RPC if configured on this wallet, else implied by the light server.
     pub fn validator_rpc_url(&self) -> Option<String> {
-        if !self.network_access {
+        if !self.network_access || self.require_source_spending_access().is_err() {
             return None;
         }
         self.meta
@@ -967,46 +1025,204 @@ impl NativeWallet {
         auth: SeedAuth,
         account_index: u32,
     ) -> Result<(Self, CreatedWallet)> {
+        Self::create_with_birthday(
+            root,
+            network,
+            server,
+            birthday_height.map(NativeBirthday::Height),
+            auth,
+            account_index,
+        )
+        .await
+    }
+
+    pub async fn create_with_birthday(
+        root: impl Into<PathBuf>,
+        network: ZNetwork,
+        server: Option<LightServer>,
+        birthday: Option<NativeBirthday>,
+        auth: SeedAuth,
+        account_index: u32,
+    ) -> Result<(Self, CreatedWallet)> {
+        Self::create_inner(
+            root,
+            SetupSource::Direct(network, server),
+            birthday,
+            auth,
+            account_index,
+        )
+        .await
+    }
+
+    async fn resolve_setup_birthday(
+        birthday: NativeBirthday,
+        network: ZNetwork,
+        server: &LightServer,
+        provided: bool,
+    ) -> Result<u32> {
+        match birthday {
+            NativeBirthday::Height(height) => Ok(height),
+            NativeBirthday::Date(_) if provided => {
+                Err(EngineError::Message("native_source_setup_mismatch".into()))
+            }
+            NativeBirthday::Date(date) => {
+                let date = date.trim();
+                let invalid = || EngineError::Message("native_birthday_date_invalid".into());
+                if date.len() != 10
+                    || !date.bytes().enumerate().all(|(index, byte)| {
+                        if index == 4 || index == 7 {
+                            byte == b'-'
+                        } else {
+                            byte.is_ascii_digit()
+                        }
+                    })
+                {
+                    return Err(invalid());
+                }
+                // Check the calendar locally before exposing any setup request.
+                crate::height_from_date_for_network(date, 1, network).map_err(|error| {
+                    if error.code() == "birthday_above_tip" {
+                        error
+                    } else {
+                        invalid()
+                    }
+                })?;
+                crate::parse_birthday_input_for_network(
+                    date,
+                    Self::fetch_tip(server).await?,
+                    network,
+                )
+            }
+        }
+    }
+
+    async fn create_inner(
+        root: impl Into<PathBuf>,
+        setup: SetupSource<'_>,
+        birthday: Option<NativeBirthday>,
+        auth: SeedAuth,
+        account_index: u32,
+    ) -> Result<(Self, CreatedWallet)> {
+        let (network, server, source) = setup.parts();
         auth.validate_for_save()?;
         super::initialize_native_threads(None)?;
         let paths = WalletPaths::new(root);
         let _ownership = database_lease::bootstrap(&paths.root)?;
-        paths.prepare_new_wallet()?;
+        paths.prepare_new_wallet_for(if source.is_some() {
+            NewWalletProfile::ReadOnlySource
+        } else {
+            NewWalletProfile::Ordinary
+        })?;
         paths.ensure_dirs()?;
+        if source.is_some() {
+            super::source::enroll(&paths.root)?;
+        }
 
-        let server = server.unwrap_or_else(|| LightServer::for_network(network));
-
-        let mut entropy = [0u8; 32];
-        UnwrapErr(SysRng)
-            .try_fill_bytes(&mut entropy)
-            .map_err(|e| EngineError::Message(format!("rng: {e}")))?;
-        let mnemonic = Mnemonic::from_entropy(&entropy)
-            .map_err(|e| EngineError::Message(format!("mnemonic: {e}")))?;
-        entropy.zeroize();
+        let seed_store = SeedStore::new(&paths.root);
+        let retained_seed = source.is_some() && seed_store.exists();
+        let mut birthday_height = match birthday {
+            Some(birthday) => Some(
+                Self::resolve_setup_birthday(birthday, network, &server, source.is_some()).await?,
+            ),
+            None => None,
+        };
+        let mut prepared_source = None;
+        if let Some(source) = source {
+            birthday_height = super::source::setup_birthday(
+                &paths.root,
+                network,
+                birthday_height,
+                account_index,
+                retained_seed,
+            )?;
+            let new_binding = super::source::setup(&paths.root)?.is_none();
+            if birthday_height.is_none() || new_binding {
+                let mut client = source.client();
+                Self::assert_chain(&mut client, network).await?;
+                let tip: u32 = client
+                    .get_latest_block(ChainSpec::default())
+                    .await
+                    .map_err(|e| EngineError::Transport(format!("GetLatestBlock: {e}")))?
+                    .into_inner()
+                    .height
+                    .try_into()
+                    .map_err(|_| EngineError::Message("tip height out of range".into()))?;
+                let height =
+                    birthday_height.unwrap_or_else(|| tip.saturating_sub(BIRTHDAY_SAFETY_BUFFER));
+                if height > tip {
+                    return Err(EngineError::BirthdayAboveTip {
+                        birthday: height,
+                        tip,
+                    });
+                }
+                Self::check_sync_gap(height, tip, false)?;
+                birthday_height = Some(height);
+                prepared_source = Some((client, tip));
+            }
+            super::source::bind_setup(
+                &paths.root,
+                network,
+                birthday_height.ok_or_else(|| {
+                    EngineError::Message("native_source_setup_binding_required".into())
+                })?,
+                account_index,
+            )?;
+        }
+        let mnemonic = if retained_seed {
+            let words = seed_store.load(auth.passphrase.as_deref(), auth.windows_credential)?;
+            Mnemonic::parse_normalized(words.expose_secret())
+                .map_err(|_| EngineError::Message("native_source_seed_invalid".into()))?
+        } else {
+            let mut entropy = [0u8; 32];
+            UnwrapErr(SysRng)
+                .try_fill_bytes(&mut entropy)
+                .map_err(|e| EngineError::Message(format!("rng: {e}")))?;
+            let mnemonic = Mnemonic::from_entropy(&entropy)
+                .map_err(|e| EngineError::Message(format!("mnemonic: {e}")))?;
+            entropy.zeroize();
+            mnemonic
+        };
         let mnemonic_str = mnemonic.to_string();
 
         // Persist seed FIRST so a crash after this cannot orphan a seeded account.
-        SeedStore::new(&paths.root).save(
-            &mnemonic_str,
-            auth.passphrase.as_deref(),
-            auth.windows_credential,
-        )?;
+        if !retained_seed {
+            seed_store.save(
+                &mnemonic_str,
+                auth.passphrase.as_deref(),
+                auth.windows_credential,
+            )?;
+        }
 
-        let mut client = Self::connect_url(
-            &server.as_url(),
-            Self::skip_ironwood_subtrees(network, &server.as_url()),
-        )
-        .await?;
-        Self::assert_chain(&mut client, network).await?;
-
-        let tip: u32 = client
-            .get_latest_block(ChainSpec::default())
-            .await
-            .map_err(|e| EngineError::Transport(format!("GetLatestBlock: {e}")))?
-            .into_inner()
-            .height
-            .try_into()
-            .map_err(|_| EngineError::Message("tip height out of range".into()))?;
+        let (mut client, prepared_tip) = match prepared_source {
+            Some((client, tip)) => (client, Some(tip)),
+            None => (
+                match source {
+                    Some(source) => source.client(),
+                    None => {
+                        Self::connect_url(
+                            &server.as_url(),
+                            Self::skip_ironwood_subtrees(network, &server.as_url()),
+                        )
+                        .await?
+                    }
+                },
+                None,
+            ),
+        };
+        let tip: u32 = match prepared_tip {
+            Some(tip) => tip,
+            None => {
+                Self::assert_chain(&mut client, network).await?;
+                client
+                    .get_latest_block(ChainSpec::default())
+                    .await
+                    .map_err(|e| EngineError::Transport(format!("GetLatestBlock: {e}")))?
+                    .into_inner()
+                    .height
+                    .try_into()
+                    .map_err(|_| EngineError::Message("tip height out of range".into()))?
+            }
+        };
 
         let birthday_h =
             birthday_height.unwrap_or_else(|| tip.saturating_sub(BIRTHDAY_SAFETY_BUFFER));
@@ -1058,6 +1274,9 @@ impl NativeWallet {
             .encode(&network);
         let ufvk_str = ufvk.encode(&network);
 
+        if source.is_some() {
+            super::source::enroll(&paths.root)?;
+        }
         let meta = WalletMeta {
             network: network.as_str().into(),
             server: server.as_url(),
@@ -1067,14 +1286,18 @@ impl NativeWallet {
             ufvk: Some(ufvk_str.clone()),
             view_only: false,
             unlock_policy: auth.unlock_policy,
-            os_unlock: auth.windows_credential,
+            os_unlock: if retained_seed {
+                seed_store.os_unlock_present()
+            } else {
+                auth.windows_credential
+            },
             allow_deep_sync: false,
         };
         write_meta(&paths.meta_path, &meta)?;
 
         let wallet = Self {
             paths,
-            network_access: true,
+            network_access: source.is_none(),
             network,
             server,
             meta,
@@ -1099,40 +1322,144 @@ impl NativeWallet {
         auth: SeedAuth,
         account_index: u32,
     ) -> Result<(Self, String)> {
+        Self::restore_with_birthday(
+            root,
+            mnemonic,
+            network,
+            server,
+            NativeBirthday::Height(birthday_height),
+            auth,
+            account_index,
+        )
+        .await
+    }
+
+    pub async fn restore_with_birthday(
+        root: impl Into<PathBuf>,
+        mnemonic: &str,
+        network: ZNetwork,
+        server: Option<LightServer>,
+        birthday: NativeBirthday,
+        auth: SeedAuth,
+        account_index: u32,
+    ) -> Result<(Self, String)> {
+        Self::restore_inner(
+            root,
+            mnemonic,
+            SetupSource::Direct(network, server),
+            birthday,
+            auth,
+            account_index,
+        )
+        .await
+    }
+
+    async fn restore_inner(
+        root: impl Into<PathBuf>,
+        mnemonic: &str,
+        setup: SetupSource<'_>,
+        birthday: NativeBirthday,
+        auth: SeedAuth,
+        account_index: u32,
+    ) -> Result<(Self, String)> {
+        let (network, server, source) = setup.parts();
         auth.validate_for_save()?;
         super::initialize_native_threads(None)?;
         let paths = WalletPaths::new(root);
         let _ownership = database_lease::bootstrap(&paths.root)?;
-        paths.prepare_new_wallet()?;
+        paths.prepare_new_wallet_for(if source.is_some() {
+            NewWalletProfile::ReadOnlySource
+        } else {
+            NewWalletProfile::Ordinary
+        })?;
         paths.ensure_dirs()?;
+        if source.is_some() {
+            super::source::enroll(&paths.root)?;
+        }
+
+        let birthday_height =
+            Self::resolve_setup_birthday(birthday, network, &server, source.is_some()).await?;
 
         let mnemonic = Mnemonic::parse_normalized(mnemonic.trim())
             .map_err(|e| EngineError::Message(format!("invalid mnemonic: {e}")))?;
         let mnemonic_str = mnemonic.to_string();
 
-        SeedStore::new(&paths.root).save(
-            &mnemonic_str,
-            auth.passphrase.as_deref(),
-            auth.windows_credential,
-        )?;
+        let seed_store = SeedStore::new(&paths.root);
+        let retained_seed = source.is_some() && seed_store.exists();
+        let mut prepared_source = None;
+        if let Some(source) = source {
+            super::source::setup_birthday(
+                &paths.root,
+                network,
+                Some(birthday_height),
+                account_index,
+                retained_seed,
+            )?;
+            if super::source::setup(&paths.root)?.is_none() {
+                let mut client = source.client();
+                Self::assert_chain(&mut client, network).await?;
+                let tip: u32 = client
+                    .get_latest_block(ChainSpec::default())
+                    .await
+                    .map_err(|e| EngineError::Transport(format!("GetLatestBlock: {e}")))?
+                    .into_inner()
+                    .height
+                    .try_into()
+                    .map_err(|_| EngineError::Message("tip height out of range".into()))?;
+                if birthday_height > tip {
+                    return Err(EngineError::BirthdayAboveTip {
+                        birthday: birthday_height,
+                        tip,
+                    });
+                }
+                Self::check_sync_gap(birthday_height, tip, true)?;
+                prepared_source = Some((client, tip));
+            }
+            super::source::bind_setup(&paths.root, network, birthday_height, account_index)?;
+        }
+        if retained_seed {
+            let retained = seed_store.load(auth.passphrase.as_deref(), auth.windows_credential)?;
+            if retained.expose_secret() != &mnemonic_str {
+                return Err(EngineError::Message("native_source_seed_mismatch".into()));
+            }
+        } else {
+            seed_store.save(
+                &mnemonic_str,
+                auth.passphrase.as_deref(),
+                auth.windows_credential,
+            )?;
+        }
 
-        let server = server.unwrap_or_else(|| LightServer::for_network(network));
-
-        let mut client = Self::connect_url(
-            &server.as_url(),
-            Self::skip_ironwood_subtrees(network, &server.as_url()),
-        )
-        .await?;
-        Self::assert_chain(&mut client, network).await?;
-
-        let tip: u32 = client
-            .get_latest_block(ChainSpec::default())
-            .await
-            .map_err(|e| EngineError::Transport(format!("GetLatestBlock: {e}")))?
-            .into_inner()
-            .height
-            .try_into()
-            .map_err(|_| EngineError::Message("tip height out of range".into()))?;
+        let (mut client, prepared_tip) = match prepared_source {
+            Some((client, tip)) => (client, Some(tip)),
+            None => (
+                match source {
+                    Some(source) => source.client(),
+                    None => {
+                        Self::connect_url(
+                            &server.as_url(),
+                            Self::skip_ironwood_subtrees(network, &server.as_url()),
+                        )
+                        .await?
+                    }
+                },
+                None,
+            ),
+        };
+        let tip: u32 = match prepared_tip {
+            Some(tip) => tip,
+            None => {
+                Self::assert_chain(&mut client, network).await?;
+                client
+                    .get_latest_block(ChainSpec::default())
+                    .await
+                    .map_err(|e| EngineError::Transport(format!("GetLatestBlock: {e}")))?
+                    .into_inner()
+                    .height
+                    .try_into()
+                    .map_err(|_| EngineError::Message("tip height out of range".into()))?
+            }
+        };
 
         if birthday_height > tip {
             return Err(EngineError::BirthdayAboveTip {
@@ -1176,6 +1503,9 @@ impl NativeWallet {
             .encode(&network);
         let ufvk_str = ufvk.encode(&network);
 
+        if source.is_some() {
+            super::source::enroll(&paths.root)?;
+        }
         let meta = WalletMeta {
             network: network.as_str().into(),
             server: server.as_url(),
@@ -1185,7 +1515,11 @@ impl NativeWallet {
             ufvk: Some(ufvk_str),
             view_only: false,
             unlock_policy: auth.unlock_policy,
-            os_unlock: auth.windows_credential,
+            os_unlock: if retained_seed {
+                seed_store.os_unlock_present()
+            } else {
+                auth.windows_credential
+            },
             allow_deep_sync: deep,
         };
         write_meta(&paths.meta_path, &meta)?;
@@ -1193,13 +1527,69 @@ impl NativeWallet {
         Ok((
             Self {
                 paths,
-                network_access: true,
+                network_access: source.is_none(),
                 network,
                 server,
                 meta,
             },
             ua,
         ))
+    }
+
+    /// Create using only an application-authenticated public-data channel.
+    /// This wallet remains read-only across cold opens and endpoint edits.
+    pub async fn create_with_source(
+        root: impl Into<PathBuf>,
+        source: &super::NativeReadOnlySource,
+        birthday_height: Option<u32>,
+        auth: SeedAuth,
+        account_index: u32,
+    ) -> Result<(Self, CreatedWallet)> {
+        Self::create_inner(
+            root,
+            SetupSource::Provided(source),
+            birthday_height.map(NativeBirthday::Height),
+            auth,
+            account_index,
+        )
+        .await
+    }
+
+    pub async fn restore_with_source(
+        root: impl Into<PathBuf>,
+        mnemonic: &str,
+        source: &super::NativeReadOnlySource,
+        birthday_height: u32,
+        auth: SeedAuth,
+        account_index: u32,
+    ) -> Result<(Self, String)> {
+        Self::restore_inner(
+            root,
+            mnemonic,
+            SetupSource::Provided(source),
+            NativeBirthday::Height(birthday_height),
+            auth,
+            account_index,
+        )
+        .await
+    }
+
+    /// Enroll an existing wallet in sticky read-only source mode. This operation
+    /// does not contact either the channel or any stored endpoint.
+    pub fn open_with_source(
+        root: impl Into<PathBuf>,
+        source: &super::NativeReadOnlySource,
+    ) -> Result<Self> {
+        let mut wallet = Self::open(root)?;
+        if wallet.network != source.network() {
+            return Err(EngineError::Message(
+                "native_source_network_mismatch".into(),
+            ));
+        }
+        let _lease = wallet.ordinary_scan_lease()?;
+        super::source::enroll(&wallet.paths.root)?;
+        wallet.network_access = false;
+        Ok(wallet)
     }
 
     /// View-only restore: UFVK + birthday. Scan and receive work; send needs a seed paste.
@@ -1211,6 +1601,25 @@ impl NativeWallet {
         birthday_height: u32,
         account_index: u32,
     ) -> Result<(Self, String)> {
+        Self::restore_ufvk_with_birthday(
+            root,
+            ufvk_str,
+            network,
+            server,
+            NativeBirthday::Height(birthday_height),
+            account_index,
+        )
+        .await
+    }
+
+    pub async fn restore_ufvk_with_birthday(
+        root: impl Into<PathBuf>,
+        ufvk_str: &str,
+        network: ZNetwork,
+        server: Option<LightServer>,
+        birthday: NativeBirthday,
+        account_index: u32,
+    ) -> Result<(Self, String)> {
         super::initialize_native_threads(None)?;
         let keys = crate::keys::account_from_ufvk(ufvk_str, network, account_index)?;
         let ufvk = UnifiedFullViewingKey::decode(&network, keys.ufvk.trim())
@@ -1220,6 +1629,8 @@ impl NativeWallet {
         paths.prepare_new_wallet()?;
         paths.ensure_dirs()?;
         let server = server.unwrap_or_else(|| LightServer::for_network(network));
+        let birthday_height =
+            Self::resolve_setup_birthday(birthday, network, &server, false).await?;
         let mut client = Self::connect_url(
             &server.as_url(),
             Self::skip_ironwood_subtrees(network, &server.as_url()),
@@ -1286,6 +1697,7 @@ impl NativeWallet {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         super::initialize_native_threads(None)?;
         let paths = WalletPaths::new(root);
+        super::source::read_only(&paths.root)?;
         if paths.meta_path.exists() {
             paths.recover_interrupted_reset();
         }
@@ -1296,9 +1708,10 @@ impl NativeWallet {
             .map_err(|e| EngineError::Message(format!("wallet.json: {e}")))?;
         let network = ZNetwork::parse(&meta.network)
             .ok_or_else(|| EngineError::InvalidNetwork(meta.network.clone()))?;
+        let network_access = !super::source::read_only(&paths.root)?;
         Ok(Self {
             paths,
-            network_access: true,
+            network_access,
             network,
             server: LightServer::parse(&meta.server, network),
             meta,
@@ -1314,6 +1727,7 @@ impl NativeWallet {
     }
 
     fn require_network_access(&self) -> Result<()> {
+        self.require_source_spending_access()?;
         if self.network_access {
             Ok(())
         } else {
@@ -1321,8 +1735,60 @@ impl NativeWallet {
         }
     }
 
-    fn ordinary_scan_lease(&self) -> Result<std::fs::File> {
-        let lease = database_lease::exclusive(&self.paths.data_db)?;
+    fn require_source_spending_access(&self) -> Result<()> {
+        if super::source::read_only(&self.paths.root)? {
+            return Err(super::source::refused());
+        }
+        Ok(())
+    }
+
+    pub(super) fn network_operation_lease(&self) -> Result<Arc<std::fs::File>> {
+        self.check_network_capability()?;
+        let lease = Arc::new(database_lease::shared(&self.paths.data_db)?);
+        self.require_network_access()?;
+        Ok(lease)
+    }
+
+    pub(super) fn local_mutation_lease(&self) -> Result<Arc<std::fs::File>> {
+        let lease = Arc::new(database_lease::exclusive(&self.paths.data_db)?);
+        self.require_source_spending_access()?;
+        Ok(lease)
+    }
+
+    pub(super) fn bootstrap_network_lease(root: &Path) -> Result<Arc<std::fs::File>> {
+        let lease = Arc::new(database_lease::bootstrap(root)?);
+        if super::source::read_only(root)? {
+            return Err(super::source::refused());
+        }
+        Ok(lease)
+    }
+
+    fn check_network_capability(&self) -> Result<()> {
+        // A disabled handle always refuses; enabled handles check sticky policy
+        // after acquiring ownership, before any transport or database mutation.
+        if self.network_access {
+            Ok(())
+        } else {
+            self.require_network_access()
+        }
+    }
+
+    fn require_read_only_source(&self, source: &super::NativeReadOnlySource) -> Result<()> {
+        if self.network != source.network() {
+            return Err(EngineError::Message(
+                "native_source_network_mismatch".into(),
+            ));
+        }
+        if !super::source::read_only(&self.paths.root)? {
+            return Err(EngineError::Message(
+                "native_source_enrollment_required".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn ordinary_scan_lease(&self) -> Result<Arc<std::fs::File>> {
+        let lease = Arc::new(database_lease::exclusive(&self.paths.data_db)?);
         if has_recovery_marker(&self.paths.data_db)? {
             return Err(EngineError::Message("native_recovery_scan_refused".into()));
         }
@@ -1475,6 +1941,9 @@ impl NativeWallet {
         live: Option<Arc<Mutex<SyncProgress>>>,
         cancel: Arc<AtomicBool>,
     ) -> Result<(u32, SyncProgress)> {
+        self.check_network_capability()?;
+        let _lease = self.ordinary_scan_lease()?;
+        self.require_network_access()?;
         // The CLI passes no live progress; keep one anyway so the retry loop
         // can tell an attempt that moved the scan from one that never connected.
         let live = live.or_else(|| Some(Arc::new(Mutex::new(SyncProgress::default()))));
@@ -1486,7 +1955,28 @@ impl NativeWallet {
             Duration::from_secs(120),
             Duration::from_secs(2),
             &cancel,
-            || self.sync_reported(progress.clone()),
+            || self.sync_reported_locked(progress.clone(), None, &_lease),
+        )
+        .await
+    }
+
+    pub async fn sync_with_source_reported_cancellable(
+        &self,
+        source: &super::NativeReadOnlySource,
+        live: Option<Arc<Mutex<SyncProgress>>>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<(u32, SyncProgress)> {
+        let _lease = self.ordinary_scan_lease()?;
+        self.require_read_only_source(source)?;
+        let live = live.or_else(|| Some(Arc::new(Mutex::new(SyncProgress::default()))));
+        let progress = live.clone();
+        retry_transient_sync(
+            live,
+            None,
+            Duration::from_secs(120),
+            Duration::from_secs(2),
+            &cancel,
+            || self.sync_reported_locked(progress.clone(), Some(source), &_lease),
         )
         .await
     }
@@ -1495,8 +1985,23 @@ impl NativeWallet {
         &self,
         live: Option<Arc<Mutex<SyncProgress>>>,
     ) -> Result<(u32, SyncProgress)> {
-        self.require_network_access()?;
+        self.check_network_capability()?;
         let _lease = self.ordinary_scan_lease()?;
+        self.sync_reported_locked(live, None, &_lease).await
+    }
+
+    // Callers retain one exclusive lease for the full scan/retry lifetime.
+    async fn sync_reported_locked(
+        &self,
+        live: Option<Arc<Mutex<SyncProgress>>>,
+        source: Option<&super::NativeReadOnlySource>,
+        lease: &Arc<std::fs::File>,
+    ) -> Result<(u32, SyncProgress)> {
+        match source {
+            Some(source) => self.require_read_only_source(source)?,
+            None => self.require_network_access()?,
+        }
+        let provided = source.is_some();
         let mut progress = SyncProgress {
             stage: SyncStage::Connecting,
             percent: 0.0,
@@ -1506,7 +2011,10 @@ impl NativeWallet {
         Self::push_progress(&live, &progress);
 
         let mut db = self.open_db()?;
-        let mut client = self.connect().await?;
+        let mut client = match source {
+            Some(source) => source.client(),
+            None => self.connect().await?,
+        };
         Self::assert_chain(&mut client, self.network).await?;
 
         let tip: u32 = client
@@ -1534,7 +2042,11 @@ impl NativeWallet {
             .map_err(|e| EngineError::WalletDb(format!("block cache: {e}")))?
             .with_progress(Arc::clone(&downloaded))
             .with_scan_progress(Arc::clone(&scanned));
-        let light_url = self.server.as_url();
+        let light_url = if provided {
+            "authenticated public-data source".to_owned()
+        } else {
+            self.server.as_url()
+        };
 
         progress.stage = SyncStage::Connecting;
         progress.eta_secs = None;
@@ -1615,7 +2127,7 @@ impl NativeWallet {
                         && left > 0;
                     let quiet = span <= crate::NEAR_TIP_BLOCKS
                         || left <= crate::STALL_QUIET_REMAINING;
-                    if frozen && !quiet && last_probe.elapsed() >= Duration::from_secs(5) {
+                    if !provided && frozen && !quiet && last_probe.elapsed() >= Duration::from_secs(5) {
                         last_probe = std::time::Instant::now();
                         light_reachable = light_tcp_reachable(&light_tick);
                         if !light_reachable {
@@ -1717,6 +2229,7 @@ impl NativeWallet {
             &self.paths.data_db,
             self.meta.birthday_height,
             &light_url,
+            provided,
             &downloaded,
             &scanned,
             live.clone(),
@@ -1734,34 +2247,37 @@ impl NativeWallet {
             )));
         }
 
-        progress.stage = SyncStage::Enhancing;
-        progress.percent = 92.0;
-        progress.message = "reading memos from mined transactions".into();
-        Self::push_progress(&live, &progress);
+        if !provided {
+            progress.stage = SyncStage::Enhancing;
+            progress.percent = 92.0;
+            progress.message = "reading memos from mined transactions".into();
+            Self::push_progress(&live, &progress);
 
-        // Memos are best effort and retried next sync. A hung validator RPC
-        // (120 s read timeout per lookup) must not hold the sync, and with it
-        // Send, for many minutes.
-        let enhanced = tokio::time::timeout(ENHANCE_BUDGET, self.enhance_memos(&mut db))
-            .await
-            .unwrap_or_else(|_| {
-                warn!("memo enhancement ran out of time; the rest waits for the next sync");
-                Ok(0)
-            })
-            .unwrap_or(0);
-        #[cfg(feature = "transparent-inputs")]
-        self.classify_balance_funding(&mut db).await?;
-        info!("memo enhancement completed");
-        if enhanced > 0 {
-            info!("memo enhance stored decrypted outputs");
+            // Memos are best effort and retried next sync. A hung validator RPC
+            // (120 s read timeout per lookup) must not hold the sync, and with it
+            // Send, for many minutes.
+            let enhanced = tokio::time::timeout(ENHANCE_BUDGET, self.enhance_memos(&mut db, lease))
+                .await
+                .unwrap_or_else(|_| {
+                    warn!("memo enhancement ran out of time; the rest waits for the next sync");
+                    Ok(0)
+                })
+                .unwrap_or(0);
+            #[cfg(feature = "transparent-inputs")]
+            self.classify_balance_funding(&mut db, lease).await?;
+            info!("memo enhancement completed");
+            if enhanced > 0 {
+                info!("memo enhance stored decrypted outputs");
+            }
+
+            match tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip, lease))
+                .await
+            {
+                Ok(0) => {}
+                Ok(_sent) => info!("saved unmined sends resubmitted"),
+                Err(_) => warn!("rebroadcast ran out of time; the rest waits for the next sync"),
+            }
         }
-
-        match tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip)).await {
-            Ok(0) => {}
-            Ok(_sent) => info!("saved unmined sends resubmitted"),
-            Err(_) => warn!("rebroadcast ran out of time; the rest waits for the next sync"),
-        }
-
         let scanned = last_filled_island_end(&self.paths.data_db, self.meta.birthday_height, tip);
         progress.stage = SyncStage::Synced;
         progress.percent = 100.0;
@@ -1785,7 +2301,7 @@ impl NativeWallet {
     /// Enhancements store full data at the server-reported mined height;
     /// status requests and unknown transactions are reported back with
     /// `set_transaction_status`, so they leave the queue instead of blocking it.
-    async fn enhance_memos(&self, db: &mut Db) -> Result<u32> {
+    async fn enhance_memos(&self, db: &mut Db, lease: &Arc<std::fs::File>) -> Result<u32> {
         self.require_network_access()?;
         const MAX: usize = 24;
         let reqs = db
@@ -1824,7 +2340,9 @@ impl NativeWallet {
         let client = Self::connect_url(&self.server.as_url(), skip).await;
         for chunk in wanted.chunks(4) {
             let ids: Vec<TxId> = chunk.iter().map(|(id, _)| *id).collect();
-            let lookups = self.lookup_transactions(client.as_ref().ok(), &ids).await;
+            let lookups = self
+                .lookup_transactions(client.as_ref().ok(), &ids, lease)
+                .await;
             info!("memo transaction RPC batch completed");
             for (&(txid, full), lookup) in chunk.iter().zip(lookups) {
                 let (raw, mined_at) = match lookup {
@@ -1883,10 +2401,15 @@ impl NativeWallet {
     }
 
     /// Up to four lookups at once.
-    async fn lookup_transactions(&self, client: Option<&LwdClient>, ids: &[TxId]) -> Vec<TxLookup> {
+    async fn lookup_transactions(
+        &self,
+        client: Option<&LwdClient>,
+        ids: &[TxId],
+        lease: &Arc<std::fs::File>,
+    ) -> Vec<TxLookup> {
         let lookup = |i: usize| async move {
             match ids.get(i) {
-                Some(id) => Some(self.lookup_transaction(client.cloned(), *id).await),
+                Some(id) => Some(self.lookup_transaction(client.cloned(), *id, lease).await),
                 None => None,
             }
         };
@@ -1896,8 +2419,13 @@ impl NativeWallet {
 
     /// A validator RPC answers with the mined height in one call; the light
     /// server's GetTransaction does too and covers wallets without one.
-    async fn lookup_transaction(&self, client: Option<LwdClient>, txid: TxId) -> TxLookup {
-        if !self.network_access {
+    async fn lookup_transaction(
+        &self,
+        client: Option<LwdClient>,
+        txid: TxId,
+        lease: &Arc<std::fs::File>,
+    ) -> TxLookup {
+        if !self.network_access || self.require_source_spending_access().is_err() {
             return TxLookup::Unavailable(EngineError::Message("native_offline_wallet".into()));
         }
         let mut failure = None;
@@ -1906,7 +2434,9 @@ impl NativeWallet {
             .or_else(|| self.server.zebra_rpc_url())
         {
             let id = txid.to_string();
+            let owner = lease.clone();
             let fetched = tokio::task::spawn_blocking(move || {
+                let _owner = owner;
                 super::rpc::get_raw_transaction_verbose(&rpc, &id)
             })
             .await;
@@ -1966,6 +2496,7 @@ impl NativeWallet {
 
     /// Rotate to the next diversified unified address (preferred for privacy).
     pub fn next_unified_address(&self) -> Result<String> {
+        let _ownership = database_lease::shared(&self.paths.data_db)?;
         let mut db = self.open_db()?;
         let account = Self::primary_account_id(&db)?;
         let (addr, _idx) = db
@@ -2094,8 +2625,9 @@ impl NativeWallet {
     /// Rewind scan_queue to the last filled island so the next `sync` trial-decrypts
     /// island_end+1→tip. Does not wipe keys or the already-scanned island.
     pub async fn rewind_scan_to_gap(&self) -> Result<u32> {
-        self.require_network_access()?;
+        self.check_network_capability()?;
         let _lease = self.ordinary_scan_lease()?;
+        self.require_network_access()?;
         let mut client = Self::connect_url(
             &self.server.as_url(),
             Self::skip_ironwood_subtrees(self.network, &self.server.as_url()),
@@ -2116,6 +2648,7 @@ impl NativeWallet {
     #[cfg(test)]
     fn rewind_scan_to_gap_at_tip(&self, tip: u32) -> Result<u32> {
         let _lease = self.ordinary_scan_lease()?;
+        self.require_source_spending_access()?;
         self.rewind_scan_to_gap_locked(tip)
     }
 
@@ -2140,6 +2673,8 @@ impl NativeWallet {
     /// Wipe sqlite + compact-block cache and re-import the UFVK at birthday.
     /// Seed / keyring / wallet.json stay. Next `sync` is a full rescan.
     pub async fn reset_scan(&self) -> Result<()> {
+        self.check_network_capability()?;
+        let _lease = database_lease::exclusive(&self.paths.data_db)?;
         self.require_network_access()?;
         if has_recovery_marker(&self.paths.data_db)? {
             return Err(EngineError::Message("native_recovery_reset_refused".into()));
@@ -2184,9 +2719,10 @@ impl NativeWallet {
         let birthday = AccountBirthday::from_treestate(treestate, Some(BlockHeight::from(tip)))
             .map_err(|e| EngineError::WalletDb(format!("birthday: {e}")))?;
 
-        self.replace_scan_db(&ufvk, &birthday)
+        self.replace_scan_db_locked(&ufvk, &birthday)
     }
 
+    #[cfg(test)]
     fn replace_scan_db(
         &self,
         ufvk: &UnifiedFullViewingKey,
@@ -2194,6 +2730,17 @@ impl NativeWallet {
     ) -> Result<()> {
         let db_path = &self.paths.data_db;
         let _lease = database_lease::exclusive(db_path)?;
+        self.replace_scan_db_locked(ufvk, birthday)
+    }
+
+    fn replace_scan_db_locked(
+        &self,
+        ufvk: &UnifiedFullViewingKey,
+        birthday: &AccountBirthday,
+    ) -> Result<()> {
+        // The caller retains the exclusive ownership lease through the swap.
+        self.require_source_spending_access()?;
+        let db_path = &self.paths.data_db;
         if has_recovery_marker(db_path)? {
             return Err(EngineError::Message("native_recovery_reset_refused".into()));
         }
@@ -2425,12 +2972,13 @@ impl NativeWallet {
 
     /// Sync if the wallet is behind the light server tip. Returns whether work ran.
     pub async fn catch_up(&self) -> Result<(u32, SyncProgress, bool)> {
-        self.require_network_access()?;
+        self.check_network_capability()?;
         let lease = self.ordinary_scan_lease()?;
+        self.require_network_access()?;
         let scanned = self.scanned_height()?;
         let tip = Self::fetch_tip(&self.server).await?;
         if scanned >= tip {
-            return self.finish_caught_up(scanned, tip).await;
+            return self.finish_caught_up(scanned, tip, &lease).await;
         }
         drop(lease);
         let (h, p) = self.sync().await?;
@@ -2438,20 +2986,26 @@ impl NativeWallet {
     }
 
     // Caller retains the ordinary scan lease for the entire maintenance pass.
-    async fn finish_caught_up(&self, scanned: u32, tip: u32) -> Result<(u32, SyncProgress, bool)> {
+    async fn finish_caught_up(
+        &self,
+        scanned: u32,
+        tip: u32,
+        lease: &Arc<std::fs::File>,
+    ) -> Result<(u32, SyncProgress, bool)> {
         // Older sparse scans could persist notes/rows without a usable
         // checkpoint. A caught-up wallet must recover those anchors too.
         self.recover_spend_checkpoints(scanned).await?;
         let mut db = self.open_db()?;
         // Raw enhancement can be deferred while scanning succeeds. Retry its
         // bounded queue even when no new compact block arrived.
-        let _ = tokio::time::timeout(ENHANCE_BUDGET, self.enhance_memos(&mut db)).await;
+        let _ = tokio::time::timeout(ENHANCE_BUDGET, self.enhance_memos(&mut db, lease)).await;
         #[cfg(feature = "transparent-inputs")]
-        self.classify_balance_funding(&mut db).await?;
+        self.classify_balance_funding(&mut db, lease).await?;
         drop(db);
         // The web bridge syncs through here: resubmit unmined sends even
         // when no block arrived.
-        let _ = tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip)).await;
+        let _ =
+            tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip, lease)).await;
         Ok((
             scanned,
             SyncProgress {
@@ -2467,7 +3021,11 @@ impl NativeWallet {
     }
 
     #[cfg(feature = "transparent-inputs")]
-    async fn classify_balance_funding(&self, db: &mut Db) -> Result<usize> {
+    async fn classify_balance_funding(
+        &self,
+        db: &mut Db,
+        lease: &Arc<std::fs::File>,
+    ) -> Result<usize> {
         self.require_network_access()?;
         let rpc = self.validator_rpc_url();
         let phase = super::transparent_funding::classify_balance_funding(
@@ -2477,7 +3035,11 @@ impl NativeWallet {
             |txid| {
                 let txid = txid.to_string();
                 let rpc = rpc.as_deref();
-                async move { Self::fetch_raw_transaction_with_rpc(&self.server, rpc, &txid).await }
+                let owner = lease.clone();
+                async move {
+                    Self::fetch_raw_transaction_with_rpc_owned(&self.server, rpc, &txid, owner)
+                        .await
+                }
             },
         );
         tokio::time::timeout(Duration::from_secs(30), phase)
@@ -2552,9 +3114,8 @@ impl NativeWallet {
 
     #[cfg(feature = "transparent-inputs")]
     pub async fn shield(&self, auth: &SeedAuth, threshold_zat: u64) -> Result<Vec<String>> {
-        self.require_network_access()?;
+        let _lease = self.network_operation_lease()?;
         self.ensure_recovery_selection_ready()?;
-        let _lease = database_lease::shared(&self.paths.data_db)?;
         let mut db = self.open_db()?;
         let account = Self::primary_account_id(&db)?;
         let seed = self.load_seed(auth)?;
@@ -2584,7 +3145,11 @@ impl NativeWallet {
             |txid| {
                 let txid = txid.to_string();
                 let rpc = rpc.as_deref();
-                async move { Self::fetch_raw_transaction_with_rpc(&self.server, rpc, &txid).await }
+                let owner = _lease.clone();
+                async move {
+                    Self::fetch_raw_transaction_with_rpc_owned(&self.server, rpc, &txid, owner)
+                        .await
+                }
             },
         )
         .await?;
@@ -2646,7 +3211,9 @@ impl NativeWallet {
             })
             .map_err(|e| map_funds_err(format!("create shielding tx: {e}")))?;
 
-        let out = self.broadcast_all(&mut db, txids.iter().copied()).await;
+        let out = self
+            .broadcast_all(&mut db, txids.iter().copied(), &_lease)
+            .await;
         info!("shield timings");
         out
     }
@@ -2691,15 +3258,18 @@ impl NativeWallet {
 
     /// ZIP-317 fee for a shielded send / ZIP-321 URI. Propose only — no prove or broadcast.
     pub fn estimate_fee(&self, to: &str, amount_zatoshis: u64, memo: Option<&str>) -> Result<u64> {
+        let _lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         self.ensure_recovery_selection_ready()?;
         let request = self.send_request(to, amount_zatoshis, memo)?;
-        let _lease = database_lease::shared(&self.paths.data_db)?;
         let mut db = self.open_db()?;
         self.propose_fee(&mut db, request, shielded_spend_policy())
     }
 
     /// Largest shielded amount that `propose_transfer` accepts for `to` (own UA if omitted).
     pub fn max_send(&self, to: Option<&str>) -> Result<(u64, u64)> {
+        let _source_lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         self.ensure_recovery_selection_ready()?;
         let dest = match to.map(str::trim).filter(|s| !s.is_empty()) {
             Some(s) if s.to_ascii_lowercase().starts_with("zcash:") => {
@@ -2878,6 +3448,7 @@ impl NativeWallet {
         after_guard: impl FnOnce(),
     ) -> Result<(u64, u64)> {
         let _lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         let mut db = self.open_db()?;
         db.transactionally_with_extension(|db, ext| -> anyhow::Result<(u64, u64)> {
             recovery_guard::transaction_recovery_ready(db, ext)?;
@@ -2970,9 +3541,8 @@ impl NativeWallet {
         memo: Option<&str>,
         policy: SpendPolicy,
     ) -> Result<Vec<String>> {
-        self.require_network_access()?;
+        let _lease = self.network_operation_lease()?;
         self.ensure_recovery_selection_ready()?;
-        let _lease = database_lease::shared(&self.paths.data_db)?;
         crate::keys::assert_shielded_send_dest(to, crate::keys::SendDestPolicy::Shielded)?;
         let db = self.open_db()?;
         let account = Self::primary_account_id(&db)?;
@@ -3024,9 +3594,8 @@ impl NativeWallet {
         payments: &[crate::Zip321Payment],
         policy: SpendPolicy,
     ) -> Result<Vec<String>> {
-        self.require_network_access()?;
+        let _lease = self.network_operation_lease()?;
         self.ensure_recovery_selection_ready()?;
-        let _lease = database_lease::shared(&self.paths.data_db)?;
         if payments.is_empty() {
             return Err(EngineError::Message("ZIP-321 URI has no payments".into()));
         }
@@ -3090,7 +3659,8 @@ impl NativeWallet {
         policy: SpendPolicy,
         after_proposal: impl FnOnce(),
     ) -> Result<Vec<String>> {
-        let _lease = database_lease::shared(&self.paths.data_db)?;
+        let _lease = Arc::new(database_lease::shared(&self.paths.data_db)?);
+        self.require_source_spending_access()?;
 
         let (proposal, selected_generation) = db
             .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
@@ -3145,7 +3715,9 @@ impl NativeWallet {
             })
             .map_err(|e| map_funds_err(format!("create send tx: {e}")))?;
 
-        let out = self.broadcast_all(&mut db, txids.iter().copied()).await;
+        let out = self
+            .broadcast_all(&mut db, txids.iter().copied(), &_lease)
+            .await;
         info!("send timings");
         out
     }
@@ -3154,6 +3726,7 @@ impl NativeWallet {
         &self,
         db: &mut Db,
         txids: impl IntoIterator<Item = TxId>,
+        lease: &Arc<std::fs::File>,
     ) -> Result<Vec<String>> {
         let txids: Vec<_> = txids.into_iter().collect();
         let saved_ids = txids
@@ -3176,7 +3749,7 @@ impl NativeWallet {
         let mut client = None;
         let mut out = Vec::new();
         for txid in txids {
-            match self.broadcast_one(&mut client, db, txid).await {
+            match self.broadcast_one(&mut client, db, txid, lease).await {
                 Ok(s) => out.push(s),
                 Err(e) => return Err(failure(e)),
             }
@@ -3189,6 +3762,7 @@ impl NativeWallet {
         client: &mut Option<BroadcastConnection>,
         db: &mut Db,
         txid: TxId,
+        lease: &Arc<std::fs::File>,
     ) -> Result<String> {
         let raw = db
             .get_transaction(txid)
@@ -3198,7 +3772,7 @@ impl NativeWallet {
         let mut data = Vec::new();
         raw.write(&mut data)
             .map_err(|e| EngineError::WalletDb(format!("serialize tx: {e}")))?;
-        self.submit_raw(client, data).await?;
+        self.submit_raw(client, data, lease).await?;
         info!("broadcast ok");
         Ok(txid.to_string())
     }
@@ -3206,17 +3780,21 @@ impl NativeWallet {
     /// Establish canonical identity before exposing any signed bytes. Validator
     /// requests retain their TCP connection; light requests retain their client.
     /// A failed identity check never falls back to a different transport.
-    async fn connect_submission(&self) -> Result<BroadcastConnection> {
+    async fn connect_submission(&self, lease: &Arc<std::fs::File>) -> Result<BroadcastConnection> {
         self.require_network_access()?;
         if let Some(url) = self.validator_rpc_url() {
             let network = self.network;
+            let owner = lease.clone();
             let connected = tokio::task::spawn_blocking(move || {
+                let _owner = owner;
                 super::rpc::VerifiedValidator::connect(&url, network)
             })
             .await
             .map_err(|_| EngineError::Transport("broadcast connection task failed".into()))?;
             match connected {
-                Ok(connection) => return Ok(BroadcastConnection::Validator(connection)),
+                Ok(connection) => {
+                    return Ok(BroadcastConnection::Validator(connection, lease.clone()))
+                }
                 Err(error) if super::rpc::never_sent(&error) => {
                     warn!("validator RPC unreachable; checking light server identity");
                 }
@@ -3256,7 +3834,7 @@ impl NativeWallet {
             &info.chain_name,
             &crate::web::to_hex(&genesis),
         )?;
-        Ok(BroadcastConnection::Light(Box::new(client)))
+        Ok(BroadcastConnection::Light(Box::new(client), lease.clone()))
     }
 
     /// Every broadcast (including automatic rebroadcast) verifies canonical
@@ -3265,25 +3843,29 @@ impl NativeWallet {
         &self,
         client: &mut Option<BroadcastConnection>,
         data: Vec<u8>,
+        lease: &Arc<std::fs::File>,
     ) -> Result<()> {
         self.require_network_access()?;
         if client.is_none() {
-            *client = Some(self.connect_submission().await?);
+            *client = Some(self.connect_submission(lease).await?);
         }
         match client
             .take()
             .expect("submission connection established above")
         {
-            BroadcastConnection::Validator(mut connection) => {
-                tokio::task::spawn_blocking(move || connection.send(&data))
-                    .await
-                    .map_err(|_| EngineError::Transport("broadcast task failed".into()))??;
+            BroadcastConnection::Validator(mut connection, owner) => {
+                tokio::task::spawn_blocking(move || {
+                    let _owner = owner;
+                    connection.send(&data)
+                })
+                .await
+                .map_err(|_| EngineError::Transport("broadcast task failed".into()))??;
             }
-            BroadcastConnection::Light(mut connection) => {
+            BroadcastConnection::Light(mut connection, owner) => {
                 let result = connection
                     .send_transaction(RawTransaction { data, height: 0 })
                     .await;
-                *client = Some(BroadcastConnection::Light(connection));
+                *client = Some(BroadcastConnection::Light(connection, owner));
                 let response = result
                     .map_err(|_| EngineError::Transport("SendTransaction failed".into()))?
                     .into_inner();
@@ -3305,7 +3887,7 @@ impl NativeWallet {
     /// broadcast whose outcome was unknown (lost reply, outage, the app closed
     /// between saving and sending) without the user sending again, which picks
     /// other notes and could pay twice. Returns how many were resubmitted.
-    async fn rebroadcast_unmined(&self, tip: u32) -> usize {
+    async fn rebroadcast_unmined(&self, tip: u32, lease: &Arc<std::fs::File>) -> usize {
         let pending = match unmined_sends(&self.paths.data_db, tip) {
             Ok(pending) => pending,
             Err(_e) => {
@@ -3316,7 +3898,7 @@ impl NativeWallet {
         let mut client = None;
         let mut sent = 0;
         for (_txid, raw) in pending {
-            match self.submit_raw(&mut client, raw).await {
+            match self.submit_raw(&mut client, raw, lease).await {
                 Ok(()) => {
                     info!("rebroadcast saved unmined send");
                     sent += 1;
@@ -3569,16 +4151,37 @@ impl NativeWallet {
         validator_rpc: Option<&str>,
         txid_hex: &str,
     ) -> Result<Vec<u8>> {
+        Self::fetch_raw_transaction_with_rpc_inner(server, validator_rpc, txid_hex, None).await
+    }
+
+    pub(super) async fn fetch_raw_transaction_with_rpc_owned(
+        server: &LightServer,
+        validator_rpc: Option<&str>,
+        txid_hex: &str,
+        owner: Arc<std::fs::File>,
+    ) -> Result<Vec<u8>> {
+        Self::fetch_raw_transaction_with_rpc_inner(server, validator_rpc, txid_hex, Some(owner))
+            .await
+    }
+
+    async fn fetch_raw_transaction_with_rpc_inner(
+        server: &LightServer,
+        validator_rpc: Option<&str>,
+        txid_hex: &str,
+        owner: Option<Arc<std::fs::File>>,
+    ) -> Result<Vec<u8>> {
         let rpc = validator_rpc
             .map(str::to_string)
             .or_else(|| server.zebra_rpc_url());
         let try_rpc = |id: String| {
             let rpc = rpc.clone();
+            let owner = owner.clone();
             async move {
                 let rpc = rpc.ok_or_else(|| EngineError::Message("no validator rpc".into()))?;
-                // The worker owns only request inputs. Dropping a timed-out fetch
-                // cannot leave native database writes running in the background.
+                // Wallet-associated callers retain their policy owner until the
+                // blocking request ends, even after the async caller is dropped.
                 tokio::task::spawn_blocking(move || {
+                    let _owner = owner;
                     let hex = super::rpc::get_raw_transaction_hex(&rpc, &id)?;
                     crate::web::from_hex(&hex).map_err(EngineError::Message)
                 })
@@ -4522,10 +5125,10 @@ mod tests {
         let reader = NativeWallet::open_offline(dir.path()).unwrap();
         let baseline = reader.balance().unwrap();
         assert_eq!(baseline.orchard_available, 50_000);
-        let exclusive = writer.ordinary_scan_lease().unwrap();
         writer
             .scan_public_regtest_incremental(&publication, schedule)
             .unwrap();
+        let exclusive = writer.ordinary_scan_lease().unwrap();
         assert!(matches!(reader.balance(), Err(EngineError::SyncRequired)));
         drop(exclusive);
         assert_eq!(reader.scanned_height().unwrap(), 9);
@@ -4678,7 +5281,7 @@ mod tests {
             }
         });
         let lease = wallet.ordinary_scan_lease().unwrap();
-        let first = wallet.finish_caught_up(8, 8).await.unwrap();
+        let first = wallet.finish_caught_up(8, 8, &lease).await.unwrap();
         assert_eq!(first.0, 8);
         assert!(!first.2);
         assert_eq!(fee(), None);
@@ -4688,7 +5291,7 @@ mod tests {
             .transaction_enhancement_work()
             .unwrap()
             .is_empty());
-        let second = wallet.finish_caught_up(8, 8).await.unwrap();
+        let second = wallet.finish_caught_up(8, 8, &lease).await.unwrap();
         assert_eq!(second.0, 8);
         assert!(!second.2);
         assert_eq!(fee(), Some(10_000));

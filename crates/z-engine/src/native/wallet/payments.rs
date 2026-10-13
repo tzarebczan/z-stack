@@ -434,8 +434,11 @@ mod tests {
         let mut db = wallet.open_db().unwrap();
         let txid = TxId::from_bytes([0xaa; 32]);
         let mut client = None;
+        let owner = wallet.network_operation_lease().unwrap();
         assert!(matches!(
-            wallet.broadcast_one(&mut client, &mut db, txid).await,
+            wallet
+                .broadcast_one(&mut client, &mut db, txid, &owner)
+                .await,
             Err(EngineError::WalletDb(_))
         ));
         assert!(client.is_none(), "missing bytes must not reach a server");
@@ -669,6 +672,8 @@ impl NativeWallet {
         memo: Option<&str>,
         policy: ConfirmationsPolicy,
     ) -> Result<PaymentReceipt> {
+        let _source_lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         if to.trim().to_ascii_lowercase().starts_with("zcash:") {
             return Err(failed("payment_plain_address_required"));
         }
@@ -747,6 +752,8 @@ impl NativeWallet {
     /// receipt commit in ONE SQLite transaction before this returns. No broadcast.
     /// A failed/interrupted transaction leaves the review prepared and sends nothing.
     pub fn sign_payment(&self, auth: &SeedAuth, id: &str) -> Result<PaymentReceipt> {
+        let _source_lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         self.ensure_recovery_selection_ready()?;
         let conn = connection(self)?;
         let receipt = read(&conn, id)?;
@@ -834,7 +841,7 @@ impl NativeWallet {
     /// create a replacement payment. Lost replies remain unknown; explicit node
     /// rejections surface as errors while the signed receipt remains recoverable.
     pub async fn submit_payment(&self, id: &str) -> Result<PaymentReceipt> {
-        self.require_network_access()?;
+        let _source_lease = self.network_operation_lease()?;
         let conn = connection(self)?;
         let receipt = self.payment_receipt(id)?;
         if matches!(receipt.phase.as_str(), "accepted" | "mined") {
@@ -845,7 +852,7 @@ impl NativeWallet {
         }
         // Refuse a changed chain before changing the durable receipt. Keep this
         // verified connection for submission; do not reconnect after the check.
-        let mut client = Some(self.connect_submission().await?);
+        let mut client = Some(self.connect_submission(&_source_lease).await?);
         conn.execute(
             "UPDATE ext_native_payments_v1 SET phase='unknown' WHERE id=?1",
             [id],
@@ -854,7 +861,10 @@ impl NativeWallet {
         let mut db = self.open_db()?;
         for id in &receipt.txids {
             let txid = TxId::from_hex(id).ok_or_else(|| failed("payment_storage_failed"))?;
-            if !submission_acknowledged(self.broadcast_one(&mut client, &mut db, txid).await)? {
+            if !submission_acknowledged(
+                self.broadcast_one(&mut client, &mut db, txid, &_source_lease)
+                    .await,
+            )? {
                 return self.payment_receipt(&receipt.id);
             }
         }

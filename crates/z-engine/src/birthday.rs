@@ -326,9 +326,17 @@ pub fn height_from_date(ymd: &str, tip_height: u32) -> Result<u32> {
 
 /// Approximate date-to-height conversion, using every intervening spacing era.
 /// A live tip and exact birthday height are preferable to this wall-clock estimate.
+/// Dates allow one day ahead for timezone differences.
 pub fn height_from_date_for_network(ymd: &str, tip_height: u32, network: Network) -> Result<u32> {
+    height_from_date_at(ymd, tip_height, network, now_unix())
+}
+
+fn height_from_date_at(ymd: &str, tip_height: u32, network: Network, now: i64) -> Result<u32> {
     let date_unix = ymd_to_unix(ymd.trim())?;
-    let seconds = now_unix().saturating_sub(date_unix).max(0) as u64;
+    if date_unix > now.saturating_add(86_400) {
+        return Err(EngineError::Message("birthday date is above tip".into()));
+    }
+    let seconds = now.saturating_sub(date_unix).max(0) as u64;
     Ok(height_before_seconds(network, tip_height, seconds))
 }
 
@@ -507,6 +515,45 @@ mod tests {
         let h = height_from_date("2020-01-01", 3_000_000).unwrap();
         assert!(h < 3_000_000);
         assert!(h > 1);
+    }
+
+    #[test]
+    fn future_birthday_cannot_become_a_tip_height() {
+        for network in [Network::Mainnet, Network::Testnet, Network::Regtest] {
+            for tip in [1, 3_000_000, u32::MAX] {
+                assert_eq!(
+                    height_from_date_for_network("9999-12-31", tip, network)
+                        .unwrap_err()
+                        .code(),
+                    "birthday_above_tip"
+                );
+                assert_eq!(
+                    parse_birthday_input_for_network("9999-12-31", tip, network)
+                        .unwrap_err()
+                        .code(),
+                    "birthday_above_tip"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn future_birthday_allows_only_one_day_for_timezone_difference() {
+        let midnight = ymd_to_unix("2024-01-01").unwrap();
+        for network in [Network::Mainnet, Network::Testnet, Network::Regtest] {
+            assert_eq!(
+                height_from_date_at("2024-01-02", 3_000_000, network, midnight).unwrap(),
+                3_000_000
+            );
+            for now in [midnight - 1, midnight - 86_400] {
+                assert_eq!(
+                    height_from_date_at("2024-01-02", 3_000_000, network, now)
+                        .unwrap_err()
+                        .code(),
+                    "birthday_above_tip"
+                );
+            }
+        }
     }
 
     #[test]

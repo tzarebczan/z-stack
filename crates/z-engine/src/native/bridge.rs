@@ -5,7 +5,7 @@
 
 use crate::error::{EngineError, Result};
 use crate::native::rpc::{pick_local_validator, probe_validator};
-use crate::native::wallet::{NativeWallet, SeedAuth};
+use crate::native::wallet::{NativeBirthday, NativeWallet, SeedAuth};
 use crate::{format_zatoshis, parse_zec_to_zatoshis, zip321_uri, Balance, LightServer, Network};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -246,17 +246,21 @@ impl Bridge {
         let wallet = if self.wallet_exists() {
             match NativeWallet::open(&self.wallet) {
                 Ok(wallet) => Some(wallet),
-                Err(error)
-                    if req.method == "POST"
-                        && path == "/lwd/sendraw"
-                        && query_param(&req.path, "network").is_none() =>
-                {
-                    return lwd_err(error);
-                }
-                Err(_) => None,
+                Err(error) => return lwd_err(error),
             }
         } else {
             None
+        };
+        // An existing wallet owns every associated route, including explicit
+        // endpoint overrides. A corrupt/source-marked wallet cannot become a
+        // wallet-independent diagnostic by selecting another query parameter.
+        let ownership = match wallet.as_ref() {
+            Some(wallet) => wallet.network_operation_lease(),
+            None => NativeWallet::bootstrap_network_lease(&self.wallet),
+        };
+        let ownership = match ownership {
+            Ok(ownership) => ownership,
+            Err(error) => return lwd_err(error),
         };
         let network = match query_param(&req.path, "network") {
             Some(network) => match Network::parse(&network) {
@@ -308,7 +312,11 @@ impl Bridge {
                         "no validator RPC (set local Zakura / Zebra, or Z_STACK_VALIDATOR_RPC)",
                     );
                 };
+                let worker_ownership = ownership.clone();
                 let sent = tokio::task::spawn_blocking(move || {
+                    // Async cancellation cannot release policy exclusion while
+                    // this blocking connection or broadcast continues.
+                    let _ownership = worker_ownership;
                     crate::native::rpc::send_raw_transaction_verified(&rpc, network, &raw)
                 })
                 .await
@@ -378,7 +386,14 @@ impl Bridge {
                 let Some(txid) = query_param(&req.path, "txid") else {
                     return lwd_msg(400, "txid query param required");
                 };
-                match NativeWallet::fetch_raw_transaction(&server, &txid).await {
+                match NativeWallet::fetch_raw_transaction_with_rpc_owned(
+                    &server,
+                    None,
+                    &txid,
+                    ownership.clone(),
+                )
+                .await
+                {
                     Ok(raw) => json_ok_bytes(serde_json::json!({
                         "txid": txid,
                         "hex": crate::web::to_hex(&raw),
@@ -551,6 +566,7 @@ impl Bridge {
                 let dir = self.wallet.clone();
                 self.locked(async move {
                     let w = NativeWallet::open(&dir)?;
+                    let _ownership = w.network_operation_lease()?;
                     let scanned = w.scanned_height()?;
                     let tip = NativeWallet::fetch_tip(&LightServer::Url(w.server_url())).await?;
                     Ok(json!({
@@ -673,16 +689,15 @@ impl Bridge {
                     let dir = self.wallet.clone();
                     let remembered = Arc::clone(&self.auth);
                     self.locked(async move {
-                        let birthday = match birthday {
-                            Some(input) => Some(
-                                resolve_birthday(input, network, NativeWallet::fetch_tip(&server))
-                                    .await?,
-                            ),
-                            None => None,
-                        };
-                        let (mut w, created) =
-                            NativeWallet::create(&dir, network, Some(server), birthday, auth, 0)
-                                .await?;
+                        let (mut w, created) = NativeWallet::create_with_birthday(
+                            &dir,
+                            network,
+                            Some(server),
+                            birthday,
+                            auth,
+                            0,
+                        )
+                        .await?;
                         w.set_validator_rpc(rpc)?;
                         remember_passphrase(&remembered, pass);
                         let mut v = snapshot_json(&dir)?;
@@ -704,11 +719,8 @@ impl Bridge {
                     let dir = self.wallet.clone();
                     let remembered = Arc::clone(&self.auth);
                     self.locked(async move {
-                        let birthday =
-                            resolve_birthday(birthday, network, NativeWallet::fetch_tip(&server))
-                                .await?;
                         if let Some(ufvk) = ufvk {
-                            let (mut w, _) = NativeWallet::restore_ufvk(
+                            let (mut w, _) = NativeWallet::restore_ufvk_with_birthday(
                                 &dir,
                                 &ufvk,
                                 network,
@@ -722,7 +734,7 @@ impl Bridge {
                             }
                             w.set_validator_rpc(rpc)?;
                         } else {
-                            let (mut w, _) = NativeWallet::restore(
+                            let (mut w, _) = NativeWallet::restore_with_birthday(
                                 &dir,
                                 &mnemonic,
                                 network,
@@ -827,7 +839,7 @@ fn parse_create(
 ) -> std::result::Result<
     (
         Network,
-        Option<BridgeBirthday>,
+        Option<NativeBirthday>,
         LightServer,
         Option<String>,
         Option<String>,
@@ -853,24 +865,18 @@ fn parse_create(
     ))
 }
 
-#[derive(Debug, PartialEq)]
-enum BridgeBirthday {
-    Height(u32),
-    Estimate(String),
-}
-
 fn parse_birthday_value(
     raw: Option<&serde_json::Value>,
     network: Network,
-) -> std::result::Result<BridgeBirthday, String> {
+) -> std::result::Result<NativeBirthday, String> {
     let invalid = || "birthday must be a block height or YYYY-MM-DD".to_string();
     match raw {
-        None if network == Network::Regtest => Ok(BridgeBirthday::Height(1)),
+        None if network == Network::Regtest => Ok(NativeBirthday::Height(1)),
         Some(serde_json::Value::Number(n)) => n
             .as_u64()
             .and_then(|h| u32::try_from(h).ok())
             .filter(|h| *h > 0)
-            .map(BridgeBirthday::Height)
+            .map(NativeBirthday::Height)
             .ok_or_else(invalid),
         Some(serde_json::Value::String(s)) => {
             let s = s.trim();
@@ -879,28 +885,15 @@ fn parse_birthday_value(
                     .parse::<u32>()
                     .ok()
                     .filter(|h| *h > 0)
-                    .map(BridgeBirthday::Height)
+                    .map(NativeBirthday::Height)
                     .ok_or_else(invalid);
             }
-            // Validate syntax only. Resolve the estimate later against the live
-            // server tip, before creating files or saving a seed.
+            // Validate syntax only. The engine resolves the estimate against
+            // its live tip while holding setup ownership.
             crate::parse_birthday_input_for_network(s, 1, network).map_err(|e| e.to_string())?;
-            Ok(BridgeBirthday::Estimate(s.to_string()))
+            Ok(NativeBirthday::Date(s.to_string()))
         }
         _ => Err(invalid()),
-    }
-}
-
-async fn resolve_birthday(
-    input: BridgeBirthday,
-    network: Network,
-    live_tip: impl std::future::Future<Output = Result<u32>>,
-) -> Result<u32> {
-    match input {
-        BridgeBirthday::Height(height) => Ok(height),
-        BridgeBirthday::Estimate(raw) => {
-            crate::parse_birthday_input_for_network(&raw, live_tip.await?, network)
-        }
     }
 }
 
@@ -910,7 +903,7 @@ fn parse_restore(
     (
         String,
         Option<String>,
-        BridgeBirthday,
+        NativeBirthday,
         Network,
         LightServer,
         Option<String>,
@@ -1400,6 +1393,296 @@ async fn write_http_typed(
 mod tests {
     use super::*;
 
+    fn extra_ownership_wallet(root: &std::path::Path, server: &str) -> NativeWallet {
+        rusqlite::Connection::open(root.join("data.sqlite")).unwrap();
+        std::fs::write(
+            root.join("wallet.json"),
+            json!({"network":"regtest", "server":server, "birthday_height":1, "account_index":0})
+                .to_string(),
+        )
+        .unwrap();
+        NativeWallet::open(root).unwrap()
+    }
+
+    #[tokio::test]
+    async fn extra_ownership_source_wallet_bridge_routes_refuse_before_network() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let _wallet = extra_ownership_wallet(dir.path(), &endpoint);
+        crate::native::source::enroll(dir.path()).unwrap();
+        let before = std::fs::read(dir.path().join("data.sqlite")).unwrap();
+        let bridge = Bridge::new(dir.path(), SeedAuth::passphrase("disposable-fixture"));
+        for (method, path, body) in [
+            ("GET", "/lwd/tip".to_owned(), vec![]),
+            ("GET", "/lwd/blocks?start=1&end=1".to_owned(), vec![]),
+            ("GET", "/lwd/treestate?height=1".to_owned(), vec![]),
+            (
+                "GET",
+                "/lwd/subtreeroots?protocol=sapling".to_owned(),
+                vec![],
+            ),
+            (
+                "GET",
+                "/lwd/utxos?addresses=public-fixture".to_owned(),
+                vec![],
+            ),
+            ("GET", format!("/lwd/tx?txid={}", "00".repeat(32)), vec![]),
+            ("GET", format!("/lwd/mempool?rpc={endpoint}"), vec![]),
+            ("POST", format!("/lwd/mine?rpc={endpoint}"), vec![]),
+            (
+                "POST",
+                format!("/lwd/sendraw?rpc={endpoint}&network=regtest"),
+                b"faceb00c".to_vec(),
+            ),
+        ] {
+            let request = HttpReq {
+                method: method.into(),
+                path,
+                origin: None,
+                token: None,
+                body,
+            };
+            let (status, _, _, body) = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                bridge.dispatch_lwd(&request),
+            )
+            .await
+            .expect("source refusal must precede any endpoint request");
+            assert!(status >= 400);
+            assert!(String::from_utf8(body)
+                .unwrap()
+                .contains("native_read_only_source"));
+        }
+        let request = HttpReq {
+            method: "GET".into(),
+            path: "/tip".into(),
+            origin: None,
+            token: None,
+            body: vec![],
+        };
+        let (status, _, body) = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            bridge.dispatch(&request),
+        )
+        .await
+        .expect("wallet tip must refuse before endpoint I/O");
+        assert!(status >= 400);
+        assert!(body.contains("native_read_only_source"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert!(
+            std::fs::read(dir.path().join("data.sqlite")).unwrap() == before,
+            "source refusal changed wallet bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn extra_ownership_cancelled_bridge_broadcast_retains_worker_lease() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            socket.read_exact(&mut [0; 1]).unwrap();
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv();
+            // Closing the fixture connection terminates the blocked identity read.
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = extra_ownership_wallet(dir.path(), &endpoint);
+        let bridge = Arc::new(Bridge::new(
+            dir.path(),
+            SeedAuth::passphrase("disposable-fixture"),
+        ));
+        let request = HttpReq {
+            method: "POST".into(),
+            path: format!("/lwd/sendraw?rpc={endpoint}"),
+            origin: None,
+            token: None,
+            body: b"faceb00c".to_vec(),
+        };
+        let task = tokio::spawn(async move { bridge.dispatch_lwd(&request).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            wallet.local_mutation_lease().unwrap_err().to_string(),
+            "native_pir_database_busy"
+        );
+        release_tx.send(()).unwrap();
+        peer.join().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if wallet.local_mutation_lease().is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("finished blocking worker must release ownership");
+    }
+
+    #[tokio::test]
+    async fn extra_ownership_seed_only_source_roots_refuse_network_diagnostics() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        crate::native::source::enroll(dir.path()).unwrap();
+        let policy = std::fs::read(dir.path().join("native-source-policy")).unwrap();
+        let bridge = Bridge::new(dir.path(), SeedAuth::passphrase("disposable-fixture"));
+        for (method, path, body) in [
+            ("GET", format!("/lwd/tip?server={endpoint}"), vec![]),
+            ("POST", format!("/lwd/mine?rpc={endpoint}"), vec![]),
+            (
+                "POST",
+                format!("/lwd/sendraw?rpc={endpoint}"),
+                b"faceb00c".to_vec(),
+            ),
+        ] {
+            let req = HttpReq {
+                method: method.into(),
+                path,
+                origin: None,
+                token: None,
+                body,
+            };
+            let (status, _, _, body) = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                bridge.dispatch_lwd(&req),
+            )
+            .await
+            .expect("source-bound seed-only root must refuse before endpoint I/O");
+            assert!(status >= 400);
+            assert!(String::from_utf8(body)
+                .unwrap()
+                .contains("native_read_only_source"));
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert!(!dir.path().join("wallet.json").exists());
+        assert!(!dir.path().join("data.sqlite").exists());
+        assert!(std::fs::read(dir.path().join("native-source-policy")).unwrap() == policy);
+    }
+
+    async fn source_date_setup_refuses_before_endpoint_io(path: &str, mut body: Value) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        body["network"] = json!("mainnet");
+        body["server"] = json!(format!("http://{}", listener.local_addr().unwrap()));
+        body["birthday"] = json!("2020-01-01");
+        let dir = tempfile::tempdir().unwrap();
+        crate::native::source::enroll(dir.path()).unwrap();
+        let policy = std::fs::read(dir.path().join("native-source-policy")).unwrap();
+        let bridge = Bridge::new(dir.path(), SeedAuth::passphrase("disposable-fixture"));
+        let request = HttpReq {
+            method: "POST".into(),
+            path: path.into(),
+            origin: None,
+            token: None,
+            body: serde_json::to_vec(&body).unwrap(),
+        };
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            bridge.dispatch(&request),
+        )
+        .await;
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "source-marked date setup must not contact the endpoint"
+        );
+        let (status, _, response) = reply.expect("source policy refuses before date lookup");
+        assert!(status >= 400);
+        assert!(response.contains("native_read_only_source"));
+        assert!(!dir.path().join("wallet.json").exists());
+        assert!(!dir.path().join("data.sqlite").exists());
+        assert!(std::fs::read(dir.path().join("native-source-policy")).unwrap() == policy);
+    }
+
+    #[tokio::test]
+    async fn source_date_create_refuses_before_endpoint_io() {
+        source_date_setup_refuses_before_endpoint_io("/create", json!({})).await;
+    }
+
+    #[tokio::test]
+    async fn future_date_setup_refuses_before_endpoint_io_or_seed_write() {
+        for (path, mut body) in [
+            ("/create", json!({})),
+            (
+                "/restore",
+                json!({"mnemonic":crate::keys::REGTEST_FAUCET_MNEMONIC}),
+            ),
+            ("/restore", json!({"ufvk":"uview1fixture"})),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            body["network"] = json!("mainnet");
+            body["server"] = json!(format!("http://{}", listener.local_addr().unwrap()));
+            body["birthday"] = json!("9999-12-31");
+            let dir = tempfile::tempdir().unwrap();
+            let bridge = Bridge::new(dir.path(), SeedAuth::passphrase("disposable-fixture"));
+            let request = HttpReq {
+                method: "POST".into(),
+                path: path.into(),
+                origin: None,
+                token: None,
+                body: serde_json::to_vec(&body).unwrap(),
+            };
+            let (status, _, response) = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                bridge.dispatch(&request),
+            )
+            .await
+            .expect("future date must refuse without network delay");
+            assert!(status >= 400);
+            assert!(response.contains("above tip"));
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            for file in ["seed.enc", "wallet.json", "data.sqlite"] {
+                assert!(!dir.path().join(file).exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn source_date_seed_restore_refuses_before_endpoint_io() {
+        source_date_setup_refuses_before_endpoint_io(
+            "/restore",
+            json!({"mnemonic":crate::keys::REGTEST_FAUCET_MNEMONIC}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn source_date_ufvk_restore_refuses_before_endpoint_io() {
+        let ufvk = crate::keys::account_from_mnemonic(
+            crate::keys::REGTEST_FAUCET_MNEMONIC,
+            Network::Mainnet,
+            0,
+        )
+        .unwrap()
+        .ufvk;
+        source_date_setup_refuses_before_endpoint_io("/restore", json!({"ufvk":ufvk})).await;
+    }
+
     #[tokio::test]
     async fn sendraw_relay_verifies_requested_identity_before_receiving_transaction_bytes() {
         use crate::native::rpc::{verified_response, verified_response_peer};
@@ -1531,20 +1814,12 @@ mod tests {
         assert!(parse_loopback_bind("192.168.1.4:8787").is_err());
     }
 
-    #[tokio::test]
-    async fn date_bodies_resolve_against_live_tip_for_create_and_both_restore_keys() {
-        // A future date clips to the live tip, avoiding wall-clock rounding races.
-        let date = "9999-12-31".to_string();
+    #[test]
+    fn create_and_restore_parse_owned_birthday_inputs() {
+        let date = "2020-01-01";
         let create = json!({"network":"testnet", "birthday": date});
         let (_, input, _, _, _) = parse_create(create.to_string().as_bytes()).unwrap();
-        let input = input.unwrap();
-        assert_eq!(input, BridgeBirthday::Estimate(date.clone()));
-        let first = resolve_birthday(input, Network::Testnet, async { Ok(4_500_000) })
-            .await
-            .unwrap();
-        let expected =
-            crate::parse_birthday_input_for_network(&date, 4_500_000, Network::Testnet).unwrap();
-        assert_eq!(first, expected);
+        assert!(matches!(input, Some(NativeBirthday::Date(raw)) if raw == date));
         for key in [
             json!({"mnemonic":crate::keys::REGTEST_FAUCET_MNEMONIC}),
             json!({"ufvk":"uview1fixture"}),
@@ -1553,34 +1828,13 @@ mod tests {
             body["network"] = json!("testnet");
             body["birthday"] = json!(date);
             let (_, _, input, _, _, _, _, _) = parse_restore(body.to_string().as_bytes()).unwrap();
-            let second = resolve_birthday(input, Network::Testnet, async { Ok(4_501_000) })
-                .await
-                .unwrap();
-            assert_eq!(
-                second - first,
-                1_000,
-                "live tips must move the estimated birthday"
-            );
+            assert!(matches!(input, NativeBirthday::Date(raw) if raw == date));
         }
         let exact = parse_birthday_value(Some(&json!(12345)), Network::Testnet).unwrap();
-        assert_eq!(
-            resolve_birthday(exact, Network::Testnet, async {
-                panic!("exact heights must not fetch a tip")
-            })
-            .await
-            .unwrap(),
-            12345
-        );
+        assert!(matches!(exact, NativeBirthday::Height(12345)));
         assert!(parse_create(br#"{"birthday":4294967297}"#).is_err());
         assert!(parse_create(br#"{"birthday":0}"#).is_err());
         assert!(parse_restore(br#"{"ufvk":"uview1fixture","birthday":"2026-13-40"}"#).is_err());
-        assert!(
-            resolve_birthday(BridgeBirthday::Estimate(date), Network::Testnet, async {
-                Err(EngineError::Transport("unavailable".into()))
-            })
-            .await
-            .is_err()
-        );
     }
 
     #[test]
@@ -1694,7 +1948,7 @@ mod tests {
         assert!(policy.is_none());
         assert_eq!(m, words);
         assert!(ufvk.is_none());
-        assert_eq!(h, BridgeBirthday::Height(1));
+        assert!(matches!(h, NativeBirthday::Height(1)));
         assert_eq!(n, Network::Regtest);
         assert!(parse_restore(br#"{"mnemonic":"too short"}"#).is_err());
         let (_, u, _, _, _, _, _, _) =
@@ -1703,6 +1957,6 @@ mod tests {
         let (_, _, date_h, _, _, _, _, _) =
             parse_restore(br#"{"ufvk":"uview1xyz","network":"testnet","birthday":"2022-05-31"}"#)
                 .unwrap();
-        assert_eq!(date_h, BridgeBirthday::Estimate("2022-05-31".into()));
+        assert!(matches!(date_h, NativeBirthday::Date(raw) if raw == "2022-05-31"));
     }
 }

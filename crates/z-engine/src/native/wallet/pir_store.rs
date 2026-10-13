@@ -388,6 +388,9 @@ impl<'a> NativePirStore<'a> {
             .map_err(|_| StoreError::Io("native_pir_cancelled".into()))?;
         let database_lease = database_lease::shared(&wallet.paths.data_db)
             .map_err(|_| StoreError::Io("native_pir_database_busy".into()))?;
+        wallet
+            .require_source_spending_access()
+            .map_err(|error| StoreError::Io(error.to_string()))?;
         let existing = rusqlite::Connection::open_with_flags(
             &wallet.paths.data_db,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

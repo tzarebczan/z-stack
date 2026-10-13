@@ -63,6 +63,7 @@ impl NativeWallet {
     /// spendable note's witness at the anchor. The chain side comes from
     /// GetTreeState, so this needs no spend key and writes nothing.
     pub async fn verify_commitment_trees(&self) -> Result<TreeReport> {
+        let _ownership = self.network_operation_lease()?;
         let mut db = self.open_db()?;
         let mut client = self.connect().await?;
         let policy = crate::confirmations_policy(self.network());
@@ -213,4 +214,56 @@ where
         let witness = tree.witness_at_checkpoint_id(position, anchor)?;
         Ok(witness.is_some_and(|w| w.root(leaf) == root))
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn extra_ownership_verification_holds_network_lease_before_connect() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        rusqlite::Connection::open(dir.path().join("data.sqlite")).unwrap();
+        std::fs::write(
+            dir.path().join("wallet.json"),
+            serde_json::json!({
+                "network":"regtest", "server":endpoint, "birthday_height":1, "account_index":0
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let wallet = NativeWallet::open(dir.path()).unwrap();
+        zcash_client_sqlite::wallet::init::init_wallet_db(&mut wallet.open_db().unwrap(), None)
+            .unwrap();
+        let mut verification = Box::pin(wallet.verify_commitment_trees());
+        assert!(verification
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
+        assert_eq!(
+            wallet.local_mutation_lease().unwrap_err().to_string(),
+            "native_pir_database_busy"
+        );
+        drop(verification);
+        let ownership = wallet.local_mutation_lease().unwrap();
+        crate::native::source::enroll(dir.path()).unwrap();
+        drop(ownership);
+        let before = std::fs::read(dir.path().join("data.sqlite")).unwrap();
+        assert_eq!(
+            wallet
+                .verify_commitment_trees()
+                .await
+                .unwrap_err()
+                .to_string(),
+            "native_read_only_source"
+        );
+        assert!(
+            std::fs::read(dir.path().join("data.sqlite")).unwrap() == before,
+            "source refusal changed wallet bytes"
+        );
+    }
 }

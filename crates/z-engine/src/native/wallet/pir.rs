@@ -540,6 +540,7 @@ impl NativeWallet {
         }
         check(cancel).map_err(|_| failed("native_pir_cancelled"))?;
         let _database_lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         self.ensure_pir_journal_compatible()?;
         let mut filters = CancelFilters {
             inner: filters,
@@ -697,6 +698,8 @@ impl NativeWallet {
         if self.network != ZNetwork::Regtest {
             return Err(failed("native_pir_regtest_only"));
         }
+        let _database_lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         let cancel = AtomicBool::new(false);
         let store = store::NativePirStore::open(self, &cancel).map_err(store_failed)?;
         let Some((report, scope)) = store.report() else {
@@ -1024,7 +1027,25 @@ mod tests {
                 )
                 .unwrap()
             };
-            // A second handle changes the native scanner while the PIR operation is outstanding.
+            // Cooperating public scanners refuse mutation while the PIR reader owns the DB.
+            if change == "advance" || change == "anchor" {
+                let other = NativeWallet::open(dir.path()).unwrap();
+                let mut candidate = blocks.clone();
+                if change == "anchor" {
+                    candidate[1].hash = vec![22; 32];
+                }
+                let before = head();
+                assert!(matches!(
+                    other.scan_public_regtest_incremental(&encode(&candidate), schedule),
+                    Err(EngineError::Message(code)) if code == "native_pir_database_busy"
+                ));
+                let unchanged = NativeScanSnapshot::capture(&wallet.open_db().unwrap(), 2).unwrap();
+                assert_eq!(expected, unchanged);
+                assert_eq!(before, head());
+                assert!(store.report().is_some());
+                continue;
+            }
+            // Uncooperative external SQL writers must still fail reconciliation.
             std::thread::scope(|threads| {
                 threads
                     .spawn(|| {

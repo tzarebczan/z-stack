@@ -573,6 +573,7 @@ impl NativeWallet {
             return Err(failed("native_recovery_chain_invalid"));
         }
         let _lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         // Complete any native migrations under the cancellation gate before
         // constructing a read facade over the enrollment's actual writer.
         drop(self.open_pir_db(Some(cancel))?);
@@ -642,6 +643,7 @@ impl NativeWallet {
             return Err(failed("native_recovery_regtest_only"));
         }
         let _lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         let generation = self.begin_regtest_pir_recovery(chain, cancel)?;
         let mut db = self.open_pir_db(Some(cancel))?;
         let compact = evidence.compact_blocks()?;
@@ -1060,6 +1062,7 @@ impl NativeWallet {
             return Err(failed("native_recovery_regtest_only"));
         }
         let _lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_source_spending_access()?;
         self.begin_regtest_pir_recovery(chain, cancel)?;
         let db = self.open_pir_db(Some(cancel))?;
         let current = db
@@ -1163,6 +1166,126 @@ pub(in crate::native::wallet) mod tests {
     };
     use crate::native::wallet::tests::{fixture_account, fixture_wallet};
     use zcash_client_backend::data_api::WalletCommitmentTrees;
+
+    #[derive(Default)]
+    struct PolicyFilters {
+        calls: usize,
+    }
+    impl FilterSource for PolicyFilters {
+        fn shard_map(&mut self) -> std::result::Result<(Vec<u8>, u64), BoxError> {
+            self.calls += 1;
+            Err("fixture_unavailable".into())
+        }
+        fn filter(&mut self, _: u64) -> std::result::Result<(Vec<u8>, u64), BoxError> {
+            self.calls += 1;
+            Err("fixture_unavailable".into())
+        }
+    }
+
+    fn source_policy_refuses_pir(operation: &str) {
+        for marker in ["intact", "database-only", "malformed"] {
+            let (dir, wallet) = wallet();
+            let source = crate::native::NativeReadOnlySource::new(
+                tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy(),
+                ZNetwork::Regtest,
+            );
+            NativeWallet::open_with_source(dir.path(), &source).unwrap();
+            if marker == "database-only" {
+                std::fs::remove_file(dir.path().join("native-source-policy")).unwrap();
+            } else if marker == "malformed" {
+                let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+                conn.execute_batch("PRAGMA ignore_check_constraints=ON; INSERT INTO ext_native_source_policy_v1 VALUES(2,99,1)").unwrap();
+            }
+            let snapshot = || {
+                ["data.sqlite", "wallet.json", "native-source-policy"]
+                    .map(|name| std::fs::read(dir.path().join(name)).ok())
+            };
+            let before = snapshot();
+            let (bytes, chain) = fixture_with_script(&[0x51]);
+            let limits = WorkLimits {
+                max_queries: Some(1),
+                max_private_bytes: Some(1024),
+            };
+            let cancel = RecoveryCancellation::new();
+            let mut filters = PolicyFilters::default();
+            let error = match operation {
+                "begin" => wallet.begin_regtest_pir_recovery(&chain, &cancel).err(),
+                "sync" => wallet
+                    .sync_regtest_pir(
+                        &chain,
+                        &mut filters,
+                        &mut Unavailable,
+                        limits,
+                        &AtomicBool::new(false),
+                    )
+                    .err(),
+                "recover" => wallet
+                    .recover_regtest_pir(
+                        &chain,
+                        verify_regtest_recovery_blocks(&bytes, &chain, &AtomicBool::new(false))
+                            .unwrap(),
+                        &mut filters,
+                        &mut Unavailable,
+                        limits,
+                        &cancel,
+                    )
+                    .err(),
+                "rewind" => wallet.rewind_regtest_pir(&chain, &cancel).err(),
+                "discovery" => wallet.regtest_pir_discovery().err(),
+                "store" => store::NativePirStore::open(&wallet, &AtomicBool::new(false))
+                    .err()
+                    .map(|error| match error {
+                        StoreError::Io(code) => failed(&code),
+                        _ => panic!("unexpected fixture store error"),
+                    }),
+                _ => panic!("unknown fixture operation"),
+            };
+            assert_eq!(
+                error.map(|e| e.to_string()).as_deref(),
+                Some(if marker == "malformed" {
+                    "native_source_policy_invalid"
+                } else {
+                    "native_read_only_source"
+                }),
+                "{operation}/{marker}"
+            );
+            assert_eq!(
+                filters.calls, 0,
+                "{operation}/{marker} contacted PIR source"
+            );
+            assert_eq!(
+                snapshot(),
+                before,
+                "{operation}/{marker} changed retained bytes"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn source_policy_blocks_pir_begin_recovery_without_mutation() {
+        source_policy_refuses_pir("begin");
+    }
+
+    #[tokio::test]
+    async fn source_policy_blocks_pir_discovery_sync_before_transport() {
+        source_policy_refuses_pir("sync");
+    }
+
+    #[tokio::test]
+    async fn source_policy_blocks_pir_canonical_recovery_without_mutation() {
+        source_policy_refuses_pir("recover");
+    }
+
+    #[tokio::test]
+    async fn source_policy_blocks_pir_rewind_without_mutation() {
+        source_policy_refuses_pir("rewind");
+    }
+
+    #[tokio::test]
+    async fn source_policy_blocks_pir_store_schema_initialization() {
+        source_policy_refuses_pir("store");
+        source_policy_refuses_pir("discovery");
+    }
     #[test]
     #[ignore = "private offline categorical diagnostic"]
     fn retained_fork_raw_categories() {
