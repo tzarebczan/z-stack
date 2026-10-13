@@ -43,9 +43,69 @@ enum RestoreKind {
     Ufvk,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BirthdayMode {
+    Height,
+    Date,
+}
+
+impl BirthdayMode {
+    fn initial(date: &str) -> Self {
+        if date.trim().is_empty() {
+            Self::Height
+        } else {
+            Self::Date
+        }
+    }
+
+    fn edited(self, height_changed: bool, date_changed: bool) -> Self {
+        if height_changed {
+            Self::Height
+        } else if date_changed {
+            Self::Date
+        } else {
+            self
+        }
+    }
+
+    fn selected<'a>(self, height: &'a str, date: &'a str) -> &'a str {
+        match self {
+            Self::Height => height,
+            Self::Date => date,
+        }
+    }
+
+    fn input(
+        self,
+        height: &str,
+        date: &str,
+        network: Network,
+        create: bool,
+    ) -> anyhow::Result<Option<NativeBirthday>> {
+        let raw = self.selected(height, date).trim();
+        if create && self == Self::Height && matches!(raw, "" | "auto") {
+            return Ok(None);
+        }
+        let input = setup_birthday_input(raw, network)?;
+        match (self, &input) {
+            (Self::Height, NativeBirthday::Height(_)) | (Self::Date, NativeBirthday::Date(_)) => {
+                Ok(Some(input))
+            }
+            _ => anyhow::bail!("Use an exact height or a first-used date (YYYY-MM-DD)."),
+        }
+    }
+}
+
 fn setup_birthday_input(raw: &str, network: Network) -> anyhow::Result<NativeBirthday> {
     let raw = raw.trim();
     if raw.is_empty() {
+        anyhow::bail!("Set birthday height or first-used date (YYYY-MM-DD).");
+    }
+    if !raw.bytes().all(|byte| byte.is_ascii_digit())
+        && (raw.len() != 10
+            || raw.as_bytes().get(4) != Some(&b'-')
+            || raw.as_bytes().get(7) != Some(&b'-'))
+    {
         anyhow::bail!("Set birthday height or first-used date (YYYY-MM-DD).");
     }
     let parsed = parse_birthday_input_for_network(raw, 1, network)?;
@@ -249,6 +309,7 @@ pub struct HomeView {
     ufvk: Entity<FieldInput>,
     birthday: Entity<FieldInput>,
     birthday_date: Entity<FieldInput>,
+    birthday_mode: BirthdayMode,
     spend_seed: Entity<FieldInput>,
     restore_kind: RestoreKind,
     os_unlock: bool,
@@ -452,6 +513,7 @@ impl HomeView {
                 &nav,
             ),
             restore_kind: RestoreKind::Seed,
+            birthday_mode: BirthdayMode::initial(&birthday_date),
             os_unlock: true,
             unlock_policy: UnlockPolicy::Session,
             view_only: false,
@@ -789,6 +851,9 @@ impl HomeView {
         let tip = self.eta_tip();
         let height_raw = self.field_text(&self.birthday, cx);
         let date_raw = self.field_text(&self.birthday_date, cx);
+        self.birthday_mode = self
+            .birthday_mode
+            .edited(height_raw != self.last_bday_h, date_raw != self.last_bday_d);
         if height_raw != self.last_bday_h {
             self.last_bday_h = height_raw.clone();
             if let Ok(h) = parse_birthday_input_for_network(&height_raw, tip, self.network) {
@@ -814,7 +879,9 @@ impl HomeView {
     }
 
     fn set_approx_days(&mut self, days: u32, cx: &mut Context<Self>) {
+        self.sync_birthday_fields(cx);
         let date = ymd_days_ago(days);
+        self.birthday_mode = BirthdayMode::Date;
         self.last_bday_d.clear();
         Self::set_field(&self.birthday_date, date, cx);
         self.sync_birthday_fields(cx);
@@ -996,6 +1063,7 @@ impl HomeView {
     }
 
     fn apply_network_defaults(&mut self, cx: &mut Context<Self>) {
+        self.sync_birthday_fields(cx);
         let light = LightServer::local_for_network(self.network).as_url();
         Self::set_field(&self.light, light, cx);
         Self::set_field(&self.rpc, "", cx);
@@ -1004,11 +1072,13 @@ impl HomeView {
                 let b = self.field_text(&self.birthday, cx);
                 if b.is_empty() || b == "1" {
                     Self::set_field(&self.birthday, "1", cx);
+                    self.last_bday_h = "1".into();
                 }
             }
             _ => {
                 if self.field_text(&self.birthday, cx) == "1" {
                     Self::set_field(&self.birthday, "", cx);
+                    self.last_bday_h.clear();
                 }
             }
         }
@@ -1315,24 +1385,18 @@ impl HomeView {
         let server = self.server(cx);
         let rpc = self.field_text(&self.rpc, cx).trim().to_string();
         let auth = self.auth(cx);
+        self.sync_birthday_fields(cx);
         let height_raw = self.field_text(&self.birthday, cx);
         let date_raw = self.field_text(&self.birthday_date, cx);
-        let birthday: Option<NativeBirthday> = {
-            let raw = if !height_raw.trim().is_empty() {
-                height_raw
-            } else {
-                date_raw
-            };
-            match raw.trim() {
-                "" | "auto" => None,
-                s => match setup_birthday_input(s, network) {
-                    Ok(input) => Some(input),
-                    Err(error) => {
-                        self.status = display_anyhow(&error).into();
-                        cx.notify();
-                        return;
-                    }
-                },
+        let birthday = match self
+            .birthday_mode
+            .input(&height_raw, &date_raw, network, true)
+        {
+            Ok(input) => input,
+            Err(error) => {
+                self.status = display_anyhow(&error).into();
+                cx.notify();
+                return;
             }
         };
         self.begin_work(WorkKind::Sync, cx);
@@ -1418,8 +1482,10 @@ impl HomeView {
         let server = self.server(cx);
         let rpc = self.field_text(&self.rpc, cx).trim().to_string();
         let auth = self.auth(cx);
+        self.sync_birthday_fields(cx);
         let height_raw = self.field_text(&self.birthday, cx);
         let date_raw = self.field_text(&self.birthday_date, cx);
+        let birthday_mode = self.birthday_mode;
         let seed_for_cache = words.clone();
         self.begin_work(WorkKind::Restore, cx);
         self.run_blocking(
@@ -1428,13 +1494,9 @@ impl HomeView {
             move || {
                 let rt = chain_sync_runtime()?;
                 rt.block_on(async {
-                    let birthday = if !date_raw.trim().is_empty() {
-                        setup_birthday_input(&date_raw, network)?
-                    } else if !height_raw.trim().is_empty() {
-                        setup_birthday_input(&height_raw, network)?
-                    } else {
-                        anyhow::bail!("Set birthday height or first-used date (YYYY-MM-DD).");
-                    };
+                    let birthday = birthday_mode
+                        .input(&height_raw, &date_raw, network, false)?
+                        .ok_or_else(|| anyhow::anyhow!("Set a birthday before restoring."))?;
                     let (mut w, _ua) = if kind == RestoreKind::Ufvk {
                         NativeWallet::restore_ufvk_with_birthday(
                             &dir,
@@ -2177,6 +2239,7 @@ impl HomeView {
         Self::set_field(&self.birthday_date, "", cx);
         self.last_bday_h.clear();
         self.last_bday_d.clear();
+        self.birthday_mode = BirthdayMode::Height;
         self.show_pass = false;
         self.publish_auth(cx);
     }
@@ -2507,9 +2570,12 @@ impl HomeView {
                 if let Some(tip) = light_p.tip {
                     view.probed_tip = Some(tip as u32);
                     if view.field_text(&view.birthday, cx).trim().is_empty()
+                        && view.field_text(&view.birthday_date, cx).trim().is_empty()
+                        && view.birthday_mode == BirthdayMode::Height
                         && view.network != Network::Regtest
                     {
                         let h = (tip as u32).saturating_sub(100).max(1);
+                        view.birthday_mode = BirthdayMode::Height;
                         view.last_bday_h.clear();
                         Self::set_field(&view.birthday, h.to_string(), cx);
                         view.sync_birthday_fields(cx);
@@ -3599,11 +3665,7 @@ impl HomeView {
         let tip = self.eta_tip();
         let height_raw = self.field_text(&self.birthday, cx);
         let date_raw = self.field_text(&self.birthday_date, cx);
-        let raw = if !height_raw.trim().is_empty() {
-            height_raw.clone()
-        } else {
-            date_raw.clone()
-        };
+        let raw = self.birthday_mode.selected(&height_raw, &date_raw);
         let parsed = parse_birthday_input_for_network(&raw, tip, self.network).ok();
         let eta = parsed.map(|b| {
             let fast = uses_fast_sync(&self.field_text(&self.light, cx));
@@ -3742,7 +3804,9 @@ impl HomeView {
                         v.set_approx_days(365, cx)
                     }))
                     .child(self.pick_chip("ago-tip", "Near tip", false, cx, |v, cx| {
+                        v.sync_birthday_fields(cx);
                         let h = v.eta_tip().saturating_sub(100).max(1);
+                        v.birthday_mode = BirthdayMode::Height;
                         v.last_bday_h.clear();
                         Self::set_field(&v.birthday, h.to_string(), cx);
                         v.sync_birthday_fields(cx);
@@ -4864,9 +4928,46 @@ impl Render for HomeView {
 
 #[cfg(test)]
 mod job_tests {
-    use super::{setup_birthday_input, unpanicked};
+    use super::{setup_birthday_input, unpanicked, BirthdayMode};
     use z_engine::native::NativeBirthday;
     use z_engine::Network;
+
+    #[test]
+    fn selected_birthday_preserves_exact_height_and_guarded_date() {
+        for create in [false, true] {
+            assert!(matches!(
+                BirthdayMode::Height
+                    .input("4500001", "2026-10-13", Network::Mainnet, create)
+                    .unwrap(),
+                Some(NativeBirthday::Height(4_500_001))
+            ));
+            assert!(matches!(
+                BirthdayMode::Date.input("4500001", "2026-10-13", Network::Mainnet, create).unwrap(),
+                Some(NativeBirthday::Date(raw)) if raw == "2026-10-13"
+            ));
+        }
+        assert_eq!(BirthdayMode::initial(""), BirthdayMode::Height);
+        assert_eq!(BirthdayMode::initial("2026-10-13"), BirthdayMode::Date);
+        let mode = BirthdayMode::Date.edited(true, false);
+        assert_eq!(mode, BirthdayMode::Height);
+        assert_eq!(mode.edited(false, false), BirthdayMode::Height);
+        let mode = mode.edited(false, true);
+        assert_eq!(mode, BirthdayMode::Date);
+        assert_eq!(mode.edited(false, false), BirthdayMode::Date);
+        assert!(BirthdayMode::Date
+            .input("4500001", "", Network::Mainnet, false)
+            .is_err());
+        assert!(BirthdayMode::Date
+            .input("4500001", "auto", Network::Mainnet, true)
+            .is_err());
+        assert!(BirthdayMode::Height
+            .input("", "2026-10-13", Network::Mainnet, false)
+            .is_err());
+        assert!(BirthdayMode::Height
+            .input("", "2026-10-13", Network::Mainnet, true)
+            .unwrap()
+            .is_none());
+    }
 
     #[test]
     fn setup_birthday_keeps_dates_for_the_guarded_engine() {
