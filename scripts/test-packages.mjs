@@ -122,6 +122,17 @@ try {
   `]);
   // Compile the exact maintained snippets with the installed published subpaths.
   // Source aliases must not hide missing root exports in a copied guide.
+  writeFileSync(join(app, "src", "native-shield-types.ts"), `
+    import type { NativeWallet } from '@z-stack/sdk/native';
+    function nativeShieldArguments(wallet: NativeWallet) {
+      wallet.shield();
+      wallet.shield(100_000);
+      // @ts-expect-error Native shielding does not support browser cancellation.
+      wallet.shield(100_000, { signal: new AbortController().signal });
+      // @ts-expect-error Native shielding does not support browser authorization hooks.
+      wallet.shield(100_000, { beforeBroadcast: () => true });
+    }
+  `);
   for (const [file, minimum] of [["SERVICES.md", 3], ["SDK.md", 1]]) {
     const guide = readFileSync(join(root, "docs", file), "utf8");
     const examples = [...guide.matchAll(/<!-- sdk-example: ([a-z-]+) -->\s*```ts\n([\s\S]*?)\n```/g)];

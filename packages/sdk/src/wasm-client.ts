@@ -571,7 +571,7 @@ export function createWasmClient(
         }
       } else {
         if (!transport.utxos) throw new Error("Transparent scan needs GetAddressUtxos, but address lookup is disabled");
-        await refreshUtxos();
+        await refreshUtxos(true, options?.signal);
       }
       const txid = await proveAndSubmit("shield", seed, {
         thresholdZat: Number(threshold ?? 100_000),

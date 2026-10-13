@@ -975,3 +975,70 @@ for (const expired of ["false", "throw"] as const) {
     await forgetWasmWallet();
   });
 }
+
+for (const cancellation of ["abort-aware", "late-response"] as const) {
+  test(`automatic shielding cancels its UTXO preflight without proving or applying its ${cancellation} response`, async (t) => {
+    let proved = 0;
+    let applied = 0;
+    fixture(t, handle => {
+      handle.nextHeight = () => 11;
+      handle.birthday = () => 1;
+      handle.treesReady = () => true;
+      handle.transparentAddress = () => "tm-automatic-shield-fixture";
+      handle.applyUtxos = () => { applied++; };
+      const snapshot = handle.snapshotJson as () => string;
+      handle.snapshotJson = () => {
+        const wallet = JSON.parse(snapshot());
+        wallet.balance.transparentAvailable = 200_000;
+        wallet.balance.totalAvailable = 200_000;
+        wallet.balance.orchardAvailable = 0;
+        return JSON.stringify(wallet);
+      };
+      handle.proveShield = () => { proved++; return (handle.proveSend as () => string)(); };
+    });
+    const started = deferred<AbortSignal | undefined>();
+    let firstSignal: AbortSignal | undefined;
+    let release = () => {};
+    let aborted = false;
+    let requests = 0;
+    let submitted = 0;
+    const c = createWasmClient({ unlockPolicy: "session", network: "regtest", autoShield: true,
+      prewarmProvingKey: false, memoFetch: "on-demand", transport: {
+        kind: "mock", label: "automatic-shield-utxo-fixture", tip: async () => 10,
+        blocks: async () => new Uint8Array(),
+        utxos: async (_addresses, _start, signal) => {
+          requests++;
+          if (requests === 1) { firstSignal = signal; return []; }
+          return new Promise<[]>((resolve, reject) => {
+            release = () => resolve([]);
+            signal?.addEventListener("abort", () => {
+              aborted = true;
+              if (cancellation === "abort-aware") reject(signal.reason);
+            }, { once: true });
+            started.resolve(signal);
+          });
+        },
+        submit: async () => { submitted++; return "ab".repeat(32); },
+      } });
+    await c.restore("automatic-shield-utxo-fixture", "regtest", 1);
+    const stopped = new AbortController();
+    stopped.abort();
+    await assert.rejects(c.shield(100_000, { signal: stopped.signal }), /cancelled before broadcast/);
+    assert.equal(requests, 0, "already-aborted shielding must not start the UTXO request");
+    const syncing = c.sync();
+    const cancelled = assert.rejects(syncing, /sync cancelled/);
+    const signal = await started.promise;
+    cancelWasmSync();
+    await turn();
+    if (!aborted || cancellation === "late-response") release();
+    await cancelled;
+    assert.equal(aborted, true);
+    assert.ok(signal);
+    assert.equal(signal, firstSignal);
+    assert.equal(signal.aborted, true);
+    assert.equal(proved, 0);
+    assert.equal(submitted, 0);
+    assert.equal(applied, 1, "only the completed post-scan UTXO refresh may apply");
+    await forgetWasmWallet();
+  });
+}

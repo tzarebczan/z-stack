@@ -815,18 +815,22 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     ctx.rootsChecked = { source, at: Date.now() };
   }
 
-  async function refreshUtxos(doPersist = true): Promise<void> {
+  async function refreshUtxos(doPersist = true, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     if (ctx.rescanning) throw new WalletError("busy", "rescan is in progress");
     if (!ctx.session || !ctx.transport.utxos) return;
     const source = ctx.session;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     const taddr = await source.transparentAddress();
     ctx.assertSource(operation, source);
+    signal?.throwIfAborted();
     if (!taddr) return;
-    const rows = await ctx.transport.utxos([taddr], 0);
+    const rows = await ctx.transport.utxos([taddr], 0, signal);
     ctx.assertSource(operation, source);
+    signal?.throwIfAborted();
     await source.applyUtxos(JSON.stringify({ utxos: rows }));
     ctx.assertSource(operation, source);
+    signal?.throwIfAborted();
     if (doPersist) await ctx.persist();
   }
 
