@@ -945,26 +945,36 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     if (!ctx.session) return;
     const source = ctx.session;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
+    const active = signal ?? operation.signal;
+    const wait = signal ? AbortSignal.any([operation.signal, signal]) : operation.signal;
+    wait.throwIfAborted();
     const taddr = ctx.transparentScan !== "compact" && ctx.transport.utxos ? await source.transparentAddress() : undefined;
     ctx.assertSource(operation, source);
+    wait.throwIfAborted();
     // Network reads overlap, but wallet mutations retain the original UTXO →
     // mempool order. A failed UTXO query cannot leave a late mempool apply
     // running after sync has rejected.
     const [utxos, mempool] = await Promise.all([
       taddr && ctx.transport.utxos
         ? recovery
-          ? recovery.run(() => ctx.transport.utxos!([taddr], 0, signal))
-          : ctx.transport.utxos([taddr], 0, signal)
+          ? abortable(wait, () => recovery.run(() => ctx.transport.utxos!([taddr], 0, active)))
+          : abortable(wait, () => ctx.transport.utxos!([taddr], 0, active))
         : Promise.resolve(null),
       ctx.transport.mempool
-        ? ctx.transport.mempool().catch((_e) => { console.warn("mempool skipped"); return []; })
+        ? abortable(wait, () => ctx.transport.mempool!(active)).catch((_e) => {
+          wait.throwIfAborted();
+          console.warn("mempool skipped"); return [];
+        })
         : Promise.resolve([]),
     ]);
     ctx.assertSource(operation, source);
+    wait.throwIfAborted();
     if (utxos) await source.applyUtxos(JSON.stringify({ utxos }));
     ctx.assertSource(operation, source);
+    wait.throwIfAborted();
     if (mempool.length) await source.applyMempool(JSON.stringify({ txs: mempool }));
     ctx.assertSource(operation, source);
+    wait.throwIfAborted();
   }
 
   async function enhanceMemos(automatic = false): Promise<void> {
