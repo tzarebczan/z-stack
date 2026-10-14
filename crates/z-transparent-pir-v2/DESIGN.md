@@ -85,20 +85,33 @@ limit remains a defense guard. Header work alone never changes source coverage,
 completion, rewind markers, receive/spend facts, or query-cover debt. The first
 header-only checkpoint reports no coverage when no evidence exists.
 
-The continuation binds at most 4096 accepted public height/hash pairs to its
-source, known network genesis and current accepted anchor. Only independently
-obtained hashes matching the expected boundary enter the durable cache. A
-mismatching independently obtained point is available only to the live ChainView
-so upstream validation may reject a publication or roll back obsolete coverage.
-On an advancing target, the prior accepted anchor is independently checked on the
-current selected canonical chain before older cached points can be reused. A
-mismatch discards that cache and proceeds through fresh validation and the
-existing rollback rules. Lower targets are refused. After map validation the
-cache retains only current map boundaries, genesis/current anchor and boundaries
-needed by existing coverage, so obsolete tips do not accumulate. Oversized cache
-maps are rejected during deserialization. No PIR query bytes or randomness are
-cached. Cancellation before a core budget checkpoint may repeat uncommitted
-reads; acknowledged budget progress survives a cold reopen.
+The continuation persists one map of independently observed public height/hash
+pairs, including points that disagree with publisher metadata. ChainView derives
+acceptance or rejection by comparison; a stored observation is never a claim
+that the publisher is correct. Version-three matched-only checkpoints remain a
+valid subset of this evidence and retain their original digest validation.
+Source, network genesis and accepted target anchor bind every observation. On
+an advancing target, the old anchor is independently revalidated on the current
+selected chain before any older observation is inherited. A mismatch discards
+that cache and uses fresh observations through the unchanged rollback rules.
+Same-height anchor changes also invalidate inheritance; lower targets are refused.
+
+The supported metadata domain is explicit: at most 1024 current shards (2048
+boundary heights), 4096 distinct retained coverage endpoints, and genesis,
+current anchor and prior anchor. The resulting observation-map bound is 6147;
+network/read/time budgets are unchanged. Cache inheritance is pruned to the
+exact needed set before merging. Scope-supplied extra independently accepted
+points remain ephemeral until needed, so unrelated supplied points cannot
+exhaust the durable map. Old coverage compacts by same-script containment and
+exact range identity; cross-script or partial-target endpoints have no 1024
+invariant. Exceeding 4096 retained endpoints stops with
+`history_metadata_limit`, without IO, checkpoint replacement, evidence truncation
+or wallet-state changes. This is an unsupported historical metadata size for
+this client; it requires a future resource-policy/support upgrade. A rescan is
+not promised to resolve it, and no fallback is permitted. Oversized serialized
+observation maps are rejected before use. No PIR query bytes or randomness are
+cached. Acknowledged chain or elapsed-budget progress survives cold restart,
+including mismatches needed to reach a verified rollback.
 
 A host resource deadline may call `finish_budget` while the same wallet session
 is still active, then drain only Checkpoint/ack/Stopped. This abandons live IO and

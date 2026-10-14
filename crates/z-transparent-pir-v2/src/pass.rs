@@ -29,9 +29,13 @@ struct LegacyContinuation {
     source_id: String,
     state: MemoryStore,
 }
-// Only independently accepted public chain points; never PIR query state.
+// Independently observed selected-chain points, including publisher mismatches.
+// Comparison with a publication is derived by ChainView, never persisted as trust.
+const MAX_MAP_SHARDS: usize = 1024;
+const MAX_OLD_ENDPOINTS: usize = 4096;
+const MAX_OBSERVED_POINTS: usize = 2 * MAX_MAP_SHARDS + MAX_OLD_ENDPOINTS + 3;
 #[derive(Clone, Serialize, Deserialize)]
-struct AcceptedChain {
+struct ObservedChain {
     anchor: Anchor,
     genesis: Option<String>,
     #[serde(deserialize_with = "bounded_headers")]
@@ -44,18 +48,18 @@ fn bounded_headers<'de, D: serde::Deserializer<'de>>(
     impl<'de> serde::de::Visitor<'de> for Headers {
         type Value = BTreeMap<u64, String>;
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("at most 4096 accepted headers")
+            f.write_str("a bounded map of independently observed headers")
         }
         fn visit_map<M: serde::de::MapAccess<'de>>(
             self,
             mut map: M,
         ) -> std::result::Result<Self::Value, M::Error> {
-            if map.size_hint().is_some_and(|n| n > 4096) {
+            if map.size_hint().is_some_and(|n| n > MAX_OBSERVED_POINTS) {
                 return Err(serde::de::Error::custom("header limit"));
             }
             let mut headers = BTreeMap::new();
             while let Some((height, hash)) = map.next_entry()? {
-                if headers.len() >= 4096 || headers.insert(height, hash).is_some() {
+                if headers.len() >= MAX_OBSERVED_POINTS || headers.insert(height, hash).is_some() {
                     return Err(serde::de::Error::custom("header limit"));
                 }
             }
@@ -69,7 +73,34 @@ struct Continuation {
     version: u32,
     source_id: String,
     state: MemoryStore,
-    chain: AcceptedChain,
+    chain: ObservedChain,
+}
+// Coverage compaction is per script and revision: old recuts and partial
+// targets across scripts have no map-size bound. Refuse an explicit supported
+// metadata limit without truncating evidence or asking the walker to guess.
+fn retained_endpoints(state: &MemoryStore) -> Result<std::collections::BTreeSet<u64>> {
+    let mut endpoints = std::collections::BTreeSet::new();
+    for script in state.scripts().map_err(|_| Error("store"))? {
+        for range in state.coverage(&script.script).map_err(|_| Error("store"))? {
+            endpoints.insert(range.end_height);
+            if endpoints.len() > MAX_OLD_ENDPOINTS {
+                return Err(Error("history_metadata_limit"));
+            }
+        }
+    }
+    Ok(endpoints)
+}
+fn needed_points(
+    boundaries: impl IntoIterator<Item = u64>,
+    old: &std::collections::BTreeSet<u64>,
+    current: u64,
+    prior: Option<u64>,
+) -> std::collections::BTreeSet<u64> {
+    let mut needed = std::collections::BTreeSet::from([0, current]);
+    needed.extend(prior);
+    needed.extend(old);
+    needed.extend(boundaries);
+    needed
 }
 fn reason_code(r: sync::IncompleteReason) -> &'static str {
     use sync::IncompleteReason::*;
@@ -112,14 +143,11 @@ struct Driver {
     io: Rc<RefCell<Io>>,
     limits: Limits,
     chain: Rc<RefCell<BTreeMap<u64, String>>>,
-    verified: Rc<RefCell<BTreeMap<u64, String>>>,
+    supplied: Rc<BTreeMap<u64, String>>,
 }
 impl Driver {
     fn retain_points(&self, needed: &std::collections::BTreeSet<u64>) {
         self.chain
-            .borrow_mut()
-            .retain(|height, _| needed.contains(height));
-        self.verified
             .borrow_mut()
             .retain(|height, _| needed.contains(height));
     }
@@ -207,8 +235,12 @@ impl Driver {
             // walker must see Rejected for obsolete coverage on a reorg.
             return Ok(());
         }
-        if self.chain.borrow().len() >= 4096 {
+        if self.chain.borrow().len() >= MAX_OBSERVED_POINTS {
             return Err(Error("chain_limit"));
+        }
+        if let Some(observed) = self.supplied.get(&height) {
+            self.chain.borrow_mut().insert(height, observed.clone());
+            return Ok(());
         }
         {
             let mut io = self.io.borrow_mut();
@@ -236,13 +268,6 @@ impl Driver {
         if point.height != height {
             return Err(Error("chain_point"));
         }
-        if point.hash == expected {
-            self.verified
-                .borrow_mut()
-                .insert(height, point.hash.clone());
-        }
-        // A different independently obtained hash may reject old coverage and
-        // drive the walker's reorg logic, but is never a durable accepted point.
         self.chain.borrow_mut().insert(height, point.hash);
         Ok(())
     }
@@ -372,7 +397,7 @@ fn durable(scope: &Scope, state: &MemoryStore, headers: &BTreeMap<u64, String>) 
             version: 3,
             source_id: scope.source_id.clone(),
             state: state.clone(),
-            chain: AcceptedChain {
+            chain: ObservedChain {
                 anchor: scope.anchor.clone(),
                 genesis: headers.get(&0).cloned(),
                 headers: headers.clone(),
@@ -461,7 +486,7 @@ impl Pass {
                         .map_err(|_| Error("checkpoint_decode"))?;
                     if restored.source_id != scope.source_id
                         || restored.chain.anchor != cp.anchor
-                        || restored.chain.headers.len() > 4096
+                        || restored.chain.headers.len() > MAX_OBSERVED_POINTS
                         || restored
                             .chain
                             .headers
@@ -499,6 +524,9 @@ impl Pass {
             .map(|s| hex::decode(&s.script).map_err(|_| Error("script")))
             .collect::<Result<std::collections::BTreeSet<_>>>()?;
         memory.retain_scope(&current_scripts);
+        let old_endpoints = retained_endpoints(&memory);
+        let unsupported_history = old_endpoints.is_err();
+        let old_endpoints = old_endpoints.unwrap_or_default();
 
         let store = SharedStore {
             inner: Rc::new(RefCell::new(memory)),
@@ -521,8 +549,14 @@ impl Pass {
         let driver = Driver {
             io: Rc::new(RefCell::new(Io::default())),
             limits: limits.clone(),
-            chain: Rc::new(RefCell::new(headers.clone())),
-            verified: Rc::new(RefCell::new(headers)),
+            chain: Rc::new(RefCell::new(
+                headers
+                    .iter()
+                    .filter(|(h, _)| **h == 0 || **h == scope.anchor.height)
+                    .map(|(h, s)| (*h, s.clone()))
+                    .collect(),
+            )),
+            supplied: Rc::new(headers),
         };
         // A moving tip may reuse older points only after independently checking
         // that its previously accepted anchor still belongs to the selected chain.
@@ -534,21 +568,10 @@ impl Pass {
         if let Some(old) = &restored_chain {
             if old.anchor == scope.anchor {
                 for (height, hash) in &old.headers {
-                    if driver
-                        .chain
-                        .borrow()
-                        .get(height)
-                        .is_some_and(|held| held != hash)
-                    {
+                    if driver.supplied.get(height).is_some_and(|held| held != hash) {
                         return Err(Error("chain_point"));
                     }
-                    if !driver.chain.borrow().contains_key(height)
-                        && driver.chain.borrow().len() >= 4096
-                    {
-                        return Err(Error("chain_limit"));
-                    }
                     driver.chain.borrow_mut().insert(*height, hash.clone());
-                    driver.verified.borrow_mut().insert(*height, hash.clone());
                 }
             }
         }
@@ -611,7 +634,7 @@ impl Pass {
                     reason: "chain_identity".into(),
                 });
             }
-            if map.shards.len() > 1024
+            if map.shards.len() > MAX_MAP_SHARDS
                 || request
                     .scripts
                     .iter()
@@ -621,6 +644,23 @@ impl Pass {
                     reason: "publication_incomplete".into(),
                 });
             }
+            let needed = needed_points(
+                map.shards.iter().flat_map(|entry| {
+                    (entry.end_height <= request.anchor.height)
+                        .then_some(entry.end_height)
+                        .into_iter()
+                        .chain(
+                            entry
+                                .start_height
+                                .checked_sub(1)
+                                .filter(|h| *h <= request.anchor.height),
+                        )
+                }),
+                &old_endpoints,
+                request.anchor.height,
+                restored_chain.as_ref().map(|old| old.anchor.height),
+            );
+            owned.retain_points(&needed);
             if let Some(old) = restored_chain {
                 if old.anchor != request.anchor && old.genesis.as_deref() == Some(genesis) {
                     owned.point(old.anchor.height, &old.anchor.hash).await?;
@@ -628,7 +668,9 @@ impl Pass {
                         chain.is_accepted(old.anchor.height, &old.anchor.hash),
                         Acceptance::Accepted
                     ) {
-                        for (height, hash) in old.headers {
+                        for (height, hash) in
+                            old.headers.into_iter().filter(|(h, _)| needed.contains(h))
+                        {
                             if owned
                                 .chain
                                 .borrow()
@@ -637,34 +679,11 @@ impl Pass {
                             {
                                 return Err(Error("chain_point"));
                             }
-                            if !owned.chain.borrow().contains_key(&height)
-                                && owned.chain.borrow().len() >= 4096
-                            {
-                                return Err(Error("chain_limit"));
-                            }
                             owned.chain.borrow_mut().insert(height, hash.clone());
-                            owned.verified.borrow_mut().insert(height, hash);
                         }
                     }
                 }
             }
-            // Keep only points relevant to this publication and existing coverage;
-            // old advancing tips must not accumulate indefinitely.
-            let mut needed = std::collections::BTreeSet::from([0, request.anchor.height]);
-            for entry in &map.shards {
-                if entry.end_height <= request.anchor.height {
-                    needed.insert(entry.end_height);
-                }
-                if entry.start_height > 0 && entry.start_height - 1 <= request.anchor.height {
-                    needed.insert(entry.start_height - 1);
-                }
-            }
-            for entry in state.scripts().map_err(|_| Error("store"))? {
-                for range in state.coverage(&entry.script).map_err(|_| Error("store"))? {
-                    needed.insert(range.end_height);
-                }
-            }
-            owned.retain_points(&needed);
             for e in &map.shards {
                 if e.end_height <= request.anchor.height {
                     owned.point(e.end_height, &e.terminal_block_hash).await?;
@@ -733,7 +752,7 @@ impl Pass {
                 }),
             }
         });
-        let baseline = durable(&scope, &store.inner.borrow(), &driver.verified.borrow())?;
+        let baseline = durable(&scope, &store.inner.borrow(), &driver.chain.borrow())?;
         let state_baseline = encoded(&store.inner.borrow())?;
         let prior_baseline_matches = checkpoint.as_ref().is_some_and(|cp| {
             cp.scope_id == scope.scope_id
@@ -751,16 +770,18 @@ impl Pass {
             scope,
             store,
             driver,
-            future: Some(future),
+            future: (!unsupported_history).then_some(future),
             previous,
             prior,
             prior_baseline_matches,
             baseline,
             state_baseline,
             held: None,
-            finished: None,
+            finished: unsupported_history.then(|| Status::Incomplete {
+                reason: "history_metadata_limit".into(),
+            }),
             cancelled: false,
-            final_ack: false,
+            final_ack: unsupported_history,
         })
     }
     pub fn advance(&mut self) -> Result<Step> {
@@ -791,11 +812,25 @@ impl Pass {
                 }
             }
         }
-        if encoded(&self.store.inner.borrow())? != self.state_baseline || self.finished.is_some() {
+        let state_changed = encoded(&self.store.inner.borrow())? != self.state_baseline;
+        if state_changed && retained_endpoints(&self.store.inner.borrow()).is_err() {
+            // A newly committed range can cross the supported metadata domain.
+            // Preserve its accepted facts/debt, but never publish Complete or
+            // continue IO with a journal the next pass cannot process.
+            self.future = None;
+            self.finished = Some(Status::Incomplete {
+                reason: "history_metadata_limit".into(),
+            });
+            let mut io = self.driver.io.borrow_mut();
+            io.pending = None;
+            io.reply = None;
+            io.chain_reply = None;
+        }
+        if state_changed || self.finished.is_some() {
             let bytes = durable(
                 &self.scope,
                 &self.store.inner.borrow(),
-                &self.driver.verified.borrow(),
+                &self.driver.chain.borrow(),
             )?;
             if self.prior_baseline_matches
                 && bytes == self.baseline
@@ -982,7 +1017,7 @@ impl Pass {
         self.baseline = durable(
             &self.scope,
             &self.store.inner.borrow(),
-            &self.driver.verified.borrow(),
+            &self.driver.chain.borrow(),
         )?;
         self.state_baseline = encoded(&self.store.inner.borrow())?;
         self.prior_baseline_matches = true;
@@ -1002,6 +1037,9 @@ impl Pass {
         if self.cancelled {
             return Err(Error("cancelled"));
         }
+        if self.final_ack && self.finished.is_some() {
+            return Ok(());
+        }
         self.future = None;
         if self.finished.is_none() {
             self.finished = Some(Status::Incomplete {
@@ -1020,7 +1058,7 @@ impl Pass {
                     == durable(
                         &self.scope,
                         &self.store.inner.borrow(),
-                        &self.driver.verified.borrow(),
+                        &self.driver.chain.borrow(),
                     )?;
         }
         Ok(())
@@ -1035,3 +1073,6 @@ impl Pass {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod long_fork_tests;

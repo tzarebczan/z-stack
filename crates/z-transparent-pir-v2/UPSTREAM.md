@@ -68,3 +68,13 @@ contexts. Tests exercise the real server with malformed but digest-bound page
 heads, partial budgets, cancellation, overload and cold anchor advancement.
 The wrapper also uses inclusive optional coverage accumulation for genesis-only
 ranges; saturating_sub(1) at zero is zero, not an unsigned wraparound.
+
+The Coffer suspension wrapper persists independently observed canonical-chain
+points, including publisher mismatches, in one anchor-bound map. This is public
+chain evidence, not a publisher-verification assertion. It prevents bounded cold
+passes from repeating rejected old coverage endpoints before upstream rollback.
+The explicit supported domain is 1024 current shards and 4096 distinct old
+coverage endpoints plus three anchor/genesis points (6147 observations); excess
+old metadata fails incomplete without altering the evidence journal. The actual
+136-old-shard to one-wide-shard fork fixture records elapsed and chain-budget
+cold passes and requires the unchanged upstream walker to reach verified rewind.

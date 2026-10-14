@@ -26,12 +26,7 @@ fn scope() -> Scope {
     }
 }
 fn snapshot(p: &Pass) -> Checkpoint {
-    let bytes = durable(
-        &p.scope,
-        &p.store.inner.borrow(),
-        &p.driver.verified.borrow(),
-    )
-    .unwrap();
+    let bytes = durable(&p.scope, &p.store.inner.borrow(), &p.driver.chain.borrow()).unwrap();
     p.checkpoint(&bytes).unwrap()
 }
 #[test]
@@ -120,10 +115,9 @@ fn version_two_migrates_only_after_its_original_digest_is_verified() {
     assert!(Pass::new(scope(), Some(cp), Limits::default()).is_err());
 }
 #[test]
-fn verified_cache_is_bound_and_rejects_tampering_and_oversized_maps() {
+fn observed_cache_is_bound_and_rejects_tampering_and_oversized_maps() {
     let p = Pass::new(scope(), None, Limits::default()).unwrap();
     p.driver.chain.borrow_mut().insert(50, "b".repeat(64));
-    p.driver.verified.borrow_mut().insert(50, "b".repeat(64));
     let cp = snapshot(&p);
     let same = Pass::new(scope(), Some(cp.clone()), Limits::default()).unwrap();
     assert!(same.driver.chain.borrow().contains_key(&50));
@@ -149,10 +143,12 @@ fn verified_cache_is_bound_and_rejects_tampering_and_oversized_maps() {
     *bytes.last_mut().unwrap() ^= 1;
     tampered.continuation = STANDARD.encode(bytes);
     assert!(Pass::new(scope(), Some(tampered), Limits::default()).is_err());
-    let oversized = AcceptedChain {
+    let oversized = ObservedChain {
         anchor: scope().anchor,
         genesis: None,
-        headers: (0..4097).map(|h| (h, "b".repeat(64))).collect(),
+        headers: (0..MAX_OBSERVED_POINTS as u64 + 1)
+            .map(|h| (h, "b".repeat(64)))
+            .collect(),
     };
     let bytes = bincode::DefaultOptions::new()
         .with_fixint_encoding()
@@ -160,13 +156,13 @@ fn verified_cache_is_bound_and_rejects_tampering_and_oversized_maps() {
         .unwrap();
     assert!(bincode::DefaultOptions::new()
         .with_fixint_encoding()
-        .deserialize::<AcceptedChain>(&bytes)
+        .deserialize::<ObservedChain>(&bytes)
         .is_err());
 }
 #[test]
 fn budget_finish_preserves_held_checkpoint_and_fences_late_io() {
     let mut pass = Pass::new(scope(), None, Limits::default()).unwrap();
-    pass.driver.verified.borrow_mut().insert(50, "b".repeat(64));
+    pass.driver.chain.borrow_mut().insert(50, "b".repeat(64));
     let cp = snapshot(&pass);
     pass.held = Some(cp.clone());
     pass.finish_budget().unwrap();
@@ -231,29 +227,21 @@ fn obsolete_tips_and_recut_boundaries_do_not_accumulate() {
         needed.insert(boundary);
         pass.driver.chain.borrow_mut().insert(tip, "b".repeat(64));
         pass.driver
-            .verified
-            .borrow_mut()
-            .insert(tip, "b".repeat(64));
-        pass.driver
             .chain
             .borrow_mut()
             .insert(boundary, "c".repeat(64));
-        pass.driver
-            .verified
-            .borrow_mut()
-            .insert(boundary, "c".repeat(64));
         pass.driver.retain_points(&needed);
-        assert_eq!(pass.driver.verified.borrow().len(), 3);
+        assert_eq!(pass.driver.chain.borrow().len(), 3);
         assert!(pass
             .driver
-            .verified
+            .chain
             .borrow()
             .keys()
             .all(|h| needed.contains(h)));
     }
 }
 #[test]
-fn mismatched_independent_reply_never_enters_verified_cache() {
+fn mismatched_independent_reply_is_durable_canonical_evidence() {
     let pass = Pass::new(scope(), None, Limits::default()).unwrap();
     let driver = pass.driver.clone();
     let expected = "b".repeat(64);
@@ -266,7 +254,11 @@ fn mismatched_independent_reply_never_enters_verified_cache() {
     });
     assert!(matches!(f.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
     assert_eq!(pass.driver.chain.borrow().get(&50), Some(&"c".repeat(64)));
-    assert!(!pass.driver.verified.borrow().contains_key(&50));
+    let restored = Pass::new(scope(), Some(snapshot(&pass)), Limits::default()).unwrap();
+    assert_eq!(
+        restored.driver.chain.borrow().get(&50),
+        Some(&"c".repeat(64))
+    );
 }
 
 #[test]
@@ -312,8 +304,139 @@ fn unchanged_complete_snapshot_reuses_exact_prior_metadata_and_rejects_conflict(
     let bytes = durable(
         &conflict.scope,
         &conflict.store.inner.borrow(),
-        &conflict.driver.verified.borrow(),
+        &conflict.driver.chain.borrow(),
     )
     .unwrap();
     assert!(conflict.checkpoint(&bytes).is_err());
+}
+
+#[test]
+fn supported_domain_includes_disjoint_maps_history_and_three_anchors() {
+    let old: std::collections::BTreeSet<_> = (1..=MAX_OLD_ENDPOINTS as u64).collect();
+    let needed = needed_points(
+        10_000..10_000 + 2 * MAX_MAP_SHARDS as u64,
+        &old,
+        50_000,
+        Some(49_999),
+    );
+    assert_eq!(needed.len(), MAX_OBSERVED_POINTS);
+    let pass = Pass::new(scope(), None, Limits::default()).unwrap();
+    *pass.driver.chain.borrow_mut() = needed.iter().map(|h| (*h, "b".repeat(64))).collect();
+    let encoded = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .serialize(&ObservedChain {
+            anchor: Anchor {
+                height: 50_000,
+                hash: "b".repeat(64),
+            },
+            genesis: Some("b".repeat(64)),
+            headers: pass.driver.chain.borrow().clone(),
+        })
+        .unwrap();
+    let restored: ObservedChain = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .deserialize(&encoded)
+        .unwrap();
+    assert_eq!(restored.headers.len(), MAX_OBSERVED_POINTS);
+    for tip in 50_001..50_101 {
+        let recut = needed_points(
+            20_000..20_000 + 2 * MAX_MAP_SHARDS as u64,
+            &old,
+            tip,
+            Some(tip - 1),
+        );
+        pass.driver.retain_points(&recut);
+        for h in &recut {
+            pass.driver.chain.borrow_mut().insert(*h, "b".repeat(64));
+        }
+        assert_eq!(pass.driver.chain.borrow().len(), MAX_OBSERVED_POINTS);
+    }
+}
+#[test]
+fn excessive_history_metadata_is_closed_without_checkpoint_or_evidence_loss() {
+    let mut requested = scope();
+    requested.anchor.height = 10_000;
+    requested.accepted_headers[1] = requested.anchor.clone();
+    let p = Pass::new(requested.clone(), None, Limits::default()).unwrap();
+    let script = hex::decode(&requested.scripts[0].script).unwrap();
+    p.store
+        .inner
+        .borrow_mut()
+        .add_scripts(&[ScriptEntry {
+            script: script.clone(),
+            origin: ScriptOrigin::Derived,
+            required_from: 0,
+        }])
+        .unwrap();
+    let mut supported = None;
+    for h in 1..=MAX_OLD_ENDPOINTS as u64 + 1 {
+        p.store
+            .inner
+            .borrow_mut()
+            .commit_shard(crate::store::ShardCommit {
+                start_height: h,
+                end_height: h,
+                sealed: true,
+                shard_id: h,
+                terminal_block_hash: "b".repeat(64),
+                revision_digest: "c".repeat(64),
+                covered_scripts: vec![script.clone()],
+                ..Default::default()
+            })
+            .unwrap();
+        if h == MAX_OLD_ENDPOINTS as u64 {
+            supported = Some(snapshot(&p));
+            assert_eq!(
+                retained_endpoints(&p.store.inner.borrow()).unwrap().len(),
+                MAX_OLD_ENDPOINTS
+            );
+        }
+    }
+    let mut generated = Pass::new(requested.clone(), supported, Limits::default()).unwrap();
+    generated
+        .store
+        .inner
+        .borrow_mut()
+        .commit_shard(crate::store::ShardCommit {
+            start_height: 9000,
+            end_height: 9000,
+            sealed: true,
+            shard_id: 9000,
+            terminal_block_hash: "b".repeat(64),
+            revision_digest: "c".repeat(64),
+            covered_scripts: vec![script.clone()],
+            ..Default::default()
+        })
+        .unwrap();
+    generated.future = None;
+    generated.finished = Some(Status::Complete);
+    let Step::Checkpoint { checkpoint } = generated.advance().unwrap() else {
+        panic!("new accepted state requires a durable incomplete checkpoint");
+    };
+    assert!(!checkpoint.complete);
+    generated.acknowledge(&checkpoint.checkpoint_id).unwrap();
+    assert!(
+        matches!(generated.advance().unwrap(),Step::Stopped{status:Status::Incomplete{reason}} if reason=="history_metadata_limit")
+    );
+    let restored_generated =
+        Pass::new(requested.clone(), Some(checkpoint), Limits::default()).unwrap();
+    assert_eq!(
+        encoded(&generated.store.inner.borrow()).unwrap(),
+        encoded(&restored_generated.store.inner.borrow()).unwrap()
+    );
+    let cp = snapshot(&p);
+    let original_state = encoded(&p.store.inner.borrow()).unwrap();
+    for _ in 0..3 {
+        let mut cold = Pass::new(requested.clone(), Some(cp.clone()), Limits::default()).unwrap();
+        assert_eq!(encoded(&cold.store.inner.borrow()).unwrap(), original_state);
+        assert!(
+            matches!(cold.advance().unwrap(),Step::Stopped{status:Status::Incomplete{reason}} if reason=="history_metadata_limit")
+        );
+        cold.finish_budget().unwrap();
+        assert!(
+            matches!(cold.advance().unwrap(),Step::Stopped{status:Status::Incomplete{reason}} if reason=="history_metadata_limit")
+        );
+        assert_eq!(encoded(&cold.store.inner.borrow()).unwrap(), original_state);
+        assert!(cold.driver.io.borrow().pending.is_none());
+    }
 }
