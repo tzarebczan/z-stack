@@ -774,6 +774,8 @@ impl NativeWallet {
         let mut db = WalletDb::from_connection(conn, self.network, SystemClock, new_rng());
         db.transactionally_with_extension(|wdb,ext|->anyhow::Result<()> {
             super::recovery_guard::transaction_recovery_ready(wdb,ext)?;
+            #[cfg(feature = "transparent-pir")]
+            super::transparent_pir_funding::check_proposal(ext, &proposal)?;
             let marker:bool=ext.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",[],|r|r.get(0))?;
             let generation = if marker {Some(ext.query_row("SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",[],|r|r.get::<_,u64>(0))?)} else {None};
             if generation!=recovery_generation || wdb.chain_height()?!=Some(height) || wdb.get_block_hash(height)?.is_none_or(|h|h!=hash) {anyhow::bail!("payment_review_expired");}
@@ -858,6 +860,8 @@ impl NativeWallet {
             }
             let proposal = proto.try_into_standard_proposal(&self.network, wdb)
                 .map_err(|_| anyhow::anyhow!("payment_review_expired"))?;
+            #[cfg(feature = "transparent-pir")]
+            super::transparent_pir_funding::check_proposal(ext, &proposal)?;
             if crate::proposal_fee_zat(&proposal) != receipt.fee_zat { anyhow::bail!("payment_storage_failed"); }
             let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
                 wdb, &self.network, &*prover, &*prover,

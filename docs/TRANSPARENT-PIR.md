@@ -39,6 +39,17 @@ spending or shielding. `snapshot.transparentPir` labels the recovered confirmed
 amount and coverage under publisher trust; ordinary spend readiness remains a
 separate predicate. Unknown submissions and their input reservations are retained.
 
+Native funding keeps a durable quarantine separate from provisional-row deletion
+ownership. The shielding selector excludes publisher-only outputs individually;
+independently confirmed outputs already in the canonical wallet remain eligible.
+Transfer proposals and transaction creation repeat the provenance check. Revoking
+the transparent profile, reopening, retiring a projection, or reobserving its
+output does not promote it. Native independently verified promotion is not
+implemented in this release. Legacy native state conservatively quarantines all
+retained PIR receive identities when their prior confirmation authority is
+ambiguous. Canonical totals and history remain visible; totals do not authorize
+spending. The existing source-bound native spending refusal remains in force.
+
 ## Browser transport
 
 The app enrolls its exact OHTTP offer independently of sync/submission consent,

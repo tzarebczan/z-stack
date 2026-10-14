@@ -33,8 +33,61 @@ impl NativeTransparentPirPass {
 fn database(_: impl std::fmt::Display) -> EngineError {
     refused("transparent_pir_database_error")
 }
+// The native marker distinguishes old projection-only state from funding provenance.
+// Migration conservatively quarantines prior receive identities, without changing facts,
+// continuation, deletion ownership, reservations, or unknown submissions.
+fn decode_native_state(bytes: &[u8]) -> anyhow::Result<ProjectionState> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|_| anyhow::anyhow!("transparent_pir_state_invalid"))?;
+    let mut state: ProjectionState = serde_json::from_value(value.clone())
+        .map_err(|_| anyhow::anyhow!("transparent_pir_state_invalid"))?;
+    match value.get("nativeFundingVersion") {
+        Some(version) if version.as_u64() == Some(1) && state.unverified_outputs.is_some() => {}
+        None => {
+            let unverified = state.unverified_outputs.get_or_insert_default();
+            unverified.extend(
+                state
+                    .records
+                    .keys()
+                    .filter(|k| k.starts_with("r:"))
+                    .cloned(),
+            );
+        }
+        _ => anyhow::bail!("transparent_pir_state_invalid"),
+    }
+    state
+        .unverified_outputs
+        .get_or_insert_default()
+        .extend(state.projected_outputs.iter().cloned());
+    let unverified = state.unverified_outputs.as_ref().unwrap();
+    if unverified.len() > 65_536 {
+        anyhow::bail!("transparent_pir_state_invalid");
+    }
+    for key in unverified {
+        let fields: Vec<_> = key.split(':').collect();
+        if !matches!(fields.as_slice(), ["r", id, n] if crate::transparent_pir::hash(id) && n.parse::<u32>().is_ok_and(|v|v.to_string()==*n))
+        {
+            anyhow::bail!("transparent_pir_state_invalid");
+        }
+    }
+    Ok(state)
+}
+fn encode_native_state(state: &ProjectionState) -> anyhow::Result<Vec<u8>> {
+    let mut value = serde_json::to_value(state)?;
+    value["nativeFundingVersion"] = 1.into();
+    if state.unverified_outputs.is_none() {
+        value["unverifiedOutputs"] = serde_json::json!([]);
+    }
+    Ok(serde_json::to_vec(&value)?)
+}
 fn load(ext: &rusqlite::Transaction<'_>) -> anyhow::Result<ProjectionState> {
     ext.execute("CREATE TABLE IF NOT EXISTS ext_transparent_pir_v1 (id INTEGER PRIMARY KEY CHECK(id=1), state BLOB NOT NULL)", [])?;
+    ext.execute("CREATE TABLE IF NOT EXISTS ext_transparent_pir_funding_guard_v1 (id INTEGER PRIMARY KEY CHECK(id=1))", [])?;
+    let required: bool = ext.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ext_transparent_pir_funding_guard_v1)",
+        [],
+        |r| r.get(0),
+    )?;
     let bytes: Option<Vec<u8>> = ext
         .query_row(
             "SELECT state FROM ext_transparent_pir_v1 WHERE id=1",
@@ -42,14 +95,77 @@ fn load(ext: &rusqlite::Transaction<'_>) -> anyhow::Result<ProjectionState> {
             |r| r.get(0),
         )
         .optional()?;
-    Ok(match bytes {
-        Some(bytes) => serde_json::from_slice(&bytes)?,
-        None => ProjectionState::default(),
-    })
+    match bytes {
+        Some(bytes) => {
+            let state = decode_native_state(&bytes)?;
+            if state.bound_source.is_some() {
+                ext.execute(
+                    "INSERT OR IGNORE INTO ext_transparent_pir_funding_guard_v1 VALUES(1)",
+                    [],
+                )?;
+            }
+            Ok(state)
+        }
+        None if required => anyhow::bail!("transparent_pir_state_invalid"),
+        None => Ok(ProjectionState::default()),
+    }
 }
 fn save(ext: &rusqlite::Transaction<'_>, state: &ProjectionState) -> anyhow::Result<()> {
-    ext.execute("INSERT INTO ext_transparent_pir_v1 VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET state=excluded.state", [serde_json::to_vec(state)?])?;
+    ext.execute("INSERT INTO ext_transparent_pir_v1 VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET state=excluded.state", [encode_native_state(state)?])?;
+    if state.bound_source.is_some() {
+        ext.execute(
+            "INSERT OR IGNORE INTO ext_transparent_pir_funding_guard_v1 VALUES(1)",
+            [],
+        )?;
+    }
     Ok(())
+}
+pub(super) fn funding_exclusions(
+    ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
+) -> anyhow::Result<std::collections::BTreeSet<String>> {
+    let exists: bool = ext.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_transparent_pir_v1')", [], |r|r.get(0))?;
+    let guard_exists: bool = ext.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_transparent_pir_funding_guard_v1')", [], |r|r.get(0))?;
+    let required = guard_exists
+        && ext.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ext_transparent_pir_funding_guard_v1)",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?;
+    let bytes: Option<Vec<u8>> = if exists {
+        ext.query_row(
+            "SELECT state FROM ext_transparent_pir_v1 WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+    } else {
+        None
+    };
+    match bytes {
+        Some(bytes) => {
+            let state = decode_native_state(&bytes)?;
+            if state.bound_source.is_some() {
+                // DDL is intentionally unavailable to extension transactions. Old
+                // wallets without the guard must first load their PIR state through
+                // the native owner; funding remains refused in the meantime.
+                if !guard_exists {
+                    anyhow::bail!("transparent_pir_state_invalid");
+                }
+                ext.execute(
+                    "INSERT OR IGNORE INTO ext_transparent_pir_funding_guard_v1 VALUES(1)",
+                    [],
+                )?;
+            }
+            // Upgrade before selection in the same wallet transaction.
+            ext.execute(
+                "UPDATE ext_transparent_pir_v1 SET state=?1 WHERE id=1",
+                [encode_native_state(&state)?],
+            )?;
+            Ok(state.unverified_outputs.unwrap_or_default())
+        }
+        None if required => anyhow::bail!("transparent_pir_state_invalid"),
+        None => Ok(Default::default()),
+    }
 }
 fn scripts<D: WalletRead<AccountId = AccountUuid>>(
     db: &D,
@@ -430,9 +546,9 @@ impl NativeWallet {
             } else if let Some(floor)=retirement_floor { retire_projection(ext,&mut state,&old_records,&records,floor)?; }
             for (script,event) in &records {
                 let (id,position,mined) = match event { TransparentEvent::Receive(e) => (e.txid,e.transaction_index,e.height), TransparentEvent::Spend(e)=>(e.spending_txid,e.transaction_index,e.height) };
-                let old:Option<(Option<u32>,Option<u32>)> = ext.query_row("SELECT mined_height,tx_index FROM transactions WHERE txid=?1",[id.0.as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-                    if old.is_some_and(|(h,i)|h.is_some_and(|h|h!=mined) || i.is_some_and(|i|i!=u32::from(position))) { anyhow::bail!("transparent_pir_transaction_conflict"); }
-                    if old.is_none() { state.projected_transactions.insert(crate::web::to_hex(&id.0)); }
+                let prior_meta:Option<(Option<u32>,Option<u32>)> = ext.query_row("SELECT mined_height,tx_index FROM transactions WHERE txid=?1",[id.0.as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                    if prior_meta.is_some_and(|(h,i)|h.is_some_and(|h|h!=mined) || i.is_some_and(|i|i!=u32::from(position))) { anyhow::bail!("transparent_pir_transaction_conflict"); }
+                    if prior_meta.is_none() { state.projected_transactions.insert(crate::web::to_hex(&id.0)); }
                     let meta = WalletTx::new(TxId::from_bytes(id.0),position.into(),vec![],vec![],vec![],vec![],vec![],vec![],vec![]);
                 let tx_ref = wdb.put_tx_meta(&meta,mined.into())?;
                 match event {
@@ -441,6 +557,9 @@ impl NativeWallet {
                         if wdb.find_account_for_transparent_address(output.recipient_address())?.is_none() { anyhow::bail!("transparent_pir_script_not_owned"); }
                         let old:Option<(Vec<u8>,i64,Option<u32>)> = ext.query_row("SELECT n.script,n.value_zat,t.mined_height FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.txid=?1 AND n.output_index=?2",rusqlite::params![e.txid.0.as_slice(),e.output_index],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
                         if old.is_none() {state.projected_outputs.insert(crate::transparent_pir::event_key(*event));}
+                        if old.is_none() || prior_meta.is_none_or(|(h,_)|h.is_none()) {
+                            state.unverified_outputs.get_or_insert_default().insert(crate::transparent_pir::event_key(*event));
+                        }
                         if old.is_some_and(|(s,v,h)| s != *script || u64::try_from(v).ok()!=Some(e.value) || h.is_some_and(|h|h!=e.height)) { anyhow::bail!("transparent_pir_output_conflict"); }
                         // Native upstream reconciliation retains existing spend/lock metadata.
                         wdb.put_transparent_output(&output,height.into(),true)?;

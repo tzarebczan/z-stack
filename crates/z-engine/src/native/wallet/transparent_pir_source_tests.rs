@@ -571,3 +571,435 @@ async fn native_transparent_pir_amount_counts_only_pir_recovered_receives() {
     let ordinary:u64 = db.query_row("SELECT n.value_zat FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.txid=?1", [[0x33u8;32].as_slice()], |r|r.get(0)).unwrap();
     assert_eq!(ordinary, 40000);
 }
+
+#[tokio::test]
+async fn native_pir_only_funding_is_excluded_from_real_shielding_proposal() {
+    use zcash_keys::encoding::AddressCodec;
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(root.path()).await;
+    let wallet = fixture.restore(root.path()).await;
+    wallet
+        .sync_with_wallet_source_reported_cancellable(
+            &fixture.source,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+    let address = transparent::address::TransparentAddress::decode(
+        &wallet.network,
+        &wallet.transparent_address().unwrap().unwrap(),
+    )
+    .unwrap();
+    let script: transparent::address::Script = address.script().into();
+    let mut pass = wallet
+        .begin_transparent_pir_with_source(
+            &fixture.source,
+            &"ab".repeat(32),
+            Arc::new(RecoveryCancellation::new()),
+        )
+        .unwrap();
+    let scope: TransparentPirScope = serde_json::from_str(&pass.scope_json().unwrap()).unwrap();
+    let cp = checkpoint(
+        scope,
+        &crate::web::to_hex(&script.0 .0),
+        vec![receive()],
+        None,
+        0x91,
+    );
+    wallet
+        .apply_transparent_pir_checkpoint_with_source(
+            &fixture.source,
+            &mut pass,
+            &serde_json::to_string(&cp).unwrap(),
+        )
+        .unwrap();
+    drop(pass);
+    let mut db = wallet.open_db().unwrap();
+    let account = NativeWallet::primary_account_id(&db).unwrap();
+    let control = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
+        transparent::bundle::OutPoint::new([0x33; 32], 0),
+        transparent::bundle::TxOut::new(Zatoshis::from_u64(40000).unwrap(), script.clone()),
+        Some(1.into()),
+        Some(account),
+        None,
+        None,
+    )
+    .unwrap();
+    db.put_received_transparent_utxo(&control).unwrap();
+    drop(db);
+    assert_eq!(
+        native_funding_selection(&wallet, address).unwrap(),
+        vec![[0x33; 32]],
+        "PIR-only funding must not enter actual shielding selection alongside independent control"
+    );
+    // Public source binding remains a separate, earlier spending boundary.
+    code(
+        wallet.shield(&auth(), 1).await,
+        "native_wallet_source_required",
+    );
+    assert_eq!(
+        wallet.transparent_pir_status_for(&"ab".repeat(32)).unwrap()["confirmedZat"],
+        "150000"
+    );
+
+    // Explicit transparent SpendPolicy and decoding a proposal do not bypass the
+    // funding boundary; the create paths repeat this check in their write txn.
+    let mut db = wallet.open_db().unwrap();
+    let request = TransactionRequest::new(vec![zip_payment(
+        &wallet.unified_address().unwrap(),
+        100000,
+        None,
+    )
+    .unwrap()])
+    .unwrap();
+    let policy=shielded_spend_policy().with_transparent(zcash_client_backend::data_api::wallet::input_selection::TransparentSpendPolicy::any_account_addr());
+    let result = db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
+        wallet
+            .propose_fee_in_snapshot(wdb, ext, request, policy)
+            .map_err(anyhow::Error::new)
+    });
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("transparent_pir_funding_unverified"));
+    let raw_proposal =
+        zcash_client_backend::data_api::wallet::propose_shielding::<_, _, _, _, Infallible>(
+            &mut db,
+            &wallet.network,
+            &GreedyInputSelector::new(),
+            &SingleOutputChangeStrategy::new(
+                StandardFeeRule::Zip317,
+                None,
+                ShieldedPool::Orchard,
+                DustOutputPolicy::default(),
+            ),
+            Zatoshis::from_u64(1).unwrap(),
+            &[address],
+            account,
+            shield_confirmations(wallet.network),
+            CoinbaseFilter::AllTransparentOutputs,
+            None,
+        )
+        .unwrap();
+    let result = db.transactionally_with_extension(|_, ext| {
+        super::super::transparent_pir_funding::check_proposal(ext, &raw_proposal)
+    });
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("transparent_pir_funding_unverified"));
+
+    // Locking the independent output cannot make the selector fall back to PIR.
+    use zcash_client_backend::{
+        data_api::OutputLockStore,
+        wallet::{LockOwner, OutputRef},
+    };
+    let owner = LockOwner::new([0x55; 32]);
+    let reference = OutputRef::new(
+        TxId::from_bytes([0x33; 32]),
+        zcash_protocol::PoolType::Transparent,
+        0,
+    );
+    db.lock_outputs(&[reference], owner, 100.into()).unwrap();
+    assert!(native_funding_selection(&wallet, address).is_err());
+    assert!(
+        db.unlock_output(&reference, owner).unwrap(),
+        "selection must not release another flow's reservation"
+    );
+    drop(db);
+
+    // Re-observation alone never grants the native promotion authority this
+    // version does not implement. Dropping enrollment and reopening does not either.
+    let pir_output = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
+        transparent::bundle::OutPoint::new([0x11; 32], 0),
+        transparent::bundle::TxOut::new(Zatoshis::from_u64(150000).unwrap(), script.clone()),
+        Some(1.into()),
+        Some(account),
+        None,
+        None,
+    )
+    .unwrap();
+    wallet
+        .open_db()
+        .unwrap()
+        .put_received_transparent_utxo(&pir_output)
+        .unwrap();
+    drop(wallet);
+    let cold = NativeWallet::open_with_wallet_source(root.path(), &fixture.source).unwrap();
+    assert_eq!(
+        native_funding_selection(&cold, address).unwrap(),
+        vec![[0x33; 32]]
+    );
+    code(
+        cold.shield(&auth(), 1).await,
+        "native_wallet_source_required",
+    );
+    let ordinary_open = NativeWallet::open(root.path()).unwrap();
+    code(
+        ordinary_open.shield(&auth(), 1).await,
+        "native_wallet_source_required",
+    );
+    drop(ordinary_open);
+
+    // 08ad native state had deletion ownership but no native funding version.
+    // Backfill durably on the first selection after reopen/no active enrollment.
+    let conn = rusqlite::Connection::open(&cold.paths.data_db).unwrap();
+    let original: Vec<u8> = conn
+        .query_row("SELECT state FROM ext_transparent_pir_v1", [], |r| r.get(0))
+        .unwrap();
+    conn.execute("DROP TABLE ext_transparent_pir_funding_guard_v1", [])
+        .unwrap();
+    assert!(native_funding_selection(&cold, address).is_err());
+    cold.transparent_pir_status().unwrap(); // native owner reinstates the durable guard
+    assert_eq!(
+        native_funding_selection(&cold, address).unwrap(),
+        vec![[0x33; 32]]
+    );
+
+    for missing in [false, true] {
+        let mut legacy: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("nativeFundingVersion");
+        legacy["unverifiedOutputs"] = if missing {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!([])
+        };
+        conn.execute(
+            "UPDATE ext_transparent_pir_v1 SET state=?1",
+            [serde_json::to_vec(&legacy).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(
+            native_funding_selection(&cold, address).unwrap(),
+            vec![[0x33; 32]]
+        );
+        let saved: Vec<u8> = conn
+            .query_row("SELECT state FROM ext_transparent_pir_v1", [], |r| r.get(0))
+            .unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(saved["nativeFundingVersion"], 1);
+        assert_eq!(saved["unverifiedOutputs"].as_array().unwrap().len(), 1);
+    }
+    let mut invalid: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    invalid["nativeFundingVersion"] = 2.into();
+    conn.execute(
+        "UPDATE ext_transparent_pir_v1 SET state=?1",
+        [serde_json::to_vec(&invalid).unwrap()],
+    )
+    .unwrap();
+    assert!(native_funding_selection(&cold, address).is_err());
+    invalid["nativeFundingVersion"] = 1.into();
+    invalid["unverifiedOutputs"] = serde_json::Value::Null;
+    conn.execute(
+        "UPDATE ext_transparent_pir_v1 SET state=?1",
+        [serde_json::to_vec(&invalid).unwrap()],
+    )
+    .unwrap();
+    assert!(native_funding_selection(&cold, address).is_err());
+    conn.execute("UPDATE ext_transparent_pir_v1 SET state=?1", [original])
+        .unwrap();
+    drop(conn);
+
+    // A real source checkpoint retirement removes deletion ownership, while
+    // funding quarantine survives even if the canonical outpoint is reinserted.
+    let mut pass = cold
+        .begin_transparent_pir_with_source(
+            &fixture.source,
+            &"ab".repeat(32),
+            Arc::new(RecoveryCancellation::new()),
+        )
+        .unwrap();
+    let scope = serde_json::from_str(&pass.scope_json().unwrap()).unwrap();
+    let mut retired = checkpoint(
+        scope,
+        &crate::web::to_hex(&script.0 .0),
+        vec![],
+        Some(cp.checkpoint_id),
+        0x92,
+    );
+    retired.rewind_to = Some(crate::transparent_pir::TransparentPirAnchor {
+        height: 0,
+        hash: cold.network.genesis_hash().into(),
+    });
+    cold.apply_transparent_pir_checkpoint_with_source(
+        &fixture.source,
+        &mut pass,
+        &serde_json::to_string(&retired).unwrap(),
+    )
+    .unwrap();
+    drop(pass);
+    cold.open_db()
+        .unwrap()
+        .put_received_transparent_utxo(&pir_output)
+        .unwrap();
+    assert_eq!(
+        native_funding_selection(&cold, address).unwrap(),
+        vec![[0x33; 32]]
+    );
+    let conn = rusqlite::Connection::open(&cold.paths.data_db).unwrap();
+    let bytes: Vec<u8> = conn
+        .query_row("SELECT state FROM ext_transparent_pir_v1", [], |r| r.get(0))
+        .unwrap();
+    let state: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(state["projectedOutputs"].as_array().unwrap().is_empty());
+    assert!(state["unverifiedOutputs"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(format!("r:{}:0", "11".repeat(32)))));
+
+    // The durable receipt fixture contains serialized disposable bytes, not a
+    // real submission. Its lifecycle and bytes must survive funding refusal.
+    let (receipt_id, receipt_raw) = saved_transaction(&cold);
+    let receipt_before = serde_json::to_value(cold.payment_receipt(&receipt_id).unwrap()).unwrap();
+
+    // Losing or corrupting durable provenance fails closed, preserving rows.
+    conn.execute("UPDATE ext_transparent_pir_v1 SET state=X'00'", [])
+        .unwrap();
+    assert!(native_funding_selection(&cold, address).is_err());
+    conn.execute("DELETE FROM ext_transparent_pir_v1", [])
+        .unwrap();
+    assert!(native_funding_selection(&cold, address).is_err());
+    assert!(cold.transparent_pir_status().is_err());
+    let outputs: u64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM transparent_received_outputs",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(outputs, 3);
+    assert_eq!(
+        serde_json::to_value(cold.payment_receipt(&receipt_id).unwrap()).unwrap(),
+        receipt_before
+    );
+    let retained: Vec<u8> = conn
+        .query_row(
+            "SELECT raw FROM transactions WHERE created IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        retained == receipt_raw,
+        "funding checks must retain saved transaction bytes"
+    );
+}
+
+fn native_funding_selection(
+    wallet: &NativeWallet,
+    address: transparent::address::TransparentAddress,
+) -> anyhow::Result<Vec<[u8; 32]>> {
+    let mut db = wallet.open_db()?;
+    let account = NativeWallet::primary_account_id(&db)?;
+    let proposal = db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
+        Ok(wallet.propose_shielding_in_snapshot(
+            wdb,
+            ext,
+            &[address],
+            account,
+            Zatoshis::from_u64(1).unwrap(),
+        )?)
+    })?;
+    Ok(proposal
+        .steps()
+        .iter()
+        .flat_map(|s| s.transparent_inputs())
+        .map(|o| *o.outpoint().hash())
+        .collect())
+}
+
+#[tokio::test]
+async fn native_pir_confirmation_does_not_promote_existing_pending_funding() {
+    use zcash_keys::encoding::AddressCodec;
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(root.path()).await;
+    let wallet = fixture.restore(root.path()).await;
+    wallet
+        .sync_with_wallet_source_reported_cancellable(
+            &fixture.source,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+    let address = transparent::address::TransparentAddress::decode(
+        &wallet.network,
+        &wallet.transparent_address().unwrap().unwrap(),
+    )
+    .unwrap();
+    let script: transparent::address::Script = address.script().into();
+    let mut db = wallet.open_db().unwrap();
+    let account = NativeWallet::primary_account_id(&db).unwrap();
+    for (id, value, height) in [(0x33, 40000, Some(1.into())), (0x44, 60000, None)] {
+        let output = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
+            transparent::bundle::OutPoint::new([id; 32], 0),
+            transparent::bundle::TxOut::new(Zatoshis::from_u64(value).unwrap(), script.clone()),
+            height,
+            Some(account),
+            None,
+            None,
+        )
+        .unwrap();
+        db.put_received_transparent_utxo(&output).unwrap();
+    }
+    drop(db);
+    let mut pass = wallet
+        .begin_transparent_pir_with_source(
+            &fixture.source,
+            &"ab".repeat(32),
+            Arc::new(RecoveryCancellation::new()),
+        )
+        .unwrap();
+    let scope = serde_json::from_str(&pass.scope_json().unwrap()).unwrap();
+    let records = vec![
+        receive(),
+        TransparentEvent::Receive(ReceiveEvent {
+            metadata: None,
+            height: 1,
+            txid: Txid([0x33; 32]),
+            transaction_index: 1,
+            output_index: 0,
+            value: 40000,
+            coinbase: false,
+        }),
+        TransparentEvent::Receive(ReceiveEvent {
+            metadata: None,
+            height: 1,
+            txid: Txid([0x44; 32]),
+            transaction_index: 1,
+            output_index: 0,
+            value: 60000,
+            coinbase: false,
+        }),
+    ];
+    let cp = checkpoint(
+        scope,
+        &crate::web::to_hex(&script.0 .0),
+        records,
+        None,
+        0xa1,
+    );
+    wallet
+        .apply_transparent_pir_checkpoint_with_source(
+            &fixture.source,
+            &mut pass,
+            &serde_json::to_string(&cp).unwrap(),
+        )
+        .unwrap();
+    drop(pass);
+    assert_eq!(
+        native_funding_selection(&wallet, address).unwrap(),
+        vec![[0x33; 32]],
+        "only independently confirmed preexisting funding is spendable"
+    );
+    drop(wallet);
+    let cold = NativeWallet::open_with_wallet_source(root.path(), &fixture.source).unwrap();
+    assert_eq!(
+        native_funding_selection(&cold, address).unwrap(),
+        vec![[0x33; 32]]
+    );
+}
