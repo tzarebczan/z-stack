@@ -1,3 +1,5 @@
+import type { TransparentScanMode } from "./private-transparent";
+import type { PrivateTransparentOperation } from "./private-transparent";
 import type { PrivateEnhanceOperation } from "./private-enhance";
 import {
   HASH_KEEP,
@@ -215,6 +217,7 @@ export type WasmWalletHandle = {
   proveSend: (mnemonic: string, to: string, amountZec: string, memo?: string, maxFeeZat?: string, minConfirmations?: number) => string;
   proveShield: (mnemonic: string, thresholdZat: number) => string;
   enhanceRawTx?: (hex: string) => number;
+  privateTransparent?: (operation: PrivateTransparentOperation, bytes: Uint8Array) => Uint8Array;
   privateEnhance?: (operation: PrivateEnhanceOperation, bytes: Uint8Array, time: number) => Uint8Array;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
@@ -397,7 +400,7 @@ export type WasmClientOpts = {
   /** Shared public ranges, or selective transaction lookups (auto/on-demand). Default on-demand. */
   memoFetch?: "auto" | "on-demand" | "shared";
   /** Scan transparent inputs/outputs locally; requires protocol >= 0.5. Default off. */
-  transparentScan?: "compact" | "off";
+  transparentScan?: TransparentScanMode;
   shieldThresholdZat?: number;
   unlockPolicy?: UnlockPolicy;
 };
@@ -429,7 +432,7 @@ export type WasmClient = EngineClient & {
   fetchMemos(): Promise<WalletSnapshot>;
   /** Change automatic memo fetching for this client; already-sent requests cannot be undone. */
   setMemoFetch(mode: "auto" | "on-demand" | "shared"): void;
-  setTransparentScan(mode: "compact" | "off"): void;
+  setTransparentScan(mode: TransparentScanMode): void;
   /** Changes future background key builds; an already-running WASM build is not interruptible. */
   setPrewarmProvingKey(enabled: boolean): void;
 };

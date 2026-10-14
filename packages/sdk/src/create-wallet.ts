@@ -1,3 +1,5 @@
+import { transparentScanMode } from "./private-transparent";
+import type { TransparentScanMode } from "./private-transparent";
 /**
  * One call from "nothing" to a wallet: load the WASM engine, pick a transport
  * for the light server, and return the wallet client.
@@ -75,7 +77,7 @@ export type WalletOptions = {
    */
   sharedMemos?: boolean;
   /** Scan transparent inputs/outputs locally; requires protocol >= 0.5. Default off. */
-  transparentScan?: "compact" | "off";
+  transparentScan?: TransparentScanMode;
   /**
    * Allow a scan of more than 150,000 blocks in one go (an old birthday, or a
    * wallet reopened after months). It downloads every compact block in the
@@ -183,6 +185,10 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
   if (!["mainnet", "testnet", "regtest"].includes(opts.network)) throw new WalletError("invalid_network", "Choose mainnet, testnet or regtest.");
   if (opts.unlockPolicy !== undefined && !["session", "each-spend"].includes(opts.unlockPolicy)) throw new WalletError("unknown", "Invalid browser unlock policy.");
   const submissionPolicy = resolveSubmissionPolicy(opts.submissionPolicy);
+  const transparentScan = transparentScanMode(opts.transparentScan);
+  if (transparentScan === "pir" && opts.autoShield) throw new WalletError("unknown", "Automatic shielding is not enabled for publisher-provided PIR history.");
+  if (transparentScan === "pir" && (typeof opts.server === "string" || !opts.server.transparentPir))
+    throw new WalletError("unknown", "Private transparent scanning requires a separately consented PIR transport.");
   const transportLimits = {
     maxBlocksPerRequest: compactBlockRequestLimit(typeof opts.server === "string" ? undefined : opts.server.maxBlocksPerRequest),
     maxSharedMemoBlocksPerRequest: sharedMemoBlockRequestLimit(typeof opts.server === "string" ? undefined : opts.server.maxSharedMemoBlocksPerRequest),
@@ -234,7 +240,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
         ...(opts.autoShield !== undefined ? { autoShield: opts.autoShield } : {}),
         ...(opts.prewarmProvingKey !== undefined ? { prewarmProvingKey: opts.prewarmProvingKey } : {}),
         ...(opts.memoFetch !== undefined ? { memoFetch: opts.memoFetch } : {}),
-        ...(opts.transparentScan !== undefined ? { transparentScan: opts.transparentScan } : {}),
+        transparentScan,
         ...(opts.unlockPolicy ? { unlockPolicy: opts.unlockPolicy } : {}),
       },
       (progress) => reportProgress?.(progress),

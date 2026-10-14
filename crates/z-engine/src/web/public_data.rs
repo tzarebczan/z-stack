@@ -447,7 +447,7 @@ impl WebWallet {
     }
 
     #[cfg(feature = "transparent-inputs")]
-    fn public_transparent_scripts(&mut self) -> Result<Vec<(Vec<u8>, String)>> {
+    pub(crate) fn public_transparent_scripts(&mut self) -> Result<Vec<(Vec<u8>, String)>> {
         use transparent::{
             address::{Script, TransparentAddress},
             keys::{NonHardenedChildIndex, TransparentKeyScope},

@@ -1,3 +1,4 @@
+import type { PrivateTransparentHost, PrivateTransparentOperation } from "./private-transparent";
 import type { PrivateEnhanceHost, PrivateEnhanceOperation } from "./private-enhance";
 /**
  * Wallet scan session: in-process (Node / tests) or a dedicated Worker (browser).
@@ -41,7 +42,7 @@ export type ApplySummary = {
   scanned: number;
 };
 
-export type ScanSession = PrivateEnhanceHost & {
+export type ScanSession = PrivateEnhanceHost & PrivateTransparentHost & {
   readonly kind?: "local" | "worker";
   create: (network: string, mnemonic: string, birthday: number, accountIndex: number) => Promise<void>;
   fromUfvk: (network: string, ufvk: string, birthday: number, accountIndex: number) => Promise<void>;
@@ -120,6 +121,7 @@ type WalletHandle = HardwareWalletHandle & {
   enhanceRawTx?: (hex: string) => number;
   applyTransparentBlocks?: (blob: Uint8Array) => number;
   applySharedMemos?: (json: string) => number;
+  privateTransparent?: (operation: PrivateTransparentOperation, bytes: Uint8Array) => Uint8Array;
   privateEnhance?: (operation: PrivateEnhanceOperation, bytes: Uint8Array, time: number) => Uint8Array;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
@@ -263,6 +265,11 @@ export function localScanSession(
       const wallet = w();
       if (!wallet.applySharedMemos) throw new Error("WASM needs a public-data upgrade");
       return wallet.applySharedMemos(json);
+    },
+    privateTransparent: async (operation, bytes) => {
+      const wallet = w();
+      if (!wallet.privateTransparent) throw new Error("WASM needs a transparent PIR upgrade");
+      return wallet.privateTransparent(operation, bytes);
     },
     privateEnhance: async (operation, bytes, time) => {
       const wallet = w();
@@ -828,6 +835,12 @@ export function workerScanSession(): ScanSession | null {
     },
     applySharedMemos: async (json) => {
       return Number((await sessionRpc("applySharedMemos", { json }, undefined, 180_000)).n) || 0;
+    },
+    privateTransparent: async (operation, bytes) => {
+      const buf = bytes.slice().buffer;
+      const data = await sessionRpc("privateTransparent", { transparentOperation: operation, blob: buf }, [buf], 180_000);
+      if (!(data.blob instanceof ArrayBuffer)) throw new Error("transparent_pir_engine_invalid");
+      return new Uint8Array(data.blob);
     },
     privateEnhance: async (operation, bytes, time) => {
       const buf = bytes.slice().buffer as ArrayBuffer;

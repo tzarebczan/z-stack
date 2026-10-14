@@ -50,5 +50,13 @@
   {
     "file": "ipir-standard-LICENSE-APACHE",
     "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/Apache-2.0.txt"
+  },
+  {
+    "file": "transparent-wallet-pir-LICENSE",
+    "url": "https://raw.githubusercontent.com/valargroup/wallet-pir/c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2/LICENSE"
+  },
+  {
+    "file": "hex_lit-MITNFA.txt",
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MITNFA.txt"
   }
 ]

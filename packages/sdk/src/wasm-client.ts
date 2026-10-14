@@ -1,3 +1,4 @@
+import { transparentScanMode } from "./private-transparent";
 import {
   filterHistory,
   parseZip321,
@@ -137,9 +138,9 @@ export function createWasmClient(
 
   let memoAbort: AbortController | null = null;
 
-  let transparentScan = opts.transparentScan ?? "off";
+  let transparentScan = transparentScanMode(opts.transparentScan);
 
-  let transparentScanStatus: PublicDataStatus = transparentScan === "compact" ? "scanning" : "off";
+  let transparentScanStatus: PublicDataStatus = transparentScan !== "off" ? "scanning" : "off";
 
   let sharedMemoStatus: PublicDataStatus = memoFetch === "shared" ? "scanning" : "off";
 
@@ -568,6 +569,8 @@ export function createWasmClient(
           throw WalletError.fromUnknown(e);
         }),
     shield: async (threshold, options) => {
+      if (transparentScan === "pir") throw new Error("Transparent spending is not enabled for publisher-provided PIR history.");
+
       const beforeBroadcast = () => !options?.signal?.aborted && (options?.beforeBroadcast?.() ?? true);
       if (!beforeBroadcast()) throw new Error("cancelled before broadcast");
       assertReplacementSaved();
@@ -1000,8 +1003,10 @@ export function createWasmClient(
       }
       memoFetch = mode;
     },
-    setTransparentScan: (mode) => {
-      if (mode !== transparentScan) transparentScanStatus = mode === "compact" ? "scanning" : "off";
+    setTransparentScan: (value) => {
+      const mode = transparentScanMode(value);
+      if (mode === "pir" && !transport.transparentPir) throw new Error("Private transparent scanning requires a separately consented PIR transport.");
+      if (mode !== transparentScan) transparentScanStatus = mode !== "off" ? "scanning" : "off";
       transparentScan = mode;
     },
     setPrewarmProvingKey: (enabled) => { prewarmProvingKey = enabled; },
@@ -1131,7 +1136,7 @@ export function createWasmClient(
             assertSource(operation, source);
             // Coverage was cleared by the committed reset. Failed saves keep
             // the previous session's completion statuses during rollback.
-            transparentScanStatus = transparentScan === "compact" ? "scanning" : "off";
+            transparentScanStatus = transparentScan !== "off" ? "scanning" : "off";
             sharedMemoStatus = memoFetch === "shared" ? "scanning" : "off";
             selectiveMemoStatus = memoFetch === "on-demand" ? "off" : "scanning";
           } catch (error) {

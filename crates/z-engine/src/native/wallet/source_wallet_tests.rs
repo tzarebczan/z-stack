@@ -604,3 +604,11 @@ async fn source_rejection_keeps_saved_intent_and_exposes_only_safe_error_text() 
     assert_eq!(wallet.payment_receipt(&id).unwrap().phase, "unknown");
     assert_eq!(*fixture.sent.lock().unwrap(), vec![raw]);
 }
+
+#[cfg(feature = "transparent-pir")]
+#[path = "transparent_pir_source_tests.rs"]
+mod transparent_pir_projection_tests;
+
+#[cfg(feature = "transparent-pir")]
+#[path = "transparent_pir_integration_tests.rs"]
+mod transparent_pir_integration_tests;

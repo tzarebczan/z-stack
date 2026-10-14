@@ -62,6 +62,7 @@ declare module "./generated/z_wasm.js" {
     applyUtxos(json: string): number;
     applyMempool(json: string): number;
     enhanceRawTx(hex: string): number;
+    privateTransparent(operation: string, bytes: Uint8Array): Uint8Array;
     rewindTo(height: number): number;
     rewindToChecked(height: number): number;
     abandon(txid: string): boolean;
@@ -138,6 +139,7 @@ declare module "./generated-mt/z_wasm.js" {
     applyUtxos(json: string): number;
     applyMempool(json: string): number;
     enhanceRawTx(hex: string): number;
+    privateTransparent(operation: string, bytes: Uint8Array): Uint8Array;
     rewindTo(height: number): number;
     rewindToChecked(height: number): number;
     abandon(txid: string): boolean;

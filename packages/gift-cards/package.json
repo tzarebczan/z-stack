@@ -1,6 +1,6 @@
 {
   "name": "@z-stack/gift-cards",
-  "version": "0.1.0-alpha.11",
+  "version": "0.1.0-alpha.12",
   "private": true,
   "description": "Optional shielded bearer gift cards with isolated browser wallets and application-owned encrypted storage",
   "type": "module",

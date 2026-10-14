@@ -1,3 +1,4 @@
+import type { PrivateTransparentOperation } from "./private-transparent";
 import type { PrivateEnhanceOperation } from "./private-enhance";
 /// Compact-block scan worker — MT/ST wasm lives here so the UI thread stays free.
 
@@ -41,6 +42,7 @@ type Wallet = HardwareWalletHandle & {
   enhanceRawTx?: (hex: string) => number;
   applyTransparentBlocks?: (blob: Uint8Array) => number;
   applySharedMemos?: (json: string) => number;
+  privateTransparent?: (operation: PrivateTransparentOperation, bytes: Uint8Array) => Uint8Array;
   privateEnhance?: (operation: PrivateEnhanceOperation, bytes: Uint8Array, time: number) => Uint8Array;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
@@ -81,6 +83,7 @@ type Req = {
   id: number;
   op: string;
   operation?: PrivateEnhanceOperation;
+  transparentOperation?: PrivateTransparentOperation;
   time?: number;
   preferMulticore?: boolean;
   wasmBasePath?: string;
@@ -318,6 +321,14 @@ async function handle(msg: Req): Promise<void> {
         const w = needWallet();
         if (!w.applySharedMemos) throw new Error("WASM needs a public-data upgrade");
         post({ id: msg.id, n: w.applySharedMemos(msg.json ?? "") });
+        return;
+      }
+      case "privateTransparent": {
+        const w = needWallet();
+        if (!w.privateTransparent || !msg.transparentOperation || !msg.blob) throw new Error("WASM needs a transparent PIR upgrade");
+        const bytes = w.privateTransparent(msg.transparentOperation, new Uint8Array(msg.blob));
+        const blob = bytes.slice().buffer;
+        post({ id: msg.id, blob }, [blob]);
         return;
       }
       case "privateEnhance": {

@@ -1,3 +1,4 @@
+import type { PrivateTransparentTransport } from "./private-transparent";
 import type { PrivateEnhanceTransport } from "./private-enhance";
 import { BATCH_LOCAL, WalletError } from "@z-stack/core";
 import { COMPACT_RANGE_MAX_BYTES } from "./transport-bounds";
@@ -23,6 +24,7 @@ export const SDK_TRANSPORT_CAPABILITIES = Object.freeze({
   maxSharedMemoBlocksPerRequest: true,
   submissionPolicy: true,
   enhanceV7: true,
+  transparentPirV12: true,
   submitContext: true,
   pendingSubmissionRetry: true,
 });
@@ -40,6 +42,8 @@ export type TransparentUtxo = {
 export type SubmissionContext = { readonly txid: string };
 
 export type BlockTransport = {
+  /** Separately consented transparent confirmed-history PIR. Rust owns discovery, query secrets and wallet state. */
+  transparentPir?: PrivateTransparentTransport;
   /** Optional Ironwood-only v7 exchange. Query construction and record application remain in Rust. */
   enhance?: PrivateEnhanceTransport;
   kind: string;

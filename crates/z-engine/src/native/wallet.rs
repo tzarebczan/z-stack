@@ -5,19 +5,23 @@ mod database_lease;
 mod recovery_blocks;
 #[cfg(feature = "native-pir")]
 mod recovery_bootstrap;
-#[cfg(feature = "native-pir")]
+#[cfg(any(feature = "native-pir", feature = "transparent-pir"))]
 mod recovery_cancellation;
 #[cfg(feature = "native-pir")]
 mod recovery_effects;
 mod recovery_guard;
 #[cfg(feature = "native-pir")]
 pub use recovery_blocks::{verify_regtest_recovery_blocks, VerifiedRegtestRecoveryBlocks};
-#[cfg(feature = "native-pir")]
+#[cfg(any(feature = "native-pir", feature = "transparent-pir"))]
 pub use recovery_cancellation::RecoveryCancellation;
 mod memo_status;
 mod payments;
 mod shared_memos;
+#[cfg(feature = "transparent-pir")]
+mod transparent_pir;
 pub use shared_memos::NativeSharedMemosPass;
+#[cfg(feature = "transparent-pir")]
+pub use transparent_pir::NativeTransparentPirPass;
 #[cfg(feature = "private-enhance")]
 mod private_enhance;
 #[cfg(feature = "private-enhance")]

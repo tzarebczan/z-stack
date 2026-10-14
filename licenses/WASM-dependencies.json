@@ -1,7 +1,7 @@
 {
   "target": "wasm32-unknown-unknown",
   "edges": "normal,build",
-  "cargoLockSha256": "da6d8bcc7bc169913d0c24bc5821ea1cdd9ec461e9907e6cd1f19a82f2faef46",
+  "cargoLockSha256": "68aadd942ec27e3f1a0dcdc54adb0f5f4a47c792fc9fe69ee19839637ea4b43e",
   "dependencies": [
     {
       "name": "aead",
@@ -194,6 +194,21 @@
       ]
     },
     {
+      "name": "base58ck",
+      "version": "0.1.101",
+      "license": "CC0-1.0",
+      "source": "https://crates.io/crates/base58ck/0.1.101",
+      "repository": "https://github.com/rust-bitcoin/rust-bitcoin/",
+      "texts": [
+        {
+          "file": "bitcoin_hashes-CC0.txt",
+          "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+          "origin": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/CC0-1.0.txt"
+        }
+      ],
+      "licenseTextOrigin": "retained upstream texts; published archive omits legal files"
+    },
+    {
       "name": "base64",
       "version": "0.22.1",
       "license": "MIT OR Apache-2.0",
@@ -223,6 +238,20 @@
           "file": "LICENSE-MIT",
           "sha256": "9877c7b48cde1462f4e8688263aa96f3f1bd9717250718d3d2d9ebb031414fb9",
           "origin": "https://docs.rs/crate/bech32/0.11.1/source/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "bincode",
+      "version": "1.3.3",
+      "license": "MIT",
+      "source": "https://crates.io/crates/bincode/1.3.3",
+      "repository": "https://github.com/servo/bincode",
+      "texts": [
+        {
+          "file": "LICENSE.md",
+          "sha256": "237710d4c9dd8eb7fead2c9c433be493a878f547d1093812feff43d18abe5896",
+          "origin": "https://docs.rs/crate/bincode/1.3.3/source/LICENSE.md"
         }
       ]
     },
@@ -258,6 +287,51 @@
           "origin": "https://docs.rs/crate/bip39/2.2.2/source/LICENSE"
         }
       ]
+    },
+    {
+      "name": "bitcoin",
+      "version": "0.32.102",
+      "license": "CC0-1.0",
+      "source": "https://crates.io/crates/bitcoin/0.32.102",
+      "repository": "https://github.com/rust-bitcoin/rust-bitcoin/",
+      "texts": [
+        {
+          "file": "bitcoin_hashes-CC0.txt",
+          "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+          "origin": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/CC0-1.0.txt"
+        }
+      ],
+      "licenseTextOrigin": "retained upstream texts; published archive omits legal files"
+    },
+    {
+      "name": "bitcoin-io",
+      "version": "0.1.101",
+      "license": "CC0-1.0",
+      "source": "https://crates.io/crates/bitcoin-io/0.1.101",
+      "repository": "https://github.com/rust-bitcoin/rust-bitcoin",
+      "texts": [
+        {
+          "file": "bitcoin_hashes-CC0.txt",
+          "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+          "origin": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/CC0-1.0.txt"
+        }
+      ],
+      "licenseTextOrigin": "retained upstream texts; published archive omits legal files"
+    },
+    {
+      "name": "bitcoin-units",
+      "version": "0.1.101",
+      "license": "CC0-1.0",
+      "source": "https://crates.io/crates/bitcoin-units/0.1.101",
+      "repository": "https://github.com/rust-bitcoin/rust-bitcoin/",
+      "texts": [
+        {
+          "file": "bitcoin_hashes-CC0.txt",
+          "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+          "origin": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/CC0-1.0.txt"
+        }
+      ],
+      "licenseTextOrigin": "retained upstream texts; published archive omits legal files"
     },
     {
       "name": "bitcoin_hashes",
@@ -1263,6 +1337,44 @@
       ]
     },
     {
+      "name": "futures",
+      "version": "0.3.34",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://crates.io/crates/futures/0.3.34",
+      "repository": "https://github.com/rust-lang/futures-rs",
+      "texts": [
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "275c491d6d1160553c32fd6127061d7f9606c3ea25abfad6ca3f6ed088785427",
+          "origin": "https://docs.rs/crate/futures/0.3.34/source/LICENSE-APACHE"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
+          "origin": "https://docs.rs/crate/futures/0.3.34/source/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "futures-channel",
+      "version": "0.3.34",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://crates.io/crates/futures-channel/0.3.34",
+      "repository": "https://github.com/rust-lang/futures-rs",
+      "texts": [
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "275c491d6d1160553c32fd6127061d7f9606c3ea25abfad6ca3f6ed088785427",
+          "origin": "https://docs.rs/crate/futures-channel/0.3.34/source/LICENSE-APACHE"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
+          "origin": "https://docs.rs/crate/futures-channel/0.3.34/source/LICENSE-MIT"
+        }
+      ]
+    },
+    {
       "name": "futures-core",
       "version": "0.3.34",
       "license": "MIT OR Apache-2.0",
@@ -1278,6 +1390,63 @@
           "file": "LICENSE-MIT",
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
           "origin": "https://docs.rs/crate/futures-core/0.3.34/source/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "futures-executor",
+      "version": "0.3.34",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://crates.io/crates/futures-executor/0.3.34",
+      "repository": "https://github.com/rust-lang/futures-rs",
+      "texts": [
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "275c491d6d1160553c32fd6127061d7f9606c3ea25abfad6ca3f6ed088785427",
+          "origin": "https://docs.rs/crate/futures-executor/0.3.34/source/LICENSE-APACHE"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
+          "origin": "https://docs.rs/crate/futures-executor/0.3.34/source/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "futures-io",
+      "version": "0.3.34",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://crates.io/crates/futures-io/0.3.34",
+      "repository": "https://github.com/rust-lang/futures-rs",
+      "texts": [
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "275c491d6d1160553c32fd6127061d7f9606c3ea25abfad6ca3f6ed088785427",
+          "origin": "https://docs.rs/crate/futures-io/0.3.34/source/LICENSE-APACHE"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
+          "origin": "https://docs.rs/crate/futures-io/0.3.34/source/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "futures-macro",
+      "version": "0.3.34",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://crates.io/crates/futures-macro/0.3.34",
+      "repository": "https://github.com/rust-lang/futures-rs",
+      "texts": [
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "275c491d6d1160553c32fd6127061d7f9606c3ea25abfad6ca3f6ed088785427",
+          "origin": "https://docs.rs/crate/futures-macro/0.3.34/source/LICENSE-APACHE"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
+          "origin": "https://docs.rs/crate/futures-macro/0.3.34/source/LICENSE-MIT"
         }
       ]
     },
@@ -1536,6 +1705,21 @@
           "origin": "https://docs.rs/crate/hex-conservative/0.2.2/source/LICENSE"
         }
       ]
+    },
+    {
+      "name": "hex_lit",
+      "version": "0.1.1",
+      "license": "MITNFA",
+      "source": "https://crates.io/crates/hex_lit/0.1.1",
+      "repository": "https://github.com/Kixunil/hex_lit",
+      "texts": [
+        {
+          "file": "hex_lit-MITNFA.txt",
+          "sha256": "d436716f7a05466f52443893079761c8a88f4967d0ef490fabc0a1c9ef1c3a1d",
+          "origin": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MITNFA.txt"
+        }
+      ],
+      "licenseTextOrigin": "retained upstream texts; published archive omits legal files"
     },
     {
       "name": "hmac",
@@ -2240,6 +2424,21 @@
           "origin": "https://docs.rs/crate/pin-project-lite/0.2.17/source/LICENSE-MIT"
         }
       ]
+    },
+    {
+      "name": "pir-native",
+      "version": "0.1.0",
+      "license": "MIT",
+      "source": "https://github.com/valargroup/wallet-pir/tree/c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2/shared/pir-native",
+      "repository": "https://github.com/valargroup/wallet-pir",
+      "texts": [
+        {
+          "file": "transparent-wallet-pir-LICENSE",
+          "sha256": "37b5e27327b5a5075b601e205ba8730ce2a9241dc4480ea1486bc939991c051c",
+          "origin": "https://raw.githubusercontent.com/valargroup/wallet-pir/c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2/LICENSE"
+        }
+      ],
+      "licenseTextOrigin": "retained pinned repository license; crate directory omits legal files"
     },
     {
       "name": "poly1305",
@@ -3494,6 +3693,81 @@
       ]
     },
     {
+      "name": "transparent-events",
+      "version": "0.1.0-rc.4",
+      "license": "MIT",
+      "source": "https://github.com/valargroup/wallet-pir/tree/c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2/transparent/crates/transparent-events",
+      "repository": "https://github.com/valargroup/wallet-pir",
+      "texts": [
+        {
+          "file": "transparent-wallet-pir-LICENSE",
+          "sha256": "37b5e27327b5a5075b601e205ba8730ce2a9241dc4480ea1486bc939991c051c",
+          "origin": "https://raw.githubusercontent.com/valargroup/wallet-pir/c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2/LICENSE"
+        }
+      ],
+      "licenseTextOrigin": "retained pinned repository license; crate directory omits legal files"
+    },
+    {
+      "name": "transparent-filter",
+      "version": "0.1.0-rc.4",
+      "license": "MIT",
+      "source": "https://github.com/valargroup/wallet-pir/tree/c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2/transparent/crates/transparent-filter",
+      "repository": "https://github.com/valargroup/wallet-pir",
+      "texts": [
+        {
+          "file": "transparent-wallet-pir-LICENSE",
+          "sha256": "37b5e27327b5a5075b601e205ba8730ce2a9241dc4480ea1486bc939991c051c",
+          "origin": "https://raw.githubusercontent.com/valargroup/wallet-pir/c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2/LICENSE"
+        }
+      ],
+      "licenseTextOrigin": "retained pinned repository license; crate directory omits legal files"
+    },
+    {
+      "name": "transparent-native",
+      "version": "0.1.0-rc.4",
+      "license": "MIT",
+      "source": "https://github.com/valargroup/wallet-pir/tree/c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2/transparent/crates/transparent-native",
+      "repository": "https://github.com/valargroup/wallet-pir",
+      "texts": [
+        {
+          "file": "transparent-wallet-pir-LICENSE",
+          "sha256": "37b5e27327b5a5075b601e205ba8730ce2a9241dc4480ea1486bc939991c051c",
+          "origin": "https://raw.githubusercontent.com/valargroup/wallet-pir/c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2/LICENSE"
+        }
+      ],
+      "licenseTextOrigin": "retained pinned repository license; crate directory omits legal files"
+    },
+    {
+      "name": "transparent-shard",
+      "version": "0.1.0-rc.4",
+      "license": "MIT",
+      "source": "https://github.com/valargroup/wallet-pir/tree/c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2/transparent/crates/transparent-shard",
+      "repository": "https://github.com/valargroup/wallet-pir",
+      "texts": [
+        {
+          "file": "transparent-wallet-pir-LICENSE",
+          "sha256": "37b5e27327b5a5075b601e205ba8730ce2a9241dc4480ea1486bc939991c051c",
+          "origin": "https://raw.githubusercontent.com/valargroup/wallet-pir/c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2/LICENSE"
+        }
+      ],
+      "licenseTextOrigin": "retained pinned repository license; crate directory omits legal files"
+    },
+    {
+      "name": "transparent-wallet",
+      "version": "0.1.0-rc.4",
+      "license": "MIT",
+      "source": "https://github.com/valargroup/wallet-pir/tree/c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2/transparent/crates/transparent-wallet",
+      "repository": "https://github.com/valargroup/wallet-pir",
+      "texts": [
+        {
+          "file": "transparent-wallet-pir-LICENSE",
+          "sha256": "37b5e27327b5a5075b601e205ba8730ce2a9241dc4480ea1486bc939991c051c",
+          "origin": "https://raw.githubusercontent.com/valargroup/wallet-pir/c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2/LICENSE"
+        }
+      ],
+      "licenseTextOrigin": "retained pinned repository license; crate directory omits legal files"
+    },
+    {
       "name": "typenum",
       "version": "1.20.1",
       "license": "MIT OR Apache-2.0",
@@ -4475,6 +4749,26 @@
       },
       "originalFile": "lib/transactionHistory.ts",
       "originalFileSha256": "389703b5e3cccef5b6b5f62a43d85bd29e1a097e2e231cee218b8b80d0246455"
+    },
+    {
+      "component": "transparent PIR asynchronous recovery walker",
+      "license": "MIT",
+      "copyright": "Copyright (c) 2025-2026 Roman Akhtariev",
+      "files": [
+        "crates/z-transparent-pir-v2/src/adapters.rs",
+        "crates/z-transparent-pir-v2/src/client.rs",
+        "crates/z-transparent-pir-v2/src/store.rs",
+        "crates/z-transparent-pir-v2/src/memory_store.rs",
+        "crates/z-transparent-pir-v2/src/sync.rs",
+        "crates/z-transparent-pir-v2/src/sync_ahead.rs"
+      ],
+      "originalRevision": "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2",
+      "licenseText": {
+        "file": "licenses/upstream/transparent-wallet-pir-LICENSE",
+        "sha256": "37b5e27327b5a5075b601e205ba8730ce2a9241dc4480ea1486bc939991c051c"
+      },
+      "sourceManifest": "crates/z-transparent-pir-v2/upstream-sources.json",
+      "patch": "crates/z-transparent-pir-v2/upstream.patch"
     }
   ]
 }

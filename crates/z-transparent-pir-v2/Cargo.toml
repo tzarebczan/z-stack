@@ -1,0 +1,29 @@
+[package]
+name = "z-transparent-pir-v2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0 AND MIT"
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+hex = "0.4"
+base64 = "0.22"
+sha2 = "0.10"
+bincode = "1.3"
+futures = "0.3"
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2" }
+transparent-events = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2" }
+transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2" }
+transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2" }
+transparent-native = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2" }
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+[dev-dependencies]
+transparent-shard-server = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2" }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread","sync","time"] }
+axum = "0.7"
+tower = { version = "0.5", features = ["util"] }

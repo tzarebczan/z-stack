@@ -1,3 +1,4 @@
+import type { TransparentScanMode } from "./private-transparent";
 import {
   type UnlockPolicy,
   type WalletSnapshot
@@ -49,7 +50,7 @@ export interface WasmClientContext {
   readonly submissionPolicy: SubmissionPolicy;
   memoFetch: "auto" | "on-demand" | "shared";
   persist: (lineage?: { epoch: number; baseKey: string | null; }, replacement?: runtime.ClaimedGeneration & { unlockPolicy?: UnlockPolicy; }, background?: boolean) => Promise<void>;
-  transparentScan: "off" | "compact";
+  transparentScan: TransparentScanMode;
   localLight: boolean;
   syncOpts: { grpcWeb: boolean; lwdPipe: boolean; };
   grpcWeb: boolean;

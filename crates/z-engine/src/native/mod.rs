@@ -108,7 +108,7 @@ pub use transparent_wallet::{
 #[cfg(feature = "native-pir")]
 pub use wallet::{
     verify_regtest_recovery_blocks, PirConfirmedTransaction, PirDiscoveryReport, PirRecoveryReport,
-    RecoveryCancellation, RegtestAcceptedChain, VerifiedRegtestRecoveryBlocks,
+    RegtestAcceptedChain, VerifiedRegtestRecoveryBlocks,
 };
 
 #[cfg(feature = "native-pir")]
@@ -153,3 +153,8 @@ mod replacement_tests {
 
 #[cfg(feature = "private-enhance")]
 pub use wallet::NativeEnhancePass;
+
+#[cfg(feature = "transparent-pir")]
+pub use wallet::NativeTransparentPirPass;
+#[cfg(any(feature = "native-pir", feature = "transparent-pir"))]
+pub use wallet::RecoveryCancellation;

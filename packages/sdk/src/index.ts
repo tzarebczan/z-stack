@@ -132,3 +132,5 @@ export {
 } from "@z-stack/core";
 
 export type { PrivateEnhanceTransport, PrivateEnhanceRequest } from "./private-enhance";
+
+export type { PrivateTransparentTransport, TransparentScanMode } from "./private-transparent";

@@ -122,6 +122,17 @@ export type WalletSnapshot = {
   transparentAddress: string | null;
   zip321: string;
   scannedHeight?: number;
+  /** Publisher-provided confirmed history, separate from spend readiness and mempool coverage. */
+  transparentPir?: {
+    trust: "publisher-provided-confirmed-history";
+    spendingEnabled: false;
+    completion: "complete-for-enrolled-scope" | "checkpoint-pending" | "incomplete";
+    confirmedZat: string;
+    coveredThrough: number;
+    pendingPages: number;
+    unresolvedSpends: number;
+    scope: { sourceId: string; scopeId: string; generation: number; anchor: { height: number; hash: string }; scriptCount: number } | null;
+  };
   transparentScanHeight?: number | null;
   transparentScanComplete?: boolean;
   memoScanHeight?: number | null;

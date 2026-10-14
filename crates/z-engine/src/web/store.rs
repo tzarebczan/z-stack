@@ -1,4 +1,7 @@
 //! Versioned in-memory wallet snapshot (IndexedDB blob on the JS side).
+#[cfg(feature = "transparent-pir")]
+#[path = "transparent_pir.rs"]
+mod transparent_pir_impl;
 
 use super::history;
 use super::live_trees::{self, StoredLiveTrees};
@@ -345,6 +348,9 @@ struct Snapshot {
     transparent_scan: Option<ScanCoverage>,
     #[serde(default)]
     transparent_scan_required: bool,
+    #[cfg(feature = "transparent-pir")]
+    #[serde(default)]
+    transparent_pir: crate::transparent_pir::ProjectionState,
     #[serde(default)]
     memo_scan: Option<ScanCoverage>,
     #[serde(default)]
@@ -420,6 +426,8 @@ struct SnapshotRef<'a> {
     utxos: &'a [StoredUtxo],
     transparent_scan: &'a Option<ScanCoverage>,
     transparent_scan_required: bool,
+    #[cfg(feature = "transparent-pir")]
+    transparent_pir: &'a crate::transparent_pir::ProjectionState,
     memo_scan: &'a Option<ScanCoverage>,
     block_hashes: &'a BTreeMap<u32, String>,
     view_only: bool,
@@ -524,6 +532,8 @@ pub struct WebWallet {
     pub(crate) utxos: Vec<StoredUtxo>,
     pub(crate) transparent_scan: Option<ScanCoverage>,
     pub(crate) transparent_scan_required: bool,
+    #[cfg(feature = "transparent-pir")]
+    pub(crate) transparent_pir: crate::transparent_pir::ProjectionState,
     pub(crate) memo_scan: Option<ScanCoverage>,
     pub(crate) block_hashes: BTreeMap<u32, String>,
     view_only: bool,
@@ -601,6 +611,8 @@ impl WebWallet {
             utxos: Vec::new(),
             transparent_scan: None,
             transparent_scan_required: false,
+            #[cfg(feature = "transparent-pir")]
+            transparent_pir: Default::default(),
             memo_scan: None,
             block_hashes: BTreeMap::new(),
             view_only: false,
@@ -995,6 +1007,8 @@ impl WebWallet {
             utxos: &self.utxos,
             transparent_scan: &self.transparent_scan,
             transparent_scan_required: self.transparent_scan_required,
+            #[cfg(feature = "transparent-pir")]
+            transparent_pir: &self.transparent_pir,
             memo_scan: &self.memo_scan,
             block_hashes: &self.block_hashes,
             view_only: self.view_only,
@@ -1072,6 +1086,8 @@ impl WebWallet {
             utxos: snap.utxos,
             transparent_scan: snap.transparent_scan,
             transparent_scan_required: snap.transparent_scan_required,
+            #[cfg(feature = "transparent-pir")]
+            transparent_pir: snap.transparent_pir,
             memo_scan: snap.memo_scan,
             block_hashes: snap.block_hashes,
             view_only: snap.view_only,
@@ -1162,6 +1178,10 @@ impl WebWallet {
         // (selective shard scanning) and finalize_scan_trees / prove rebuilds.
         if let Some(live) = live_trees {
             w.restore_live_trees(&live);
+        }
+        #[cfg(feature = "transparent-pir")]
+        {
+            w.transparent_pir.durable = w.transparent_pir.checkpoint_id.is_some();
         }
         w.recompute_pool_fields();
         Ok(w)
@@ -1397,6 +1417,14 @@ impl WebWallet {
         target: zcash_client_backend::data_api::wallet::TargetHeight,
         policy: &zcash_client_backend::data_api::wallet::ConfirmationsPolicy,
     ) -> bool {
+        #[cfg(feature = "transparent-pir")]
+        if self
+            .transparent_pir
+            .records
+            .contains_key(&format!("r:{}:{}", u.txid, u.index))
+        {
+            return false;
+        }
         if self.transparent_scan_required
             && self
                 .transparent_scan
@@ -1417,6 +1445,15 @@ impl WebWallet {
         tip > u.height && tip.saturating_sub(u.height) >= need
     }
 
+    fn transparent_pir_snapshot_status(&self) -> serde_json::Value {
+        #[cfg(feature = "transparent-pir")]
+        {
+            return self.transparent_pir_status();
+        }
+        #[cfg(not(feature = "transparent-pir"))]
+        serde_json::Value::Null
+    }
+
     pub fn wallet_snapshot(&self, server: &str) -> serde_json::Value {
         let b = self.balance();
         let zip = zip321_uri(&self.unified_address, None).unwrap_or_default();
@@ -1433,6 +1470,7 @@ impl WebWallet {
             "transparentAddress": self.transparent_address,
             "zip321": zip,
             "scannedHeight": self.scanned_height,
+            "transparentPir": self.transparent_pir_snapshot_status(),
             "transparentScanHeight": self.transparent_scan.as_ref().map(|s| s.height),
             "transparentScanComplete": self.transparent_scan.as_ref().is_some_and(|s| s.height == self.scanned_height),
             "memoScanHeight": self.memo_scan.as_ref().map(|s| s.height),
@@ -2040,6 +2078,8 @@ impl WebWallet {
             self.restore_next_after_rewind(birthday_bound);
         }
         self.rewind_public_coverage();
+        #[cfg(feature = "transparent-pir")]
+        self.transparent_pir.rewind(keep);
         self.rebuild_trees()?;
         Ok(self.scanned_height)
     }

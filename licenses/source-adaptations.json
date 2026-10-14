@@ -13,5 +13,25 @@
     },
     "originalFile": "lib/transactionHistory.ts",
     "originalFileSha256": "389703b5e3cccef5b6b5f62a43d85bd29e1a097e2e231cee218b8b80d0246455"
+  },
+  {
+    "component": "transparent PIR asynchronous recovery walker",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2025-2026 Roman Akhtariev",
+    "files": [
+      "crates/z-transparent-pir-v2/src/adapters.rs",
+      "crates/z-transparent-pir-v2/src/client.rs",
+      "crates/z-transparent-pir-v2/src/store.rs",
+      "crates/z-transparent-pir-v2/src/memory_store.rs",
+      "crates/z-transparent-pir-v2/src/sync.rs",
+      "crates/z-transparent-pir-v2/src/sync_ahead.rs"
+    ],
+    "originalRevision": "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2",
+    "licenseText": {
+      "file": "licenses/upstream/transparent-wallet-pir-LICENSE",
+      "sha256": "37b5e27327b5a5075b601e205ba8730ce2a9241dc4480ea1486bc939991c051c"
+    },
+    "sourceManifest": "crates/z-transparent-pir-v2/upstream-sources.json",
+    "patch": "crates/z-transparent-pir-v2/upstream.patch"
   }
 ]

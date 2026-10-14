@@ -1,3 +1,4 @@
+import { syncPrivateTransparent } from "./private-transparent";
 import { syncPrivateEnhance } from "./private-enhance";
 import type { SyncStage } from "@z-stack/core";
 import {
@@ -968,7 +969,34 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     }
   }
 
+  async function refreshPrivateTransparent(signal: AbortSignal): Promise<void> {
+    const source = ctx.session;
+    if (!source || ctx.transparentScan !== "pir") return;
+    const transport = ctx.transport.transparentPir;
+    if (!transport) { ctx.transparentScanStatus = "unsupported"; return; }
+    const operation = ctx.sessionOperation ?? captureWalletOperation();
+    const wait = AbortSignal.any([operation.signal, signal]);
+    const current = () => {
+      wait.throwIfAborted(); ctx.assertSource(operation, source);
+      if (ctx.transparentScan !== "pir" || ctx.transport.transparentPir !== transport)
+        throw new Error("Privacy settings changed during retrieval");
+    };
+    try {
+      ctx.transparentScanStatus = "scanning";
+      ctx.transparentScanStatus = await syncPrivateTransparent({ source, transport, signal: wait,
+        assertCurrent: current, checkpoint: async () => {
+          try { await ctx.persist(); } catch (error) { ctx.retireFailedSession(source); throw error; }
+        }, treeState: ctx.transport.treeState });
+      current();
+    } catch (error) {
+      signal.throwIfAborted(); operation.signal.throwIfAborted();
+      current();
+      ctx.transparentScanStatus = "unavailable";
+    }
+  }
+
   async function refreshPublicData(signal: AbortSignal, manual = false): Promise<void> {
+    if (!manual) await refreshPrivateTransparent(signal);
     const source = ctx.session;
     if (!source || (ctx.transparentScan !== "compact" && ctx.memoFetch !== "shared")) return;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
@@ -1025,7 +1053,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     const wait = signal ? AbortSignal.any([operation.signal, signal]) : operation.signal;
     wait.throwIfAborted();
-    const taddr = ctx.transparentScan !== "compact" && ctx.transport.utxos ? await source.transparentAddress() : undefined;
+    const taddr = ctx.transparentScan === "off" && ctx.transport.utxos ? await source.transparentAddress() : undefined;
     ctx.assertSource(operation, source);
     wait.throwIfAborted();
     // Network reads overlap, but wallet mutations retain the original UTXO →
