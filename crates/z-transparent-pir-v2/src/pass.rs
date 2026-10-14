@@ -447,6 +447,10 @@ fn checkpoint_id(
     hex::encode(digest.finalize())
 }
 impl Pass {
+    #[cfg(test)]
+    pub(crate) fn fixture_store(&self) -> SharedStore {
+        self.store.clone()
+    }
     pub fn new(scope: Scope, checkpoint: Option<Checkpoint>, limits: Limits) -> Result<Self> {
         if limits.max_chain_reads == 0
             || limits.max_chain_reads > 4096

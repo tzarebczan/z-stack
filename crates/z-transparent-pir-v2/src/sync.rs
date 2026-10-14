@@ -3352,7 +3352,19 @@ impl Walker<'_> {
                     Some(progressed.clone()),
                     None,
                     Vec::new(),
-                )?;
+                )
+                .map_err(|error| match (error, failure.take()) {
+                    (
+                        SyncError::Store(StoreError::HistoryMetadataLimit),
+                        Some(
+                            known @ Failure {
+                                error: SyncError::Content(_),
+                                ..
+                            },
+                        ),
+                    ) => known,
+                    (error, _) => error.into(),
+                })?;
                 walk.item = progressed;
                 walk.head = next_head;
                 failure.map_or(Ok(()), Err)
@@ -3928,3 +3940,6 @@ fn incomplete_at<S: WalletStore>(
         failed_entries: Vec::new(),
     })
 }
+
+#[cfg(test)]
+mod cap_tests;

@@ -137,7 +137,12 @@ with scripts of at most 40 bytes add 266,240 bytes in the actual serializer.
 A 512 KiB terminal-store reserve preserves those new obligations, sets the same
 terminal marker, and stops before another Exchange can escape. Another 512 KiB
 bounds the actual serialized source/anchor/header envelope (at most 6147 points),
-so the complete continuation remains below 64 MiB. Encoder-bound tests cover
+so the complete continuation remains below 64 MiB. The publication anchor stamped
+by `commit_bounded` has no stored effect in an event-free, coverage-free failure
+commit and does not disqualify that reserve. If a checked prefix hits a local
+cap after its next head was already found malformed, the walker retains that
+known content failure and its child/count, then attaches the obligation to the
+last durable pending cursor. Other storage errors keep their original class. Encoder-bound tests cover
 both reserves. Pure reads and operations that only shrink state avoid candidate
 serialization; growth checks are proportional to the retained journal.
 

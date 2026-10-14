@@ -62,7 +62,6 @@ impl SharedStore {
             || !commit.covered_scripts.is_empty()
             || !commit.pending_complete.is_empty()
             || !commit.cached_runs.is_empty()
-            || commit.source_anchor.is_some()
             || pending.shard_id != commit.shard_id
             || pending.revision_digest != commit.revision_digest
         {

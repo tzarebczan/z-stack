@@ -84,3 +84,21 @@ checkpoint on Init/Map failure or resource interruption. The canonical owner
 retains the exact prior continuation. Cache inheritance/invalidation becomes
 checkpointable only after Rust processes the independent anchor decision. This
 is a suspension-boundary rule; upstream validation and rollback are unchanged.
+
+The suspension profile also bounds retained records and serialized store growth.
+The adapted MemoryStore validates the unique-event cap before mutation; its
+runtime-only cap does not change the stored MemoryStore encoding. A typed local
+policy refusal becomes a durable version-4 `history_metadata_limit` checkpoint.
+The exact existing-pending malformed-content update may use reserved space to
+persist newly owed dummy traffic before stopping. It cannot alter cursors,
+fragments, facts, coverage or caches through that reserve. Versions 2 and 3 keep
+their original digest validation before migration. The full event, byte and
+serializer-reserve bounds and tests are described in `DESIGN.md`.
+
+The reserved failure path accepts the inert publication-anchor stamp added by
+`commit_bounded`; coverage, records and cache changes remain forbidden. When a
+checked run cannot grow the store after a bad next head was already validated,
+only the typed local cap preserves that known content failure and owed query
+count. The failure update attaches to the unchanged durable pending cursor.
+Real Walker regressions cover stamped anchors and both event/byte refusals with
+publisher-built page fragments, followed by terminal checkpoint and cold resume.
