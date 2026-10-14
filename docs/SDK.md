@@ -330,7 +330,7 @@ await wallet.send(to, "0.25", undefined, { signer });
 - a local `z-wallet pipe` URL (`http://127.0.0.1:1239`), which is faster for a node you run yourself
 - any `BlockTransport`. Its `submit` throws `BroadcastRejection(code, reason)`
   when the node refuses a transaction; any other error counts as an unknown
-  outcome, so the send is kept and resent rather than undone.
+  outcome, so the send is kept. The submission policy controls later resubmission.
 
 Compact-block scanning and memo decryption run locally; the server receives no
 seed or viewing key. Requests still expose metadata to the server:
@@ -396,6 +396,20 @@ captured for the client's lifetime. Supply it again when reopening the wallet.
 Check `SDK_TRANSPORT_CAPABILITIES.submissionPolicy === true` before relying on
 explicit mode with another archive. The capability object is frozen.
 
+Call `wallet.retryPendingSubmission(txid, { signal })` from an explicit recovery
+action to resubmit one saved transaction. The canonical lowercase transaction ID
+selects Rust-owned signed bytes; the API does not expose those bytes or sign a
+new payment. No unlock or mnemonic is required. It holds the spend lock,
+refreshes the current wallet and commits its state before submitting once with
+`SubmissionContext`. The result is `{ txid }`; acknowledgement leaves the payment
+pending until the chain confirms it. Failure preserves its existing receipt and
+input reservations, including when the node refuses this retry. Lock, close,
+replacement and caller cancellation abort the request and fence late results.
+The method does not change the client's submission policy. Check
+`SDK_TRANSPORT_CAPABILITIES.pendingSubmissionRetry === true` before exposing this
+action with a separately supplied archive. Never use a new `send` to recover an
+uncertain payment.
+
 Check `SDK_TRANSPORT_CAPABILITIES.requiredBirthdayTreeState === true` before
 using strict mode with a separately supplied SDK archive. Older archives lack
 this export, even when their package version is the same. Set
@@ -438,9 +452,11 @@ still possible; it is not a guarantee of encrypted upstream transport.
 Every failure is a `WalletError` with a stable `code` and a user-facing
 message (`walletErrorMessage`). Switch on `code`; do not parse `message`, which
 is diagnostic text that changes. `broadcast_failed` means the outcome is
-unknown: the transaction (`error.txid`) is saved and resent, so show it as
-pending and do not offer a retry, which could pay twice. `broadcast_rejected`
-means the node refused it and the send was undone. `wallet_changed` means
+unknown: the transaction (`error.txid`) is saved, so show it as pending. The
+submission policy controls sync resubmission; an explicit recovery action can
+retry only those saved bytes. Never offer a replacement payment as recovery.
+`broadcast_rejected` means the node refused the request. A fresh send is undone;
+a saved-byte retry preserves the earlier receipt and reservations. `wallet_changed` means
 another tab saved the wallet first; this tab has reloaded it, so retry.
 Passkey failures are `PasskeyError`s. Use `isPasskeyCancel(e)` to ignore
 cancellations.

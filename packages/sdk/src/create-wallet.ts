@@ -369,6 +369,12 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
         return client.setUnlockPolicy(policy);
       },
       lock,
+      retryPendingSubmission(txid: string, options?: { signal?: AbortSignal }) {
+        const owner = unlockAbort.signal;
+        const caller = options?.signal;
+        const signal = caller ? AbortSignal.any([owner, caller]) : owner;
+        return client.retryPendingSubmission(txid, { signal });
+      },
       load: () => client.loadSavedWallet(),
       async forget(o?: { passkey?: boolean; pending?: "reject" }) {
         lock();

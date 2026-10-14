@@ -405,6 +405,10 @@ export type WasmClientOpts = {
 export { validateBirthdayInput };
 
 export type WasmClient = EngineClient & {
+  /** Explicitly resend exact Rust-owned saved bytes. No signing/unlock or policy change.
+   * Acknowledgement leaves the transaction pending until canonical confirmation.
+   * Every failure preserves its original durable receipt and input reservations. */
+  retryPendingSubmission(txid: string, options?: { signal?: AbortSignal }): Promise<{ txid: string }>;
   /** Clear scan state from an earlier birthday, without replacing keys or addresses.
    * Refuses unresolved outgoing payments. Persists the reset before returning;
    * call sync afterwards. Does not unlock spending or enable deepSync.

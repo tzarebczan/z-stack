@@ -410,9 +410,10 @@ export function createWasmClient(
   };
   const { copyLegacy, applyLoaded, persist, adoptSaved, refreshIfStale, peekedNetwork, loadIfNeeded, preferWorker, persistReplacement, releaseReplacement, replaceWallet } = createStorageController(ctx);
   const { report, paintNoteBalance, runSync, refreshUtxos, refreshMempool, fetchMemos } = createSyncController(ctx);
-  const { transparentSendSource, proveAndSubmit, proveAndSubmitHere, hardwareSubmit, requireSeed, finishSpend, parseFeeJson, parseMaxJson } = createSpendingController(ctx);
+  const { retryPendingSubmission, transparentSendSource, proveAndSubmit, proveAndSubmitHere, hardwareSubmit, requireSeed, finishSpend, parseFeeJson, parseMaxJson } = createSpendingController(ctx);
 
   const client: runtime.WasmClient = {
+    retryPendingSubmission,
     lock() {
       spendingSeed = null;
       runtime.runtimeState.moduleSpendingSeed = null;

@@ -1613,3 +1613,242 @@ test("memo request and explicit submission policy capabilities are frozen root c
   assert.equal(SDK_TRANSPORT_CAPABILITIES.submitContext, true);
   assert.equal(Object.isFrozen(SDK_TRANSPORT_CAPABILITIES), true);
 });
+
+// Transport/lifecycle regressions use the public facade and synthetic signed bytes.
+// The engine-owned selection is separately covered by real WASM/browser fixtures.
+test("explicit saved-byte retry survives cold reopen without signing or enabling sync resubmission", async t => {
+  const f = fixture(t), submitted: string[] = [];
+  let acknowledge = false;
+  const server = { kind: "fixture", label: "offline", tip: async () => 10,
+    blocks: async () => new Uint8Array(),
+    submit: async (hex: string, _signal?: AbortSignal, context?: { readonly txid: string }) => {
+      assert.deepEqual(context, { txid }); submitted.push(hex);
+      if (!acknowledge) throw new TypeError("synthetic lost acknowledgement");
+      return txid;
+    } };
+  const first = await f.open({ server, submissionPolicy: "explicit" });
+  await first.create({ birthday: 8 }); await first.unlock(words);
+  await assert.rejects(first.send("fixture", "0.00005"), code("broadcast_failed"));
+  await first.close();
+  const wallet = await f.open({ server, submissionPolicy: "explicit" });
+  await wallet.load();
+  assert.equal(wallet.hasSpendingSeed(), false);
+  acknowledge = true;
+  assert.deepEqual(await wallet.retryPendingSubmission(txid), { txid });
+  assert.deepEqual(submitted, ["synthetic-transaction", "synthetic-transaction"]);
+  assert.equal((await wallet.pending())[0]?.txid, txid);
+  assert.equal((await wallet.getWallet()).balance.totalAvailable, 0);
+  await wallet.sync();
+  assert.equal(submitted.length, 2);
+  await wallet.close();
+  const reopened = await f.open({ server, submissionPolicy: "explicit" });
+  await reopened.load(); await reopened.sync();
+  assert.equal(submitted.length, 2, "an explicit retry must not change the later sync policy");
+  assert.equal((await reopened.pending())[0]?.txid, txid);
+});
+
+for (const refusal of [false, true]) {
+  test(`${refusal ? "refused" : "unknown"} saved-byte retry preserves the original receipt and reservations`, async t => {
+    const f = fixture(t), submitted: string[] = [];
+    let retrying = false;
+    const wallet = await f.open({ submissionPolicy: "explicit", server: {
+      kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+      submit: async (hex, _signal, context) => {
+        submitted.push(hex); assert.deepEqual(context, { txid });
+        if (retrying && refusal) throw new BroadcastRejection(17, "synthetic refusal");
+        throw new TypeError("synthetic lost acknowledgement");
+      },
+    } });
+    await wallet.create({ birthday: 8 }); await wallet.unlock(words);
+    await assert.rejects(wallet.send("fixture", "0.00005"), code("broadcast_failed"));
+    const before = await readSavedSnapshotRecord(); assert.ok(before);
+    retrying = true;
+    await assert.rejects(wallet.retryPendingSubmission(txid), error =>
+      code(refusal ? "broadcast_rejected" : "broadcast_failed")(error) && error instanceof WalletError && error.txid === txid);
+    const after = await readSavedSnapshotRecord(); assert.ok(after);
+    assert.deepEqual(after.bytes, before.bytes);
+    assert.deepEqual(submitted, ["synthetic-transaction", "synthetic-transaction"]);
+    assert.equal((await wallet.pending())[0]?.txid, txid);
+    assert.equal((await wallet.getWallet()).balance.totalAvailable, 0);
+    await wallet.sync(); assert.equal(submitted.length, 2);
+  });
+}
+
+test("invalid retry identity and pre-cancellation refuse before storage or providers", async t => {
+  const f = fixture(t); let reads = 0, writes = 0, submissions = 0;
+  const storage = { available: true, transaction: (...args: Parameters<typeof f.storage.transaction>) => {
+    if (args[0] === "readonly") reads++; else writes++;
+    return f.storage.transaction(...args);
+  } };
+  const wallet = await f.open({ storage, submissionPolicy: "explicit", server: {
+    kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+    submit: async () => { submissions++; throw new TypeError("synthetic lost acknowledgement"); },
+  } });
+  await wallet.create({ birthday: 8 }); await wallet.unlock(words);
+  await assert.rejects(wallet.send("fixture", "0.00005"), code("broadcast_failed"));
+  reads = 0; writes = 0; submissions = 0;
+  for (const value of ["", "AB".repeat(32), "a".repeat(63), "g".repeat(64), txid + " "])
+    await assert.rejects(wallet.retryPendingSubmission(value), code("unknown"));
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(wallet.retryPendingSubmission(txid, { signal: controller.signal }), code("cancelled"));
+  assert.equal(reads, 0); assert.equal(writes, 0); assert.equal(submissions, 0);
+  await assert.rejects(wallet.retryPendingSubmission("cd".repeat(32)), code("not_found"));
+  assert.equal(submissions, 0);
+});
+
+test("failed retry checkpoint refuses network and preserves previously saved bytes", async t => {
+  const f = fixture(t); let refuseWrites = false, submissions = 0;
+  const storage = { available: true, transaction: (...args: Parameters<typeof f.storage.transaction>) => {
+    if (refuseWrites && args[0] === "readwrite") throw new WalletError("storage_full", "synthetic quota");
+    return f.storage.transaction(...args);
+  } };
+  const wallet = await f.open({ storage, submissionPolicy: "explicit", server: {
+    kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+    submit: async () => { submissions++; throw new TypeError("synthetic lost acknowledgement"); },
+  } });
+  await wallet.create({ birthday: 8 }); await wallet.unlock(words);
+  await assert.rejects(wallet.send("fixture", "0.00005"), code("broadcast_failed"));
+  const before = await readSavedSnapshotRecord(); assert.ok(before);
+  refuseWrites = true;
+  await assert.rejects(wallet.retryPendingSubmission(txid), code("storage_full"));
+  refuseWrites = false;
+  const after = await readSavedSnapshotRecord(); assert.ok(after);
+  assert.deepEqual(after.bytes, before.bytes);
+  assert.equal(submissions, 1);
+});
+
+for (const cancel of ["caller", "lock", "close"] as const) {
+  test(`${cancel} aborts an uncooperative saved-byte retry and fences late acknowledgement`, async t => {
+    const f = fixture(t); let retrying = false, submissions = 0, providerSignal: AbortSignal | undefined;
+    let entered!: () => void, finish!: (value: string) => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const acknowledgement = new Promise<string>(resolve => { finish = resolve; });
+    const wallet = await f.open({ submissionPolicy: "explicit", server: {
+      kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+      submit: async (_hex, signal) => {
+        submissions++;
+        if (!retrying) throw new TypeError("synthetic lost acknowledgement");
+        providerSignal = signal; entered(); return acknowledgement;
+      },
+    } });
+    await wallet.create({ birthday: 8 }); await wallet.unlock(words);
+    await assert.rejects(wallet.send("fixture", "0.00005"), code("broadcast_failed"));
+    const before = await readSavedSnapshotRecord(); assert.ok(before);
+    retrying = true;
+    const controller = new AbortController();
+    const retry = wallet.retryPendingSubmission(txid, { signal: controller.signal });
+    const rejected = assert.rejects(retry, error => code("broadcast_failed")(error) && error instanceof WalletError && error.txid === txid);
+    await started;
+    if (cancel === "caller") controller.abort();
+    else if (cancel === "lock") wallet.lock();
+    else await wallet.close();
+    await rejected;
+    assert.equal(providerSignal?.aborted, true);
+    if (cancel !== "caller") assert.equal(controller.signal.aborted, false);
+    finish(txid); await new Promise(resolve => setImmediate(resolve));
+    if (cancel === "close") {
+      const reopened = await f.open({ submissionPolicy: "explicit" });
+      await reopened.load();
+      assert.equal((await reopened.pending())[0]?.txid, txid);
+    }
+    const after = await readSavedSnapshotRecord(); assert.ok(after);
+    assert.deepEqual(after.bytes, before.bytes);
+    assert.equal(submissions, 2);
+    if (cancel !== "close") assert.equal((await wallet.pending())[0]?.txid, txid);
+  });
+}
+
+test("concurrent explicit retries share the spend exclusion and never duplicate the request", async t => {
+  const f = fixture(t); let retrying = false, submissions = 0;
+  let entered!: () => void, finish!: (value: string) => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const acknowledgement = new Promise<string>(resolve => { finish = resolve; });
+  const wallet = await f.open({ submissionPolicy: "explicit", server: {
+    kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+    submit: async () => { submissions++; if (!retrying) throw new TypeError("synthetic lost acknowledgement"); entered(); return acknowledgement; },
+  } });
+  await wallet.create({ birthday: 8 }); await wallet.unlock(words);
+  await assert.rejects(wallet.send("fixture", "0.00005"), code("broadcast_failed"));
+  retrying = true;
+  const first = wallet.retryPendingSubmission(txid); await started;
+  await assert.rejects(wallet.retryPendingSubmission(txid), code("busy"));
+  assert.equal(submissions, 2);
+  finish(txid); assert.deepEqual(await first, { txid });
+  assert.equal((await wallet.pending())[0]?.txid, txid);
+});
+
+test("explicit retry capability is an immutable public contract", () => {
+  assert.equal(SDK_TRANSPORT_CAPABILITIES.pendingSubmissionRetry, true);
+  assert.equal(Object.isFrozen(SDK_TRANSPORT_CAPABILITIES), true);
+});
+
+for (const acknowledgement of ["cd".repeat(32), "", txid.toUpperCase(), undefined]) {
+  test(`saved-byte retry treats ${acknowledgement === undefined ? "missing" : acknowledgement === "" ? "empty" : acknowledgement === txid.toUpperCase() ? "noncanonical" : "different"} acknowledgement as unknown`, async t => {
+    const f = fixture(t); let submissions = 0;
+    const server = { kind: "fixture", label: "offline", tip: async () => 10,
+      blocks: async () => new Uint8Array(), submit: async () => { submissions++; throw new TypeError("synthetic lost acknowledgement"); } };
+    const wallet = await f.open({ server, submissionPolicy: "explicit" });
+    await wallet.create({ birthday: 8 }); await wallet.unlock(words);
+    await assert.rejects(wallet.send("fixture", "0.00005"), code("broadcast_failed"));
+    const before = await readSavedSnapshotRecord(); assert.ok(before);
+    // A malformed external provider can violate its declared return type.
+    Object.defineProperty(server, "submit", { value: async (_hex: string, _signal?: AbortSignal, context?: { readonly txid: string }) => {
+      submissions++; assert.deepEqual(context, { txid }); return acknowledgement;
+    } });
+    await assert.rejects(wallet.retryPendingSubmission(txid), error =>
+      code("broadcast_failed")(error) && error instanceof WalletError && error.txid === txid);
+    const after = await readSavedSnapshotRecord(); assert.ok(after);
+    assert.deepEqual(after.bytes, before.bytes);
+    assert.equal((await wallet.pending())[0]?.txid, txid);
+    assert.equal((await wallet.getWallet()).balance.totalAvailable, 0);
+    assert.equal(submissions, 2);
+  });
+}
+
+test("retry requires the exact returned ID even for a textual already-known exception", async t => {
+  const f = fixture(t); let retrying = false;
+  const wallet = await f.open({ submissionPolicy: "explicit", server: {
+    kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+    submit: async () => {
+      if (retrying) throw new BroadcastRejection(-27, "transaction already in mempool");
+      throw new TypeError("synthetic lost acknowledgement");
+    },
+  } });
+  await wallet.create({ birthday: 8 }); await wallet.unlock(words);
+  await assert.rejects(wallet.send("fixture", "0.00005"), code("broadcast_failed"));
+  retrying = true;
+  await assert.rejects(wallet.retryPendingSubmission(txid), error =>
+    code("broadcast_failed")(error) && error instanceof WalletError && error.txid === txid);
+  assert.equal((await wallet.pending())[0]?.txid, txid);
+  assert.equal((await wallet.getWallet()).balance.totalAvailable, 0);
+});
+
+test("another tab winning the retry checkpoint prevents submission and preserves its newer snapshot", async t => {
+  const f = fixture(t); let conflict = false, submissions = 0;
+  let wallet: Wallet;
+  let winningBytes: Uint8Array | undefined;
+  const storage = { available: true, transaction: async (...args: Parameters<typeof f.storage.transaction>) => {
+    if (conflict && args[0] === "readwrite") {
+      conflict = false;
+      const record = await readSavedSnapshotRecord(); assert.ok(record);
+      const state = decode(record.bytes);
+      winningBytes = encode({ ...state, address: "other-tab-address" });
+      await saveWalletSnapshot(winningBytes, { ...(await wallet.getWallet()), unifiedAddress: "other-tab-address" },
+        () => true, record.generation, record.key);
+    }
+    return f.storage.transaction(...args);
+  } };
+  wallet = await f.open({ storage, submissionPolicy: "explicit", server: {
+    kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+    submit: async () => { submissions++; throw new TypeError("synthetic lost acknowledgement"); },
+  } });
+  await wallet.create({ birthday: 8 }); await wallet.unlock(words);
+  await assert.rejects(wallet.send("fixture", "0.00005"), code("broadcast_failed"));
+  conflict = true;
+  await assert.rejects(wallet.retryPendingSubmission(txid), code("wallet_changed"));
+  assert.equal(submissions, 1);
+  const after = await readSavedSnapshotRecord(); assert.ok(after); assert.ok(winningBytes);
+  assert.deepEqual(after.bytes, winningBytes);
+  assert.equal((await wallet.getWallet()).unifiedAddress, "other-tab-address");
+  assert.equal((await wallet.pending())[0]?.txid, txid);
+});

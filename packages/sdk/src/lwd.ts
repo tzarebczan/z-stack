@@ -24,6 +24,7 @@ export const SDK_TRANSPORT_CAPABILITIES = Object.freeze({
   submissionPolicy: true,
   enhanceV7: true,
   submitContext: true,
+  pendingSubmissionRetry: true,
 });
 
 export type TransparentUtxo = {
