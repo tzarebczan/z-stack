@@ -1013,7 +1013,7 @@ impl WebWallet {
             None
         };
         let expected_incoming = self.notes().iter().any(|note| note.txid == txid);
-        let agg = self.txs_mut().entry(txid).or_default();
+        let agg = self.txs_mut().entry(txid.clone()).or_default();
         if agg.mined_height.is_none() && inbound_n > 0 && agg.received_notes == 0 {
             agg.received_zat = inbound_zat;
             agg.received_notes = inbound_n;
@@ -1053,7 +1053,10 @@ impl WebWallet {
             agg.fee_zat = chain_fee;
             agg.fee_from_full_transaction = true;
         }
-        Ok(agg.memos.len() as u32)
+        let count = agg.memos.len() as u32;
+        #[cfg(feature = "private-enhance")]
+        self.reconcile_private_enhancement(&txid);
+        Ok(count)
     }
 
     pub fn apply_mempool_json(&mut self, json: &str) -> Result<u32> {

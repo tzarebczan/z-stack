@@ -1409,7 +1409,7 @@ impl WalletWrite for WebWallet {
                     }
                 }
             }
-            let agg = self.txs_mut().entry(txid).or_default();
+            let agg = self.txs_mut().entry(txid.clone()).or_default();
             agg.mined_height = None;
             agg.spent_zat = agg.spent_zat.saturating_add(spent_zat);
             agg.spent_notes = agg.spent_notes.saturating_add(spent_notes);
@@ -1418,6 +1418,9 @@ impl WalletWrite for WebWallet {
             agg.has_change = agg.has_change || has_change;
             agg.is_shielding = agg.is_shielding || (spent_t > 0 && received_zat > 0);
             agg.fee_zat = Some(u64::from(sent.fee_amount()));
+            // SentTransaction is constructed by the Rust wallet builder; its exact signed
+            // bytes were retained above, so this fee has local provenance, even with t-inputs.
+            agg.fee_from_full_transaction = true;
             agg.expiry_height = Some(u32::from(sent.tx().expiry_height()));
             agg.transparent_spent = agg.transparent_spent.saturating_add(spent_t);
             agg.orchard_spent = agg.orchard_spent.saturating_add(orchard_spent);
@@ -1429,6 +1432,8 @@ impl WalletWrite for WebWallet {
             if !memos.is_empty() {
                 agg.memos.extend(memos);
             }
+            #[cfg(feature = "private-enhance")]
+            self.reconcile_private_enhancement(&txid);
         }
         // Unlock-on-store: the spend records now guard these notes.
         self.prune_locks();

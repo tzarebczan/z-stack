@@ -204,7 +204,7 @@ pub struct TxAgg {
     pub is_shielding: bool,
     #[serde(default)]
     pub fee_zat: Option<u64>,
-    /// Fee derived from complete transaction bytes; PIR assertions never set this.
+    /// Fee derived from complete bytes or the wallet builder that saved those signed bytes; PIR assertions never set this.
     #[serde(default)]
     pub fee_from_full_transaction: bool,
     #[serde(default)]
@@ -3401,6 +3401,27 @@ impl WebWallet {
         tx.write(&mut data)
             .map_err(|e| EngineError::Message(format!("serialize tx: {e}")))?;
         self.pending_txs.insert(tx.txid(), data);
+        // A saved pure-Ironwood transaction determines its fee without any indexer data.
+        // The builder also records its exact fee for transactions with transparent inputs.
+        if tx.transparent_bundle().is_none()
+            && tx.sapling_bundle().is_none()
+            && tx.orchard_bundle().is_none()
+            && tx.sprout_bundle().is_none()
+        {
+            if let Some(fee) = tx
+                .ironwood_bundle()
+                .and_then(|b| u64::try_from(i64::from(*b.value_balance())).ok())
+            {
+                let agg = self
+                    .txs_mut()
+                    .entry(to_hex(tx.txid().as_ref()))
+                    .or_default();
+                agg.fee_zat = Some(fee);
+                agg.fee_from_full_transaction = true;
+            }
+        }
+        #[cfg(feature = "private-enhance")]
+        self.reconcile_private_enhancement(&to_hex(tx.txid().as_ref()));
         Ok(())
     }
 
