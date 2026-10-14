@@ -1,5 +1,5 @@
 import type { WalletSnapshot } from "@z-stack/core";
-import type { BlockTransport } from "./lwd";
+import { compactBlockRequestLimit, type BlockTransport } from "./lwd";
 import type { ScanSession } from "./scan-host";
 import { abortable } from "./abort";
 
@@ -12,15 +12,17 @@ export function supportsTransparentCompact(version?: string): boolean {
 }
 
 /** One bounded pass. Ranges depend on coverage, never on wallet matches. */
-export async function syncPublicData({ source, transport, transparent, memos, signal, assertCurrent, checkpoint } : {
+export async function syncPublicData({ source, transport, transparent, memos, signal, assertCurrent, checkpoint, maxBlocksPerRequest } : {
   source: ScanSession;
   transport: BlockTransport;
+  maxBlocksPerRequest?: number;
   transparent: boolean;
   memos: boolean;
   signal: AbortSignal;
   assertCurrent: () => void;
   checkpoint: () => Promise<void>;
 }): Promise<{ transparent?: PublicDataStatus; memos?: PublicDataStatus }> {
+  const compactLimit = compactBlockRequestLimit(maxBlocksPerRequest);
   const status: { transparent?: PublicDataStatus; memos?: PublicDataStatus } = {};
   const current = () => { signal.throwIfAborted(); assertCurrent(); };
   const snapshot = async () => {
@@ -52,8 +54,9 @@ export async function syncPublicData({ source, transport, transparent, memos, si
         let next = (state.transparentScanHeight ?? (state.birthdayHeight - 1)) + 1;
         // Backfill old snapshots without blocking every sync until birthday..tip completes.
         const last = Math.min(tip, next + 19_999);
+        let nextCheckpoint = next + 5000;
         while (next <= last) {
-          const end = Math.min(last, next + 999);
+          const end = Math.min(last, next + Math.min(1000, compactLimit) - 1);
           const bytes = await abortable(signal, () => transport.transparentBlocks!(next, end, signal));
           current();
           await source.applyTransparentBlocks(bytes);
@@ -61,7 +64,8 @@ export async function syncPublicData({ source, transport, transparent, memos, si
           const after = await snapshot();
           if (after.transparentScanHeight !== end) throw new Error("Incomplete transparent range");
           next = end + 1;
-          if (next > last || (next - 1 - (state.transparentScanHeight ?? state.birthdayHeight - 1)) % 5000 === 0) {
+          if (next > last || next >= nextCheckpoint) {
+            while (nextCheckpoint <= next) nextCheckpoint += 5000;
             await checkpoint();
             current();
           }

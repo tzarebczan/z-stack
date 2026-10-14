@@ -44,6 +44,7 @@ try {
     assert.equal(typeof sdk.createWallet, 'function');
     assert.equal(sdk.SDK_TRANSPORT_CAPABILITIES.requiredBirthdayTreeState, true);
     assert.equal(sdk.SDK_TRANSPORT_CAPABILITIES.cancellation, true);
+    assert.equal(sdk.SDK_TRANSPORT_CAPABILITIES.maxBlocksPerRequest, true);
     assert.equal(Object.isFrozen(sdk.SDK_TRANSPORT_CAPABILITIES), true);
     assert.equal(sdk.WalletError.fromMessage('propose_transfer: Must scan blocks first').code, 'sync_required');
     assert.equal(sdk.WalletError.fromMessage('invalid recovery phrase: private detail').code, 'invalid_recovery_phrase');
@@ -125,6 +126,14 @@ try {
   `]);
   // Compile the exact maintained snippets with the installed published subpaths.
   // Source aliases must not hide missing root exports in a copied guide.
+  writeFileSync(join(app, "src", "compact-transport-types.ts"), `
+    import { SDK_TRANSPORT_CAPABILITIES, type BlockTransport } from '@z-stack/sdk';
+    const supported: true = SDK_TRANSPORT_CAPABILITIES.maxBlocksPerRequest;
+    const transport = { kind: 'fixture', label: 'offline', maxBlocksPerRequest: 1000,
+      tip: async () => 10, blocks: async () => new Uint8Array() } satisfies BlockTransport;
+    const requestLimit: number | undefined = transport.maxBlocksPerRequest;
+    void supported; void requestLimit;
+  `);
   writeFileSync(join(app, "src", "native-shield-types.ts"), `
     import type { NativeWallet } from '@z-stack/sdk/native';
     function nativeShieldArguments(wallet: NativeWallet) {

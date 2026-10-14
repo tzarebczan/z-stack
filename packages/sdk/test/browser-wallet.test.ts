@@ -3,14 +3,14 @@ import { readFileSync } from "node:fs";
 import { test, before, type TestContext } from "node:test";
 import { createWallet, forgetWallet, type Wallet } from "../src/create-wallet.ts";
 import { memoryWalletStorage } from "../src/storage.ts";
-import { attachWasmBindings } from "../src/wasm-client.ts";
+import { createWasmClient, attachWasmBindings } from "../src/wasm-client.ts";
 import { initialize, deriveAccount } from "../src/runtime.ts";
 import { WalletError } from "@z-stack/core";
 import { keystoneSigner } from "../src/hardware.ts";
 import { saveWalletSnapshot, readSavedSnapshotRecord, advanceWalletGeneration, clearSavedSnapshot } from "../src/snapshot-storage.ts";
 import { attachScanWorker, restartScanWorker } from "../src/scan-host.ts";
 import { checkWalletSetup } from "../src/diagnostics.ts";
-import { BroadcastRejection, assertCompactBlockHeight } from "../src/lwd.ts";
+import { BroadcastRejection, assertCompactBlockHeight, SDK_TRANSPORT_CAPABILITIES } from "../src/lwd.ts";
 
 // Public BIP-39 fixture; no network, real money, environment or private secrets.
 const words = [...Array(23).fill("abandon"), "art"].join(" ");
@@ -1474,3 +1474,68 @@ for (const signing of ["software", "hardware"] as const) {
     assert.equal((await wallet.getWallet()).balance.totalAvailable, 10);
   });
 }
+
+
+test("compact request capability is explicit and frozen", () => {
+  assert.equal(Reflect.get(SDK_TRANSPORT_CAPABILITIES, "maxBlocksPerRequest"), true);
+  assert.equal(Object.isFrozen(SDK_TRANSPORT_CAPABILITIES), true);
+});
+
+test("compact request cap bounds actual prefetch and cannot grow after creation", async t => {
+  const f = fixture(t), ranges: number[][] = [];
+  const server = { kind: "fixture", label: "offline", maxBlocksPerRequest: 3,
+    tip: async () => 22,
+    blocks: async (start: number, end: number) => { ranges.push([start, end]); return probeBlock(end); } };
+  const wallet = await f.open({ server });
+  await wallet.create({ birthday: 8 });
+  server.maxBlocksPerRequest = 4000;
+  const result = await wallet.sync();
+  assert.deepEqual(ranges, [[11, 13], [14, 16], [17, 19], [20, 22]]);
+  assert.equal(result.scannedHeight, 22);
+});
+
+for (const limit of [undefined, 1, 1000, 4000]) {
+  test(`compact first request preserves tuned defaults or cap (${limit ?? "absent"})`, async t => {
+    const f = fixture(t), ranges: number[][] = [];
+    const server = { kind: "fixture", label: "offline", maxBlocksPerRequest: limit,
+      tip: async () => 4010, blocks: async (start: number, end: number) => {
+        ranges.push([start, end]); throw new Error("fixture stops before apply");
+      } };
+    const wallet = await f.open({ server, lightServerGraceMs: 0 });
+    await wallet.create({ birthday: 8 });
+    await assert.rejects(wallet.sync(), /fixture stops before apply/);
+    assert.deepEqual(ranges[0], [11, 10 + (limit ?? 4000)]);
+    assert.ok(ranges.every(([start, end]) => end - start + 1 <= (limit ?? 4000)));
+  });
+}
+
+test("unsafe compact caps refuse before owner claim, observers or provider I/O", async t => {
+  const f = fixture(t), existing = await f.open();
+  let calls = 0;
+  for (const value of [0, -1, 1.5, NaN, Infinity, -Infinity, 4001, Number.MAX_SAFE_INTEGER, "1000", null]) {
+    const server = { kind: "fixture", label: "offline", tip: async () => { calls++; return 10; },
+      blocks: async () => { calls++; return new Uint8Array(); } };
+    Object.defineProperty(server, "maxBlocksPerRequest", { value });
+    await assert.rejects(createWallet({ network: "regtest", server, storage: f.storage,
+      onLoadProgress: () => { calls++; } }), code("unknown"));
+    assert.throws(() => createWasmClient({ network: "regtest", transport: server }), code("unknown"));
+  }
+  assert.equal(calls, 0);
+  await existing.create({ birthday: 8 });
+  assert.equal((await existing.getWallet()).scannedHeight, 10);
+});
+
+
+test("compact cap never enlarges public transport tuning", async t => {
+  const f = fixture(t), ranges: number[][] = [];
+  const wallet = await f.open({ lightServerGraceMs: 0, server: {
+    kind: "fixture", label: "https://zec.rocks", maxBlocksPerRequest: 4000,
+    tip: async () => 2010, blocks: async (start, end) => {
+      ranges.push([start, end]); throw new Error("fixture stops before apply");
+    },
+  } });
+  await wallet.create({ birthday: 8 });
+  await assert.rejects(wallet.sync(), /fixture stops before apply/);
+  assert.deepEqual(ranges[0], [11, 1010]);
+  assert.ok(ranges.every(([start, end]) => end - start + 1 <= 1000));
+});

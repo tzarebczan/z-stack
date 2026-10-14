@@ -1,3 +1,4 @@
+import { BATCH_LOCAL, WalletError } from "@z-stack/core";
 import { COMPACT_RANGE_MAX_BYTES } from "./transport-bounds";
 /**
  * Compact-block transports for the WASM scanner.
@@ -17,6 +18,7 @@ export const transportFetchOptions = {
 export const SDK_TRANSPORT_CAPABILITIES = Object.freeze({
   requiredBirthdayTreeState: true,
   cancellation: true,
+  maxBlocksPerRequest: true,
 });
 
 export type TransparentUtxo = {
@@ -31,6 +33,9 @@ export type TransparentUtxo = {
 export type BlockTransport = {
   kind: string;
   label: string;
+  /** SDK compact-block request span, including transparent backfill. Integer 1..4000;
+   * captured when the client is created. Does not limit memo, subtree or stream calls. */
+  readonly maxBlocksPerRequest?: number;
   tip: (signal?: AbortSignal) => Promise<number>;
   /** Length-delimited compact blocks (u32 BE + protobuf), start..=end inclusive. */
   blocks: (start: number, end: number, signal?: AbortSignal) => Promise<Uint8Array>;
@@ -95,6 +100,15 @@ export type BlockTransport = {
     onPage: (blob: Uint8Array, blocks: number) => Promise<void>,
   ) => Promise<void>;
 };
+
+/** Validate at SDK entry points before claiming an owner or starting any I/O. */
+export function compactBlockRequestLimit(value: unknown): number {
+  if (value === undefined) return BATCH_LOCAL;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > BATCH_LOCAL) {
+    throw new WalletError("unknown", "maxBlocksPerRequest must be an integer from 1 to 4,000.");
+  }
+  return value;
+}
 
 export function isLoopbackUrl(url: string): boolean {
   try {

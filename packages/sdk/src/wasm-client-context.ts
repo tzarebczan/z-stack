@@ -44,6 +44,7 @@ export interface WasmClientContext {
   loadIfNeeded: () => Promise<boolean>;
   preferWorker: () => Promise<void>;
   transport: BlockTransport;
+  readonly maxBlocksPerRequest: number;
   memoFetch: "auto" | "on-demand" | "shared";
   persist: (lineage?: { epoch: number; baseKey: string | null; }, replacement?: runtime.ClaimedGeneration & { unlockPolicy?: UnlockPolicy; }, background?: boolean) => Promise<void>;
   transparentScan: "off" | "compact";

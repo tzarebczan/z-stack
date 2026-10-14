@@ -15,7 +15,7 @@ import type { WalletEventHandler } from "./events";
 import {
   type HardwareAccount
 } from "./hardware";
-import { usesFastSync } from "./lwd";
+import { compactBlockRequestLimit, usesFastSync } from "./lwd";
 import { type PublicDataStatus } from "./public-data";
 import {
   forgetScanWorkerWallet,
@@ -43,6 +43,7 @@ export function createWasmClient(
 ): runtime.WasmClient {
 
   const { network, transport } = opts;
+  const maxBlocksPerRequest = compactBlockRequestLimit(transport.maxBlocksPerRequest);
 
   function tipFailure(error: unknown): WalletError {
     const normalized = WalletError.fromUnknown(error);
@@ -370,6 +371,7 @@ export function createWasmClient(
     get persist() { return persist; },
     get transparentScan() { return transparentScan; },
     set transparentScan(value: WasmClientContext["transparentScan"]) { transparentScan = value; },
+    get maxBlocksPerRequest() { return maxBlocksPerRequest; },
     get localLight() { return localLight; },
     get syncOpts() { return syncOpts; },
     get grpcWeb() { return grpcWeb; },
