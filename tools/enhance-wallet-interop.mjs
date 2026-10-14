@@ -9,6 +9,7 @@ import { once } from 'node:events';
 import { chromium, firefox } from 'playwright';
 import ts from 'typescript';
 const root = resolve(import.meta.dirname, '..');
+const modes=(process.env.ENHANCE_MODES??'st,mt').split(',');assert.ok(modes.length&&modes.every(mode=>['st','mt'].includes(mode)));
 const output = resolve(process.argv[2] ?? '/tmp/coffer-enhance-wallet-interop');
 const packages={st:resolve(root,process.env.ENHANCE_ST_DIR??'packages/sdk/src/generated'),mt:resolve(root,process.env.ENHANCE_MT_DIR??'packages/sdk/src/generated-mt')};
 const binary = process.env.ENHANCE_FIXTURE_BIN ?? '/home/tom/.cache/coffer-enhance-sdk-target/debug/examples/enhance_wallet_fixture';
@@ -31,8 +32,8 @@ self.onmessage = async ({data:{mode}}) => {
   const blob=Uint8Array.from(atob(meta.blob),c=>c.charCodeAt(0));
   const check=(value,msg)=>{if(!value)throw new Error(msg);};
   const rejects=async(fn,code)=>{try{await fn();}catch(e){check(String(e).includes(code),'wrong refusal '+String(e));return;}throw new Error('missing refusal '+code);};
-  const create=()=>{const w=mod.WasmWallet.fromUfvk('mainnet',meta.ufvk,meta.height,0);w.applyTreeState(JSON.stringify(meta.tree));w.applyCompactBlocksSummary(blob);return w;};
-  const wallet=create();const before=wallet.toSnapshot();let saved;let requests=[];let outside=0;
+  const create=()=>{const w=mod.WasmWallet.fromUfvk('mainnet',meta.ufvk,meta.height,0);w.applyTreeState(JSON.stringify(meta.tree));w.applyCompactBlocksSummary(blob);w.recomputePools();return w;};
+  const wallet=create();const before=wallet.toSnapshot();let saved;let requests=[];
   const source={privateEnhance:async(op,bytes,time)=>wallet.privateEnhance(op,bytes,time)};
   const transport={exchange:async(request,signal)=>{
    requests.push(request.kind);
@@ -57,20 +58,20 @@ self.onmessage = async ({data:{mode}}) => {
   check(saved instanceof Uint8Array,'Rust apply not checkpointed');
   const restored=mod.WasmWallet.fromSnapshot(saved);check(JSON.parse(restored.history(10))[0].memos.includes('private hello'),'memo lost after reload');
   const calls=requests.length;check(await run()===0&&requests.length===calls,'resolved action produced provider I/O');
-  const malformed=mod.WasmWallet.fromSnapshot(before);const time=Math.floor(Date.now()/1000);
+  const malformed=mod.WasmWallet.fromSnapshot(before);const malformedBaseline=malformed.toSnapshot();const time=Math.floor(Date.now()/1000);
   malformed.privateEnhance('begin',encode(meta.manifest),time);malformed.privateEnhance('material',encode(meta.material),time);malformed.privateEnhance('prepare',new Uint8Array(),time);
   await rejects(()=>malformed.privateEnhance('finish',new Uint8Array([1]),time),'enhance_reply_invalid');
   await rejects(()=>malformed.privateEnhance('finish',new Uint8Array([1]),time),'enhance_context_consumed');
-  check(malformed.toSnapshot().every((v,i)=>v===before[i]),'malformed reply changed wallet');
+  check(malformed.toSnapshot().every((v,i)=>v===malformedBaseline[i]),'malformed reply changed loaded wallet');
   const stale=mod.WasmWallet.fromSnapshot(before);stale.privateEnhance('begin',encode(meta.manifest),time);stale.privateEnhance('material',encode(meta.material),time);
   const ciphertext=stale.privateEnhance('prepare',new Uint8Array(),time);const reply=new Uint8Array(await(await fetch('/query',{method:'POST',body:ciphertext})).arrayBuffer());
-  stale.resetScan();await rejects(()=>stale.privateEnhance('finish',reply,time),'enhance_anchor_unavailable');
-  await rejects(()=>stale.privateEnhance('finish',reply,time),'enhance_context_consumed');
+  stale.resetScan();const resetBaseline=stale.toSnapshot();await rejects(()=>stale.privateEnhance('finish',reply,time),'enhance_anchor_unavailable');
+  await rejects(()=>stale.privateEnhance('finish',reply,time),'enhance_context_consumed');check(stale.toSnapshot().every((v,i)=>v===resetBaseline[i]),'late reply changed reset wallet');
   const expired=mod.WasmWallet.fromSnapshot(before);expired.privateEnhance('begin',encode(meta.manifest),100);expired.privateEnhance('material',encode(meta.material),100);expired.privateEnhance('prepare',new Uint8Array(),100);
   await rejects(()=>expired.privateEnhance('finish',reply,130),'enhance_routing_refresh_required');
   await rejects(()=>expired.privateEnhance('finish',reply,130),'enhance_context_consumed');
   for(const w of[wallet,restored,malformed,stale,expired])w.free();
-  self.postMessage({ok:true,mode,threads,queries:requests.filter(r=>r==='query').length+1,checks:['genuine-compact-note-scan','SDK-driver-native-PIR-query','authenticated-653B-memo-apply','checkpoint-and-reload','resolved-zero-provider-I/O','cancel-before-late-ciphertext','malformed-consumes-preserves-wallet','reset-wins-late-reply','expired-reply-consumes'],outside});
+  self.postMessage({ok:true,mode,threads,queries:requests.filter(r=>r==='query').length+1,checks:['genuine-compact-note-scan','SDK-driver-native-PIR-query','authenticated-653B-memo-apply','checkpoint-and-reload','resolved-zero-provider-I/O','cancel-before-late-ciphertext','malformed-consumes-preserves-wallet','reset-wins-late-reply','expired-reply-consumes']});
  }catch(error){self.postMessage({ok:false,error:String(error)});}
 };`;
 const main = `const mode=location.pathname.split('/')[1];const worker=new Worker('/runner-worker.mjs',{type:'module'});worker.onmessage=({data})=>{window.result=data;worker.terminate();};worker.postMessage({mode});`;
@@ -108,7 +109,7 @@ try {
  const reports=[];
  for(const [name,type] of Object.entries({chromium,firefox})) {
   browser=await type.launch({headless:true});
-  for(const mode of ['st','mt']) {
+  for(const mode of modes) {
    const context=await browser.newContext();
    try {
     const page=await context.newPage();const errors=[],requests=[];
@@ -117,7 +118,7 @@ try {
     await page.goto(origin+'/'+mode+'/test');
     await page.waitForFunction(()=>window.result!==undefined,null,{timeout:180000});
     const result=await page.evaluate(()=>window.result);assert.equal(result.ok,true,JSON.stringify(result));assert.deepEqual(errors,[]);
-    reports.push({browser:name,version:browser.version(),...result,requests:requests.length});
+    reports.push({browser:name,version:browser.version(),...result,requests:requests.length,outsideRequests:requests.filter(url=>new URL(url).origin!==origin).length});
     console.log(name+' '+mode+': real wallet SDK/PIR authentication and lifecycle passed');
    }finally{await context.close();}
   }
@@ -125,7 +126,7 @@ try {
  }
  await mkdir(output,{recursive:true});
  const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
- const artifacts={};for(const mode of ['st','mt'])artifacts[mode]=sha(await readFile(join(packages[mode],'z_wasm_bg.wasm')));
+ const artifacts={};for(const mode of modes)artifacts[mode]=sha(await readFile(join(packages[mode],'z_wasm_bg.wasm')));
  await writeFile(join(output,'report.json'),JSON.stringify({scope:'Public synthetic watch-only Mainnet-profile wallet and actual SDK driver/native PIR crypto; no production consensus chain, controller, service capacity, OHTTP integration or deployment claim',profile:'ironwood-enhance-pir-v7/simplepir-p16-q48-v1',rows:4096,artifacts,reports},null,2)+'\n');
 }finally {
  await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));

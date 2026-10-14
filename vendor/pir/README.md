@@ -15,3 +15,5 @@ serialization are unchanged. ipir-sp, inspiring, reinspiring and spiral are
 exact published registry dependencies, with no local patches. Their unused
 server mmap APIs compile to unsupported-platform stubs on wasm32; no browser
 client path invokes them.
+
+Run `node tools/check-enhance-upstream.mjs` from the repository root to reverse `http-client.patch` in a disposable copy and verify all recorded original source hashes.

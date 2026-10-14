@@ -33,7 +33,7 @@ registry = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))) / "re
 paths = {(name, version): Path(path) for name, version, path in re.findall(r"^(\S+) v(\S+) \(([^)]+)\)", tree, re.M) if Path(path).is_absolute()}
 packages = []
 for name, version in sorted(selected):
-    if name in {"z-engine", "z-wasm"}:
+    if name in {"z-engine", "z-wasm", "z-enhance-pir"}:
         continue
     candidates = [paths[(name, version)]] if (name, version) in paths else list(registry.glob(f"*/{name}-{version}"))
     assert len(candidates) == 1, f"ambiguous/missing source for {name} {version}: build the engine first"
@@ -45,6 +45,11 @@ supplemental = ROOT / "licenses/upstream"
 sources = {item["file"]: item["url"] for item in json.loads((supplemental / "sources.json").read_text())}
 fallbacks = {
     "bitcoin_hashes": "bitcoin_hashes-",
+    "ipir-sp": "ipir-standard-",
+    "valar-spiral-rs": "ipir-standard-",
+    "inspiring": "ipir-standard-",
+    "reinspiring": "ipir-standard-",
+    "simplepir-kernel": "ipir-standard-",
     "blake2b_simd": "blake2_simd-",
     "blake2s_simd": "blake2_simd-",
     "equihash": "librustzcash-",
@@ -59,7 +64,7 @@ text = ["z-stack browser engine and SDK: third-party license texts\n",
         "Original project code: Apache-2.0. Third-party code retains the following licenses.\n"]
 for package in packages:
     name, version = package["name"], package["version"]
-    if (name, version) not in selected or name in {"z-engine", "z-wasm"}:
+    if (name, version) not in selected or name in {"z-engine", "z-wasm", "z-enhance-pir"}:
         continue
     assert package["license"], f"missing license declaration: {name}"
     directory = Path(package["manifest_path"]).parent
@@ -73,10 +78,15 @@ for package in packages:
         assert files, f"missing retained upstream license: {name}"
     record = {"name": name, "version": version, "license": package["license"],
               "source": f"https://crates.io/crates/{name}/{version}", "repository": package.get("repository"), "texts": []}
+    if name == "enhance-pir":
+        record["source"] = "https://github.com/valargroup/wallet-pir/tree/24f7694cd4f8274172a11cbff43c158bcab5d500/enhance/crates/enhance-pir"
     text.append(f"\n{'=' * 72}\n{name} {version} — {package['license']}\n{record['source']}\n")
     # Preserve the published declaration when its own legal files are absent.
     if upstream:
         record["licenseTextOrigin"] = "retained upstream texts; published archive omits legal files"
+        if name in {"ipir-sp", "inspiring", "reinspiring", "simplepir-kernel", "valar-spiral-rs"}:
+            record["note"] = "The published crate declares MIT OR Apache-2.0 and omits legal files. Retained standard Apache-2.0 text is used under that license option, without inventing a copyright notice."
+            text.append(record["note"] + "\n")
         if name == "zakura-pir-enhance-types":
             record["note"] = "The published crate declares MIT OR Apache-2.0 and omits legal files. Retained standard Apache-2.0 text is used under that license option, without inventing a copyright notice. Source: zakura-core/wallet-libraries at d60d1442526afce96a40bfbea0f35c63f116d2af, zakura/pir-enhance-types."
         if name == "zakura-pczt":
@@ -86,7 +96,9 @@ for package in packages:
             text.append(record["note"] + "\n" + (directory / "README.md").read_text() + "\n")
     for file in files:
         data = file.read_bytes()
-        origin = sources[file.name] if upstream else f"https://docs.rs/crate/{name}/{version}/source/{file.relative_to(directory).as_posix()}"
+        origin = sources[file.name] if upstream else (
+            record["source"] + "/" + file.relative_to(directory).as_posix() if name == "enhance-pir" else
+            f"https://docs.rs/crate/{name}/{version}/source/{file.relative_to(directory).as_posix()}")
         record["texts"].append({"file": file.name, "sha256": sha(data), "origin": origin})
         text.append(f"\n--- {file.name} ({origin}) ---\n" + data.decode("utf-8") + "\n")
     records.append(record)
