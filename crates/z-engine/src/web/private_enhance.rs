@@ -1051,6 +1051,13 @@ mod tests {
             .ironwood_commitment_tree_size = 2;
         w.apply_compact_block(&block.encode_to_vec()).unwrap();
         assert_eq!(w.private_enhance_work().unwrap().len(), 2);
+        let compact_snapshot = w.to_snapshot().unwrap();
+        let foreign_request = w
+            .private_enhance_work()
+            .unwrap()
+            .into_iter()
+            .find(|request| request.action.index == 1)
+            .unwrap();
         w.enhance_raw_tx(&raw).unwrap();
         assert_eq!(w.txs()[&id].memos, ["private hello"]);
         assert!(w.txs()[&id].enhancement_complete);
@@ -1059,7 +1066,38 @@ mod tests {
             .iter()
             .any(|action| action.txid == id && !action.done));
         assert!(w.private_enhance_work().unwrap().is_empty());
+        let authenticated = w.to_snapshot().unwrap();
+        assert_eq!(
+            w.apply_private_enhance_record(foreign_request, outputs[1].1.as_bytes())
+                .unwrap(),
+            EnhancePirStoreResult::AlreadyResolved
+        );
+        assert_eq!(
+            w.to_snapshot().unwrap(),
+            authenticated,
+            "late foreign response must be inert"
+        );
         let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert!(restored.txs()[&id].enhancement_complete);
+        assert!(!restored
+            .memo_enhancement_txids(10)
+            .contains(&WebWallet::display_txid(&id)));
+        // Reverse the real caller order: a foreign record arrives before full raw.
+        let mut reverse = WebWallet::from_snapshot(&compact_snapshot).unwrap();
+        let foreign_request = reverse
+            .private_enhance_work()
+            .unwrap()
+            .into_iter()
+            .find(|request| request.action.index == 1)
+            .unwrap();
+        let result = reverse
+            .apply_private_enhance_record(foreign_request, outputs[1].1.as_bytes())
+            .unwrap();
+        assert_eq!(result, EnhancePirStoreResult::Stored);
+        reverse.enhance_raw_tx(&raw).unwrap();
+        assert!(reverse.txs()[&id].enhancement_complete);
+        assert!(reverse.private_enhance_work().unwrap().is_empty());
+        let restored = WebWallet::from_snapshot(&reverse.to_snapshot().unwrap()).unwrap();
         assert!(restored.txs()[&id].enhancement_complete);
         assert!(!restored
             .memo_enhancement_txids(10)
