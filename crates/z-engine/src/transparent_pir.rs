@@ -40,9 +40,10 @@ pub(crate) struct ProjectionState {
     pub records: BTreeMap<String, (u32, String)>,
     #[serde(default)]
     pub projected_outputs: BTreeSet<String>,
-    /// Web projections before this marker could overwrite ordinary funding metadata.
+    /// Web funding remains blocked independently of provisional-row deletion ownership.
+    /// None is legacy/unknown provenance and requires an explicit canonical rescan.
     #[serde(default)]
-    pub public_funding_isolated: bool,
+    pub unverified_outputs: Option<BTreeSet<String>>,
     #[serde(default)]
     pub projected_spends: BTreeSet<String>,
     #[serde(default)]
@@ -285,7 +286,7 @@ impl ProjectionState {
         // The scanner erased canonical rows, not acquisition progress. Keep the
         // continuation and its owed cover queries; replay its records atomically.
         self.projection_invalidated = true;
-        self.public_funding_isolated = true;
+        self.unverified_outputs = Some(BTreeSet::new());
         self.complete = false;
         self.durable = false;
         self.projected_outputs.clear();

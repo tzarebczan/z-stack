@@ -1264,23 +1264,29 @@ impl WalletWrite for WebWallet {
     ) -> Result<Self::UtxoRef, String> {
         let txid = super::to_hex(output.outpoint().hash());
         let index = output.outpoint().n();
+        #[cfg(feature = "transparent-pir")]
+        let funding_unverified = self.pir_funding_unverified(&txid, index);
+        #[cfg(not(feature = "transparent-pir"))]
+        let funding_unverified = false;
         if let Some((i, existing)) = self
             .utxos
             .iter_mut()
             .enumerate()
             .find(|(_, u)| u.txid == txid && u.index == index)
         {
-            if !existing.spent {
+            // An unmined write cannot replace facts whose independent funding
+            // verification is still pending, even after a public prefix sighting.
+            if !existing.spent && (!funding_unverified || output.mined_height().is_some()) {
                 existing.height = output
                     .mined_height()
                     .map(u32::from)
                     .unwrap_or(existing.height);
                 existing.value_zat = u64::from(output.txout().value());
                 existing.script = super::to_hex(&output.txout().script_pubkey().0 .0);
-            }
-            #[cfg(feature = "transparent-pir")]
-            if output.mined_height().is_some() {
-                self.record_public_transparent_output(&txid, index);
+                #[cfg(feature = "transparent-pir")]
+                if output.mined_height().is_some() {
+                    self.confirm_public_transparent_output(&txid, index);
+                }
             }
             return Ok(i as u32);
         }
@@ -1293,7 +1299,7 @@ impl WalletWrite for WebWallet {
         let address = String::new();
         #[cfg(feature = "transparent-pir")]
         if output.mined_height().is_some() {
-            self.record_public_transparent_output(&txid, index);
+            self.confirm_public_transparent_output(&txid, index);
         }
         self.utxos.push(super::store::StoredUtxo {
             coinbase: false,

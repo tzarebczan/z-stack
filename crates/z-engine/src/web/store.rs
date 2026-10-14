@@ -1418,16 +1418,7 @@ impl WebWallet {
         policy: &zcash_client_backend::data_api::wallet::ConfirmationsPolicy,
     ) -> bool {
         #[cfg(feature = "transparent-pir")]
-        if self
-            .transparent_pir
-            .projected_outputs
-            .contains(&format!("r:{}:{}", u.txid, u.index))
-            || (!self.transparent_pir.public_funding_isolated
-                && self
-                    .transparent_pir
-                    .records
-                    .contains_key(&format!("r:{}:{}", u.txid, u.index)))
-        {
+        if self.pir_funding_unverified(&u.txid, u.index) {
             return false;
         }
         if self.transparent_scan_required
@@ -1451,9 +1442,24 @@ impl WebWallet {
     }
 
     #[cfg(feature = "transparent-pir")]
+    pub(crate) fn pir_funding_unverified(&self, txid: &str, index: u32) -> bool {
+        let key = format!("r:{txid}:{index}");
+        self.transparent_pir
+            .unverified_outputs
+            .as_ref()
+            .map_or_else(
+                || {
+                    self.transparent_pir.records.contains_key(&key)
+                        || self.transparent_pir.projected_outputs.contains(&key)
+                },
+                |outputs| outputs.contains(&key),
+            )
+    }
+
+    #[cfg(feature = "transparent-pir")]
     pub(crate) fn record_public_transparent_output(&mut self, txid: &str, index: u32) {
-        // Independently confirmed canonical rows no longer belong to PIR's
-        // provisional projection. Keep the acquired facts, but transfer retirement authority.
+        // Publicly observed canonical rows no longer belong to PIR's deletion
+        // ownership. This alone does not discharge their funding block.
         self.transparent_pir
             .projected_outputs
             .remove(&format!("r:{txid}:{index}"));
@@ -1461,16 +1467,57 @@ impl WebWallet {
     }
 
     #[cfg(feature = "transparent-pir")]
+    pub(crate) fn confirm_public_transparent_output(&mut self, txid: &str, index: u32) {
+        self.record_public_transparent_output(txid, index);
+        if let Some(unverified) = &mut self.transparent_pir.unverified_outputs {
+            unverified.remove(&format!("r:{txid}:{index}"));
+        }
+    }
+
+    #[cfg(feature = "transparent-pir")]
+    pub(crate) fn confirm_complete_public_transparent_outputs(&mut self) {
+        if self
+            .transparent_scan
+            .as_ref()
+            .is_none_or(|scan| scan.height != self.scanned_height)
+        {
+            return;
+        }
+        let state = &mut self.transparent_pir;
+        if let Some(unverified) = &mut state.unverified_outputs {
+            for output in &self.utxos {
+                let key = format!("r:{}:{}", output.txid, output.index);
+                // A public prefix already transferred deletion ownership. Full
+                // contiguous coverage to this tip now also validates its unspent state.
+                if output.height > 0 && !state.projected_outputs.contains(&key) {
+                    unverified.remove(&key);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "transparent-pir")]
     pub(crate) fn record_public_transparent_spend(
         &mut self,
         txid: &str,
-        input: usize,
         previous: &str,
         index: u32,
     ) {
-        self.transparent_pir
+        // Canonical spent state identifies a spender and outpoint, not the
+        // publisher's claimed input position. Retire every claim for that identity.
+        let prefix = format!("s:{txid}:");
+        let suffix = format!(":{previous}:{index}");
+        let claims: Vec<_> = self
+            .transparent_pir
             .projected_spends
-            .remove(&format!("s:{txid}:{input}:{previous}:{index}"));
+            .range(prefix.clone()..)
+            .take_while(|key| key.starts_with(&prefix))
+            .filter(|key| key.ends_with(&suffix))
+            .cloned()
+            .collect();
+        for claim in claims {
+            self.transparent_pir.projected_spends.remove(&claim);
+        }
         self.transparent_pir.projected_transactions.remove(txid);
     }
 
@@ -3602,7 +3649,7 @@ impl WebWallet {
         self.utxos = next;
         #[cfg(feature = "transparent-pir")]
         for (txid, index) in confirmed {
-            self.record_public_transparent_output(&txid, index);
+            self.confirm_public_transparent_output(&txid, index);
         }
         // Explicit compatibility address lookup replaces compact coverage. A
         // future switch back must replay spends missed in this mode.
