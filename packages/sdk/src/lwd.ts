@@ -19,6 +19,8 @@ export const SDK_TRANSPORT_CAPABILITIES = Object.freeze({
   requiredBirthdayTreeState: true,
   cancellation: true,
   maxBlocksPerRequest: true,
+  maxSharedMemoBlocksPerRequest: true,
+  submissionPolicy: true,
 });
 
 export type TransparentUtxo = {
@@ -36,6 +38,8 @@ export type BlockTransport = {
   /** SDK compact-block request span, including transparent backfill. Integer 1..4000;
    * captured when the client is created. Does not limit memo, subtree or stream calls. */
   readonly maxBlocksPerRequest?: number;
+  /** Shared memo range span. Integer 1..10; captured before ownership. Default 10. */
+  readonly maxSharedMemoBlocksPerRequest?: number;
   tip: (signal?: AbortSignal) => Promise<number>;
   /** Length-delimited compact blocks (u32 BE + protobuf), start..=end inclusive. */
   blocks: (start: number, end: number, signal?: AbortSignal) => Promise<Uint8Array>;
@@ -108,6 +112,23 @@ export function compactBlockRequestLimit(value: unknown): number {
     throw new WalletError("unknown", "maxBlocksPerRequest must be an integer from 1 to 4,000.");
   }
   return value;
+}
+
+export function sharedMemoBlockRequestLimit(value: unknown): number {
+  if (value === undefined) return 10;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 10) {
+    throw new WalletError("unknown", "maxSharedMemoBlocksPerRequest must be an integer from 1 to 10.");
+  }
+  return value;
+}
+
+/** Whether sync may resubmit the same saved signed bytes. Neither policy creates a replacement payment. */
+export type SubmissionPolicy = "explicit" | "saved-bytes-auto";
+
+export function resolveSubmissionPolicy(value: unknown): SubmissionPolicy {
+  if (value === undefined) return "saved-bytes-auto";
+  if (value === "explicit" || value === "saved-bytes-auto") return value;
+  throw new WalletError("unknown", "submissionPolicy must be explicit or saved-bytes-auto.");
 }
 
 export function isLoopbackUrl(url: string): boolean {

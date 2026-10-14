@@ -1539,3 +1539,75 @@ test("compact cap never enlarges public transport tuning", async t => {
   assert.deepEqual(ranges[0], [11, 1010]);
   assert.ok(ranges.every(([start, end]) => end - start + 1 <= 1000));
 });
+
+for (const policy of [undefined, "saved-bytes-auto", "explicit"] as const) {
+  test(`${policy ?? "default"} submission policy controls sync of a durable unknown payment after reopen`, async t => {
+    const f = fixture(t), submitted: string[] = [];
+    const server = { kind: "fixture", label: "offline", tip: async () => 10,
+      blocks: async () => new Uint8Array(), submit: async (hex: string) => { submitted.push(hex); throw new TypeError("fixture lost acknowledgement"); } };
+    const options = { server, submissionPolicy: policy };
+    const wallet = await f.open(options);
+    await wallet.create({ birthday: 8 });
+    await wallet.unlock(words);
+    await assert.rejects(wallet.send("fixture", "0.00005"), code("broadcast_failed"));
+    assert.deepEqual(submitted, ["synthetic-transaction"]);
+    assert.equal((await wallet.pending())[0]?.txid, txid);
+    submitted.length = 0;
+    await wallet.sync();
+    assert.deepEqual(submitted, policy === "explicit" ? [] : ["synthetic-transaction"]);
+    await wallet.close();
+    const reopened = await f.open(options);
+    await reopened.load();
+    submitted.length = 0;
+    await reopened.sync();
+    assert.deepEqual(submitted, policy === "explicit" ? [] : ["synthetic-transaction"]);
+    assert.equal((await reopened.pending())[0]?.txid, txid);
+    assert.equal((await reopened.getWallet()).balance.totalAvailable, 0);
+  });
+}
+
+test("shared memo transport hint is captured before ownership and keeps common range boundaries", async t => {
+  const f = fixture(t), ranges: number[][] = [];
+  let advertised = 1;
+  const server = { kind: "fixture", label: "offline", get maxSharedMemoBlocksPerRequest() {
+    const first = advertised; advertised = 10; return first;
+  }, tip: async () => 10, blocks: async () => new Uint8Array(), sharedMemos: async (start: number, end: number) => {
+    ranges.push([start, end]); return JSON.stringify({ start, end });
+  } };
+  const wallet = await f.open({ server, memoFetch: "shared" });
+  await wallet.create({ birthday: 8 });
+  const snapshot = await wallet.sync();
+  assert.deepEqual(ranges, [[8, 8], [9, 9], [10, 10]]);
+  assert.equal(snapshot.memoScanHeight, 10);
+  await wallet.sync();
+  assert.deepEqual(ranges, [[8, 8], [9, 9], [10, 10]], "complete coverage must not fetch again");
+});
+
+test("unsafe memo hints and submission policies refuse before ownership, storage or provider I/O", async t => {
+  const f = fixture(t), existing = await f.open();
+  let calls = 0;
+  const server = { kind: "fixture", label: "offline", tip: async () => { calls++; return 10; }, blocks: async () => { calls++; return new Uint8Array(); } };
+  for (const value of [0, -1, 1.5, NaN, Infinity, -Infinity, 11, Number.MAX_SAFE_INTEGER, "1", null]) {
+    const invalid = { ...server };
+    Object.defineProperty(invalid, "maxSharedMemoBlocksPerRequest", { value });
+    await assert.rejects(createWallet({ network: "regtest", server: invalid, storage: f.storage, onLoadProgress: () => { calls++; } }), code("unknown"));
+    assert.throws(() => createWasmClient({ network: "regtest", transport: invalid }), code("unknown"));
+  }
+  for (const value of ["auto", "", null, 1, false, {}]) {
+    const options = { network: "regtest", server, storage: f.storage, onLoadProgress: () => { calls++; } } satisfies Parameters<typeof createWallet>[0];
+    Object.defineProperty(options, "submissionPolicy", { value });
+    await assert.rejects(createWallet(options), code("unknown"));
+    const raw = { network: "regtest", transport: server } satisfies Parameters<typeof createWasmClient>[0];
+    Object.defineProperty(raw, "submissionPolicy", { value });
+    assert.throws(() => createWasmClient(raw), code("unknown"));
+  }
+  assert.equal(calls, 0);
+  await existing.create({ birthday: 8 });
+  assert.equal((await existing.getWallet()).scannedHeight, 10);
+});
+
+test("memo request and explicit submission policy capabilities are frozen root contracts", () => {
+  assert.equal(SDK_TRANSPORT_CAPABILITIES.maxSharedMemoBlocksPerRequest, true);
+  assert.equal(SDK_TRANSPORT_CAPABILITIES.submissionPolicy, true);
+  assert.equal(Object.isFrozen(SDK_TRANSPORT_CAPABILITIES), true);
+});

@@ -35,7 +35,7 @@ import type { WasmClientContext } from './wasm-client-context';
 import * as runtime from './wasm-client-runtime';
 
 /** Block scanning and optional public-data enhancement. */
-export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" | "bus" | "session" | "snap" | "currentSession" | "syncLock" | "memoLock" | "loadIfNeeded" | "preferWorker" | "transport" | "memoFetch" | "persist" | "opts" | "transparentScan" | "localLight" | "maxBlocksPerRequest" | "syncOpts" | "grpcWeb" | "lwdPipe" | "retireFailedSession" | "spendingSeed" | "prewarmProvingKey" | "sessionOperation" | "client" | "unlockPolicy" | "rootsChecked" | "assertSource" | "network" | "refreshIfStale" | "stateEpoch" | "transparentScanStatus" | "sharedMemoStatus" | "selectiveMemoStatus" | "memoAbort" | "storageGeneration" | "rescanning">) {
+export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" | "bus" | "session" | "snap" | "currentSession" | "syncLock" | "memoLock" | "loadIfNeeded" | "preferWorker" | "transport" | "memoFetch" | "persist" | "opts" | "transparentScan" | "localLight" | "maxBlocksPerRequest" | "maxSharedMemoBlocksPerRequest" | "submissionPolicy" | "syncOpts" | "grpcWeb" | "lwdPipe" | "retireFailedSession" | "spendingSeed" | "prewarmProvingKey" | "sessionOperation" | "client" | "unlockPolicy" | "rootsChecked" | "assertSource" | "network" | "refreshIfStale" | "stateEpoch" | "transparentScanStatus" | "sharedMemoStatus" | "selectiveMemoStatus" | "memoAbort" | "storageGeneration" | "rescanning">) {
 
   function progressScope(): () => boolean {
     const epoch = runtime.runtimeState.wasmSyncEpoch;
@@ -898,7 +898,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
    * would pick other notes and could pay twice.
    */
   async function rebroadcastPending(source: ScanSession, signal?: AbortSignal): Promise<void> {
-    if (!ctx.transport.submit) return;
+    if (ctx.submissionPolicy === "explicit" || !ctx.transport.submit) return;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     const wait = signal ? AbortSignal.any([operation.signal, signal]) : operation.signal;
     const run = async () => {
@@ -956,6 +956,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       try {
         const status = await syncPublicData({
           source, transport: ctx.transport, signal: wait, maxBlocksPerRequest: ctx.maxBlocksPerRequest,
+          maxSharedMemoBlocksPerRequest: ctx.maxSharedMemoBlocksPerRequest,
           transparent: kind === "transparent", memos: kind === "memos",
           assertCurrent: current, checkpoint: ctx.persist
         });

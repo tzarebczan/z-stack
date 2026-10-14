@@ -1,5 +1,5 @@
 import type { WalletSnapshot } from "@z-stack/core";
-import { compactBlockRequestLimit, type BlockTransport } from "./lwd";
+import { compactBlockRequestLimit, sharedMemoBlockRequestLimit, type BlockTransport } from "./lwd";
 import type { ScanSession } from "./scan-host";
 import { abortable } from "./abort";
 
@@ -12,10 +12,11 @@ export function supportsTransparentCompact(version?: string): boolean {
 }
 
 /** One bounded pass. Ranges depend on coverage, never on wallet matches. */
-export async function syncPublicData({ source, transport, transparent, memos, signal, assertCurrent, checkpoint, maxBlocksPerRequest } : {
+export async function syncPublicData({ source, transport, transparent, memos, signal, assertCurrent, checkpoint, maxBlocksPerRequest, maxSharedMemoBlocksPerRequest } : {
   source: ScanSession;
   transport: BlockTransport;
   maxBlocksPerRequest?: number;
+  maxSharedMemoBlocksPerRequest?: number;
   transparent: boolean;
   memos: boolean;
   signal: AbortSignal;
@@ -23,6 +24,7 @@ export async function syncPublicData({ source, transport, transparent, memos, si
   checkpoint: () => Promise<void>;
 }): Promise<{ transparent?: PublicDataStatus; memos?: PublicDataStatus }> {
   const compactLimit = compactBlockRequestLimit(maxBlocksPerRequest);
+  const memoLimit = sharedMemoBlockRequestLimit(maxSharedMemoBlocksPerRequest);
   const status: { transparent?: PublicDataStatus; memos?: PublicDataStatus } = {};
   const current = () => { signal.throwIfAborted(); assertCurrent(); };
   const snapshot = async () => {
@@ -87,7 +89,7 @@ export async function syncPublicData({ source, transport, transparent, memos, si
       const last = Math.min(tip, next + 99);
       while (next <= last) {
         // After the birthday range, boundaries are shared by every wallet.
-        const end = Math.min(last, Math.floor(next / 10) * 10 + 9);
+        const end = Math.min(last, next + memoLimit - 1, Math.floor(next / 10) * 10 + 9);
         const json = await abortable(signal, () => transport.sharedMemos!(next, end, signal));
         current();
         if (json === null) { status.memos = "unsupported"; break; }

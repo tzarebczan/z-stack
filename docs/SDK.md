@@ -364,6 +364,27 @@ a span that also fits the transport's byte bound. Check
 `SDK_TRANSPORT_CAPABILITIES.maxBlocksPerRequest === true` before relying on this
 hint with a separately supplied archive; older runtimes may silently ignore it.
 
+A custom transport may also declare `readonly maxSharedMemoBlocksPerRequest: 1`.
+The SDK accepts integers from 1 through 10, captures the value before wallet
+ownership or storage setup, and defaults to 10. Shared memo retrieval splits
+requests at this cap and the existing common ten-block boundaries. Each complete
+response is checked and checkpointed before the next range. This hint limits
+block count, not response bytes; the adapter must still enforce its byte bounds.
+Check `SDK_TRANSPORT_CAPABILITIES.maxSharedMemoBlocksPerRequest === true` before
+relying on it with another archive.
+
+The root export `SubmissionPolicy` is `"explicit" | "saved-bytes-auto"`.
+Pass `submissionPolicy: "explicit"` to `createWallet` to keep ordinary sync from
+resubmitting saved signed transactions. The default, `"saved-bytes-auto"`, retains
+same-byte resubmission after sync. Both policies preserve pending transactions,
+reserved inputs and application receipts after an unknown submission result.
+Explicit `send` and its `beforeSubmit` durability checks are unchanged, and no
+policy constructs a replacement payment. This option controls saved transaction
+resubmission; automatic shielding remains a separate opt-in. The policy is
+captured for the client's lifetime. Supply it again when reopening the wallet.
+Check `SDK_TRANSPORT_CAPABILITIES.submissionPolicy === true` before relying on
+explicit mode with another archive. The capability object is frozen.
+
 Check `SDK_TRANSPORT_CAPABILITIES.requiredBirthdayTreeState === true` before
 using strict mode with a separately supplied SDK archive. Older archives lack
 this export, even when their package version is the same. Set

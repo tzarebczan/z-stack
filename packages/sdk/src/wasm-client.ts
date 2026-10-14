@@ -15,7 +15,7 @@ import type { WalletEventHandler } from "./events";
 import {
   type HardwareAccount
 } from "./hardware";
-import { compactBlockRequestLimit, usesFastSync } from "./lwd";
+import { compactBlockRequestLimit, sharedMemoBlockRequestLimit, resolveSubmissionPolicy, usesFastSync } from "./lwd";
 import { type PublicDataStatus } from "./public-data";
 import {
   forgetScanWorkerWallet,
@@ -40,10 +40,16 @@ export type { WasmClient, WasmClientOpts, WasmProgress } from './wasm-client-run
 export function createWasmClient(
   opts: runtime.WasmClientOpts,
   onProgress?: (p: runtime.WasmProgress) => void,
+  capturedTransportLimits?: Pick<runtime.WasmClientOpts["transport"], "maxBlocksPerRequest" | "maxSharedMemoBlocksPerRequest">,
 ): runtime.WasmClient {
 
   const { network, transport } = opts;
-  const maxBlocksPerRequest = compactBlockRequestLimit(transport.maxBlocksPerRequest);
+  const submissionPolicy = resolveSubmissionPolicy(opts.submissionPolicy);
+  // The public facade captures hints before its async owner/storage setup.
+  // Raw engine clients capture them here, before observing or loading state.
+  const limits = capturedTransportLimits ?? transport;
+  const maxBlocksPerRequest = compactBlockRequestLimit(limits.maxBlocksPerRequest);
+  const maxSharedMemoBlocksPerRequest = sharedMemoBlockRequestLimit(limits.maxSharedMemoBlocksPerRequest);
 
   function tipFailure(error: unknown): WalletError {
     const normalized = WalletError.fromUnknown(error);
@@ -372,6 +378,8 @@ export function createWasmClient(
     get transparentScan() { return transparentScan; },
     set transparentScan(value: WasmClientContext["transparentScan"]) { transparentScan = value; },
     get maxBlocksPerRequest() { return maxBlocksPerRequest; },
+    get maxSharedMemoBlocksPerRequest() { return maxSharedMemoBlocksPerRequest; },
+    get submissionPolicy() { return submissionPolicy; },
     get localLight() { return localLight; },
     get syncOpts() { return syncOpts; },
     get grpcWeb() { return grpcWeb; },

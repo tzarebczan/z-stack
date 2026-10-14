@@ -11,7 +11,7 @@ import {
 import { coalescedTask } from "./coalesced-task";
 import type { BirthdayInput, EngineClient } from "./engine";
 import type { HardwareStatics } from "./hardware-ops";
-import type { BlockTransport } from "./lwd";
+import type { BlockTransport, SubmissionPolicy } from "./lwd";
 import { isBroadcastRejection, isDuplicateBroadcast } from "./lwd";
 import {
   forgetScanWorkerWallet,
@@ -381,6 +381,7 @@ export type WasmClientOpts = {
   requireExplicitReplacement?: boolean;
   network: Network;
   transport: BlockTransport;
+  submissionPolicy?: SubmissionPolicy;
   /** Compact-block light URL (Zaino / LWD). Drives batch size; t-scan stays loopback-only. */
   lightUrl?: string;
   allowDeepSync?: boolean;
