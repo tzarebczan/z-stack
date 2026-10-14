@@ -742,8 +742,8 @@ async fn native_pir_only_funding_is_excluded_from_real_shielding_proposal() {
     );
     drop(ordinary_open);
 
-    // 08ad native state had deletion ownership but no native funding version.
-    // Backfill durably on the first selection after reopen/no active enrollment.
+    // Absent/v1 funding provenance cannot establish sibling authority.
+    // The native owner durably quarantines ambiguous legacy canonical funds.
     let conn = rusqlite::Connection::open(&cold.paths.data_db).unwrap();
     let original: Vec<u8> = conn
         .query_row("SELECT state FROM ext_transparent_pir_v1", [], |r| r.get(0))
@@ -757,12 +757,15 @@ async fn native_pir_only_funding_is_excluded_from_real_shielding_proposal() {
         vec![[0x33; 32]]
     );
 
-    for missing in [false, true] {
+    for (version, missing) in [(None, false), (None, true), (Some(1), false)] {
         let mut legacy: serde_json::Value = serde_json::from_slice(&original).unwrap();
         legacy
             .as_object_mut()
             .unwrap()
             .remove("nativeFundingVersion");
+        if let Some(v) = version {
+            legacy["nativeFundingVersion"] = serde_json::json!(v);
+        }
         legacy["unverifiedOutputs"] = if missing {
             serde_json::Value::Null
         } else {
@@ -773,26 +776,24 @@ async fn native_pir_only_funding_is_excluded_from_real_shielding_proposal() {
             [serde_json::to_vec(&legacy).unwrap()],
         )
         .unwrap();
-        assert_eq!(
-            native_funding_selection(&cold, address).unwrap(),
-            vec![[0x33; 32]]
-        );
+        cold.transparent_pir_status().unwrap(); // owner commits the conservative migration
+        assert!(native_funding_selection(&cold, address).is_err());
         let saved: Vec<u8> = conn
             .query_row("SELECT state FROM ext_transparent_pir_v1", [], |r| r.get(0))
             .unwrap();
         let saved: serde_json::Value = serde_json::from_slice(&saved).unwrap();
-        assert_eq!(saved["nativeFundingVersion"], 1);
-        assert_eq!(saved["unverifiedOutputs"].as_array().unwrap().len(), 1);
+        assert_eq!(saved["nativeFundingVersion"], 2);
+        assert_eq!(saved["unverifiedOutputs"].as_array().unwrap().len(), 2);
     }
     let mut invalid: serde_json::Value = serde_json::from_slice(&original).unwrap();
-    invalid["nativeFundingVersion"] = 2.into();
+    invalid["nativeFundingVersion"] = 3.into();
     conn.execute(
         "UPDATE ext_transparent_pir_v1 SET state=?1",
         [serde_json::to_vec(&invalid).unwrap()],
     )
     .unwrap();
     assert!(native_funding_selection(&cold, address).is_err());
-    invalid["nativeFundingVersion"] = 1.into();
+    invalid["nativeFundingVersion"] = 2.into();
     invalid["unverifiedOutputs"] = serde_json::Value::Null;
     conn.execute(
         "UPDATE ext_transparent_pir_v1 SET state=?1",
@@ -912,94 +913,153 @@ fn native_funding_selection(
         .collect())
 }
 
-#[tokio::test]
-async fn native_pir_confirmation_does_not_promote_existing_pending_funding() {
+async fn pending_sibling_confirmation_case(split: bool) {
     use zcash_keys::encoding::AddressCodec;
-    let root = tempfile::tempdir().unwrap();
-    let fixture = Fixture::new(root.path()).await;
-    let wallet = fixture.restore(root.path()).await;
-    wallet
-        .sync_with_wallet_source_reported_cancellable(
-            &fixture.source,
-            None,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-        .unwrap();
-    let address = transparent::address::TransparentAddress::decode(
-        &wallet.network,
-        &wallet.transparent_address().unwrap().unwrap(),
-    )
-    .unwrap();
-    let script: transparent::address::Script = address.script().into();
-    let mut db = wallet.open_db().unwrap();
-    let account = NativeWallet::primary_account_id(&db).unwrap();
-    for (id, value, height) in [(0x33, 40000, Some(1.into())), (0x44, 60000, None)] {
-        let output = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
-            transparent::bundle::OutPoint::new([id; 32], 0),
-            transparent::bundle::TxOut::new(Zatoshis::from_u64(value).unwrap(), script.clone()),
-            height,
-            Some(account),
-            None,
-            None,
+    let mut observed = Vec::new();
+    {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(root.path()).await;
+        let wallet = fixture.restore(root.path()).await;
+        wallet
+            .sync_with_wallet_source_reported_cancellable(
+                &fixture.source,
+                None,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap();
+        let address = transparent::address::TransparentAddress::decode(
+            &wallet.network,
+            &wallet.transparent_address().unwrap().unwrap(),
         )
         .unwrap();
-        db.put_received_transparent_utxo(&output).unwrap();
+        let script: transparent::address::Script = address.script().into();
+        let mut db = wallet.open_db().unwrap();
+        let account = NativeWallet::primary_account_id(&db).unwrap();
+        for (id, index, value, height) in [
+            (0x33, 0, 40000, Some(1.into())),
+            (0x44, 0, 60000, None),
+            (0x44, 1, 70000, None),
+        ] {
+            let output = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
+                transparent::bundle::OutPoint::new([id; 32], index),
+                transparent::bundle::TxOut::new(Zatoshis::from_u64(value).unwrap(), script.clone()),
+                height,
+                Some(account),
+                None,
+                None,
+            )
+            .unwrap();
+            db.put_received_transparent_utxo(&output).unwrap();
+        }
+        drop(db);
+        let records = vec![
+            receive(),
+            TransparentEvent::Receive(ReceiveEvent {
+                metadata: None,
+                height: 1,
+                txid: Txid([0x33; 32]),
+                transaction_index: 1,
+                output_index: 0,
+                value: 40000,
+                coinbase: false,
+            }),
+            TransparentEvent::Receive(ReceiveEvent {
+                metadata: None,
+                height: 1,
+                txid: Txid([0x33; 32]),
+                transaction_index: 1,
+                output_index: 1,
+                value: 50000,
+                coinbase: false,
+            }),
+            TransparentEvent::Receive(ReceiveEvent {
+                metadata: None,
+                height: 1,
+                txid: Txid([0x44; 32]),
+                transaction_index: 1,
+                output_index: 0,
+                value: 60000,
+                coinbase: false,
+            }),
+            TransparentEvent::Receive(ReceiveEvent {
+                metadata: None,
+                height: 1,
+                txid: Txid([0x44; 32]),
+                transaction_index: 1,
+                output_index: 1,
+                value: 70000,
+                coinbase: false,
+            }),
+        ];
+        let mut pass = wallet
+            .begin_transparent_pir_with_source(
+                &fixture.source,
+                &"ab".repeat(32),
+                Arc::new(RecoveryCancellation::new()),
+            )
+            .unwrap();
+        let scope = serde_json::from_str(&pass.scope_json().unwrap()).unwrap();
+        let first = if split {
+            records[..4].to_vec()
+        } else {
+            records.clone()
+        };
+        let mut cp = checkpoint(scope, &crate::web::to_hex(&script.0 .0), first, None, 0xa1);
+        if split {
+            cp.complete = false;
+            cp.pending_pages = 1;
+        }
+        wallet
+            .apply_transparent_pir_checkpoint_with_source(
+                &fixture.source,
+                &mut pass,
+                &serde_json::to_string(&cp).unwrap(),
+            )
+            .unwrap();
+        drop(pass);
+        observed.push(native_funding_selection(&wallet, address).unwrap());
+        drop(wallet);
+        let cold = NativeWallet::open_with_wallet_source(root.path(), &fixture.source).unwrap();
+        observed.push(native_funding_selection(&cold, address).unwrap());
+        code(
+            cold.shield(&auth(), 1).await,
+            "native_wallet_source_required",
+        );
+        if split {
+            let mut pass = cold
+                .begin_transparent_pir_with_source(
+                    &fixture.source,
+                    &"ab".repeat(32),
+                    Arc::new(RecoveryCancellation::new()),
+                )
+                .unwrap();
+            let scope = serde_json::from_str(&pass.scope_json().unwrap()).unwrap();
+            let next = checkpoint(
+                scope,
+                &crate::web::to_hex(&script.0 .0),
+                records,
+                Some(cp.checkpoint_id),
+                0xa2,
+            );
+            cold.apply_transparent_pir_checkpoint_with_source(
+                &fixture.source,
+                &mut pass,
+                &serde_json::to_string(&next).unwrap(),
+            )
+            .unwrap();
+            drop(pass);
+            observed.push(native_funding_selection(&cold, address).unwrap());
+        }
     }
-    drop(db);
-    let mut pass = wallet
-        .begin_transparent_pir_with_source(
-            &fixture.source,
-            &"ab".repeat(32),
-            Arc::new(RecoveryCancellation::new()),
-        )
-        .unwrap();
-    let scope = serde_json::from_str(&pass.scope_json().unwrap()).unwrap();
-    let records = vec![
-        receive(),
-        TransparentEvent::Receive(ReceiveEvent {
-            metadata: None,
-            height: 1,
-            txid: Txid([0x33; 32]),
-            transaction_index: 1,
-            output_index: 0,
-            value: 40000,
-            coinbase: false,
-        }),
-        TransparentEvent::Receive(ReceiveEvent {
-            metadata: None,
-            height: 1,
-            txid: Txid([0x44; 32]),
-            transaction_index: 1,
-            output_index: 0,
-            value: 60000,
-            coinbase: false,
-        }),
-    ];
-    let cp = checkpoint(
-        scope,
-        &crate::web::to_hex(&script.0 .0),
-        records,
-        None,
-        0xa1,
-    );
-    wallet
-        .apply_transparent_pir_checkpoint_with_source(
-            &fixture.source,
-            &mut pass,
-            &serde_json::to_string(&cp).unwrap(),
-        )
-        .unwrap();
-    drop(pass);
-    assert_eq!(
-        native_funding_selection(&wallet, address).unwrap(),
-        vec![[0x33; 32]],
-        "only independently confirmed preexisting funding is spendable"
-    );
-    drop(wallet);
-    let cold = NativeWallet::open_with_wallet_source(root.path(), &fixture.source).unwrap();
-    assert_eq!(
-        native_funding_selection(&cold, address).unwrap(),
-        vec![[0x33; 32]]
-    );
+    assert_eq!(observed,vec![vec![[0x33;32]];if split {3}else{2}],"publisher metadata cannot confer funding authority on pending siblings in hot, cold, or later checkpoint stages");
+}
+
+#[tokio::test]
+async fn native_pir_same_checkpoint_pending_siblings_remain_read_only() {
+    pending_sibling_confirmation_case(false).await;
+}
+#[tokio::test]
+async fn native_pir_cross_checkpoint_pending_siblings_remain_read_only() {
+    pending_sibling_confirmation_case(true).await;
 }

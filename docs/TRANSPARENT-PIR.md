@@ -45,9 +45,12 @@ independently confirmed outputs already in the canonical wallet remain eligible.
 Transfer proposals and transaction creation repeat the provenance check. Revoking
 the transparent profile, reopening, retiring a projection, or reobserving its
 output does not promote it. Native independently verified promotion is not
-implemented in this release. Legacy native state conservatively quarantines all
-retained PIR receive identities when their prior confirmation authority is
-ambiguous. Canonical totals and history remain visible; totals do not authorize
+implemented in this release. Native funding version 2 snapshots shared transaction
+confirmation authority before applying a checkpoint and quarantines existing
+pending siblings together. Absent/version-1 native funding state conservatively
+quarantines all currently canonical transparent outputs, because prior sibling
+confirmation authority is ambiguous. This migration is bounded and does not
+promote funds or discard history, acquisition progress, or payment authority. Canonical totals and history remain visible; totals do not authorize
 spending. The existing source-bound native spending refusal remains in force.
 
 ## Browser transport

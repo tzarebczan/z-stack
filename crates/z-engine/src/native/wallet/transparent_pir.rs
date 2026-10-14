@@ -36,24 +36,25 @@ fn database(_: impl std::fmt::Display) -> EngineError {
 // The native marker distinguishes old projection-only state from funding provenance.
 // Migration conservatively quarantines prior receive identities, without changing facts,
 // continuation, deletion ownership, reservations, or unknown submissions.
-fn decode_native_state(bytes: &[u8]) -> anyhow::Result<ProjectionState> {
+fn decode_native_state(bytes: &[u8]) -> anyhow::Result<(ProjectionState, bool)> {
     let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|_| anyhow::anyhow!("transparent_pir_state_invalid"))?;
     let mut state: ProjectionState = serde_json::from_value(value.clone())
         .map_err(|_| anyhow::anyhow!("transparent_pir_state_invalid"))?;
-    match value.get("nativeFundingVersion") {
-        Some(version) if version.as_u64() == Some(1) && state.unverified_outputs.is_some() => {}
-        None => {
-            let unverified = state.unverified_outputs.get_or_insert_default();
-            unverified.extend(
-                state
-                    .records
-                    .keys()
-                    .filter(|k| k.starts_with("r:"))
-                    .cloned(),
-            );
-        }
+    let legacy = match value.get("nativeFundingVersion") {
+        Some(version) if version.as_u64() == Some(2) && state.unverified_outputs.is_some() => false,
+        None => true,
+        Some(version) if version.as_u64() == Some(1) => true,
         _ => anyhow::bail!("transparent_pir_state_invalid"),
+    };
+    if legacy {
+        state.unverified_outputs.get_or_insert_default().extend(
+            state
+                .records
+                .keys()
+                .filter(|k| k.starts_with("r:"))
+                .cloned(),
+        );
     }
     state
         .unverified_outputs
@@ -70,11 +71,33 @@ fn decode_native_state(bytes: &[u8]) -> anyhow::Result<ProjectionState> {
             anyhow::bail!("transparent_pir_state_invalid");
         }
     }
-    Ok(state)
+    Ok((state, legacy))
+}
+// Native v1 and older did not reliably distinguish shared publisher-supplied
+// confirmation metadata. Migrate once under the native owner; do not infer it.
+const LEGACY_OUTPUTS: &str = "SELECT json_group_array(json_array(txid,output_index)) FROM (SELECT lower(hex(t.txid)) AS txid,n.output_index FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id LIMIT 65537)";
+fn quarantine_legacy(state: &mut ProjectionState, rows: &str) -> anyhow::Result<()> {
+    let rows: Vec<(String, u32)> =
+        serde_json::from_str(rows).map_err(|_| anyhow::anyhow!("transparent_pir_state_invalid"))?;
+    if rows.len() > 65_536 || rows.iter().any(|(id, _)| !crate::transparent_pir::hash(id)) {
+        anyhow::bail!("transparent_pir_state_invalid");
+    }
+    state
+        .unverified_outputs
+        .get_or_insert_default()
+        .extend(rows.into_iter().map(|(id, n)| format!("r:{id}:{n}")));
+    Ok(())
 }
 fn encode_native_state(state: &ProjectionState) -> anyhow::Result<Vec<u8>> {
     let mut value = serde_json::to_value(state)?;
-    value["nativeFundingVersion"] = 1.into();
+    if state
+        .unverified_outputs
+        .as_ref()
+        .is_some_and(|s| s.len() > 65_536)
+    {
+        anyhow::bail!("transparent_pir_state_invalid");
+    }
+    value["nativeFundingVersion"] = 2.into();
     if state.unverified_outputs.is_none() {
         value["unverifiedOutputs"] = serde_json::json!([]);
     }
@@ -97,7 +120,12 @@ fn load(ext: &rusqlite::Transaction<'_>) -> anyhow::Result<ProjectionState> {
         .optional()?;
     match bytes {
         Some(bytes) => {
-            let state = decode_native_state(&bytes)?;
+            let (mut state, legacy) = decode_native_state(&bytes)?;
+            if legacy {
+                let rows: String = ext.query_row(LEGACY_OUTPUTS, [], |r| r.get(0))?;
+                quarantine_legacy(&mut state, &rows)?;
+                save(ext, &state)?;
+            }
             if state.bound_source.is_some() {
                 ext.execute(
                     "INSERT OR IGNORE INTO ext_transparent_pir_funding_guard_v1 VALUES(1)",
@@ -143,7 +171,7 @@ pub(super) fn funding_exclusions(
     };
     match bytes {
         Some(bytes) => {
-            let state = decode_native_state(&bytes)?;
+            let (mut state, legacy) = decode_native_state(&bytes)?;
             if state.bound_source.is_some() {
                 // DDL is intentionally unavailable to extension transactions. Old
                 // wallets without the guard must first load their PIR state through
@@ -155,6 +183,10 @@ pub(super) fn funding_exclusions(
                     "INSERT OR IGNORE INTO ext_transparent_pir_funding_guard_v1 VALUES(1)",
                     [],
                 )?;
+            }
+            if legacy {
+                let rows: String = ext.query_row(LEGACY_OUTPUTS, [], |r| r.get(0))?;
+                quarantine_legacy(&mut state, &rows)?;
             }
             // Upgrade before selection in the same wallet transaction.
             ext.execute(
@@ -539,6 +571,26 @@ impl NativeWallet {
                 save(ext,&state)?;
                 return Ok(state.status());
             }
+            // Snapshot confirmation authority for every transaction before ANY
+            // publisher metadata writes (including spend-only events). Promoting
+            // one output also confirms its existing pending siblings in WalletDb.
+            let mut original_meta=std::collections::BTreeMap::new();
+            let mut pending_siblings=std::collections::BTreeSet::new();
+            for (_,event) in &records {
+                let id=match event {TransparentEvent::Receive(e)=>e.txid.0,TransparentEvent::Spend(e)=>e.spending_txid.0};
+                if let std::collections::btree_map::Entry::Vacant(entry)=original_meta.entry(id) {
+                    let prior:Option<(Option<u32>,Option<u32>)>=ext.query_row("SELECT mined_height,tx_index FROM transactions WHERE txid=?1",[id.as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                    if prior.is_none_or(|(h,_)|h.is_none()) {
+                        let mut stmt=ext.prepare("SELECT n.output_index FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.txid=?1")?;
+                        for index in stmt.query_map([id.as_slice()],|r|r.get::<_,u32>(0))? {
+                            pending_siblings.insert(format!("r:{}:{}",crate::web::to_hex(&id),index?));
+                            if pending_siblings.len()>65_536 {anyhow::bail!("transparent_pir_state_invalid");}
+                        }
+                    }
+                    entry.insert(prior);
+                }
+            }
+            state.unverified_outputs.get_or_insert_default().extend(pending_siblings);
             if repair {
                 // The original source-bound checkpoint is already accepted. Rebuild
                 // only its erased owned effects; do not retire or rewrite independent rows.
@@ -546,7 +598,7 @@ impl NativeWallet {
             } else if let Some(floor)=retirement_floor { retire_projection(ext,&mut state,&old_records,&records,floor)?; }
             for (script,event) in &records {
                 let (id,position,mined) = match event { TransparentEvent::Receive(e) => (e.txid,e.transaction_index,e.height), TransparentEvent::Spend(e)=>(e.spending_txid,e.transaction_index,e.height) };
-                let prior_meta:Option<(Option<u32>,Option<u32>)> = ext.query_row("SELECT mined_height,tx_index FROM transactions WHERE txid=?1",[id.0.as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                let prior_meta=original_meta[&id.0];
                     if prior_meta.is_some_and(|(h,i)|h.is_some_and(|h|h!=mined) || i.is_some_and(|i|i!=u32::from(position))) { anyhow::bail!("transparent_pir_transaction_conflict"); }
                     if prior_meta.is_none() { state.projected_transactions.insert(crate::web::to_hex(&id.0)); }
                     let meta = WalletTx::new(TxId::from_bytes(id.0),position.into(),vec![],vec![],vec![],vec![],vec![],vec![],vec![]);
