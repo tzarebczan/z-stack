@@ -13,6 +13,8 @@ use zcash_protocol::consensus::{
 };
 
 pub mod birthday;
+#[cfg(feature = "private-enhance")]
+pub mod enhancement;
 pub mod error;
 pub use error::{display_anyhow, EngineError};
 pub mod keys;

@@ -1,3 +1,4 @@
+import type { PrivateEnhanceTransport } from "./private-enhance";
 import { BATCH_LOCAL, WalletError } from "@z-stack/core";
 import { COMPACT_RANGE_MAX_BYTES } from "./transport-bounds";
 /**
@@ -21,6 +22,7 @@ export const SDK_TRANSPORT_CAPABILITIES = Object.freeze({
   maxBlocksPerRequest: true,
   maxSharedMemoBlocksPerRequest: true,
   submissionPolicy: true,
+  enhanceV7: true,
 });
 
 export type TransparentUtxo = {
@@ -33,6 +35,8 @@ export type TransparentUtxo = {
 };
 
 export type BlockTransport = {
+  /** Optional Ironwood-only v7 exchange. Query construction and record application remain in Rust. */
+  enhance?: PrivateEnhanceTransport;
   kind: string;
   label: string;
   /** SDK compact-block request span, including transparent backfill. Integer 1..4000;

@@ -136,6 +136,7 @@ impl WebWallet {
             .private_enhance
             .iter()
             .filter(|a| !a.done && !a.suspended)
+            .take(24)
             .cloned()
             .map(|action| PrivateEnhanceRequest {
                 owner: owner.clone(),

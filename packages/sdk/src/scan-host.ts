@@ -1,3 +1,4 @@
+import type { PrivateEnhanceHost, PrivateEnhanceOperation } from "./private-enhance";
 /**
  * Wallet scan session: in-process (Node / tests) or a dedicated Worker (browser).
  * Apply runs off the UI thread so fetch + paint keep moving during catch-up.
@@ -38,7 +39,7 @@ export type ApplySummary = {
   scanned: number;
 };
 
-export type ScanSession = {
+export type ScanSession = PrivateEnhanceHost & {
   readonly kind?: "local" | "worker";
   create: (network: string, mnemonic: string, birthday: number, accountIndex: number) => Promise<void>;
   fromUfvk: (network: string, ufvk: string, birthday: number, accountIndex: number) => Promise<void>;
@@ -116,6 +117,7 @@ type WalletHandle = HardwareWalletHandle & {
   enhanceRawTx?: (hex: string) => number;
   applyTransparentBlocks?: (blob: Uint8Array) => number;
   applySharedMemos?: (json: string) => number;
+  privateEnhance?: (operation: PrivateEnhanceOperation, bytes: Uint8Array, time: number) => Uint8Array;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
   rewindToChecked?: (height: number) => number;
@@ -245,6 +247,11 @@ export function localScanSession(
       const wallet = w();
       if (!wallet.applySharedMemos) throw new Error("WASM needs a public-data upgrade");
       return wallet.applySharedMemos(json);
+    },
+    privateEnhance: async (operation, bytes, time) => {
+      const wallet = w();
+      if (!wallet.privateEnhance) throw new Error("WASM needs an Enhance v7 upgrade");
+      return wallet.privateEnhance(operation, bytes, time);
     },
     memoEnhancementTxids: async (limit) => {
       const cur = w();
@@ -804,6 +811,12 @@ export function workerScanSession(): ScanSession | null {
     },
     applySharedMemos: async (json) => {
       return Number((await sessionRpc("applySharedMemos", { json }, undefined, 180_000)).n) || 0;
+    },
+    privateEnhance: async (operation, bytes, time) => {
+      const buf = bytes.slice().buffer as ArrayBuffer;
+      const data = await sessionRpc("privateEnhance", { operation, blob: buf, time }, [buf], 180_000);
+      if (!(data.blob instanceof ArrayBuffer)) throw new Error("enhance_engine_invalid");
+      return new Uint8Array(data.blob);
     },
     enhanceRawTx: async (hex) => {
       const data = await sessionRpc("enhanceRawTx", { hex });

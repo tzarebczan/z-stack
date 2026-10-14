@@ -1,3 +1,4 @@
+import { syncPrivateEnhance } from "./private-enhance";
 import type { SyncStage } from "@z-stack/core";
 import {
   canShield,
@@ -256,6 +257,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     });
     if (start > tip) {
       await seedBirthdayTrees(undefined, recovery, signal);
+      await refreshPrivateEnhance(signal);
       await refreshPublicData(signal);
       await refreshPostScanState(recovery, signal);
       if (cancelled()) throw new Error("sync cancelled");
@@ -668,6 +670,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         message: ctx.memoFetch === "on-demand" ? "updating pending transactions" : "decrypting mined transaction memos",
       });
     }
+    await refreshPrivateEnhance(signal);
     await refreshPublicData(signal);
     await refreshPostScanState(recovery, signal);
     if (cancelled()) throw new Error("sync cancelled");
@@ -936,6 +939,34 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     await abortable(wait, () => locks.request("z-stack-wallet-spend", { ifAvailable: true }, (lock) => (lock ? run() : undefined)));
   }
 
+  async function refreshPrivateEnhance(signal: AbortSignal, manual = false): Promise<void> {
+    const source = ctx.session;
+    const transport = ctx.transport.enhance;
+    if (!source || !transport || (!manual && ctx.memoFetch !== "shared" && ctx.memoFetch !== "auto")) return;
+    const operation = ctx.sessionOperation ?? captureWalletOperation();
+    const mode = ctx.memoFetch;
+    const controller = new AbortController();
+    ctx.memoAbort = controller;
+    const wait = AbortSignal.any([operation.signal, signal, controller.signal]);
+    const current = () => {
+      wait.throwIfAborted(); ctx.assertSource(operation, source);
+      if (mode !== ctx.memoFetch) throw new Error("Privacy settings changed during retrieval");
+    };
+    try {
+      await syncPrivateEnhance({ source, transport, signal: wait, assertCurrent: current, checkpoint: ctx.persist });
+    } catch (error) {
+      signal.throwIfAborted(); operation.signal.throwIfAborted();
+      if (controller.signal.aborted && mode !== ctx.memoFetch) return;
+      current();
+      if (isWalletError(error) && error.code === "wallet_changed") throw error;
+      if (mode === "shared") ctx.sharedMemoStatus = "unavailable";
+      else ctx.selectiveMemoStatus = "unavailable";
+      if (manual) throw error;
+    } finally {
+      if (ctx.memoAbort === controller) ctx.memoAbort = null;
+    }
+  }
+
   async function refreshPublicData(signal: AbortSignal, manual = false): Promise<void> {
     const source = ctx.session;
     if (!source || (ctx.transparentScan !== "compact" && ctx.memoFetch !== "shared")) return;
@@ -1023,7 +1054,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
   }
 
   async function enhanceMemos(automatic = false): Promise<void> {
-    if (!ctx.session || !ctx.transport.tx) { ctx.selectiveMemoStatus = "unsupported"; return; }
+    if (!ctx.session || !ctx.transport.tx || ctx.transport.enhance) { ctx.selectiveMemoStatus = "unsupported"; return; }
     const source = ctx.session;
     const epoch = runtime.runtimeState.wasmSyncEpoch;
     const state = ctx.stateEpoch;
@@ -1121,6 +1152,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       await ctx.refreshIfStale(source, operation);
       ctx.assertSource(operation, source);
       if (epoch !== runtime.runtimeState.wasmSyncEpoch) throw new Error("memo fetch cancelled");
+      await refreshPrivateEnhance(operation.signal, true);
       if (ctx.memoFetch === "shared") await refreshPublicData(operation.signal, true);
       else await enhanceMemos();
       ctx.assertSource(operation, source);

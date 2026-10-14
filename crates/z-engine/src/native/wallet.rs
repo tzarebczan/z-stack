@@ -15,6 +15,10 @@ pub use recovery_blocks::{verify_regtest_recovery_blocks, VerifiedRegtestRecover
 #[cfg(feature = "native-pir")]
 pub use recovery_cancellation::RecoveryCancellation;
 mod payments;
+#[cfg(feature = "private-enhance")]
+mod private_enhance;
+#[cfg(feature = "private-enhance")]
+pub use private_enhance::NativeEnhancePass;
 #[cfg(feature = "native-pir")]
 mod pir;
 #[cfg(test)]

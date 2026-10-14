@@ -1,3 +1,4 @@
+import type { PrivateEnhanceOperation } from "./private-enhance";
 import {
   HASH_KEEP,
   MAX_SYNC_BLOCKS,
@@ -214,6 +215,7 @@ export type WasmWalletHandle = {
   proveSend: (mnemonic: string, to: string, amountZec: string, memo?: string, maxFeeZat?: string, minConfirmations?: number) => string;
   proveShield: (mnemonic: string, thresholdZat: number) => string;
   enhanceRawTx?: (hex: string) => number;
+  privateEnhance?: (operation: PrivateEnhanceOperation, bytes: Uint8Array, time: number) => Uint8Array;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
   rewindToChecked?: (height: number) => number;

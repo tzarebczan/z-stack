@@ -60,6 +60,7 @@ test("built SDK exports immutable strict-transport capability evidence", () => {
     assert.equal(SDK_TRANSPORT_CAPABILITIES.cancellation, true);
     assert.equal(SDK_TRANSPORT_CAPABILITIES.maxSharedMemoBlocksPerRequest, true);
     assert.equal(SDK_TRANSPORT_CAPABILITIES.submissionPolicy, true);
+    assert.equal(SDK_TRANSPORT_CAPABILITIES.enhanceV7, true);
     assert.equal(Object.isFrozen(SDK_TRANSPORT_CAPABILITIES), true);
   `], {cwd:join(root,"sdk"),env:{PATH:process.env.PATH??""},stdio:"pipe"});
 });

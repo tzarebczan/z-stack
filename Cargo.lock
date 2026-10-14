@@ -8613,6 +8613,7 @@ dependencies = [
  "transparent-events",
  "transparent-filter",
  "transparent-wallet",
+ "z-enhance-pir",
  "zakura-address",
  "zakura-bls12-381",
  "zakura-client-backend",
@@ -8675,6 +8676,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-rayon",
  "z-engine",
+ "z-enhance-pir",
 ]
 
 [[package]]

@@ -129,3 +129,5 @@ export {
   type Zip321Payment,
   type Zip321Request,
 } from "@z-stack/core";
+
+export type { PrivateEnhanceTransport, PrivateEnhanceRequest } from "./private-enhance";

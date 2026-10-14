@@ -149,3 +149,6 @@ mod replacement_tests {
         }
     }
 }
+
+#[cfg(feature = "private-enhance")]
+pub use wallet::NativeEnhancePass;
