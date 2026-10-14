@@ -1053,9 +1053,21 @@ impl WebWallet {
             agg.fee_zat = chain_fee;
             agg.fee_from_full_transaction = true;
         }
+        agg.ironwood_fee_from_full_transaction = Self::pure_ironwood_fee(tx);
         let count = agg.memos.len() as u32;
         #[cfg(feature = "private-enhance")]
-        self.reconcile_private_enhancement(&txid);
+        {
+            let recovered: Vec<_> = decrypted
+                .ironwood_outputs()
+                .iter()
+                .map(|output| {
+                    let outgoing = matches!(output.transfer_type(), TransferType::Outgoing)
+                        .then(|| output.note().0.value().inner());
+                    (output.index() as u32, outgoing)
+                })
+                .collect();
+            self.reconcile_full_ironwood_decryption(&txid, &recovered);
+        }
         Ok(count)
     }
 

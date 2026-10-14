@@ -1417,10 +1417,13 @@ impl WalletWrite for WebWallet {
             agg.received_notes = agg.received_notes.saturating_add(received_notes);
             agg.has_change = agg.has_change || has_change;
             agg.is_shielding = agg.is_shielding || (spent_t > 0 && received_zat > 0);
-            agg.fee_zat = Some(u64::from(sent.fee_amount()));
-            // SentTransaction is constructed by the Rust wallet builder; its exact signed
-            // bytes were retained above, so this fee has local provenance, even with t-inputs.
+            let builder_fee = u64::from(sent.fee_amount());
+            // The total builder fee is useful history metadata, but a pool-local balance
+            // identity additionally requires pure-Ironwood bytes and exact agreement.
+            let pure_fee = Self::pure_ironwood_fee(sent.tx());
+            agg.fee_zat = pure_fee.or(Some(builder_fee));
             agg.fee_from_full_transaction = true;
+            agg.ironwood_fee_from_full_transaction = pure_fee.filter(|fee| *fee == builder_fee);
             agg.expiry_height = Some(u32::from(sent.tx().expiry_height()));
             agg.transparent_spent = agg.transparent_spent.saturating_add(spent_t);
             agg.orchard_spent = agg.orchard_spent.saturating_add(orchard_spent);

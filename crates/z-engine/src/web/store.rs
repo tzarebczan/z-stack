@@ -207,6 +207,10 @@ pub struct TxAgg {
     /// Fee derived from complete bytes or the wallet builder that saved those signed bytes; PIR assertions never set this.
     #[serde(default)]
     pub fee_from_full_transaction: bool,
+    /// Pure-Ironwood value-balance fee, independent of generic builder/PIR fee metadata.
+    /// Other-pool contributions cannot authorize Ironwood-only padding retirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ironwood_fee_from_full_transaction: Option<u64>,
     #[serde(default)]
     pub expiry_height: Option<u32>,
     #[serde(default)]
@@ -3396,32 +3400,34 @@ impl WebWallet {
             .unwrap_or_else(|_| wire_hex.to_owned())
     }
 
+    pub(super) fn pure_ironwood_fee(tx: &Transaction) -> Option<u64> {
+        if tx.transparent_bundle().is_some()
+            || tx.sapling_bundle().is_some()
+            || tx.orchard_bundle().is_some()
+            || tx.sprout_bundle().is_some()
+        {
+            return None;
+        }
+        tx.ironwood_bundle()
+            .and_then(|bundle| u64::try_from(i64::from(*bundle.value_balance())).ok())
+    }
+
     pub(crate) fn store_pending_tx(&mut self, tx: &Transaction) -> Result<()> {
         let mut data = Vec::new();
         tx.write(&mut data)
             .map_err(|e| EngineError::Message(format!("serialize tx: {e}")))?;
         self.pending_txs.insert(tx.txid(), data);
-        // A saved pure-Ironwood transaction determines its fee without any indexer data.
-        // The builder also records its exact fee for transactions with transparent inputs.
-        if tx.transparent_bundle().is_none()
-            && tx.sapling_bundle().is_none()
-            && tx.orchard_bundle().is_none()
-            && tx.sprout_bundle().is_none()
-        {
-            if let Some(fee) = tx
-                .ironwood_bundle()
-                .and_then(|b| u64::try_from(i64::from(*b.value_balance())).ok())
-            {
-                let agg = self
-                    .txs_mut()
-                    .entry(to_hex(tx.txid().as_ref()))
-                    .or_default();
-                agg.fee_zat = Some(fee);
-                agg.fee_from_full_transaction = true;
-            }
+        // Only complete pure-Ironwood bytes supply the pool-local value balance.
+        let fee = Self::pure_ironwood_fee(tx);
+        let agg = self
+            .txs_mut()
+            .entry(to_hex(tx.txid().as_ref()))
+            .or_default();
+        agg.ironwood_fee_from_full_transaction = fee;
+        if let Some(fee) = fee {
+            agg.fee_zat = Some(fee);
+            agg.fee_from_full_transaction = true;
         }
-        #[cfg(feature = "private-enhance")]
-        self.reconcile_private_enhancement(&to_hex(tx.txid().as_ref()));
         Ok(())
     }
 

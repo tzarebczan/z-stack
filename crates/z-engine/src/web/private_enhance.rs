@@ -224,6 +224,27 @@ impl WebWallet {
 }
 
 impl WebWallet {
+    pub(super) fn reconcile_full_ironwood_decryption(
+        &mut self,
+        txid: &str,
+        recovered: &[(u32, Option<u64>)],
+    ) {
+        // Resolve only indices actually authenticated by complete-transaction decryption.
+        // Failed recoveries remain candidates; a visible change note cannot hide another output.
+        for action in self
+            .private_enhance
+            .iter_mut()
+            .filter(|action| action.txid == txid)
+        {
+            if let Some((_, outgoing)) = recovered.iter().find(|(index, _)| *index == action.index)
+            {
+                action.done = true;
+                action.suspended = false;
+                action.recovered_outgoing_value = *outgoing;
+            }
+        }
+        self.reconcile_private_enhancement(txid);
+    }
     pub(super) fn reconcile_private_enhancement(&mut self, txid: &str) {
         self.retire_value_balanced_padding(txid);
         let mut actions = self
@@ -244,7 +265,7 @@ impl WebWallet {
         let Some(tx) = self.txs().get(txid) else {
             return;
         };
-        let Some(fee) = tx.fee_zat.filter(|_| tx.fee_from_full_transaction) else {
+        let Some(fee) = tx.ironwood_fee_from_full_transaction else {
             return;
         };
         let actions: Vec<_> = self
@@ -635,6 +656,15 @@ mod tests {
         w: &WebWallet,
         outputs: &[(CompactOrchardAction, EnhanceRecord)],
     ) -> Vec<u8> {
+        full_spend_bytes_with_balance(w, outputs, 10000, false)
+    }
+    #[cfg(feature = "native")]
+    fn full_spend_bytes_with_balance(
+        w: &WebWallet,
+        outputs: &[(CompactOrchardAction, EnhanceRecord)],
+        balance: i64,
+        transparent_input: bool,
+    ) -> Vec<u8> {
         use orchard::{
             bundle::{Authorized as Auth, Bundle, BundleVersion},
             note::{Nullifier, TransmittedNoteCiphertext},
@@ -682,7 +712,7 @@ mod tests {
         let bundle = Bundle::try_from_parts(
             nonempty,
             version.default_flags(),
-            ZatBalance::from_i64(10000).unwrap(),
+            ZatBalance::from_i64(balance).unwrap(),
             Anchor::empty_tree(),
             Auth::from_parts(proof, [0; 64].into()),
             version,
@@ -692,7 +722,15 @@ mod tests {
             BranchId::Nu6_3,
             0,
             BlockHeight::from_u32(HEIGHT + 500),
-            None,
+            transparent_input.then(|| transparent::bundle::Bundle {
+                vin: vec![transparent::bundle::TxIn::from_parts(
+                    transparent::bundle::OutPoint::new([9; 32], 0),
+                    transparent::address::Script::default(),
+                    u32::MAX,
+                )],
+                vout: vec![],
+                authorization: transparent::bundle::Authorized,
+            }),
             None,
             None,
             Some(bundle),
@@ -712,6 +750,14 @@ mod tests {
     fn spent_change_padding_custom(
         fee: Option<u64>,
         discard_payment: bool,
+        before_scan: impl FnOnce(&mut WebWallet, &[(CompactOrchardAction, EnhanceRecord)]) -> Vec<u8>,
+    ) -> (WebWallet, Vec<EnhanceRecord>) {
+        spent_change_padding_values(fee, discard_payment, [60000, 30000], before_scan)
+    }
+    fn spent_change_padding_values(
+        fee: Option<u64>,
+        discard_payment: bool,
+        values: [u64; 2],
         before_scan: impl FnOnce(&mut WebWallet, &[(CompactOrchardAction, EnhanceRecord)]) -> Vec<u8>,
     ) -> (WebWallet, Vec<EnhanceRecord>) {
         let mut w = wallet();
@@ -743,14 +789,14 @@ mod tests {
             encrypted_action(
                 foreign.address_at(0u32, Scope::External),
                 (!discard_payment).then(|| fvk.to_ovk(Scope::External)),
-                60000,
+                values[0],
                 nf,
                 fee,
             ),
             encrypted_action(
                 fvk.address_at(0u32, Scope::Internal),
                 Some(fvk.to_ovk(Scope::Internal)),
-                30000,
+                values[1],
                 [5; 32],
                 fee,
             ),
@@ -820,6 +866,153 @@ mod tests {
         });
         let (raw, id) = saved.unwrap();
         (w, records, raw, id)
+    }
+    #[cfg(feature = "native")]
+    #[test]
+    fn caller_order_mixed_or_mismatched_saved_fee_cannot_retire_hidden_positive() {
+        use zcash_client_backend::data_api::{SentTransaction, WalletWrite};
+        use zcash_primitives::transaction::Transaction;
+        use zcash_protocol::{
+            consensus::{BlockHeight, BranchId},
+            value::Zatoshis,
+        };
+        let mut falsely_complete = Vec::new();
+        for mixed in [false, true] {
+            let mut id = String::new();
+            let (mut w, records) = spent_change_padding_values(
+                Some(if mixed { 10000 } else { 70000 }),
+                true,
+                if mixed {
+                    [50000, 90000]
+                } else {
+                    [60000, 30000]
+                },
+                |w, outputs| {
+                    // Mixed case: IW100k + transparent50k = change90k + hidden50k + fee10k.
+                    // Other case deliberately supplies a caller fee70k for pure-IW fee10k.
+                    let raw = full_spend_bytes_with_balance(
+                        w,
+                        outputs,
+                        if mixed { -40000 } else { 10000 },
+                        mixed,
+                    );
+                    let tx = Transaction::read(raw.as_slice(), BranchId::Nu6_3).unwrap();
+                    id = to_hex(tx.txid().as_ref());
+                    let sent = SentTransaction::new(
+                        &tx,
+                        std::time::UNIX_EPOCH.into(),
+                        BlockHeight::from_u32(HEIGHT + 1).into(),
+                        0,
+                        &[],
+                        Zatoshis::from_u64(if mixed { 10000 } else { 70000 }).unwrap(),
+                        #[cfg(feature = "transparent-inputs")]
+                        &[],
+                    );
+                    w.store_transactions_to_be_sent(&[sent]).unwrap();
+                    tx.txid().as_ref().to_vec()
+                },
+            );
+            let work: Vec<_> = w
+                .private_enhance_work()
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.action.txid == id)
+                .collect();
+            assert_eq!(work.len(), 3);
+            assert_eq!(w.txs()[&id].ironwood_fee_from_full_transaction, None);
+            for (request, record) in work.into_iter().zip(records) {
+                let before = w.to_snapshot().unwrap();
+                if w.apply_private_enhance_record(request, record.as_bytes())
+                    .is_err()
+                {
+                    // The forged pure-IW fee also conflicts with the canonical stored fee.
+                    assert!(!mixed);
+                    assert_eq!(w.to_snapshot().unwrap(), before);
+                }
+            }
+            let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+            if w.txs()[&id].enhancement_complete || restored.txs()[&id].enhancement_complete {
+                falsely_complete.push(mixed);
+            } else {
+                assert!(
+                    w.private_enhance
+                        .iter()
+                        .filter(|a| a.txid == id && !a.done)
+                        .count()
+                        >= 2
+                );
+                assert_eq!(restored.txs()[&id].ironwood_fee_from_full_transaction, None);
+            }
+        }
+        assert!(
+            falsely_complete.is_empty(),
+            "falsely complete mixed={falsely_complete:?}"
+        );
+    }
+    #[cfg(feature = "native")]
+    #[test]
+    fn caller_order_incoming_full_raw_before_pir_stays_complete() {
+        use zcash_primitives::transaction::Transaction;
+        use zcash_protocol::consensus::BranchId;
+        let mut w = wallet();
+        let fvk = w.decode_ufvk().unwrap().orchard().unwrap().clone();
+        let output = encrypted_action(
+            fvk.address_at(0u32, Scope::External),
+            None,
+            50000,
+            [1; 32],
+            Some(10000),
+        );
+        let raw = full_spend_bytes(&w, std::slice::from_ref(&output));
+        let tx = Transaction::read(raw.as_slice(), BranchId::Nu6_3).unwrap();
+        let id = to_hex(tx.txid().as_ref());
+        let (mut block, _) = fixture(&w);
+        block.vtx[0].txid = tx.txid().as_ref().to_vec();
+        block.vtx[0].ironwood_actions = vec![output.0];
+        w.apply_compact_block(&block.encode_to_vec()).unwrap();
+        assert_eq!(w.private_enhance_work().unwrap().len(), 1);
+        w.enhance_raw_tx(&raw).unwrap();
+        assert_eq!(w.txs()[&id].memos, ["private hello"]);
+        assert!(w.txs()[&id].enhancement_complete);
+        assert!(w.private_enhance_work().unwrap().is_empty());
+        let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert!(restored.txs()[&id].enhancement_complete);
+        assert!(!restored
+            .memo_enhancement_txids(10)
+            .contains(&WebWallet::display_txid(&id)));
+    }
+    #[cfg(feature = "native")]
+    #[test]
+    fn caller_order_full_raw_before_pir_keeps_hidden_positive_unresolved() {
+        let (mut w, records, raw, id) = caller_order_fixture_with_discard(false, true);
+        w.enhance_raw_tx(&raw).unwrap();
+        assert!(!w.txs()[&id].enhancement_complete);
+        let work: Vec<_> = w
+            .private_enhance_work()
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.action.txid == id)
+            .collect();
+        assert_eq!(
+            work.len(),
+            2,
+            "only the authenticated change action was resolved"
+        );
+        for request in work {
+            let record = &records[request.action.index as usize];
+            w.apply_private_enhance_record(request, record.as_bytes())
+                .unwrap();
+        }
+        assert!(!w.txs()[&id].enhancement_complete);
+        assert_eq!(
+            w.private_enhance
+                .iter()
+                .filter(|a| a.txid == id && a.suspended && !a.done)
+                .count(),
+            2
+        );
+        let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert!(!restored.txs()[&id].enhancement_complete);
     }
     #[cfg(feature = "native")]
     #[test]
@@ -916,19 +1109,15 @@ mod tests {
             2
         );
     }
+    #[cfg(feature = "native")]
     #[test]
     fn genuine_spend_change_and_padding_complete_only_after_recovered_value_balance() {
-        let (mut w, records) = spent_change_padding(Some(10000), false);
-        {
-            let tx = w.txs_mut().get_mut(&"04".repeat(32)).unwrap();
-            tx.fee_zat = Some(10000);
-            tx.fee_from_full_transaction = true;
-        }
+        let (mut w, records, _, id) = caller_order_fixture(true);
         let work: Vec<_> = w
             .private_enhance_work()
             .unwrap()
             .into_iter()
-            .filter(|r| r.action.txid == "04".repeat(32))
+            .filter(|r| r.action.txid == id)
             .collect();
         assert_eq!(work.len(), 3);
         assert_eq!(
@@ -936,24 +1125,24 @@ mod tests {
                 .unwrap(),
             EnhancePirStoreResult::NotRecoverable
         );
-        assert!(!w.txs()[&"04".repeat(32)].enhancement_complete);
+        assert!(!w.txs()[&id].enhancement_complete);
         assert_eq!(
             w.apply_private_enhance_record(work[1].clone(), records[1].as_bytes())
                 .unwrap(),
             EnhancePirStoreResult::Stored
         );
-        assert!(!w.txs()[&"04".repeat(32)].enhancement_complete);
+        assert!(!w.txs()[&id].enhancement_complete);
         assert_eq!(
             w.apply_private_enhance_record(work[0].clone(), records[0].as_bytes())
                 .unwrap(),
             EnhancePirStoreResult::Stored
         );
-        let tx = &w.txs()[&"04".repeat(32)];
+        let tx = &w.txs()[&id];
         assert!(tx.enhancement_complete);
         assert_eq!(tx.outgoing_shielded_zat, 60000);
         assert_eq!(tx.memo_recovered, Some(true));
         let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
-        assert!(restored.txs()[&"04".repeat(32)].enhancement_complete);
+        assert!(restored.txs()[&id].enhancement_complete);
     }
     #[test]
     fn missing_fee_wrong_balance_and_discarded_payment_remain_unresolved() {
@@ -964,11 +1153,6 @@ mod tests {
             (Some(10000), true),
         ] {
             let (mut w, records) = spent_change_padding(fee, discard);
-            if discard || fee == Some(9000) {
-                let tx = w.txs_mut().get_mut(&"04".repeat(32)).unwrap();
-                tx.fee_zat = fee;
-                tx.fee_from_full_transaction = true;
-            }
             let work: Vec<_> = w
                 .private_enhance_work()
                 .unwrap()
@@ -1017,8 +1201,13 @@ mod tests {
         let agg = &w.txs()[&to_hex(tx.txid().as_ref())];
         assert_eq!(agg.fee_zat, Some(0));
         assert!(agg.fee_from_full_transaction);
+        assert_eq!(agg.ironwood_fee_from_full_transaction, Some(0));
         let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
         assert!(restored.txs()[&to_hex(tx.txid().as_ref())].fee_from_full_transaction);
+        assert_eq!(
+            restored.txs()[&to_hex(tx.txid().as_ref())].ironwood_fee_from_full_transaction,
+            Some(0)
+        );
         w.reset_scan();
         assert!(w.txs().is_empty());
     }
