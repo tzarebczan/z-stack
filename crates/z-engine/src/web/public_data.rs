@@ -386,7 +386,7 @@ impl WebWallet {
             for tx in &block.vtx {
                 let txid = to_hex(&tx.txid);
                 let mut involved = false;
-                for input in &tx.vin {
+                for (_input_index, input) in tx.vin.iter().enumerate() {
                     let prev = to_hex(&input.prevout_txid);
                     for u in &mut self.utxos {
                         if u.txid == prev && u.index == input.prevout_index {
@@ -395,6 +395,13 @@ impl WebWallet {
                             involved = true;
                         }
                     }
+                    #[cfg(feature = "transparent-pir")]
+                    self.record_public_transparent_spend(
+                        &txid,
+                        _input_index,
+                        &prev,
+                        input.prevout_index,
+                    );
                 }
                 for (index, output) in tx.vout.iter().enumerate() {
                     let Some((_, address)) = scripts
@@ -427,6 +434,8 @@ impl WebWallet {
                         });
                         found += 1;
                     }
+                    #[cfg(feature = "transparent-pir")]
+                    self.record_public_transparent_output(&txid, index as u32);
                 }
                 if involved {
                     let agg = self.txs_mut().entry(txid).or_default();

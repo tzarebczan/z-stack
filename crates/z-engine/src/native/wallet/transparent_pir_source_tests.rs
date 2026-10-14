@@ -194,6 +194,19 @@ async fn native_transparent_pir_canonical_receive_spend_reopen_and_cancel() {
         wallet.transparent_pir_status().unwrap()["confirmedZat"],
         "150000"
     );
+    // PIR rows live in the canonical DB, but this source-bound wallet cannot
+    // enter ordinary transparent shielding or direct endpoint send routines.
+    let calls_before = fixture.calls.lock().unwrap().len();
+    code(
+        wallet.shield(&auth(), 1).await,
+        "native_wallet_source_required",
+    );
+    code(wallet.max_send(None), "native_wallet_source_required");
+    code(
+        wallet.send(&auth(), "irrelevant", 1, None).await,
+        "native_wallet_source_required",
+    );
+    assert_eq!(fixture.calls.lock().unwrap().len(), calls_before);
     conn.execute(
         "UPDATE transparent_received_outputs SET lock_expiry_height=100 WHERE value_zat=150000",
         [],

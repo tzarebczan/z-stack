@@ -1278,6 +1278,10 @@ impl WalletWrite for WebWallet {
                 existing.value_zat = u64::from(output.txout().value());
                 existing.script = super::to_hex(&output.txout().script_pubkey().0 .0);
             }
+            #[cfg(feature = "transparent-pir")]
+            if output.mined_height().is_some() {
+                self.record_public_transparent_output(&txid, index);
+            }
             return Ok(i as u32);
         }
         #[cfg(feature = "transparent-inputs")]
@@ -1287,6 +1291,10 @@ impl WalletWrite for WebWallet {
         };
         #[cfg(not(feature = "transparent-inputs"))]
         let address = String::new();
+        #[cfg(feature = "transparent-pir")]
+        if output.mined_height().is_some() {
+            self.record_public_transparent_output(&txid, index);
+        }
         self.utxos.push(super::store::StoredUtxo {
             coinbase: false,
             txid,

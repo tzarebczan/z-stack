@@ -1420,8 +1420,13 @@ impl WebWallet {
         #[cfg(feature = "transparent-pir")]
         if self
             .transparent_pir
-            .records
-            .contains_key(&format!("r:{}:{}", u.txid, u.index))
+            .projected_outputs
+            .contains(&format!("r:{}:{}", u.txid, u.index))
+            || (!self.transparent_pir.public_funding_isolated
+                && self
+                    .transparent_pir
+                    .records
+                    .contains_key(&format!("r:{}:{}", u.txid, u.index)))
         {
             return false;
         }
@@ -1443,6 +1448,30 @@ impl WebWallet {
         let need = u32::from(policy.untrusted());
         let tip = u32::from(target);
         tip > u.height && tip.saturating_sub(u.height) >= need
+    }
+
+    #[cfg(feature = "transparent-pir")]
+    pub(crate) fn record_public_transparent_output(&mut self, txid: &str, index: u32) {
+        // Independently confirmed canonical rows no longer belong to PIR's
+        // provisional projection. Keep the acquired facts, but transfer retirement authority.
+        self.transparent_pir
+            .projected_outputs
+            .remove(&format!("r:{txid}:{index}"));
+        self.transparent_pir.projected_transactions.remove(txid);
+    }
+
+    #[cfg(feature = "transparent-pir")]
+    pub(crate) fn record_public_transparent_spend(
+        &mut self,
+        txid: &str,
+        input: usize,
+        previous: &str,
+        index: u32,
+    ) {
+        self.transparent_pir
+            .projected_spends
+            .remove(&format!("s:{txid}:{input}:{previous}:{index}"));
+        self.transparent_pir.projected_transactions.remove(txid);
     }
 
     fn transparent_pir_snapshot_status(&self) -> serde_json::Value {
@@ -2096,6 +2125,15 @@ impl WebWallet {
         if self.unmined_pending_txs().next().is_some() {
             return Err(EngineError::Message("rescan pending payment".into()));
         }
+        if self
+            .output_locks
+            .iter()
+            .any(|lock| lock.expiry >= self.next_height())
+        {
+            return Err(EngineError::Message(
+                "rescan active output reservation".into(),
+            ));
+        }
         let mut fresh = Self::from_ufvk(self.network, &self.ufvk, birthday, self.account_index)?;
         fresh.unified_address = self.unified_address.clone();
         fresh.transparent_address = self.transparent_address.clone();
@@ -2104,6 +2142,11 @@ impl WebWallet {
         fresh.hardware = self.hardware.clone();
         fresh.recent_recipients = self.recent_recipients.clone();
         fresh.transparent_scan_required = self.transparent_scan_required;
+        #[cfg(feature = "transparent-pir")]
+        {
+            fresh.transparent_pir = self.transparent_pir.clone();
+            fresh.transparent_pir.invalidate_projection();
+        }
         *self = fresh;
         Ok(())
     }
@@ -3549,8 +3592,18 @@ impl WebWallet {
             })
             .cloned()
             .collect();
+        #[cfg(feature = "transparent-pir")]
+        let confirmed: Vec<_> = next
+            .iter()
+            .filter(|u| u.height > 0)
+            .map(|u| (u.txid.clone(), u.index))
+            .collect();
         next.extend(kept);
         self.utxos = next;
+        #[cfg(feature = "transparent-pir")]
+        for (txid, index) in confirmed {
+            self.record_public_transparent_output(&txid, index);
+        }
         // Explicit compatibility address lookup replaces compact coverage. A
         // future switch back must replay spends missed in this mode.
         self.transparent_scan_required = false;
