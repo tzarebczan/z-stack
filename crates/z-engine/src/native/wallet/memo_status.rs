@@ -42,10 +42,14 @@ pub(super) fn work(
     }
     // The typed API intentionally identifies rediscovery by block. Resolve only the durable
     // private discovery jobs in those blocks, without exposing their identities to a host.
-    if let Ok(mut statement) = conn.prepare("SELECT t.txid FROM ironwood_enhance_discovery_queue q JOIN transactions t ON t.id_tx=q.transaction_id JOIN ironwood_enhance_routing r ON r.transaction_id=t.id_tx WHERE t.mined_height=?1 AND r.route=0") {
+    if !discovery.is_empty() {
+        let mut statement = conn.prepare("SELECT t.txid FROM ironwood_enhance_discovery_queue q JOIN transactions t ON t.id_tx=q.transaction_id JOIN ironwood_enhance_routing r ON r.transaction_id=t.id_tx WHERE t.mined_height=?1 AND r.route=0").ok()?;
         for height in discovery {
-            if let Ok(rows) = statement.query_map([height], |row|row.get::<_,[u8;32]>(0)) {
-                for id in rows.flatten() { pending.insert(TxId::from_bytes(id)); }
+            let rows = statement
+                .query_map([height], |row| row.get::<_, [u8; 32]>(0))
+                .ok()?;
+            for id in rows {
+                pending.insert(TxId::from_bytes(id.ok()?));
             }
         }
     }

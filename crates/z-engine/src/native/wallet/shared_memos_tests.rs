@@ -1,4 +1,7 @@
-use super::super::{open_wallet_db, LightServer, UnlockPolicy, WalletMeta, WalletPaths};
+use super::super::{
+    new_rng, open_wallet_db, LightServer, SystemClock, UnlockPolicy, WalletDb, WalletMeta,
+    WalletPaths,
+};
 use super::*;
 use crate::{
     keys::{account_from_mnemonic, REGTEST_FAUCET_MNEMONIC},
@@ -461,4 +464,60 @@ async fn public_apply_preserves_private_rediscover_and_suspended_work() {
             crate::MemoStatus::Pending
         );
     }
+}
+
+#[tokio::test]
+async fn rediscovery_row_decode_error_keeps_authenticated_empty_memo_unknown() {
+    let f = fixture_with_memo(false, "");
+    let mut pass = f.wallet.begin_shared_memos_with_source(&f.source).unwrap();
+    assert_eq!(apply_all(&f, &mut pass).unwrap(), 1);
+    let status = || {
+        f.wallet
+            .transaction(&f.public.to_string())
+            .unwrap()
+            .unwrap()
+            .memo_status
+    };
+    assert_eq!(status(), crate::MemoStatus::Empty);
+    let conn = rusqlite::Connection::open(&f.wallet.paths.data_db).unwrap();
+    // Rediscovery work carries the block hash, so its typed work is valid even
+    // when one durable queue member has a corrupt txid. Its ID lookup must fail closed.
+    conn.execute("INSERT OR IGNORE INTO blocks(height,hash,time,sapling_tree,sapling_commitment_tree_size,orchard_commitment_tree_size,ironwood_commitment_tree_size) SELECT ?1,?2,time,sapling_tree,0,0,0 FROM blocks WHERE height=?3",rusqlite::params![BIRTHDAY-1,[4u8;32].as_slice(),BIRTHDAY]).unwrap();
+    conn.execute(
+        "INSERT INTO transactions(txid,mined_height,tx_index,min_observed_height) VALUES(?1,?2,99,?2)",
+        rusqlite::params![[1u8, 2].as_slice(), BIRTHDAY],
+    )
+    .unwrap();
+    let id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO ironwood_enhance_routing(transaction_id,route) VALUES(?1,0)",
+        [id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO ironwood_enhance_discovery_queue(transaction_id,suspended) VALUES(?1,0)",
+        [id],
+    )
+    .unwrap();
+    conn.pragma_update(None, "query_only", true).unwrap();
+    let changes = conn.total_changes();
+    let db = WalletDb::from_connection(&conn, Network::Regtest, SystemClock, new_rng())
+        .with_enhancement_mode(EnhancementMode::PrivateIronwood);
+    assert!(db
+        .transaction_enhancement_work()
+        .unwrap()
+        .iter()
+        .any(|work| matches!(
+            work,
+            TransactionEnhancementWork::Private(
+                zcash_client_backend::data_api::enhance_pir::EnhancePirWork::Rediscover(_)
+            )
+        )));
+    assert_eq!(status(), crate::MemoStatus::Unknown);
+    assert!(super::super::memo_status::work(&conn, Network::Regtest).is_none());
+    assert_eq!(
+        conn.total_changes(),
+        changes,
+        "status lookup must remain query-only"
+    );
 }
