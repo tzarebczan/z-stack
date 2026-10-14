@@ -229,6 +229,22 @@ impl WebWallet {
         txid: &str,
         recovered: &[(u32, Option<u64>)],
     ) {
+        let incoming: Vec<_> = self
+            .notes()
+            .iter()
+            .filter(|note| note.txid == txid && note.pool == "ironwood")
+            .collect();
+        let incoming_only_complete = !incoming.is_empty()
+            && self.txs().get(txid).is_some_and(|tx| tx.spent_notes == 0)
+            && !self
+                .notes()
+                .iter()
+                .any(|note| note.spent_in.as_deref() == Some(txid))
+            && incoming.iter().all(|note| {
+                recovered
+                    .iter()
+                    .any(|(index, _)| *index == note.output_index)
+            });
         // Resolve only indices actually authenticated by complete-transaction decryption.
         // Failed recoveries remain candidates; a visible change note cannot hide another output.
         for action in self
@@ -244,6 +260,14 @@ impl WebWallet {
             }
         }
         self.reconcile_private_enhancement(txid);
+        if incoming_only_complete {
+            // Full raw authenticated every locally known incoming memo. Unrecovered foreign
+            // actions do not require outgoing completion when this wallet spent no notes.
+            // Leave their action bits untouched: this does not certify them as padding.
+            if let Some(tx) = self.txs_mut().get_mut(txid) {
+                tx.enhancement_complete = true;
+            }
+        }
     }
     pub(super) fn reconcile_private_enhancement(&mut self, txid: &str) {
         self.retire_value_balanced_padding(txid);
@@ -974,6 +998,66 @@ mod tests {
         w.enhance_raw_tx(&raw).unwrap();
         assert_eq!(w.txs()[&id].memos, ["private hello"]);
         assert!(w.txs()[&id].enhancement_complete);
+        assert!(w.private_enhance_work().unwrap().is_empty());
+        let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert!(restored.txs()[&id].enhancement_complete);
+        assert!(!restored
+            .memo_enhancement_txids(10)
+            .contains(&WebWallet::display_txid(&id)));
+    }
+    #[cfg(feature = "native")]
+    #[test]
+    fn caller_order_incoming_full_raw_with_unrecoverable_padding_stays_complete() {
+        use zcash_primitives::transaction::Transaction;
+        use zcash_protocol::consensus::BranchId;
+        let mut w = wallet();
+        let fvk = w.decode_ufvk().unwrap().orchard().unwrap().clone();
+        let stranger = account_from_mnemonic(
+            "legal winner thank year wave sausage worth useful legal winner thank yellow",
+            Network::Regtest,
+            0,
+        )
+        .unwrap();
+        let foreign =
+            zcash_keys::keys::UnifiedFullViewingKey::decode(&Network::Regtest, &stranger.ufvk)
+                .unwrap();
+        let outputs = [
+            encrypted_action(
+                fvk.address_at(0u32, Scope::External),
+                None,
+                50000,
+                [1; 32],
+                Some(10000),
+            ),
+            encrypted_action(
+                foreign.orchard().unwrap().address_at(0u32, Scope::External),
+                None,
+                0,
+                [2; 32],
+                Some(10000),
+            ),
+        ];
+        let raw = full_spend_bytes(&w, &outputs);
+        let tx = Transaction::read(raw.as_slice(), BranchId::Nu6_3).unwrap();
+        let id = to_hex(tx.txid().as_ref());
+        let (mut block, _) = fixture(&w);
+        block.vtx[0].txid = tx.txid().as_ref().to_vec();
+        block.vtx[0].ironwood_actions =
+            outputs.iter().map(|(compact, _)| compact.clone()).collect();
+        block
+            .chain_metadata
+            .as_mut()
+            .unwrap()
+            .ironwood_commitment_tree_size = 2;
+        w.apply_compact_block(&block.encode_to_vec()).unwrap();
+        assert_eq!(w.private_enhance_work().unwrap().len(), 2);
+        w.enhance_raw_tx(&raw).unwrap();
+        assert_eq!(w.txs()[&id].memos, ["private hello"]);
+        assert!(w.txs()[&id].enhancement_complete);
+        assert!(w
+            .private_enhance
+            .iter()
+            .any(|action| action.txid == id && !action.done));
         assert!(w.private_enhance_work().unwrap().is_empty());
         let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
         assert!(restored.txs()[&id].enhancement_complete);
