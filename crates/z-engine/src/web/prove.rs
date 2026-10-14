@@ -148,12 +148,6 @@ pub(super) fn orchard_spend_policy() -> SpendPolicy {
 
 impl WebWallet {
     pub fn prove_shield(&mut self, mnemonic: &str, threshold_zat: u64) -> Result<Vec<u8>> {
-        #[cfg(feature = "transparent-pir")]
-        if self.transparent_pir.scope.is_some() {
-            return Err(EngineError::Message(
-                "transparent_pir_shield_unavailable".into(),
-            ));
-        }
         #[cfg(not(feature = "transparent-inputs"))]
         {
             let _ = (mnemonic, threshold_zat);
