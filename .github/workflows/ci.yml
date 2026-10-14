@@ -140,7 +140,7 @@ jobs:
         with:
           name: native-timings-${{ github.sha }}
           path: target/**/cargo-timings/cargo-timing-*.html
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: warn
       - name: Native compiler cache statistics
         if: always() && steps.sccache-install.outcome == 'success' && steps.compiler-cache.outcome == 'success'
@@ -264,7 +264,7 @@ jobs:
         with:
           name: api-reference-${{ github.sha }}
           path: docs/api/
-          retention-days: 14
+          retention-days: 1
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
@@ -272,7 +272,7 @@ jobs:
           path: |
             artifacts/*.tgz
             artifacts/SHA256SUMS
-          retention-days: 14
+          retention-days: 1
           if-no-files-found: error
 
       - name: Prepared browser consumer builds
