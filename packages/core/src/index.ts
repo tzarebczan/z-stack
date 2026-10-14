@@ -126,6 +126,8 @@ export type WalletSnapshot = {
   transparentPir?: {
     trust: "publisher-provided-confirmed-history";
     spendingEnabled: false;
+    /** Legacy private-history state requires an explicit, payment-safe wallet rescan. */
+    rescanRequired?: boolean;
     completion: "complete-for-enrolled-scope" | "checkpoint-pending" | "incomplete";
     confirmedZat: string;
     coveredThrough: number;
