@@ -19,7 +19,8 @@ Only these six public routes are admitted. Query never selects a segment.
 `advance()->Result<Step>`;
 `accept(request_id:u64, reply:Reply)->Result<()>`;
 `acknowledge(checkpoint_id:&str)->Result<()>`;
-`cancel()`.
+`finish_budget()->Result<()>` (active resource deadline only);
+`cancel()` (user/session cancellation, never persistence).
 Step = Exchange {request_id,operation} | NeedChain {height,hash} |
 Checkpoint {checkpoint:Checkpoint} | Stopped {status:Status}.
 
@@ -58,7 +59,7 @@ logical continuation. Retries and malformed-content dummy obligations remain the
 upstream walker's. Busy yields bounded delayed progress, never thread sleep.
 
 
-The private continuation is version 2. A malformed page run records its remaining
+The private continuation is version 3; version 2 is accepted only after its original checkpoint digest is verified, then migrated without changing its source journal or cover-query obligations. A malformed page run records its remaining
 cover-query count on the existing pending item, bound to that script, revision,
 and accepted target. The failure count and this obligation commit together before
 another exchange is yielded. Reopening pays that debt before another real query
@@ -73,3 +74,52 @@ transparent continuations are rejected; existing wallet/payment data is unchange
 Coverage walks from the script's inclusive required height using an optional end,
 so a range covering genesis alone produces a revision-bearing 0..0 coverage row.
 A completing checkpoint must carry every enrolled script through its accepted anchor.
+
+
+Historical chain validation has an independent core resource limit:
+`Limits.max_chain_reads` defaults to 32 (also when absent from older JSON).
+Each new independent historical read, including prior-anchor revalidation, counts
+against it. Reaching the limit produces an acknowledged incomplete checkpoint
+with reason `chain_budget`, then stops that pass. The host's separate 64-read
+limit remains a defense guard. Header work alone never changes source coverage,
+completion, rewind markers, receive/spend facts, or query-cover debt. The first
+header-only checkpoint reports no coverage when no evidence exists.
+
+The continuation binds at most 4096 accepted public height/hash pairs to its
+source, known network genesis and current accepted anchor. Only independently
+obtained hashes matching the expected boundary enter the durable cache. A
+mismatching independently obtained point is available only to the live ChainView
+so upstream validation may reject a publication or roll back obsolete coverage.
+On an advancing target, the prior accepted anchor is independently checked on the
+current selected canonical chain before older cached points can be reused. A
+mismatch discards that cache and proceeds through fresh validation and the
+existing rollback rules. Lower targets are refused. After map validation the
+cache retains only current map boundaries, genesis/current anchor and boundaries
+needed by existing coverage, so obsolete tips do not accumulate. Oversized cache
+maps are rejected during deserialization. No PIR query bytes or randomness are
+cached. Cancellation before a core budget checkpoint may repeat uncommitted
+reads; acknowledged budget progress survives a cold reopen.
+
+A host resource deadline may call `finish_budget` while the same wallet session
+is still active, then drain only Checkpoint/ack/Stopped. This abandons live IO and
+query contexts while preserving previously validated logical progress. A held
+checkpoint remains held until its ordinary durable acknowledgment. User lock,
+user cancellation or an obsolete generation must use `cancel`, which cannot be
+converted into a budget finish. An elapsed deadline may therefore commit a
+shorter accepted header prefix without raising either read limit.
+
+Budget checkpoints retain the full source projection and serialize it once per
+bounded pass; large wallet checkpoint cost remains proportional to that journal.
+They do not prove the publisher indexed every block. The real-service fixture
+first recovers receive/spend facts, then validates more than 130 boundary heights
+across cold bounded passes and advancing tips, preserving those facts during
+header-only progress.
+
+An incomplete result with an unchanged durable continuation and identical
+source/scope/generation/anchor returns Stopped without rewriting the prior
+checkpoint. A changed binding, accepted header, journal or cover obligation still
+checkpoints. Complete retains its normal checkpoint/ack path. If the complete
+logical payload has the same ID, the validated prior metadata (including receipt
+link and rewind) is reused exactly; conflicting metadata is refused. A repeated
+upstream walk may increment its source-journal commit counter and produce a new
+ID while preserving the same canonical facts.

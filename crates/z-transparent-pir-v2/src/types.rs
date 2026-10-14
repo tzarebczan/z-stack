@@ -101,6 +101,10 @@ pub struct Checkpoint {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
+    /// Independently retrieved historical chain points per pass, including
+    /// prior-anchor revalidation. Reaching this limit commits resumable progress.
+    #[serde(default = "default_chain_reads")]
+    pub max_chain_reads: u64,
     pub max_exchanges: u64,
     pub max_download_bytes: u64,
     pub max_upload_bytes: u64,
@@ -108,9 +112,13 @@ pub struct Limits {
     pub max_private_bytes: u64,
     pub max_scripts: usize,
 }
+fn default_chain_reads() -> u64 {
+    32
+}
 impl Default for Limits {
     fn default() -> Self {
         Self {
+            max_chain_reads: default_chain_reads(),
             max_exchanges: 64,
             max_download_bytes: 256 * 1024 * 1024,
             max_upload_bytes: 32 * 1024 * 1024,

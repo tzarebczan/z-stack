@@ -24,10 +24,52 @@ use std::{
     time::Duration,
 };
 #[derive(Serialize, Deserialize)]
+struct LegacyContinuation {
+    version: u32,
+    source_id: String,
+    state: MemoryStore,
+}
+// Only independently accepted public chain points; never PIR query state.
+#[derive(Clone, Serialize, Deserialize)]
+struct AcceptedChain {
+    anchor: Anchor,
+    genesis: Option<String>,
+    #[serde(deserialize_with = "bounded_headers")]
+    headers: BTreeMap<u64, String>,
+}
+fn bounded_headers<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<BTreeMap<u64, String>, D::Error> {
+    struct Headers;
+    impl<'de> serde::de::Visitor<'de> for Headers {
+        type Value = BTreeMap<u64, String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("at most 4096 accepted headers")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(
+            self,
+            mut map: M,
+        ) -> std::result::Result<Self::Value, M::Error> {
+            if map.size_hint().is_some_and(|n| n > 4096) {
+                return Err(serde::de::Error::custom("header limit"));
+            }
+            let mut headers = BTreeMap::new();
+            while let Some((height, hash)) = map.next_entry()? {
+                if headers.len() >= 4096 || headers.insert(height, hash).is_some() {
+                    return Err(serde::de::Error::custom("header limit"));
+                }
+            }
+            Ok(headers)
+        }
+    }
+    d.deserialize_map(Headers)
+}
+#[derive(Serialize, Deserialize)]
 struct Continuation {
     version: u32,
     source_id: String,
     state: MemoryStore,
+    chain: AcceptedChain,
 }
 fn reason_code(r: sync::IncompleteReason) -> &'static str {
     use sync::IncompleteReason::*;
@@ -60,6 +102,7 @@ struct Io {
     reply: Option<Reply>,
     chain_reply: Option<Anchor>,
     exchanges: u64,
+    chain_reads: u64,
     download: u64,
     upload: u64,
     stop: Option<&'static str>,
@@ -69,8 +112,17 @@ struct Driver {
     io: Rc<RefCell<Io>>,
     limits: Limits,
     chain: Rc<RefCell<BTreeMap<u64, String>>>,
+    verified: Rc<RefCell<BTreeMap<u64, String>>>,
 }
 impl Driver {
+    fn retain_points(&self, needed: &std::collections::BTreeSet<u64>) {
+        self.chain
+            .borrow_mut()
+            .retain(|height, _| needed.contains(height));
+        self.verified
+            .borrow_mut()
+            .retain(|height, _| needed.contains(height));
+    }
     async fn send(&self, operation: Operation) -> std::result::Result<Vec<u8>, BoxError> {
         let upload = if let Operation::Query { body, .. } = &operation {
             body.len() as u64
@@ -151,7 +203,20 @@ impl Driver {
     }
     async fn point(&self, height: u64, expected: &str) -> Result<()> {
         if self.chain.borrow().contains_key(&height) {
+            // Existing independently accepted points remain authoritative; the
+            // walker must see Rejected for obsolete coverage on a reorg.
             return Ok(());
+        }
+        if self.chain.borrow().len() >= 4096 {
+            return Err(Error("chain_limit"));
+        }
+        {
+            let mut io = self.io.borrow_mut();
+            if io.chain_reads >= self.limits.max_chain_reads {
+                io.stop = Some("chain_budget");
+                return Err(Error("chain_budget"));
+            }
+            io.chain_reads += 1;
         }
         self.io.borrow_mut().pending = Some(Pending::Chain {
             height,
@@ -171,6 +236,13 @@ impl Driver {
         if point.height != height {
             return Err(Error("chain_point"));
         }
+        if point.hash == expected {
+            self.verified
+                .borrow_mut()
+                .insert(height, point.hash.clone());
+        }
+        // A different independently obtained hash may reject old coverage and
+        // drive the walker's reorg logic, but is never a durable accepted point.
         self.chain.borrow_mut().insert(height, point.hash);
         Ok(())
     }
@@ -277,7 +349,11 @@ pub struct Pass {
     driver: Driver,
     future: Option<LocalBoxFuture<'static, Result<Status>>>,
     previous: Option<String>,
+    // Validated prior metadata, with large records/continuation owned by store.
+    prior: Option<Checkpoint>,
+    prior_baseline_matches: bool,
     baseline: Vec<u8>,
+    state_baseline: Vec<u8>,
     held: Option<Checkpoint>,
     finished: Option<Status>,
     cancelled: bool,
@@ -287,6 +363,21 @@ fn encoded(store: &MemoryStore) -> Result<Vec<u8>> {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .serialize(store)
+        .map_err(|_| Error("checkpoint_encode"))
+}
+fn durable(scope: &Scope, state: &MemoryStore, headers: &BTreeMap<u64, String>) -> Result<Vec<u8>> {
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .serialize(&Continuation {
+            version: 3,
+            source_id: scope.source_id.clone(),
+            state: state.clone(),
+            chain: AcceptedChain {
+                anchor: scope.anchor.clone(),
+                genesis: headers.get(&0).cloned(),
+                headers: headers.clone(),
+            },
+        })
         .map_err(|_| Error("checkpoint_encode"))
 }
 fn hash(s: &str) -> bool {
@@ -314,7 +405,9 @@ fn checkpoint_id(
 }
 impl Pass {
     pub fn new(scope: Scope, checkpoint: Option<Checkpoint>, limits: Limits) -> Result<Self> {
-        if limits.max_exchanges == 0
+        if limits.max_chain_reads == 0
+            || limits.max_chain_reads > 4096
+            || limits.max_exchanges == 0
             || limits.max_exchanges > 4096
             || limits.max_scripts > 4096
             || !hash(&scope.source_id)
@@ -330,7 +423,11 @@ impl Pass {
         if scope.scripts.iter().any(|s| !seen.insert(&s.script)) {
             return Err(Error("duplicate_script"));
         }
+        let mut restored_chain = None;
         let mut memory = if let Some(cp) = &checkpoint {
+            if cp.anchor.height > scope.anchor.height {
+                return Err(Error("anchor_rewound"));
+            }
             if cp.source_id != scope.source_id {
                 return Err(Error("source_changed"));
             }
@@ -340,23 +437,46 @@ impl Pass {
             let bytes = STANDARD
                 .decode(&cp.continuation)
                 .map_err(|_| Error("checkpoint_encoding"))?;
-            let restored: Continuation = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .with_limit(64 * 1024 * 1024)
-                .reject_trailing_bytes()
-                .deserialize(&bytes)
-                .map_err(|_| Error("checkpoint_decode"))?;
-            if restored.version != 2 || restored.source_id != scope.source_id {
-                return Err(Error("checkpoint_source"));
-            }
-            let mut state = restored.state;
-            state.rebuild_indexes();
-            state
-        } else {
-            MemoryStore::new()
-        };
-        if let Some(cp) = &checkpoint {
-            let original = encoded(&memory)?;
+            let version = bytes.get(..4).ok_or(Error("checkpoint_decode"))?;
+            let (mut state, original) = match u32::from_le_bytes(version.try_into().unwrap()) {
+                2 => {
+                    let restored: LegacyContinuation = bincode::DefaultOptions::new()
+                        .with_fixint_encoding()
+                        .with_limit(64 * 1024 * 1024)
+                        .reject_trailing_bytes()
+                        .deserialize(&bytes)
+                        .map_err(|_| Error("checkpoint_decode"))?;
+                    if restored.source_id != scope.source_id {
+                        return Err(Error("checkpoint_source"));
+                    }
+                    let original = encoded(&restored.state)?;
+                    (restored.state, original)
+                }
+                3 => {
+                    let restored: Continuation = bincode::DefaultOptions::new()
+                        .with_fixint_encoding()
+                        .with_limit(64 * 1024 * 1024)
+                        .reject_trailing_bytes()
+                        .deserialize(&bytes)
+                        .map_err(|_| Error("checkpoint_decode"))?;
+                    if restored.source_id != scope.source_id
+                        || restored.chain.anchor != cp.anchor
+                        || restored.chain.headers.len() > 4096
+                        || restored
+                            .chain
+                            .headers
+                            .iter()
+                            .any(|(h, s)| *h > cp.anchor.height || !hash(s))
+                        || restored.chain.headers.get(&cp.anchor.height) != Some(&cp.anchor.hash)
+                        || restored.chain.genesis.as_ref() != restored.chain.headers.get(&0)
+                    {
+                        return Err(Error("checkpoint_source"));
+                    }
+                    restored_chain = Some(restored.chain);
+                    (restored.state, bytes)
+                }
+                _ => return Err(Error("checkpoint_source")),
+            };
             if checkpoint_id(
                 &cp.source_id,
                 &cp.scope_id,
@@ -368,21 +488,25 @@ impl Pass {
             {
                 return Err(Error("checkpoint_id"));
             }
-        }
+            state.rebuild_indexes();
+            state
+        } else {
+            MemoryStore::new()
+        };
         let current_scripts = scope
             .scripts
             .iter()
             .map(|s| hex::decode(&s.script).map_err(|_| Error("script")))
             .collect::<Result<std::collections::BTreeSet<_>>>()?;
         memory.retain_scope(&current_scripts);
-        let baseline = encoded(&memory)?;
+
         let store = SharedStore {
             inner: Rc::new(RefCell::new(memory)),
             rewind: Rc::new(RefCell::new(None)),
         };
         let mut headers = BTreeMap::new();
         for point in &scope.accepted_headers {
-            if !hash(&point.hash) {
+            if !hash(&point.hash) || point.height > scope.anchor.height {
                 return Err(Error("chain"));
             }
             if let Some(old) = headers.insert(point.height, point.hash.clone()) {
@@ -397,8 +521,37 @@ impl Pass {
         let driver = Driver {
             io: Rc::new(RefCell::new(Io::default())),
             limits: limits.clone(),
-            chain: Rc::new(RefCell::new(headers)),
+            chain: Rc::new(RefCell::new(headers.clone())),
+            verified: Rc::new(RefCell::new(headers)),
         };
+        // A moving tip may reuse older points only after independently checking
+        // that its previously accepted anchor still belongs to the selected chain.
+        let restored_chain = restored_chain.filter(|old| {
+            old.anchor.height <= scope.anchor.height
+                && old.genesis.is_some()
+                && old.genesis.as_ref() == driver.chain.borrow().get(&0)
+        });
+        if let Some(old) = &restored_chain {
+            if old.anchor == scope.anchor {
+                for (height, hash) in &old.headers {
+                    if driver
+                        .chain
+                        .borrow()
+                        .get(height)
+                        .is_some_and(|held| held != hash)
+                    {
+                        return Err(Error("chain_point"));
+                    }
+                    if !driver.chain.borrow().contains_key(height)
+                        && driver.chain.borrow().len() >= 4096
+                    {
+                        return Err(Error("chain_limit"));
+                    }
+                    driver.chain.borrow_mut().insert(*height, hash.clone());
+                    driver.verified.borrow_mut().insert(*height, hash.clone());
+                }
+            }
+        }
         let mut filters = driver.clone();
         let mut transport = driver.clone();
         let owned = driver.clone();
@@ -468,6 +621,50 @@ impl Pass {
                     reason: "publication_incomplete".into(),
                 });
             }
+            if let Some(old) = restored_chain {
+                if old.anchor != request.anchor && old.genesis.as_deref() == Some(genesis) {
+                    owned.point(old.anchor.height, &old.anchor.hash).await?;
+                    if matches!(
+                        chain.is_accepted(old.anchor.height, &old.anchor.hash),
+                        Acceptance::Accepted
+                    ) {
+                        for (height, hash) in old.headers {
+                            if owned
+                                .chain
+                                .borrow()
+                                .get(&height)
+                                .is_some_and(|held| held != &hash)
+                            {
+                                return Err(Error("chain_point"));
+                            }
+                            if !owned.chain.borrow().contains_key(&height)
+                                && owned.chain.borrow().len() >= 4096
+                            {
+                                return Err(Error("chain_limit"));
+                            }
+                            owned.chain.borrow_mut().insert(height, hash.clone());
+                            owned.verified.borrow_mut().insert(height, hash);
+                        }
+                    }
+                }
+            }
+            // Keep only points relevant to this publication and existing coverage;
+            // old advancing tips must not accumulate indefinitely.
+            let mut needed = std::collections::BTreeSet::from([0, request.anchor.height]);
+            for entry in &map.shards {
+                if entry.end_height <= request.anchor.height {
+                    needed.insert(entry.end_height);
+                }
+                if entry.start_height > 0 && entry.start_height - 1 <= request.anchor.height {
+                    needed.insert(entry.start_height - 1);
+                }
+            }
+            for entry in state.scripts().map_err(|_| Error("store"))? {
+                for range in state.coverage(&entry.script).map_err(|_| Error("store"))? {
+                    needed.insert(range.end_height);
+                }
+            }
+            owned.retain_points(&needed);
             for e in &map.shards {
                 if e.end_height <= request.anchor.height {
                     owned.point(e.end_height, &e.terminal_block_hash).await?;
@@ -536,13 +733,30 @@ impl Pass {
                 }),
             }
         });
+        let baseline = durable(&scope, &store.inner.borrow(), &driver.verified.borrow())?;
+        let state_baseline = encoded(&store.inner.borrow())?;
+        let prior_baseline_matches = checkpoint.as_ref().is_some_and(|cp| {
+            cp.scope_id == scope.scope_id
+                && cp.generation == scope.generation
+                && cp.anchor == scope.anchor
+                && STANDARD.decode(&cp.continuation).ok().as_deref() == Some(baseline.as_slice())
+        });
+        let previous = checkpoint.as_ref().map(|cp| cp.checkpoint_id.clone());
+        let prior = checkpoint.map(|mut cp| {
+            cp.records = Vec::new();
+            cp.continuation = String::new();
+            cp
+        });
         Ok(Self {
             scope,
             store,
             driver,
             future: Some(future),
-            previous: checkpoint.map(|c| c.checkpoint_id),
+            previous,
+            prior,
+            prior_baseline_matches,
             baseline,
+            state_baseline,
             held: None,
             finished: None,
             cancelled: false,
@@ -577,8 +791,20 @@ impl Pass {
                 }
             }
         }
-        let bytes = encoded(&self.store.inner.borrow())?;
-        if bytes != self.baseline || self.finished.is_some() {
+        if encoded(&self.store.inner.borrow())? != self.state_baseline || self.finished.is_some() {
+            let bytes = durable(
+                &self.scope,
+                &self.store.inner.borrow(),
+                &self.driver.verified.borrow(),
+            )?;
+            if self.prior_baseline_matches
+                && bytes == self.baseline
+                && matches!(self.finished, Some(Status::Incomplete { .. }))
+            {
+                return Ok(Step::Stopped {
+                    status: self.finished.clone().unwrap(),
+                });
+            }
             // A final status checkpoint is emitted once, then removed by acknowledge.
             if self.finished.is_some()
                 && self.future.is_none()
@@ -620,7 +846,11 @@ impl Pass {
             return Err(Error("event_limit"));
         }
         let mut coverage = Vec::new();
-        let mut through = self.scope.anchor.height;
+        let mut through = if state.scripts().map_err(|_| Error("store"))?.is_empty() {
+            0
+        } else {
+            self.scope.anchor.height
+        };
         for script in state.scripts().map_err(|_| Error("store"))? {
             let ranges = state.coverage(&script.script).map_err(|_| Error("store"))?;
             let mut end: Option<u64> = None;
@@ -652,18 +882,10 @@ impl Pass {
         {
             return Err(Error("coverage_incomplete"));
         }
-        let durable = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .serialize(&Continuation {
-                version: 2,
-                source_id: self.scope.source_id.clone(),
-                state: state.clone(),
-            })
-            .map_err(|_| Error("checkpoint_encode"))?;
-        if durable.len() > 64 * 1024 * 1024 {
+        if bytes.len() > 64 * 1024 * 1024 {
             return Err(Error("checkpoint_limit"));
         }
-        let continuation = STANDARD.encode(durable);
+        let continuation = STANDARD.encode(bytes);
         let id = checkpoint_id(
             &self.scope.source_id,
             &self.scope.scope_id,
@@ -672,12 +894,18 @@ impl Pass {
             complete,
             bytes,
         );
-        Ok(Checkpoint {
+        let checkpoint = Checkpoint {
             source_id: self.scope.source_id.clone(),
             generation: self.scope.generation,
             scope_id: self.scope.scope_id.clone(),
-            checkpoint_id: id,
-            previous_checkpoint_id: self.previous.clone(),
+            checkpoint_id: id.clone(),
+            previous_checkpoint_id: if self.previous.as_ref() == Some(&id) {
+                self.prior
+                    .as_ref()
+                    .and_then(|cp| cp.previous_checkpoint_id.clone())
+            } else {
+                self.previous.clone()
+            },
             anchor: self.scope.anchor.clone(),
             covered_through: through,
             complete,
@@ -689,12 +917,27 @@ impl Pass {
                 .len() as u64,
             records,
             coverage,
-            rewind_to: self.store.rewind.borrow().clone().map(|a| Anchor {
-                height: a.height,
-                hash: a.hash,
-            }),
+            rewind_to: if self.previous.as_ref() == Some(&id) {
+                self.prior.as_ref().and_then(|cp| cp.rewind_to.clone())
+            } else {
+                self.store.rewind.borrow().clone().map(|a| Anchor {
+                    height: a.height,
+                    hash: a.hash,
+                })
+            },
             continuation,
-        })
+        };
+        if self.previous.as_ref() == Some(&id) {
+            let mut prior = self.prior.clone().ok_or(Error("checkpoint_missing"))?;
+            prior.records = checkpoint.records.clone();
+            prior.continuation = checkpoint.continuation.clone();
+            if prior != checkpoint {
+                return Err(Error("checkpoint_conflict"));
+            }
+            Ok(prior)
+        } else {
+            Ok(checkpoint)
+        }
     }
     pub fn accept(&mut self, request_id: u64, reply: Reply) -> Result<()> {
         if self.held.is_some() || self.cancelled {
@@ -736,11 +979,50 @@ impl Pass {
         if cp.checkpoint_id != id {
             return Err(Error("checkpoint_id"));
         }
-        self.baseline = encoded(&self.store.inner.borrow())?;
+        self.baseline = durable(
+            &self.scope,
+            &self.store.inner.borrow(),
+            &self.driver.verified.borrow(),
+        )?;
+        self.state_baseline = encoded(&self.store.inner.borrow())?;
+        self.prior_baseline_matches = true;
         self.previous = Some(id.into());
         self.final_ack = self.finished.is_some();
         self.store.rewind.borrow_mut().take();
-        self.held = None;
+        let mut cp = self.held.take().ok_or(Error("checkpoint_missing"))?;
+        cp.records = Vec::new();
+        cp.continuation = String::new();
+        self.prior = Some(cp);
+        Ok(())
+    }
+    /// End an active resource-limited pass without discarding validated logical
+    /// progress. The caller must still durably acknowledge any yielded checkpoint.
+    /// This must never be used for user cancellation or a retired wallet session.
+    pub fn finish_budget(&mut self) -> Result<()> {
+        if self.cancelled {
+            return Err(Error("cancelled"));
+        }
+        self.future = None;
+        if self.finished.is_none() {
+            self.finished = Some(Status::Incomplete {
+                reason: "budget".into(),
+            });
+        }
+        let mut io = self.driver.io.borrow_mut();
+        io.pending = None;
+        io.reply = None;
+        io.chain_reply = None;
+        // With no new accepted work, the preceding durable checkpoint already
+        // represents this pass; do not emit a conflicting same-ID replay.
+        if self.held.is_none() {
+            self.final_ack = self.prior_baseline_matches
+                && self.baseline
+                    == durable(
+                        &self.scope,
+                        &self.store.inner.borrow(),
+                        &self.driver.verified.borrow(),
+                    )?;
+        }
         Ok(())
     }
     pub fn cancel(&mut self) {
@@ -750,3 +1032,6 @@ impl Pass {
         self.driver.io.borrow_mut().pending = None;
     }
 }
+
+#[cfg(test)]
+mod tests;

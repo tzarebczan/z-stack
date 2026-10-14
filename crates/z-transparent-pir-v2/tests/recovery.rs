@@ -156,6 +156,11 @@ fn drive(pass: &mut Pass, server: &InProcess) -> Checkpoint {
             }
             Step::NeedChain { .. } => panic!("fixture provides every independent header"),
             Step::Checkpoint { checkpoint } => {
+                if checkpoint.complete {
+                    // A resource timer racing a held valid final checkpoint
+                    // must preserve completion and its durable acknowledgment.
+                    pass.finish_budget().unwrap();
+                }
                 assert_eq!(
                     pass.advance().unwrap(),
                     Step::Checkpoint {
@@ -167,7 +172,16 @@ fn drive(pass: &mut Pass, server: &InProcess) -> Checkpoint {
             }
             Step::Stopped {
                 status: Status::Complete,
-            } => return latest.unwrap(),
+            } => {
+                pass.finish_budget().unwrap();
+                assert_eq!(
+                    pass.advance().unwrap(),
+                    Step::Stopped {
+                        status: Status::Complete
+                    }
+                );
+                return latest.unwrap();
+            }
             Step::Stopped { status } => panic!("incomplete: {status:?}"),
         }
     }
@@ -210,6 +224,13 @@ fn nonzero_receive_spend_unused_and_durable_resume() {
     assert!(cp.rewind_to.is_none());
     let mut saved = cp.clone();
     saved.records.clear();
+    let mut same = Pass::new(scope(), Some(saved.clone()), Limits::default()).unwrap();
+    let replayed = drive(&mut same, &server);
+    assert!(
+        replayed.records == cp.records,
+        "same-scope canonical facts must be stable"
+    );
+    assert_eq!(replayed.coverage, cp.coverage);
     let mut next = scope();
     next.generation = 2;
     next.scope_id = "3".repeat(64);
@@ -864,4 +885,351 @@ fn malformed_page_debt_precedes_real_queries_after_cancel_overload_and_anchor_ad
             }
         );
     }
+}
+
+// Exercise the real map-validation walk, not a host-side model of its steps.
+#[test]
+fn historical_headers_survive_bounded_cold_passes_and_advancing_anchor() {
+    let dir = tempfile::tempdir().unwrap();
+    publish(
+        dir.path(),
+        &[ShardSpec::first(100, 110, true, events())],
+        SEAL,
+        synthetic,
+        vec![],
+    );
+    let server = InProcess::serve(dir.path());
+    let original = drive(
+        &mut Pass::new(scope(), None, Limits::default()).unwrap(),
+        &server,
+    );
+    drop(server);
+    let shards: Vec<_> = std::iter::once(ShardSpec::first(100, 110, true, events()))
+        .chain((111..=245).map(|h| ShardSpec::first(h, h, true, vec![])))
+        .collect();
+    publish(dir.path(), &shards, SEAL, synthetic, vec![]);
+    let server = InProcess::serve(dir.path());
+    for limit in [1, 2, 32] {
+        let mut request = scope();
+        request.anchor = Anchor {
+            height: 245,
+            hash: synthetic(245).to_display_hex(),
+        };
+        request.accepted_headers.retain(|point| point.height == 0);
+        request.accepted_headers.push(request.anchor.clone());
+        let mut limits = Limits::default();
+        limits.max_chain_reads = limit;
+        let mut pass = Pass::new(request, Some(original.clone()), limits).unwrap();
+        let mut reads = 0;
+        let mut durable = false;
+        for _ in 0..1000 {
+            match pass.advance().unwrap() {
+                Step::Exchange {
+                    request_id,
+                    operation,
+                } => pass.accept(request_id, answer(&server, operation)).unwrap(),
+                Step::NeedChain { height, hash } => {
+                    reads += 1;
+                    pass.accept_chain(height, hash).unwrap();
+                }
+                Step::Checkpoint { checkpoint } => {
+                    assert!(!checkpoint.complete);
+                    assert!(
+                        checkpoint.records == original.records,
+                        "header budget preserves existing facts"
+                    );
+                    assert_eq!(checkpoint.covered_through, 110);
+                    assert!(checkpoint.rewind_to.is_none());
+                    pass.acknowledge(&checkpoint.checkpoint_id).unwrap();
+                    durable = true;
+                }
+                Step::Stopped { status } => {
+                    assert_eq!(
+                        status,
+                        Status::Incomplete {
+                            reason: "chain_budget".into()
+                        }
+                    );
+                    break;
+                }
+            }
+        }
+        assert!(durable);
+        assert_eq!(reads, limit);
+    }
+    // Simulate an elapsed host deadline before the core's 32-read budget. Its
+    // already validated prefix must survive a cold reopen; the next read is new.
+    let mut request = scope();
+    request.anchor = Anchor {
+        height: 245,
+        hash: synthetic(245).to_display_hex(),
+    };
+    request.accepted_headers.retain(|point| point.height == 0);
+    request.accepted_headers.push(request.anchor.clone());
+    let mut pass = Pass::new(request.clone(), Some(original.clone()), Limits::default()).unwrap();
+    let mut read_heights = std::collections::BTreeSet::new();
+    let mut deadline_checkpoint = None;
+    for _ in 0..100 {
+        match pass.advance().unwrap() {
+            Step::Exchange {
+                request_id,
+                operation,
+            } => pass.accept(request_id, answer(&server, operation)).unwrap(),
+            Step::NeedChain { height, hash } => {
+                if read_heights.len() == 12 {
+                    pass.finish_budget().unwrap();
+                } else {
+                    read_heights.insert(height);
+                    pass.accept_chain(height, hash).unwrap();
+                }
+            }
+            Step::Checkpoint { mut checkpoint } => {
+                assert!(
+                    checkpoint.records == original.records,
+                    "elapsed budget preserves facts"
+                );
+                assert_eq!(checkpoint.covered_through, 110);
+                assert!(checkpoint.rewind_to.is_none());
+                pass.acknowledge(&checkpoint.checkpoint_id).unwrap();
+                checkpoint.records.clear();
+                deadline_checkpoint = Some(checkpoint);
+            }
+            Step::Stopped { status } => {
+                assert_eq!(
+                    status,
+                    Status::Incomplete {
+                        reason: "budget".into()
+                    }
+                );
+                break;
+            }
+        }
+    }
+    assert_eq!(read_heights.len(), 12);
+    let mut reopened = Pass::new(
+        request,
+        Some(deadline_checkpoint.unwrap()),
+        Limits::default(),
+    )
+    .unwrap();
+    let mut next_read = None;
+    for _ in 0..10 {
+        match reopened.advance().unwrap() {
+            Step::Exchange {
+                request_id,
+                operation,
+            } => reopened
+                .accept(request_id, answer(&server, operation))
+                .unwrap(),
+            Step::NeedChain { height, .. } => {
+                next_read = Some(height);
+                break;
+            }
+            _ => panic!("expected a fresh independent boundary after budget reopen"),
+        }
+    }
+    assert!(!read_heights.contains(&next_read.unwrap()));
+    reopened.cancel();
+    assert!(
+        reopened.finish_budget().is_err(),
+        "user cancellation cannot publish budget progress"
+    );
+
+    // A prior-anchor mismatch must not authorize inheritance of its earlier points.
+    for same_height in [false, true] {
+        let mut request = scope();
+        request.anchor = Anchor {
+            height: if same_height { 110 } else { 245 },
+            hash: if same_height {
+                "f".repeat(64)
+            } else {
+                synthetic(245).to_display_hex()
+            },
+        };
+        request.accepted_headers.retain(|point| point.height == 0);
+        request.accepted_headers.push(request.anchor.clone());
+        let mut pass = Pass::new(request, Some(original.clone()), Limits::default()).unwrap();
+        let mut stopped = false;
+        for _ in 0..100 {
+            match pass.advance().unwrap() {
+                Step::Exchange {
+                    request_id,
+                    operation,
+                } => pass.accept(request_id, answer(&server, operation)).unwrap(),
+                Step::NeedChain { height, .. } => {
+                    pass.accept_chain(height, "f".repeat(64)).unwrap()
+                }
+                Step::Checkpoint { checkpoint } => {
+                    assert!(!checkpoint.complete);
+                    assert!(
+                        checkpoint.records == original.records,
+                        "unaccepted lineage cannot retire old facts"
+                    );
+                    assert!(checkpoint.rewind_to.is_none());
+                    pass.acknowledge(&checkpoint.checkpoint_id).unwrap();
+                }
+                Step::Stopped { status } => {
+                    assert_ne!(status, Status::Complete);
+                    stopped = true;
+                    break;
+                }
+            }
+        }
+        assert!(stopped);
+    }
+    let mut previous = Some(original.clone());
+    let mut counts = Vec::new();
+    let mut completed = false;
+    let mut header_checkpoints = 0;
+    let mut largest_checkpoint = 0;
+    for round in 0..12u64 {
+        let mut request = scope();
+        request.generation += round + 1;
+        request.scope_id = format!("{:064x}", round + 10);
+        let target = (243 + round).min(245);
+        request.anchor = Anchor {
+            height: target,
+            hash: synthetic(target).to_display_hex(),
+        };
+        request.accepted_headers.retain(|p| p.height == 0);
+        request.accepted_headers.push(request.anchor.clone());
+        let mut pass = Pass::new(request, previous.clone(), Limits::default()).unwrap();
+        let mut reads = 0;
+        let mut acquisition_started = false;
+        for _ in 0..3000 {
+            match pass.advance().unwrap() {
+                Step::Exchange {
+                    request_id,
+                    operation,
+                } => {
+                    if !matches!(operation, Operation::Init | Operation::Map) {
+                        acquisition_started = true;
+                    }
+                    pass.accept(request_id, answer(&server, operation)).unwrap();
+                }
+                Step::NeedChain { height, hash } => {
+                    if reads == 64 {
+                        pass.cancel();
+                        break;
+                    }
+                    assert_eq!(hash, synthetic(height).to_display_hex());
+                    reads += 1;
+                    pass.accept_chain(height, synthetic(height).to_display_hex())
+                        .unwrap();
+                }
+                Step::Checkpoint { mut checkpoint } => {
+                    if !acquisition_started {
+                        assert!(!checkpoint.complete);
+                        assert!(checkpoint.rewind_to.is_none());
+                        assert!(
+                            checkpoint.records == original.records,
+                            "header progress preserves receive/spend facts"
+                        );
+                        assert_eq!(checkpoint.covered_through, 110);
+                        assert_eq!(checkpoint.pending_pages, original.pending_pages);
+                        assert_eq!(checkpoint.unresolved_spends, original.unresolved_spends);
+                        header_checkpoints += 1;
+                        largest_checkpoint =
+                            largest_checkpoint.max(serde_json::to_vec(&checkpoint).unwrap().len());
+                    }
+                    pass.acknowledge(&checkpoint.checkpoint_id).unwrap();
+                    checkpoint.records.clear(); // Exact persisted engine boundary.
+                    previous = Some(checkpoint);
+                }
+                Step::Stopped { status } => {
+                    completed = status == Status::Complete;
+                    break;
+                }
+            }
+        }
+        counts.push(reads);
+        if completed {
+            break;
+        }
+    }
+    assert!(
+        completed,
+        "cold historical walk must converge under 64 reads per call: {counts:?}"
+    );
+    let final_cp = previous.unwrap();
+    assert!(final_cp.complete);
+    assert_eq!(final_cp.covered_through, 245);
+    assert!(header_checkpoints >= 4);
+    assert_eq!(&counts[..2], &[32, 32]);
+    eprintln!("header-progress: reads={counts:?}, checkpoints={header_checkpoints}, largest_fixture_checkpoint_bytes={largest_checkpoint}");
+    // Same-height fork: inherited old points must be discarded, while actual
+    // canonical disagreements remain available to the walker's rollback logic.
+    drop(server);
+    let forked = |height| {
+        if height >= 105 {
+            synthetic(height + 1000)
+        } else {
+            synthetic(height)
+        }
+    };
+    // The service refuses two competing sealed revisions on one disk. A
+    // disposable replacement snapshot models the same publisher after a fork.
+    let fork_dir = tempfile::tempdir().unwrap();
+    publish(fork_dir.path(), &shards, SEAL, forked, vec![]);
+    let server = InProcess::serve(fork_dir.path());
+    let mut checkpoint = Some(final_cp);
+    let mut saw_rewind = false;
+    let mut complete = false;
+    for round in 0..12 {
+        let mut request = scope();
+        request.generation = 100 + round;
+        request.scope_id = format!("{:064x}", 100 + round);
+        request.anchor = Anchor {
+            height: 245,
+            hash: forked(245).to_display_hex(),
+        };
+        request.accepted_headers.retain(|point| point.height == 0);
+        request.accepted_headers.push(request.anchor.clone());
+        let mut pass = Pass::new(request, checkpoint.take(), Limits::default()).unwrap();
+        let mut acquisition_started = false;
+        for _ in 0..3000 {
+            match pass.advance().unwrap() {
+                Step::Exchange {
+                    request_id,
+                    operation,
+                } => {
+                    if !matches!(operation, Operation::Init | Operation::Map) {
+                        acquisition_started = true;
+                    }
+                    pass.accept(request_id, answer(&server, operation)).unwrap();
+                }
+                Step::NeedChain { height, .. } => pass
+                    .accept_chain(height, forked(height).to_display_hex())
+                    .unwrap(),
+                Step::Checkpoint { checkpoint: mut cp } => {
+                    if !acquisition_started && cp.rewind_to.is_none() {
+                        assert!(cp.records == original.records, "header-only fork detection preserves prior facts until verified rollback");
+                    }
+                    if let Some(point) = &cp.rewind_to {
+                        assert_eq!(point.hash, forked(point.height).to_display_hex());
+                        saw_rewind = true;
+                    }
+                    pass.acknowledge(&cp.checkpoint_id).unwrap();
+                    cp.records.clear();
+                    checkpoint = Some(cp);
+                }
+                Step::Stopped { status } => {
+                    complete = status == Status::Complete;
+                    break;
+                }
+            }
+        }
+        if complete {
+            break;
+        }
+    }
+    assert!(
+        complete,
+        "a rejected prior anchor must recover without a wallet wipe"
+    );
+    assert!(
+        saw_rewind,
+        "obsolete source coverage must be retired by verified rollback"
+    );
+    assert_eq!(checkpoint.unwrap().covered_through, 245);
 }
