@@ -58,7 +58,7 @@
     "url": "https://github.com/tzarebczan/z-stack/issues"
   },
   "peerDependencies": {
-    "@z-stack/sdk": "0.1.0-alpha.11"
+    "@z-stack/sdk": "0.1.0-alpha.12"
   },
   "peerDependenciesMeta": {
     "@z-stack/sdk": {
