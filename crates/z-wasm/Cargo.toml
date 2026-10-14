@@ -19,7 +19,9 @@ z-engine = { workspace = true, default-features = false, features = [
     "transparent-inputs",
     "wasm-prove",
     "hardware",
+    "private-enhance",
 ] }
+z-enhance-pir = { path = "../z-enhance-pir" }
 wasm-bindgen.workspace = true
 js-sys = "0.3"
 serde.workspace = true

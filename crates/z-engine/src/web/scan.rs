@@ -38,6 +38,7 @@ struct Head {
     shielded: bool,
     txids: Vec<String>,
     spends: Vec<(String, Vec<u8>)>,
+    enhance: Vec<super::private_enhance::CompactEnhanceAction>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -311,6 +312,7 @@ impl WebWallet {
             }
         }
 
+        let enhance = super::private_enhance::candidates(&block);
         let block_time = block.time;
         let block_txids: Vec<String> = block.vtx.iter().map(|t| to_hex(&t.txid)).collect();
         if !compact_has_shielded(&block) {
@@ -359,6 +361,7 @@ impl WebWallet {
             Self::make_prior(height, hash, sapling_sz, orchard_sz, ironwood_sz),
         )?;
         self.stamp_block_time(block_time, &block_txids);
+        self.retain_enhance_candidates(enhance);
 
         Ok(ScanDelta {
             height,
@@ -433,6 +436,7 @@ impl WebWallet {
         for (i, block) in blocks.into_iter().enumerate() {
             let height = block.height as u32;
             let shielded = compact_has_shielded(&block);
+            let enhance = super::private_enhance::candidates(&block);
             let (sap, orch, iron) = match &block.chain_metadata {
                 Some(m) => (
                     m.sapling_commitment_tree_size,
@@ -467,6 +471,7 @@ impl WebWallet {
                     shielded: true,
                     txids,
                     spends,
+                    enhance,
                 });
                 decrypts.push(self, i, block)?;
             } else {
@@ -480,6 +485,7 @@ impl WebWallet {
                     shielded: false,
                     txids: Vec::new(),
                     spends: Vec::new(),
+                    enhance: Vec::new(),
                 });
             }
         }
@@ -519,6 +525,7 @@ impl WebWallet {
                         true,
                     )?;
                     self.stamp_block_time(head.time, &head.txids);
+                    self.retain_enhance_candidates(head.enhance.clone());
                     out.push(ScanDelta {
                         height: head.height,
                         notes_found: 0,
@@ -558,6 +565,7 @@ impl WebWallet {
                         ),
                     )?;
                     self.stamp_block_time(head.time, &head.txids);
+                    self.retain_enhance_candidates(head.enhance.clone());
                     out.push(ScanDelta {
                         height: head.height,
                         notes_found,
@@ -1005,7 +1013,7 @@ impl WebWallet {
             None
         };
         let expected_incoming = self.notes().iter().any(|note| note.txid == txid);
-        let agg = self.txs_mut().entry(txid).or_default();
+        let agg = self.txs_mut().entry(txid.clone()).or_default();
         if agg.mined_height.is_none() && inbound_n > 0 && agg.received_notes == 0 {
             agg.received_zat = inbound_zat;
             agg.received_notes = inbound_n;
@@ -1043,8 +1051,24 @@ impl WebWallet {
         agg.transparent_outputs = transparent_outputs;
         if chain_fee.is_some() {
             agg.fee_zat = chain_fee;
+            agg.fee_from_full_transaction = true;
         }
-        Ok(agg.memos.len() as u32)
+        agg.ironwood_fee_from_full_transaction = Self::pure_ironwood_fee(tx);
+        let count = agg.memos.len() as u32;
+        #[cfg(feature = "private-enhance")]
+        {
+            let recovered: Vec<_> = decrypted
+                .ironwood_outputs()
+                .iter()
+                .map(|output| {
+                    let outgoing = matches!(output.transfer_type(), TransferType::Outgoing)
+                        .then(|| output.note().0.value().inner());
+                    (output.index() as u32, outgoing)
+                })
+                .collect();
+            self.reconcile_full_ironwood_decryption(&txid, &recovered);
+        }
+        Ok(count)
     }
 
     pub fn apply_mempool_json(&mut self, json: &str) -> Result<u32> {

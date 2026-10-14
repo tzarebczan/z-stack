@@ -45,6 +45,10 @@ try {
     assert.equal(sdk.SDK_TRANSPORT_CAPABILITIES.requiredBirthdayTreeState, true);
     assert.equal(sdk.SDK_TRANSPORT_CAPABILITIES.cancellation, true);
     assert.equal(sdk.SDK_TRANSPORT_CAPABILITIES.maxBlocksPerRequest, true);
+    assert.equal(sdk.SDK_TRANSPORT_CAPABILITIES.maxSharedMemoBlocksPerRequest, true);
+    assert.equal(sdk.SDK_TRANSPORT_CAPABILITIES.enhanceV7, true);
+    assert.equal(sdk.SDK_TRANSPORT_CAPABILITIES.submitContext, true);
+    assert.equal(sdk.SDK_TRANSPORT_CAPABILITIES.pendingSubmissionRetry, true);
     assert.equal(Object.isFrozen(sdk.SDK_TRANSPORT_CAPABILITIES), true);
     assert.equal(sdk.WalletError.fromMessage('propose_transfer: Must scan blocks first').code, 'sync_required');
     assert.equal(sdk.WalletError.fromMessage('invalid recovery phrase: private detail').code, 'invalid_recovery_phrase');
@@ -133,6 +137,24 @@ try {
       tip: async () => 10, blocks: async () => new Uint8Array() } satisfies BlockTransport;
     const requestLimit: number | undefined = transport.maxBlocksPerRequest;
     void supported; void requestLimit;
+  `);
+  writeFileSync(join(app, "src", "private-wallet-operation-types.ts"), `
+    import { SDK_TRANSPORT_CAPABILITIES, type BlockTransport, type PrivateEnhanceRequest, type Wallet } from '@z-stack/sdk';
+    const enhanceSupported: true = SDK_TRANSPORT_CAPABILITIES.enhanceV7;
+    const retrySupported: true = SDK_TRANSPORT_CAPABILITIES.pendingSubmissionRetry;
+    const submissionContext: NonNullable<Parameters<NonNullable<BlockTransport['submit']>>[2]> = { txid: '00'.repeat(32) };
+    const enhance: NonNullable<BlockTransport['enhance']> = { exchange: async (request, signal) => {
+      const ownedSignal: AbortSignal = signal;
+      if (request.kind === 'query') { const ciphertext: Uint8Array = request.body; void ciphertext; }
+      void ownedSignal;
+      return { status: 200, body: new Uint8Array() };
+    } };
+    function explicitSavedByteRetry(wallet: Wallet, signal: AbortSignal): Promise<{txid: string}> {
+      return wallet.retryPendingSubmission('00'.repeat(32), {signal});
+    }
+    // @ts-expect-error A host cannot supply the Rust-owned private query position.
+    const invalid: PrivateEnhanceRequest = {kind: 'query', body: new Uint8Array(), anchor: {height: 1, hash: '00'.repeat(32)}, position: 0};
+    void enhanceSupported; void retrySupported; void submissionContext; void enhance; void explicitSavedByteRetry; void invalid;
   `);
   writeFileSync(join(app, "src", "native-shield-types.ts"), `
     import type { NativeWallet } from '@z-stack/sdk/native';

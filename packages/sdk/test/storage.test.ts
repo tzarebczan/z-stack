@@ -315,6 +315,7 @@ class MemoWorker extends EventTarget {
       case "fromSnapshot": this.completed = new Set(JSON.parse(new TextDecoder().decode(msg.snapshot))); break;
       case "history": data = { json: JSON.stringify(this.legacyEnhancement ? this.candidates.filter(id => !this.completed.has(id)).map(txid => ({ txid, receivedNoteCount: 1 })) : []) }; break;
       case "pendingRawTxs": data = { json: JSON.stringify(this.pending) }; break;
+      case "pendingSubmissions": data = { json: JSON.stringify(this.pending.map(hex => ({ txid: "ab".repeat(32), hex }))) }; break;
       case "memoEnhancementTxids": data = { json: this.legacyEnhancement ? null : JSON.stringify(this.candidates.filter((txid) => !this.completed.has(txid)).slice(0, msg.limit)) }; break;
       case "enhanceRawTx": this.enhanced.push(msg.hex!); this.completed.add(msg.hex!); data = { n: 0 }; break;
     }
@@ -405,7 +406,7 @@ test("already-caught-up sync cannot report synced when cancelled during its fina
   let reading!: () => void;
   const started = new Promise<void>(resolve => { reading = resolve; });
   t.mock.method(worker, "postMessage", (message: Parameters<MemoWorker["postMessage"]>[0]) => {
-    if (message.op === "pendingRawTxs") afterPending = true;
+    if (message.op === "pendingSubmissions") afterPending = true;
     if (afterPending && message.op === "snapshotJson") {
       release = () => post(message);
       reading();
@@ -556,13 +557,13 @@ test("on-demand memos keep both sync paths and pending rebroadcasts while histor
   await restartScanWorker(() => worker as unknown as Worker);
   await attachScanWorker(worker as unknown as Worker, { threads: 1, preferMulticore: false });
   const txids: string[] = [];
-  const submissions: string[] = [];
+  const submissions: { hex: string; txid: string | undefined }[] = [];
   let blocks = 0;
   const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
     kind: "mock", label: "mock", tip: async () => 11,
     blocks: async () => { blocks++; return new Uint8Array([1]); },
     tx: async (id) => { txids.push(id); return id; },
-    submit: async (hex) => { submissions.push(hex); return "ok"; },
+    submit: async (hex, _signal, context) => { submissions.push({ hex, txid: context?.txid }); return "ok"; },
   } });
   await client.restore("test-only worker fixture", "regtest", 1);
   await client.sync();
@@ -571,7 +572,7 @@ test("on-demand memos keep both sync paths and pending rebroadcasts while histor
   await client.transaction("blank");
   await client.pending();
   assert.equal(blocks, 1);
-  assert.deepEqual(submissions, ["pending-raw", "pending-raw"]);
+  assert.deepEqual(submissions, [{ hex: "pending-raw", txid: "ab".repeat(32) }, { hex: "pending-raw", txid: "ab".repeat(32) }]);
   assert.deepEqual(txids, []);
   assert.equal(worker.ops.includes("memoEnhancementTxids"), false);
   const snapshot = await client.fetchMemos();

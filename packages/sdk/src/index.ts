@@ -59,6 +59,8 @@ export {
   // A custom transport's `submit` throws this for the node's explicit refusal.
   BroadcastRejection,
   type BlockTransport,
+  type SubmissionPolicy,
+  type SubmissionContext,
   type GrpcWebTransportOpts,
   type TransparentUtxo,
 } from "./lwd";
@@ -128,3 +130,5 @@ export {
   type Zip321Payment,
   type Zip321Request,
 } from "@z-stack/core";
+
+export type { PrivateEnhanceTransport, PrivateEnhanceRequest } from "./private-enhance";

@@ -2,12 +2,13 @@
 resolver = "2"
 members = [
     "crates/z-engine",
+    "crates/z-enhance-pir",
     "crates/z-wasm",
     "crates/z-node-launcher",
     "crates/z-desktop",
 ]
 # Patched upstream crates (see [patch.crates-io]); each builds and tests on its own.
-exclude = ["vendor/zakura"]
+exclude = ["vendor/zakura", "vendor/pir"]
 
 [workspace.package]
 version = "0.1.0-alpha.11"

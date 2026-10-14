@@ -13,6 +13,7 @@ use z_engine::{crypto_smoke, LightServer, Network};
 #[cfg(feature = "multicore")]
 pub use wasm_bindgen_rayon::init_thread_pool;
 
+mod private_enhance;
 #[cfg_attr(
     not(all(target_arch = "wasm32", target_feature = "atomics")),
     allow(dead_code)
@@ -226,6 +227,8 @@ impl WasmEngine {
 #[wasm_bindgen]
 pub struct WasmWallet {
     inner: z_engine::web::WebWallet,
+    private_enhance:
+        Option<z_engine::enhancement::EnhanceBatch<z_engine::web::PrivateEnhanceRequest>>,
 }
 
 #[wasm_bindgen]
@@ -240,13 +243,17 @@ impl WasmWallet {
         let network = parse_network(network)?;
         let acct = keys::account_from_mnemonic(mnemonic, network, account_index).map_err(js_err)?;
         let inner = z_engine::web::WebWallet::from_account(acct, birthday).map_err(js_err)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            private_enhance: None,
+        })
     }
 
     #[wasm_bindgen(js_name = fromSnapshot)]
     pub fn from_snapshot(bytes: &[u8]) -> Result<WasmWallet, JsValue> {
         Ok(Self {
             inner: z_engine::web::WebWallet::from_snapshot(bytes).map_err(js_err)?,
+            private_enhance: None,
         })
     }
 
@@ -261,6 +268,7 @@ impl WasmWallet {
         Ok(Self {
             inner: z_engine::web::WebWallet::from_ufvk(network, ufvk, birthday, account_index)
                 .map_err(js_err)?,
+            private_enhance: None,
         })
     }
 
@@ -284,6 +292,7 @@ impl WasmWallet {
         Ok(Self {
             inner: z_engine::web::WebWallet::from_hardware(network, ufvk, birthday, hardware)
                 .map_err(js_err)?,
+            private_enhance: None,
         })
     }
 
@@ -721,6 +730,12 @@ impl WasmWallet {
     #[wasm_bindgen(js_name = pendingRawTxs)]
     pub fn pending_raw_txs(&self) -> Result<String, JsValue> {
         serde_json::to_string(&self.inner.pending_raw_txs()).map_err(js_err)
+    }
+
+    /// Saved signed bytes paired with their display-order Rust transaction ID.
+    #[wasm_bindgen(js_name = pendingSubmissions)]
+    pub fn pending_submissions(&self) -> Result<String, JsValue> {
+        serde_json::to_string(&self.inner.pending_submissions()).map_err(js_err)
     }
 
     #[wasm_bindgen(js_name = abandon)]

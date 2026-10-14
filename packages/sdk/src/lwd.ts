@@ -1,3 +1,4 @@
+import type { PrivateEnhanceTransport } from "./private-enhance";
 import { BATCH_LOCAL, WalletError } from "@z-stack/core";
 import { COMPACT_RANGE_MAX_BYTES } from "./transport-bounds";
 /**
@@ -19,6 +20,11 @@ export const SDK_TRANSPORT_CAPABILITIES = Object.freeze({
   requiredBirthdayTreeState: true,
   cancellation: true,
   maxBlocksPerRequest: true,
+  maxSharedMemoBlocksPerRequest: true,
+  submissionPolicy: true,
+  enhanceV7: true,
+  submitContext: true,
+  pendingSubmissionRetry: true,
 });
 
 export type TransparentUtxo = {
@@ -30,12 +36,19 @@ export type TransparentUtxo = {
   address: string;
 };
 
+/** Identity of the exact signed bytes, returned by Rust proving or saved state. */
+export type SubmissionContext = { readonly txid: string };
+
 export type BlockTransport = {
+  /** Optional Ironwood-only v7 exchange. Query construction and record application remain in Rust. */
+  enhance?: PrivateEnhanceTransport;
   kind: string;
   label: string;
   /** SDK compact-block request span, including transparent backfill. Integer 1..4000;
    * captured when the client is created. Does not limit memo, subtree or stream calls. */
   readonly maxBlocksPerRequest?: number;
+  /** Shared memo range span. Integer 1..10; captured before ownership. Default 10. */
+  readonly maxSharedMemoBlocksPerRequest?: number;
   tip: (signal?: AbortSignal) => Promise<number>;
   /** Length-delimited compact blocks (u32 BE + protobuf), start..=end inclusive. */
   blocks: (start: number, end: number, signal?: AbortSignal) => Promise<Uint8Array>;
@@ -46,9 +59,11 @@ export type BlockTransport = {
   /**
    * Broadcast a raw transaction hex. Loopback proxy posts `/lwd/sendraw`.
    * The node's explicit refusal throws a {@link BroadcastRejection}; any
-   * other error is an unknown outcome.
+   * other error is an unknown outcome. The SDK supplies the exact Rust-produced
+   * display-order txid in context for software, hardware and saved-byte submissions.
+   * Ordinary transports may ignore context; a signed relay can require it.
    */
-  submit?: (rawHex: string, signal?: AbortSignal) => Promise<string>;
+  submit?: (rawHex: string, signal?: AbortSignal, context?: SubmissionContext) => Promise<string>;
   /** Loopback-only. Leaks t-addrs to local Zaino; never call against public LWD. */
   utxos?: (addresses: string[], startHeight?: number, signal?: AbortSignal) => Promise<TransparentUtxo[]>;
   /** Loopback-only regtest mine via Zebra `generate`. */
@@ -108,6 +123,23 @@ export function compactBlockRequestLimit(value: unknown): number {
     throw new WalletError("unknown", "maxBlocksPerRequest must be an integer from 1 to 4,000.");
   }
   return value;
+}
+
+export function sharedMemoBlockRequestLimit(value: unknown): number {
+  if (value === undefined) return 10;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 10) {
+    throw new WalletError("unknown", "maxSharedMemoBlocksPerRequest must be an integer from 1 to 10.");
+  }
+  return value;
+}
+
+/** Whether sync may resubmit the same saved signed bytes. Neither policy creates a replacement payment. */
+export type SubmissionPolicy = "explicit" | "saved-bytes-auto";
+
+export function resolveSubmissionPolicy(value: unknown): SubmissionPolicy {
+  if (value === undefined) return "saved-bytes-auto";
+  if (value === "explicit" || value === "saved-bytes-auto") return value;
+  throw new WalletError("unknown", "submissionPolicy must be explicit or saved-bytes-auto.");
 }
 
 export function isLoopbackUrl(url: string): boolean {

@@ -46,5 +46,9 @@
   {
     "file": "pir-enhance-types-LICENSE-APACHE",
     "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/Apache-2.0.txt"
+  },
+  {
+    "file": "ipir-standard-LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/Apache-2.0.txt"
   }
 ]

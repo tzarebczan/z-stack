@@ -1,3 +1,4 @@
+import type { PrivateEnhanceOperation } from "./private-enhance";
 /// Compact-block scan worker — MT/ST wasm lives here so the UI thread stays free.
 
 import { minimumConfirmations } from "./confirmation-policy";
@@ -40,6 +41,7 @@ type Wallet = HardwareWalletHandle & {
   enhanceRawTx?: (hex: string) => number;
   applyTransparentBlocks?: (blob: Uint8Array) => number;
   applySharedMemos?: (json: string) => number;
+  privateEnhance?: (operation: PrivateEnhanceOperation, bytes: Uint8Array, time: number) => Uint8Array;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
   rewindToChecked?: (height: number) => number;
@@ -63,6 +65,7 @@ type Wallet = HardwareWalletHandle & {
   history: (limit: number) => string;
   historyQuery?: (limit: number, status: string, txid: string) => string;
   pendingRawTxs?: () => string;
+  pendingSubmissions?: () => string;
   scannedHeight: () => number;
   birthday: () => number;
   nextHeight: () => number;
@@ -77,6 +80,8 @@ type Wallet = HardwareWalletHandle & {
 type Req = {
   id: number;
   op: string;
+  operation?: PrivateEnhanceOperation;
+  time?: number;
   preferMulticore?: boolean;
   wasmBasePath?: string;
   threads?: number;
@@ -315,6 +320,14 @@ async function handle(msg: Req): Promise<void> {
         post({ id: msg.id, n: w.applySharedMemos(msg.json ?? "") });
         return;
       }
+      case "privateEnhance": {
+        const w = needWallet();
+        if (!w.privateEnhance || !msg.operation || !msg.blob || msg.time == null) throw new Error("WASM needs an Enhance v7 upgrade");
+        const bytes = w.privateEnhance(msg.operation, new Uint8Array(msg.blob), msg.time);
+        const blob = bytes.slice().buffer;
+        post({ id: msg.id, blob }, [blob]);
+        return;
+      }
       case "enhanceRawTx": {
         const n = needWallet().enhanceRawTx?.(msg.hex ?? "") ?? 0;
         post({ id: msg.id, n });
@@ -430,6 +443,12 @@ async function handle(msg: Req): Promise<void> {
       }
       case "snapshotJson": {
         post({ id: msg.id, json: needWallet().snapshotJson(msg.server ?? "") });
+        return;
+      }
+      case "pendingSubmissions": {
+        const read = needWallet().pendingSubmissions;
+        if (!read) throw new Error("WASM needs a signed submission context upgrade");
+        post({ id: msg.id, json: read.call(needWallet()) });
         return;
       }
       case "pendingRawTxs": {

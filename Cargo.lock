@@ -1965,6 +1965,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
+name = "enhance-pir"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "hex",
+ "ipir-sp",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "enumflags2"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2595,9 +2609,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 5.3.0",
  "wasip2",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -8559,14 +8575,17 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-trait",
+ "base64",
  "bip39",
  "blake2b_simd",
  "bytes",
  "chacha20poly1305",
  "clap",
  "directories",
+ "enhance-pir",
  "ff",
  "getrandom 0.2.17",
+ "hex",
  "http",
  "http-body",
  "http-body-util",
@@ -8574,9 +8593,12 @@ dependencies = [
  "hyper",
  "hyper-util",
  "incrementalmerkletree",
+ "inspiring",
+ "ipir-sp",
  "keyring",
  "prost",
  "rand 0.10.2",
+ "rand 0.8.8",
  "rand_core 0.10.1",
  "rayon",
  "rusqlite",
@@ -8597,6 +8619,7 @@ dependencies = [
  "transparent-events",
  "transparent-filter",
  "transparent-wallet",
+ "z-enhance-pir",
  "zakura-address",
  "zakura-bls12-381",
  "zakura-client-backend",
@@ -8614,6 +8637,25 @@ dependencies = [
  "zcash_script",
  "zeroize",
  "zip32",
+]
+
+[[package]]
+name = "z-enhance-pir"
+version = "0.1.0-alpha.11"
+dependencies = [
+ "base64",
+ "enhance-pir",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "hex",
+ "inspiring",
+ "ipir-sp",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "wasm-bindgen",
+ "wasm-bindgen-rayon",
 ]
 
 [[package]]
@@ -8640,6 +8682,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-rayon",
  "z-engine",
+ "z-enhance-pir",
 ]
 
 [[package]]

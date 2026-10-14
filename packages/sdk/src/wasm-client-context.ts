@@ -3,7 +3,7 @@ import {
   type WalletSnapshot
 } from "@z-stack/core";
 import type { EventBus } from './events';
-import type { BlockTransport } from "./lwd";
+import type { BlockTransport, SubmissionPolicy } from "./lwd";
 import { type PublicDataStatus } from "./public-data";
 import {
   type ScanSession
@@ -45,6 +45,8 @@ export interface WasmClientContext {
   preferWorker: () => Promise<void>;
   transport: BlockTransport;
   readonly maxBlocksPerRequest: number;
+  readonly maxSharedMemoBlocksPerRequest: number;
+  readonly submissionPolicy: SubmissionPolicy;
   memoFetch: "auto" | "on-demand" | "shared";
   persist: (lineage?: { epoch: number; baseKey: string | null; }, replacement?: runtime.ClaimedGeneration & { unlockPolicy?: UnlockPolicy; }, background?: boolean) => Promise<void>;
   transparentScan: "off" | "compact";

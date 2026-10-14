@@ -35,6 +35,13 @@ use zip32::{DiversifierIndex, Scope};
 // rebuilds older retained history from the unchanged snapshot leaves/metadata.
 pub(crate) const TREE_CHECKPOINTS: usize = offload::TIP_CHECKPOINT_BLOCKS as usize + 1;
 pub(crate) use crate::scan::{CHECKPOINT_EVERY, HASH_KEEP};
+/// One persisted, unmined and unexpired transaction eligible for exact-byte submission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingSubmission {
+    pub txid: String,
+    pub hex: String,
+}
+
 /// JSON snapshot layout. Magic stays `zstk1`; this field distinguishes selective shard scanning + tree-size marks.
 const SNAPSHOT_VERSION: u32 = 2;
 fn snapshot_version_legacy() -> u32 {
@@ -197,6 +204,13 @@ pub struct TxAgg {
     pub is_shielding: bool,
     #[serde(default)]
     pub fee_zat: Option<u64>,
+    /// Fee derived from complete bytes or the wallet builder that saved those signed bytes; PIR assertions never set this.
+    #[serde(default)]
+    pub fee_from_full_transaction: bool,
+    /// Pure-Ironwood value-balance fee, independent of generic builder/PIR fee metadata.
+    /// Other-pool contributions cannot authorize Ironwood-only padding retirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ironwood_fee_from_full_transaction: Option<u64>,
     #[serde(default)]
     pub expiry_height: Option<u32>,
     #[serde(default)]
@@ -318,6 +332,8 @@ struct Snapshot {
     #[serde(default)]
     spend_notes: Vec<StoredNote>,
     #[serde(default)]
+    private_enhance: Vec<super::private_enhance::CompactEnhanceAction>,
+    #[serde(default)]
     sapling_leaves: Vec<TreeLeaf>,
     #[serde(default)]
     orchard_leaves: Vec<TreeLeaf>,
@@ -397,6 +413,7 @@ struct SnapshotRef<'a> {
     notes: &'a [TrackedNote],
     txs: &'a BTreeMap<String, TxAgg>,
     spend_notes: &'a [StoredNote],
+    private_enhance: &'a [super::private_enhance::CompactEnhanceAction],
     sapling_leaves: SnapshotLeaves<'a>,
     orchard_leaves: SnapshotLeaves<'a>,
     ironwood_leaves: SnapshotLeaves<'a>,
@@ -495,6 +512,7 @@ pub struct WebWallet {
     notes: Vec<TrackedNote>,
     txs: BTreeMap<String, TxAgg>,
     pub(crate) spend_notes: Vec<StoredNote>,
+    pub(crate) private_enhance: Vec<super::private_enhance::CompactEnhanceAction>,
     pub(crate) sapling_leaves: Vec<TreeLeaf>,
     pub(crate) orchard_leaves: Vec<TreeLeaf>,
     pub(crate) ironwood_leaves: Vec<TreeLeaf>,
@@ -571,6 +589,7 @@ impl WebWallet {
             notes: Vec::new(),
             txs: BTreeMap::new(),
             spend_notes: Vec::new(),
+            private_enhance: Vec::new(),
             sapling_leaves: Vec::new(),
             orchard_leaves: Vec::new(),
             ironwood_leaves: Vec::new(),
@@ -948,6 +967,7 @@ impl WebWallet {
             notes: &self.notes,
             txs: &self.txs,
             spend_notes: &self.spend_notes,
+            private_enhance: &self.private_enhance,
             sapling_leaves: SnapshotLeaves {
                 retained: &self.sapling_leaves,
                 buffered: self
@@ -1034,6 +1054,7 @@ impl WebWallet {
             notes: snap.notes,
             txs: snap.txs,
             spend_notes: snap.spend_notes,
+            private_enhance: snap.private_enhance,
             sapling_leaves: snap.sapling_leaves,
             orchard_leaves: snap.orchard_leaves,
             ironwood_leaves: snap.ironwood_leaves,
@@ -1642,6 +1663,13 @@ impl WebWallet {
         })
     }
 
+    pub(crate) fn private_enhance_tree_size(&self, height: u32) -> Option<u64> {
+        self.tree_sizes
+            .iter()
+            .find(|m| m.height == height)
+            .map(|m| m.ironwood)
+    }
+
     fn record_tree_size(&mut self, height: u32) {
         let mark = TreeSizeMark {
             height,
@@ -1944,6 +1972,7 @@ impl WebWallet {
             }
         }
         self.spend_notes.retain(|n| n.mined_height <= keep);
+        self.private_enhance.retain(|a| a.height() <= keep);
         for n in &mut self.spend_notes {
             if n.spent && !stays_pending(&n.spent_in) {
                 if let Some(txid) = &n.spent_in {
@@ -2050,6 +2079,7 @@ impl WebWallet {
         self.notes.clear();
         self.txs.clear();
         self.spend_notes.clear();
+        self.private_enhance.clear();
         self.sapling_leaves.clear();
         self.orchard_leaves.clear();
         self.ironwood_leaves.clear();
@@ -2076,11 +2106,11 @@ impl WebWallet {
     /// Unmined, with a nonzero expiry height the scanned chain has passed: it
     /// can no longer be mined (zero never expires).
     /// Raw bytes of our sends still waiting to be mined, keyed like `txs`.
-    fn unmined_pending_txs(&self) -> impl Iterator<Item = (String, &Vec<u8>)> + '_ {
+    fn unmined_pending_txs(&self) -> impl Iterator<Item = (TxId, &Vec<u8>)> + '_ {
         self.pending_txs.iter().filter_map(|(id, raw)| {
             let key = to_hex(id.as_ref());
             let agg = self.txs.get(&key)?;
-            (agg.mined_height.is_none() && !self.expired_unmined(agg)).then_some((key, raw))
+            (agg.mined_height.is_none() && !self.expired_unmined(agg)).then_some((*id, raw))
         })
     }
 
@@ -2103,6 +2133,16 @@ impl WebWallet {
     pub fn pending_raw_txs(&self) -> Vec<String> {
         self.unmined_pending_txs()
             .map(|(_, raw)| to_hex(raw))
+            .collect()
+    }
+
+    /// The exact saved bytes and their display-order ID from the Rust wallet.
+    pub fn pending_submissions(&self) -> Vec<PendingSubmission> {
+        self.unmined_pending_txs()
+            .map(|(txid, raw)| PendingSubmission {
+                txid: txid.to_string(),
+                hex: to_hex(raw),
+            })
             .collect()
     }
 
@@ -3360,11 +3400,34 @@ impl WebWallet {
             .unwrap_or_else(|_| wire_hex.to_owned())
     }
 
+    pub(super) fn pure_ironwood_fee(tx: &Transaction) -> Option<u64> {
+        if tx.transparent_bundle().is_some()
+            || tx.sapling_bundle().is_some()
+            || tx.orchard_bundle().is_some()
+            || tx.sprout_bundle().is_some()
+        {
+            return None;
+        }
+        tx.ironwood_bundle()
+            .and_then(|bundle| u64::try_from(i64::from(*bundle.value_balance())).ok())
+    }
+
     pub(crate) fn store_pending_tx(&mut self, tx: &Transaction) -> Result<()> {
         let mut data = Vec::new();
         tx.write(&mut data)
             .map_err(|e| EngineError::Message(format!("serialize tx: {e}")))?;
         self.pending_txs.insert(tx.txid(), data);
+        // Only complete pure-Ironwood bytes supply the pool-local value balance.
+        let fee = Self::pure_ironwood_fee(tx);
+        let agg = self
+            .txs_mut()
+            .entry(to_hex(tx.txid().as_ref()))
+            .or_default();
+        agg.ironwood_fee_from_full_transaction = fee;
+        if let Some(fee) = fee {
+            agg.fee_zat = Some(fee);
+            agg.fee_from_full_transaction = true;
+        }
         Ok(())
     }
 
@@ -4168,7 +4231,7 @@ fn diversifier_u32(j: DiversifierIndex) -> u32 {
 
 #[cfg(test)]
 #[path = "store_tests.rs"]
-mod performance_tests;
+pub(crate) mod performance_tests;
 
 #[cfg(test)]
 mod tests {

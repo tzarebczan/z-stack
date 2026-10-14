@@ -58,6 +58,7 @@ lwd = [
 ]
 sync = ["lwd", "zcash_client_backend/sync"]
 transparent-inputs = ["zcash_client_backend/transparent-inputs", "dep:transparent"]
+private-enhance = ["dep:z-enhance-pir"]
 native-pir = ["native", "dep:transparent-wallet", "dep:transparent-events", "dep:transparent-filter", "dep:sha2", "dep:tempfile"]
 # WASM proving (Orchard/Ironwood in-process). Sapling params stay out of the blob.
 wasm-prove = ["orchard/circuit", "zcash_primitives/circuits"]
@@ -95,6 +96,7 @@ cli = [
 ]
 
 [dependencies]
+z-enhance-pir = { path = "../z-enhance-pir", optional = true }
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -178,6 +180,12 @@ getrandom = { version = "0.2", features = ["js"] }
 time = { version = "0.3.22", default-features = false, features = ["std", "wasm-bindgen"] }
 
 [dev-dependencies]
+rand_08 = { package = "rand", version = "0.8" }
+hex = "0.4"
+enhance-pir = { path = "../../vendor/pir/enhance-pir", default-features = false }
+ipir-sp = "=0.1.0-rc.7"
+inspiring = "=0.1.0-rc.3"
+base64 = "0.22"
 hyper = { version = "1", features = ["server", "http2"] }
 transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2", features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
@@ -188,3 +196,7 @@ zcash_note_encryption = "=0.4.2"
 name = "z-wallet"
 path = "src/bin/z_wallet.rs"
 required-features = ["native", "cli"]
+
+[[example]]
+name = "enhance_wallet_fixture"
+required-features = ["native", "private-enhance"]

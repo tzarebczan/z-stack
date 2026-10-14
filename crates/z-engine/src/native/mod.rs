@@ -14,7 +14,8 @@ mod seed;
 mod selective_scan;
 mod source;
 mod submission_channel;
-pub use source::NativeReadOnlySource;
+pub use source::{NativeReadOnlySource, NativeWalletSource};
+pub use wallet::NativeSharedMemosPass;
 mod transparent_funding;
 mod transparent_refresh;
 mod tree_state;
@@ -149,3 +150,6 @@ mod replacement_tests {
         }
     }
 }
+
+#[cfg(feature = "private-enhance")]
+pub use wallet::NativeEnhancePass;

@@ -161,9 +161,17 @@ node scripts/grpc-web-proxy.mjs --upstream http://127.0.0.1:28137 --port 28138
 ```
 
 `GET /zstack/memos?start=H&end=J` accepts inclusive public ranges of 1–10 blocks.
-No other query parameters or caller identities are forwarded upstream. Normal
-SDK pages end on ten-block boundaries; the first birthday and trailing tip
-pages can be shorter. The response is JSON:
+No other query parameters or caller identities are forwarded upstream. SDK
+requests never cross the common ten-block boundaries; the first birthday and
+trailing tip pages can be shorter. A custom transport's
+`readonly maxSharedMemoBlocksPerRequest` can reduce each request to 1 through 10
+blocks. The SDK validates and captures it before owner or storage setup, with a
+default of 10. Smaller requests preserve the common boundaries and checkpoint
+every completed range. They do not change the response byte limit or permit a
+selective fallback. Check
+`SDK_TRANSPORT_CAPABILITIES.maxSharedMemoBlocksPerRequest === true` on the root
+SDK export before relying on the hint from a separately supplied archive.
+The response is JSON:
 
 ```json
 {"start":1,"end":9,"blocks":"<hex u32-BE-length-delimited CompactBlocks>","transactions":["<raw tx hex>"]}
@@ -219,3 +227,12 @@ query leakage but do not hide transparent on-chain activity. A malicious or
 incomplete light server can still deny data. Memo text, viewing keys and seeds
 remain local. Enabling compatibility lookups intentionally restores selective
 query disclosure.
+
+A signed submission transport can require `SubmissionContext`, exported from
+`@z-stack/sdk`. The SDK passes `{ txid }` as the third `submit` argument for
+software and hardware submissions and for optional saved-byte resubmission.
+Rust supplies the display-order ID together with the exact transaction bytes;
+TypeScript does not derive an ID. Check
+`SDK_TRANSPORT_CAPABILITIES.submitContext === true` before enabling such a
+transport. This context binds the reply to a signed transaction; application
+review and durable unknown-outcome handling remain separate responsibilities.

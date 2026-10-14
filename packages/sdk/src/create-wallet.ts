@@ -5,7 +5,7 @@
 
 import { WalletError, type UnlockPolicy, type WalletSnapshot } from "@z-stack/core";
 import type { CreationPreparation, EngineClient } from "./engine";
-import { compactBlockRequestLimit, grpcWebTransport, httpLwdTransport, isLoopbackUrl, looksLikeLwdPipe, type BlockTransport } from "./lwd";
+import { compactBlockRequestLimit, sharedMemoBlockRequestLimit, resolveSubmissionPolicy, type SubmissionPolicy, grpcWebTransport, httpLwdTransport, isLoopbackUrl, looksLikeLwdPipe, type BlockTransport } from "./lwd";
 import { initialize, wasmRuntime, type Network, type SdkInitOptions, type WasmRuntime } from "./runtime";
 import { observeEngineProgress, type EngineLoadProgress } from "./engine-progress";
 import { cancelWasmSync, createWasmClient, forgetWasmWallet, peekWasmWallet, type WasmClient, type WasmProgress } from "./wasm-client";
@@ -59,6 +59,8 @@ export type WalletOptions = {
    * before sending. No unlocker is called automatically.
    */
   autoShield?: boolean;
+  /** Default saved-bytes-auto resubmits existing signed bytes during sync. Explicit disables sync resubmission. */
+  submissionPolicy?: SubmissionPolicy;
   /**
    * Fetch full wallet transactions for memos during sync (default on-demand). The
    * server learns their transaction IDs. With on-demand, only fetchMemos()
@@ -180,7 +182,11 @@ export function lightServer(url: string, opts: { network: Network; transparent?:
 export async function createWallet(opts: WalletOptions): Promise<Wallet> {
   if (!["mainnet", "testnet", "regtest"].includes(opts.network)) throw new WalletError("invalid_network", "Choose mainnet, testnet or regtest.");
   if (opts.unlockPolicy !== undefined && !["session", "each-spend"].includes(opts.unlockPolicy)) throw new WalletError("unknown", "Invalid browser unlock policy.");
-  if (typeof opts.server !== "string") compactBlockRequestLimit(opts.server.maxBlocksPerRequest);
+  const submissionPolicy = resolveSubmissionPolicy(opts.submissionPolicy);
+  const transportLimits = {
+    maxBlocksPerRequest: compactBlockRequestLimit(typeof opts.server === "string" ? undefined : opts.server.maxBlocksPerRequest),
+    maxSharedMemoBlocksPerRequest: sharedMemoBlockRequestLimit(typeof opts.server === "string" ? undefined : opts.server.maxSharedMemoBlocksPerRequest),
+  };
   const claimed = claimWalletOwner();
   if (!claimed) throw new WalletError("owner_conflict", "Only one browser wallet client can own the engine. Close it before creating another.");
   const lease = claimed;
@@ -216,6 +222,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
     const client = createWasmClient(
       {
         requireExplicitReplacement: true,
+        submissionPolicy,
         network: opts.network,
         transport,
         requirePersistence: true,
@@ -231,6 +238,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
         ...(opts.unlockPolicy ? { unlockPolicy: opts.unlockPolicy } : {}),
       },
       (progress) => reportProgress?.(progress),
+      transportLimits,
     );
     createdClient = client;
     Object.defineProperty(client, "runtime", { get: () => wasmRuntime() ?? runtime, enumerable: true });
@@ -361,6 +369,12 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
         return client.setUnlockPolicy(policy);
       },
       lock,
+      retryPendingSubmission(txid: string, options?: { signal?: AbortSignal }) {
+        const owner = unlockAbort.signal;
+        const caller = options?.signal;
+        const signal = caller ? AbortSignal.any([owner, caller]) : owner;
+        return client.retryPendingSubmission(txid, { signal });
+      },
       load: () => client.loadSavedWallet(),
       async forget(o?: { passkey?: boolean; pending?: "reject" }) {
         lock();

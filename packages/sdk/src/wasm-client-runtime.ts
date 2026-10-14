@@ -1,3 +1,4 @@
+import type { PrivateEnhanceOperation } from "./private-enhance";
 import {
   HASH_KEEP,
   MAX_SYNC_BLOCKS,
@@ -11,7 +12,7 @@ import {
 import { coalescedTask } from "./coalesced-task";
 import type { BirthdayInput, EngineClient } from "./engine";
 import type { HardwareStatics } from "./hardware-ops";
-import type { BlockTransport } from "./lwd";
+import type { BlockTransport, SubmissionPolicy } from "./lwd";
 import { isBroadcastRejection, isDuplicateBroadcast } from "./lwd";
 import {
   forgetScanWorkerWallet,
@@ -214,6 +215,7 @@ export type WasmWalletHandle = {
   proveSend: (mnemonic: string, to: string, amountZec: string, memo?: string, maxFeeZat?: string, minConfirmations?: number) => string;
   proveShield: (mnemonic: string, thresholdZat: number) => string;
   enhanceRawTx?: (hex: string) => number;
+  privateEnhance?: (operation: PrivateEnhanceOperation, bytes: Uint8Array, time: number) => Uint8Array;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
   rewindToChecked?: (height: number) => number;
@@ -381,6 +383,7 @@ export type WasmClientOpts = {
   requireExplicitReplacement?: boolean;
   network: Network;
   transport: BlockTransport;
+  submissionPolicy?: SubmissionPolicy;
   /** Compact-block light URL (Zaino / LWD). Drives batch size; t-scan stays loopback-only. */
   lightUrl?: string;
   allowDeepSync?: boolean;
@@ -402,6 +405,10 @@ export type WasmClientOpts = {
 export { validateBirthdayInput };
 
 export type WasmClient = EngineClient & {
+  /** Explicitly resend exact Rust-owned saved bytes. No signing/unlock or policy change.
+   * Acknowledgement leaves the transaction pending until canonical confirmation.
+   * Every failure preserves its original durable receipt and input reservations. */
+  retryPendingSubmission(txid: string, options?: { signal?: AbortSignal }): Promise<{ txid: string }>;
   /** Clear scan state from an earlier birthday, without replacing keys or addresses.
    * Refuses unresolved outgoing payments. Persists the reset before returning;
    * call sync afterwards. Does not unlock spending or enable deepSync.

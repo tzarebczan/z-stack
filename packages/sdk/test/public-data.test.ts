@@ -190,3 +190,56 @@ test("compact backfill unsafe cap refuses before snapshot, mutation or provider"
   assert.deepEqual(f.calls, []);
   assert.equal(f.state.transparentScanHeight, null);
 });
+
+for (const [cap, expected] of [
+  [1, [["memos", 1, 1], ["memos", 2, 2], ["memos", 3, 3], ["memos", 4, 4], ["memos", 5, 5], ["memos", 6, 6], ["memos", 7, 7], ["memos", 8, 8], ["memos", 9, 9], ["memos", 10, 10], ["memos", 11, 11], ["memos", 12, 12]]],
+  [3, [["memos", 1, 3], ["memos", 4, 6], ["memos", 7, 9], ["memos", 10, 12]]],
+  [10, [["memos", 1, 9], ["memos", 10, 12]]],
+] as const) {
+  test(`shared memo cap ${cap} bounds provider ranges and commits every completed range`, async () => {
+    const f = fixture(12), checkpoints: Array<number | null> = [];
+    assert.deepEqual(await syncPublicData({ ...f.opts, transparent: false,
+      maxSharedMemoBlocksPerRequest: cap, checkpoint: async () => { checkpoints.push(f.state.memoScanHeight); },
+    }), { memos: "complete" });
+    assert.deepEqual(f.calls, expected);
+    assert.deepEqual(checkpoints, expected.map(([, , end]) => end));
+  });
+}
+
+test("shared memo cap refuses before reading or mutating wallet state", async () => {
+  const f = fixture();
+  let reads = 0;
+  f.source.snapshotJson = async () => { reads++; return "{}"; };
+  await assert.rejects(syncPublicData({ ...f.opts, maxSharedMemoBlocksPerRequest: 0 }), /maxSharedMemoBlocksPerRequest/);
+  assert.equal(reads, 0);
+  assert.deepEqual(f.calls, []);
+  assert.equal(f.state.memoScanHeight, null);
+});
+
+test("one-block memo retrieval resumes only after its last durable checkpoint", async () => {
+  const f = fixture(12);
+  let saved: number | null = null;
+  const fetch = f.transport.sharedMemos!;
+  f.transport.sharedMemos = async (start, end, signal) => {
+    if (start === 5) throw new TypeError("fixture shared range unavailable");
+    return fetch(start, end, signal);
+  };
+  const options = { ...f.opts, transparent: false, maxSharedMemoBlocksPerRequest: 1,
+    checkpoint: async () => { saved = f.state.memoScanHeight; },
+  };
+  await assert.rejects(syncPublicData(options), /fixture shared range unavailable/);
+  assert.equal(saved, 4);
+  f.state.memoScanHeight = saved;
+  f.calls.length = 0;
+  f.transport.sharedMemos = fetch;
+  assert.deepEqual(await syncPublicData(options), { memos: "complete" });
+  assert.deepEqual(f.calls[0], ["memos", 5, 5]);
+  assert.equal(saved, 12);
+});
+
+test("memo caps preserve common boundaries when coverage resumes inside a bucket", async () => {
+  const f = fixture(14);
+  f.state.birthdayHeight = 8;
+  assert.deepEqual(await syncPublicData({ ...f.opts, transparent: false, maxSharedMemoBlocksPerRequest: 4 }), { memos: "complete" });
+  assert.deepEqual(f.calls, [["memos", 8, 9], ["memos", 10, 13], ["memos", 14, 14]]);
+});

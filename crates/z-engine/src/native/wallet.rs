@@ -14,11 +14,20 @@ mod recovery_guard;
 pub use recovery_blocks::{verify_regtest_recovery_blocks, VerifiedRegtestRecoveryBlocks};
 #[cfg(feature = "native-pir")]
 pub use recovery_cancellation::RecoveryCancellation;
+mod memo_status;
 mod payments;
+mod shared_memos;
+pub use shared_memos::NativeSharedMemosPass;
+#[cfg(feature = "private-enhance")]
+mod private_enhance;
+#[cfg(feature = "private-enhance")]
+pub use private_enhance::NativeEnhancePass;
 #[cfg(feature = "native-pir")]
 mod pir;
 #[cfg(test)]
 mod source_tests;
+#[cfg(test)]
+mod source_wallet_tests;
 #[cfg(test)]
 mod submission_tests;
 #[cfg(feature = "native-pir")]
@@ -405,16 +414,11 @@ fn require_initial_recovery_setup(path: &Path) -> Result<()> {
 enum SetupSource<'a> {
     Direct(ZNetwork, Option<LightServer>),
     Provided(&'a super::NativeReadOnlySource),
+    Wallet(&'a super::NativeWalletSource),
 }
 
 impl<'a> SetupSource<'a> {
-    fn parts(
-        self,
-    ) -> (
-        ZNetwork,
-        LightServer,
-        Option<&'a super::NativeReadOnlySource>,
-    ) {
+    fn parts(self) -> (ZNetwork, LightServer, Option<SuppliedSource<'a>>) {
         match self {
             Self::Direct(network, server) => (
                 network,
@@ -424,8 +428,74 @@ impl<'a> SetupSource<'a> {
             Self::Provided(source) => (
                 source.network(),
                 LightServer::for_network(source.network()),
-                Some(source),
+                Some(SuppliedSource::ReadOnly(source)),
             ),
+            Self::Wallet(source) => (
+                source.network(),
+                LightServer::for_network(source.network()),
+                Some(SuppliedSource::Wallet(source)),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SuppliedSource<'a> {
+    ReadOnly(&'a super::NativeReadOnlySource),
+    Wallet(&'a super::NativeWalletSource),
+}
+impl SuppliedSource<'_> {
+    async fn assert_chain(self, client: &mut LwdClient, network: ZNetwork) -> Result<()> {
+        match self {
+            Self::ReadOnly(_) => NativeWallet::assert_chain(client, network).await,
+            Self::Wallet(_) => NativeWallet::assert_wallet_source_chain(client, network).await,
+        }
+    }
+    fn client(self) -> LwdClient {
+        match self {
+            Self::ReadOnly(s) => s.client(),
+            Self::Wallet(s) => s.client(),
+        }
+    }
+    fn enroll(self, root: &Path) -> Result<()> {
+        match self {
+            Self::ReadOnly(_) => super::source::enroll(root),
+            Self::Wallet(s) => super::source::enroll_wallet(root, s),
+        }
+    }
+    fn setup(self, root: &Path) -> Result<Option<super::source::Setup>> {
+        match self {
+            Self::ReadOnly(_) => super::source::setup(root),
+            Self::Wallet(_) => super::source::wallet_setup(root),
+        }
+    }
+    fn setup_birthday(
+        self,
+        root: &Path,
+        network: ZNetwork,
+        birthday: Option<u32>,
+        account: u32,
+        retained: bool,
+    ) -> Result<Option<u32>> {
+        match self {
+            Self::ReadOnly(_) => {
+                super::source::setup_birthday(root, network, birthday, account, retained)
+            }
+            Self::Wallet(_) => {
+                super::source::wallet_setup_birthday(root, network, birthday, account, retained)
+            }
+        }
+    }
+    fn bind_setup(self, root: &Path, network: ZNetwork, birthday: u32, account: u32) -> Result<()> {
+        match self {
+            Self::ReadOnly(_) => super::source::bind_setup(root, network, birthday, account),
+            Self::Wallet(_) => super::source::bind_wallet_setup(root, network, birthday, account),
+        }
+    }
+    fn profile(self) -> NewWalletProfile {
+        match self {
+            Self::ReadOnly(_) => NewWalletProfile::ReadOnlySource,
+            Self::Wallet(_) => NewWalletProfile::WalletSource,
         }
     }
 }
@@ -433,6 +503,7 @@ impl<'a> SetupSource<'a> {
 enum NewWalletProfile {
     Ordinary,
     ReadOnlySource,
+    WalletSource,
     #[cfg(feature = "native-pir")]
     VerifiedRegtestRecovery,
 }
@@ -477,6 +548,24 @@ impl WalletPaths {
     }
 
     fn prepare_new_wallet_for(&self, profile: NewWalletProfile) -> Result<()> {
+        if matches!(profile, NewWalletProfile::WalletSource) && self.data_db.try_exists()? {
+            return Err(EngineError::Message(
+                "native_wallet_source_fresh_required".into(),
+            ));
+        }
+        if matches!(profile, NewWalletProfile::WalletSource)
+            && super::source::wallet_binding(&self.root)?.is_none()
+            && SeedStore::new(&self.root).exists()
+        {
+            return Err(EngineError::Message(
+                "native_wallet_source_fresh_required".into(),
+            ));
+        }
+        if super::source::wallet_binding(&self.root)?.is_some()
+            && !matches!(profile, NewWalletProfile::WalletSource)
+        {
+            return Err(EngineError::Message("native_wallet_source_required".into()));
+        }
         if matches!(profile, NewWalletProfile::ReadOnlySource) && self.data_db.try_exists()? {
             return Err(super::source::refused());
         }
@@ -500,6 +589,11 @@ impl WalletPaths {
                             "native_recovery_profile_required".into(),
                         ));
                     }
+                }
+                NewWalletProfile::WalletSource => {
+                    return Err(EngineError::Message(
+                        "native_wallet_source_fresh_required".into(),
+                    ))
                 }
                 #[cfg(feature = "native-pir")]
                 NewWalletProfile::VerifiedRegtestRecovery => {
@@ -799,6 +893,11 @@ pub enum NativeBirthday {
 
 enum BroadcastConnection {
     Light(Box<LwdClient>, Arc<std::fs::File>),
+    Supplied(
+        Box<LwdClient>,
+        Arc<std::fs::File>,
+        super::NativeWalletSource,
+    ),
     Validator(super::rpc::VerifiedValidator, Arc<std::fs::File>),
 }
 
@@ -834,6 +933,12 @@ impl NativeWallet {
     pub fn uses_read_only_source(&self) -> Result<bool> {
         let _lease = database_lease::shared(&self.paths.data_db)?;
         super::source::read_only(&self.paths.root)
+    }
+
+    /// The accepted source identity is durable; a cold open has no transport.
+    pub fn uses_wallet_source(&self) -> Result<bool> {
+        let _lease = database_lease::shared(&self.paths.data_db)?;
+        Ok(super::source::wallet_binding(&self.paths.root)?.is_some())
     }
 
     pub fn server_url(&self) -> String {
@@ -992,6 +1097,31 @@ impl NativeWallet {
         Ok(())
     }
 
+    async fn assert_wallet_source_chain(client: &mut LwdClient, expected: ZNetwork) -> Result<()> {
+        let info = client
+            .get_lightd_info(Empty {})
+            .await
+            .map_err(|_| EngineError::Transport("supplied source identity unavailable".into()))?
+            .into_inner();
+        let first = client
+            .get_block(BlockId {
+                height: 1,
+                hash: vec![],
+            })
+            .await
+            .map_err(|_| EngineError::Transport("supplied source genesis unavailable".into()))?
+            .into_inner();
+        if first.height != 1 || first.prev_hash.len() != 32 {
+            return Err(EngineError::ChainMismatch {
+                wallet: expected.as_str().into(),
+                server: "supplied source genesis framing mismatch".into(),
+            });
+        }
+        let mut genesis = first.prev_hash;
+        genesis.reverse();
+        super::chain_identity::validate(expected, &info.chain_name, &crate::web::to_hex(&genesis))
+    }
+
     fn check_sync_gap(birthday: u32, tip: u32, allow_deep: bool) -> Result<()> {
         let gap = tip.saturating_sub(birthday);
         let env = std::env::var("Z_STACK_ALLOW_DEEP_SYNC").ok().as_deref() == Some("1");
@@ -1108,14 +1238,12 @@ impl NativeWallet {
         super::initialize_native_threads(None)?;
         let paths = WalletPaths::new(root);
         let _ownership = database_lease::bootstrap(&paths.root)?;
-        paths.prepare_new_wallet_for(if source.is_some() {
-            NewWalletProfile::ReadOnlySource
-        } else {
-            NewWalletProfile::Ordinary
-        })?;
+        paths.prepare_new_wallet_for(
+            source.map_or(NewWalletProfile::Ordinary, SuppliedSource::profile),
+        )?;
         paths.ensure_dirs()?;
-        if source.is_some() {
-            super::source::enroll(&paths.root)?;
+        if let Some(source) = source {
+            source.enroll(&paths.root)?;
         }
 
         let seed_store = SeedStore::new(&paths.root);
@@ -1128,17 +1256,17 @@ impl NativeWallet {
         };
         let mut prepared_source = None;
         if let Some(source) = source {
-            birthday_height = super::source::setup_birthday(
+            birthday_height = source.setup_birthday(
                 &paths.root,
                 network,
                 birthday_height,
                 account_index,
                 retained_seed,
             )?;
-            let new_binding = super::source::setup(&paths.root)?.is_none();
+            let new_binding = source.setup(&paths.root)?.is_none();
             if birthday_height.is_none() || new_binding {
                 let mut client = source.client();
-                Self::assert_chain(&mut client, network).await?;
+                source.assert_chain(&mut client, network).await?;
                 let tip: u32 = client
                     .get_latest_block(ChainSpec::default())
                     .await
@@ -1159,7 +1287,7 @@ impl NativeWallet {
                 birthday_height = Some(height);
                 prepared_source = Some((client, tip));
             }
-            super::source::bind_setup(
+            source.bind_setup(
                 &paths.root,
                 network,
                 birthday_height.ok_or_else(|| {
@@ -1212,7 +1340,10 @@ impl NativeWallet {
         let tip: u32 = match prepared_tip {
             Some(tip) => tip,
             None => {
-                Self::assert_chain(&mut client, network).await?;
+                match source {
+                    Some(source) => source.assert_chain(&mut client, network).await?,
+                    None => Self::assert_chain(&mut client, network).await?,
+                }
                 client
                     .get_latest_block(ChainSpec::default())
                     .await
@@ -1274,8 +1405,8 @@ impl NativeWallet {
             .encode(&network);
         let ufvk_str = ufvk.encode(&network);
 
-        if source.is_some() {
-            super::source::enroll(&paths.root)?;
+        if let Some(source) = source {
+            source.enroll(&paths.root)?;
         }
         let meta = WalletMeta {
             network: network.as_str().into(),
@@ -1367,14 +1498,12 @@ impl NativeWallet {
         super::initialize_native_threads(None)?;
         let paths = WalletPaths::new(root);
         let _ownership = database_lease::bootstrap(&paths.root)?;
-        paths.prepare_new_wallet_for(if source.is_some() {
-            NewWalletProfile::ReadOnlySource
-        } else {
-            NewWalletProfile::Ordinary
-        })?;
+        paths.prepare_new_wallet_for(
+            source.map_or(NewWalletProfile::Ordinary, SuppliedSource::profile),
+        )?;
         paths.ensure_dirs()?;
-        if source.is_some() {
-            super::source::enroll(&paths.root)?;
+        if let Some(source) = source {
+            source.enroll(&paths.root)?;
         }
 
         let birthday_height =
@@ -1388,16 +1517,16 @@ impl NativeWallet {
         let retained_seed = source.is_some() && seed_store.exists();
         let mut prepared_source = None;
         if let Some(source) = source {
-            super::source::setup_birthday(
+            source.setup_birthday(
                 &paths.root,
                 network,
                 Some(birthday_height),
                 account_index,
                 retained_seed,
             )?;
-            if super::source::setup(&paths.root)?.is_none() {
+            if source.setup(&paths.root)?.is_none() {
                 let mut client = source.client();
-                Self::assert_chain(&mut client, network).await?;
+                source.assert_chain(&mut client, network).await?;
                 let tip: u32 = client
                     .get_latest_block(ChainSpec::default())
                     .await
@@ -1415,7 +1544,7 @@ impl NativeWallet {
                 Self::check_sync_gap(birthday_height, tip, true)?;
                 prepared_source = Some((client, tip));
             }
-            super::source::bind_setup(&paths.root, network, birthday_height, account_index)?;
+            source.bind_setup(&paths.root, network, birthday_height, account_index)?;
         }
         if retained_seed {
             let retained = seed_store.load(auth.passphrase.as_deref(), auth.windows_credential)?;
@@ -1449,7 +1578,10 @@ impl NativeWallet {
         let tip: u32 = match prepared_tip {
             Some(tip) => tip,
             None => {
-                Self::assert_chain(&mut client, network).await?;
+                match source {
+                    Some(source) => source.assert_chain(&mut client, network).await?,
+                    None => Self::assert_chain(&mut client, network).await?,
+                }
                 client
                     .get_latest_block(ChainSpec::default())
                     .await
@@ -1503,8 +1635,8 @@ impl NativeWallet {
             .encode(&network);
         let ufvk_str = ufvk.encode(&network);
 
-        if source.is_some() {
-            super::source::enroll(&paths.root)?;
+        if let Some(source) = source {
+            source.enroll(&paths.root)?;
         }
         let meta = WalletMeta {
             network: network.as_str().into(),
@@ -1589,6 +1721,55 @@ impl NativeWallet {
         let _lease = wallet.ordinary_scan_lease()?;
         super::source::enroll(&wallet.paths.root)?;
         wallet.network_access = false;
+        Ok(wallet)
+    }
+
+    /// Create in a fresh store bound to an application-authenticated source.
+    /// Ordinary networking and historical read-only policies remain disabled.
+    pub async fn create_with_wallet_source(
+        root: impl Into<PathBuf>,
+        source: &super::NativeWalletSource,
+        birthday_height: Option<u32>,
+        auth: SeedAuth,
+        account_index: u32,
+    ) -> Result<(Self, CreatedWallet)> {
+        Self::create_inner(
+            root,
+            SetupSource::Wallet(source),
+            birthday_height.map(NativeBirthday::Height),
+            auth,
+            account_index,
+        )
+        .await
+    }
+
+    pub async fn restore_with_wallet_source(
+        root: impl Into<PathBuf>,
+        mnemonic: &str,
+        source: &super::NativeWalletSource,
+        birthday_height: u32,
+        auth: SeedAuth,
+        account_index: u32,
+    ) -> Result<(Self, String)> {
+        Self::restore_inner(
+            root,
+            mnemonic,
+            SetupSource::Wallet(source),
+            NativeBirthday::Height(birthday_height),
+            auth,
+            account_index,
+        )
+        .await
+    }
+
+    /// Reattach the same accepted source without enrolling or changing policy.
+    pub fn open_with_wallet_source(
+        root: impl Into<PathBuf>,
+        source: &super::NativeWalletSource,
+    ) -> Result<Self> {
+        let wallet = Self::open(root)?;
+        let _lease = database_lease::shared(&wallet.paths.data_db)?;
+        wallet.require_wallet_source(source)?;
         Ok(wallet)
     }
 
@@ -1698,6 +1879,7 @@ impl NativeWallet {
         super::initialize_native_threads(None)?;
         let paths = WalletPaths::new(root);
         super::source::read_only(&paths.root)?;
+        super::source::wallet_binding(&paths.root)?;
         if paths.meta_path.exists() {
             paths.recover_interrupted_reset();
         }
@@ -1708,7 +1890,8 @@ impl NativeWallet {
             .map_err(|e| EngineError::Message(format!("wallet.json: {e}")))?;
         let network = ZNetwork::parse(&meta.network)
             .ok_or_else(|| EngineError::InvalidNetwork(meta.network.clone()))?;
-        let network_access = !super::source::read_only(&paths.root)?;
+        let network_access = !super::source::read_only(&paths.root)?
+            && super::source::wallet_binding(&paths.root)?.is_none();
         Ok(Self {
             paths,
             network_access,
@@ -1739,6 +1922,9 @@ impl NativeWallet {
         if super::source::read_only(&self.paths.root)? {
             return Err(super::source::refused());
         }
+        if super::source::wallet_binding(&self.paths.root)?.is_some() {
+            return Err(EngineError::Message("native_wallet_source_required".into()));
+        }
         Ok(())
     }
 
@@ -1759,6 +1945,9 @@ impl NativeWallet {
         let lease = Arc::new(database_lease::bootstrap(root)?);
         if super::source::read_only(root)? {
             return Err(super::source::refused());
+        }
+        if super::source::wallet_binding(root)?.is_some() {
+            return Err(EngineError::Message("native_wallet_source_required".into()));
         }
         Ok(lease)
     }
@@ -1785,6 +1974,15 @@ impl NativeWallet {
             ));
         }
         Ok(())
+    }
+
+    fn require_wallet_source(&self, source: &super::NativeWalletSource) -> Result<()> {
+        if self.network != source.network() {
+            return Err(EngineError::Message(
+                "native_source_network_mismatch".into(),
+            ));
+        }
+        super::source::require_wallet(&self.paths.root, source)
     }
 
     fn ordinary_scan_lease(&self) -> Result<Arc<std::fs::File>> {
@@ -1976,7 +2174,42 @@ impl NativeWallet {
             Duration::from_secs(120),
             Duration::from_secs(2),
             &cancel,
-            || self.sync_reported_locked(progress.clone(), Some(source), &_lease),
+            || {
+                self.sync_reported_locked(
+                    progress.clone(),
+                    Some(SuppliedSource::ReadOnly(source)),
+                    &_lease,
+                )
+            },
+        )
+        .await
+    }
+
+    /// Scan public data on the supplied channel. This path never enhances by
+    /// selected txid, refreshes addresses or automatically rebroadcasts payments.
+    pub async fn sync_with_wallet_source_reported_cancellable(
+        &self,
+        source: &super::NativeWalletSource,
+        live: Option<Arc<Mutex<SyncProgress>>>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<(u32, SyncProgress)> {
+        let _lease = self.ordinary_scan_lease()?;
+        self.require_wallet_source(source)?;
+        let live = live.or_else(|| Some(Arc::new(Mutex::new(SyncProgress::default()))));
+        let progress = live.clone();
+        retry_transient_sync(
+            live,
+            None,
+            Duration::from_secs(120),
+            Duration::from_secs(2),
+            &cancel,
+            || {
+                self.sync_reported_locked(
+                    progress.clone(),
+                    Some(SuppliedSource::Wallet(source)),
+                    &_lease,
+                )
+            },
         )
         .await
     }
@@ -1994,11 +2227,12 @@ impl NativeWallet {
     async fn sync_reported_locked(
         &self,
         live: Option<Arc<Mutex<SyncProgress>>>,
-        source: Option<&super::NativeReadOnlySource>,
+        source: Option<SuppliedSource<'_>>,
         lease: &Arc<std::fs::File>,
     ) -> Result<(u32, SyncProgress)> {
         match source {
-            Some(source) => self.require_read_only_source(source)?,
+            Some(SuppliedSource::ReadOnly(source)) => self.require_read_only_source(source)?,
+            Some(SuppliedSource::Wallet(source)) => self.require_wallet_source(source)?,
             None => self.require_network_access()?,
         }
         let provided = source.is_some();
@@ -2015,7 +2249,10 @@ impl NativeWallet {
             Some(source) => source.client(),
             None => self.connect().await?,
         };
-        Self::assert_chain(&mut client, self.network).await?;
+        match source {
+            Some(source) => source.assert_chain(&mut client, self.network).await?,
+            None => Self::assert_chain(&mut client, self.network).await?,
+        }
 
         let tip: u32 = client
             .get_latest_block(ChainSpec::default())
@@ -2962,9 +3199,25 @@ impl NativeWallet {
             pending.push(r.map_err(|e| EngineError::WalletDb(format!("history row: {e}")))?);
         }
         drop(stmt);
+        let work_status = memo_status::work(&conn, self.network);
         let mut out = Vec::with_capacity(pending.len());
         for (txid, mut e) in pending {
-            e.memos = memos_for_txid(&conn, &txid);
+            let (memos, authenticated_empty) = memos_for_txid(&conn, &txid);
+            e.memos = memos;
+            e.memo_status = if !e.memos.is_empty() {
+                crate::MemoStatus::Available
+            } else {
+                txid.as_slice()
+                    .try_into()
+                    .ok()
+                    .map(TxId::from_bytes)
+                    .and_then(|id| work_status.as_ref()?.get(&id).copied())
+                    .unwrap_or(if authenticated_empty && work_status.is_some() {
+                        crate::MemoStatus::Empty
+                    } else {
+                        crate::MemoStatus::Unknown
+                    })
+            };
             out.push(e);
         }
         Ok(out)
@@ -3845,7 +4098,12 @@ impl NativeWallet {
         data: Vec<u8>,
         lease: &Arc<std::fs::File>,
     ) -> Result<()> {
-        self.require_network_access()?;
+        match client.as_ref() {
+            Some(BroadcastConnection::Supplied(_, _, source)) => {
+                self.require_wallet_source(source)?
+            }
+            _ => self.require_network_access()?,
+        }
         if client.is_none() {
             *client = Some(self.connect_submission(lease).await?);
         }
@@ -3874,6 +4132,29 @@ impl NativeWallet {
                         code: response.error_code,
                         message: response.error_message,
                     });
+                }
+            }
+            BroadcastConnection::Supplied(mut connection, owner, source) => {
+                let result = connection
+                    .send_transaction(RawTransaction { data, height: 0 })
+                    .await;
+                *client = Some(BroadcastConnection::Supplied(connection, owner, source));
+                let response = result
+                    .map_err(|_| {
+                        EngineError::Transport("supplied source submission outcome unknown".into())
+                    })?
+                    .into_inner();
+                if response.error_code != 0 {
+                    let rejection = EngineError::BroadcastRejected {
+                        code: response.error_code,
+                        message: response.error_message,
+                    };
+                    if !already_known_transaction(&rejection) {
+                        return Err(EngineError::BroadcastRejected {
+                            code: response.error_code,
+                            message: "supplied source rejected saved transaction".into(),
+                        });
+                    }
                 }
             }
         }
@@ -4299,34 +4580,46 @@ fn zip_payment(to: &str, zat: u64, memo: Option<&str>) -> Result<Payment> {
     }
 }
 
-fn memos_for_txid(conn: &rusqlite::Connection, txid: &[u8]) -> Vec<String> {
+fn memos_for_txid(conn: &rusqlite::Connection, txid: &[u8]) -> (Vec<String>, bool) {
     let sql = "SELECT memo FROM orchard_received_notes n
-         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1 AND n.memo IS NOT NULL
+         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1
          UNION ALL
          SELECT memo FROM sapling_received_notes n
-         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1 AND n.memo IS NOT NULL
+         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1
          UNION ALL
          SELECT memo FROM ironwood_received_notes n
-         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1 AND n.memo IS NOT NULL
+         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1
          UNION ALL
          SELECT memo FROM sent_notes n
-         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1 AND n.memo IS NOT NULL";
+         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1";
     let Ok(mut stmt) = conn.prepare(sql) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
-    let Ok(rows) = stmt.query_map([txid], |row| row.get::<_, Vec<u8>>(0)) else {
-        return Vec::new();
+    let Ok(rows) = stmt.query_map([txid], |row| row.get::<_, Option<Vec<u8>>>(0)) else {
+        return (Vec::new(), false);
     };
     let mut out = Vec::new();
-    for r in rows.flatten() {
-        if let Ok(Memo::Text(t)) = Memo::from_bytes(&r) {
-            let s = t.to_string();
-            if !s.is_empty() && !out.contains(&s) {
-                out.push(s);
+    let mut authenticated = false;
+    let mut missing_or_invalid = false;
+    for row in rows {
+        let Ok(Some(bytes)) = row else {
+            missing_or_invalid = true;
+            continue;
+        };
+        match Memo::from_bytes(&bytes) {
+            Ok(memo) => {
+                authenticated = true;
+                if let Memo::Text(text) = memo {
+                    let text = text.to_string();
+                    if !text.is_empty() && !out.contains(&text) {
+                        out.push(text);
+                    }
+                }
             }
+            Err(_) => missing_or_invalid = true,
         }
     }
-    out
+    (out, authenticated && !missing_or_invalid)
 }
 
 /// Most unmined sends one sync resubmits.
@@ -5769,8 +6062,8 @@ mod tests {
             [memo.as_slice()],
         )
         .unwrap();
-        assert_eq!(memos_for_txid(&conn, &[1; 32]), ["ironwood"]);
-        assert!(memos_for_txid(&conn, &[2; 32]).is_empty());
+        assert_eq!(memos_for_txid(&conn, &[1; 32]).0, ["ironwood"]);
+        assert!(memos_for_txid(&conn, &[2; 32]).0.is_empty());
     }
 
     #[cfg(feature = "transparent-inputs")]

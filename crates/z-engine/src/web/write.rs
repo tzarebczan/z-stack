@@ -84,7 +84,7 @@ impl Account for WebAccount {
 }
 
 impl WebWallet {
-    fn account(&self) -> Result<WebAccount, String> {
+    pub(super) fn account(&self) -> Result<WebAccount, String> {
         let ufvk = self.decode_ufvk().map_err(|e| e.to_string())?;
         Ok(WebAccount {
             id: ACCOUNT,
@@ -1409,7 +1409,7 @@ impl WalletWrite for WebWallet {
                     }
                 }
             }
-            let agg = self.txs_mut().entry(txid).or_default();
+            let agg = self.txs_mut().entry(txid.clone()).or_default();
             agg.mined_height = None;
             agg.spent_zat = agg.spent_zat.saturating_add(spent_zat);
             agg.spent_notes = agg.spent_notes.saturating_add(spent_notes);
@@ -1417,7 +1417,13 @@ impl WalletWrite for WebWallet {
             agg.received_notes = agg.received_notes.saturating_add(received_notes);
             agg.has_change = agg.has_change || has_change;
             agg.is_shielding = agg.is_shielding || (spent_t > 0 && received_zat > 0);
-            agg.fee_zat = Some(u64::from(sent.fee_amount()));
+            let builder_fee = u64::from(sent.fee_amount());
+            // The total builder fee is useful history metadata, but a pool-local balance
+            // identity additionally requires pure-Ironwood bytes and exact agreement.
+            let pure_fee = Self::pure_ironwood_fee(sent.tx());
+            agg.fee_zat = pure_fee.or(Some(builder_fee));
+            agg.fee_from_full_transaction = true;
+            agg.ironwood_fee_from_full_transaction = pure_fee.filter(|fee| *fee == builder_fee);
             agg.expiry_height = Some(u32::from(sent.tx().expiry_height()));
             agg.transparent_spent = agg.transparent_spent.saturating_add(spent_t);
             agg.orchard_spent = agg.orchard_spent.saturating_add(orchard_spent);
@@ -1429,6 +1435,8 @@ impl WalletWrite for WebWallet {
             if !memos.is_empty() {
                 agg.memos.extend(memos);
             }
+            #[cfg(feature = "private-enhance")]
+            self.reconcile_private_enhancement(&txid);
         }
         // Unlock-on-store: the spend records now guard these notes.
         self.prune_locks();

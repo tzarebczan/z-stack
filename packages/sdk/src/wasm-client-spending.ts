@@ -186,6 +186,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       }
       assertBroadcastAllowed();
       if (!sentTxid) throw new WalletError("unknown", "The engine did not return a transaction ID; nothing was broadcast.");
+      const submissionContext = { txid: sentTxid };
       const reservationGeneration = runtime.runtimeState.persistGen;
       if (!sameLineage()) throw new WalletError("wallet_changed", "the wallet was saved by another tab");
       await ctx.persist({ epoch: stateAtSend, baseKey: baseAtSend });
@@ -211,7 +212,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       finishDrain?.();
       // Stop waiting on close/replacement without claiming the already-started
       // request was cancelled. The pending transaction and known ID survive.
-      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(hex, operation.signal));
+      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(hex, operation.signal, submissionContext));
       ctx.assertSource(operation, source);
       return txid ?? (/^[0-9a-f]{64}$/i.test(submitted) ? submitted.toLowerCase() : undefined);
     } catch (e) {
@@ -449,6 +450,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       ctx.assertSource(operation, source);
       if (!done.hex) throw new Error("finalize returned no transaction");
       if (!finalizedTxid) throw new WalletError("unknown", "The engine did not return a transaction ID; nothing was broadcast.");
+      const submissionContext = { txid: finalizedTxid };
       if (ctx.stateEpoch !== stateAtHardware) {
         throw new WalletError("wallet_changed", "the wallet was saved by another tab");
       }
@@ -479,7 +481,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       assertReviewCurrent();
       broadcastStarted = true;
       finishDrain?.();
-      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(done.hex!, operation.signal));
+      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(done.hex!, operation.signal, submissionContext));
       ctx.assertSource(operation, source);
       return done.txid ?? (/^[0-9a-f]{64}$/i.test(submitted) ? submitted.toLowerCase() : undefined);
     } catch (e) {
@@ -547,6 +549,85 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
     }
   }
 
+  /** Resend one already-signed Rust-owned payment without creating or signing another. */
+  async function retryPendingSubmission(txid: string, options: { signal?: AbortSignal } = {}): Promise<{ txid: string }> {
+    if (typeof txid !== "string" || !/^[0-9a-f]{64}$/.test(txid)) {
+      return Promise.reject(new WalletError("unknown", "Choose an exact saved transaction ID."));
+    }
+    const called = ctx.sessionOperation ?? captureWalletOperation();
+    const wait = AbortSignal.any([called.signal, ctx.disposeWaits.signal, ...(options.signal ? [options.signal] : [])]);
+    wait.throwIfAborted();
+    return runtime.withOriginSpendLock(async () => {
+      wait.throwIfAborted();
+      await abortable(wait, () => called.ready());
+      called.assertCurrent();
+      if (ctx.disposing) throw new DOMException("wallet closing before retry", "AbortError");
+      if (!walletStorageAvailable()) throw new WalletError("wallet_db", "Saved payment storage is unavailable. Nothing was submitted.");
+      if (!ctx.transport.submit) throw new WalletError("transport", "This connection cannot submit a saved payment.");
+      if (runtime.runtimeState.spendingOperation) throw new WalletError("busy", "a wallet spend is already in progress");
+      runtime.runtimeState.spendingOperation = wait;
+      let started = false;
+      try {
+        if (!ctx.currentSession() && !(await abortable(wait, () => ctx.loadIfNeeded()))) {
+          throw new WalletError("not_found", "No saved wallet is available.");
+        }
+        called.assertCurrent();
+        const source = ctx.session;
+        if (!source) throw new WalletError("not_found", "No saved wallet is available.");
+        const current = () => {
+          wait.throwIfAborted();
+          ctx.assertSource(called, source);
+          if (ctx.disposing) throw new DOMException("wallet closing before retry", "AbortError");
+        };
+        current();
+        await abortable(wait, () => ctx.refreshIfStale(source, called));
+        current();
+        const epoch = ctx.stateEpoch;
+        const baseKey = ctx.savedKeySeen;
+        const submissions = await abortable(wait, () => source.pendingSubmissions());
+        current();
+        const pending = submissions.filter(value => value.txid === txid);
+        if (pending.length !== 1 || !pending[0].hex) {
+          throw new WalletError("not_found", "This transaction is not eligible for a saved-byte retry.");
+        }
+        const hex = pending[0].hex;
+        const generation = runtime.runtimeState.persistGen;
+        // Await the commit itself. Cancellation may race a successful commit,
+        // but no network request begins until durability and ownership agree.
+        await ctx.persist({ epoch, baseKey });
+        current();
+        if (ctx.stateEpoch !== epoch || runtime.runtimeState.persistGen !== generation) {
+          throw new WalletError("wallet_changed", "The saved wallet changed. Nothing was resubmitted.");
+        }
+        const eligible = await abortable(wait, () => source.pendingSubmissions());
+        current();
+        if (ctx.stateEpoch !== epoch || runtime.runtimeState.persistGen !== generation || eligible.filter(value => value.txid === txid && value.hex === hex).length !== 1) {
+          throw new WalletError("wallet_changed", "The saved payment changed. Nothing was resubmitted.");
+        }
+        started = true;
+        const acknowledged = await abortable(wait, () => ctx.transport.submit!(hex, wait, { txid }));
+        current();
+        if (acknowledged !== txid) {
+          throw new WalletError("broadcast_failed", "The provider did not acknowledge this exact saved transaction.", undefined, { txid });
+        }
+        if (ctx.stateEpoch !== epoch || runtime.runtimeState.persistGen !== generation) {
+          throw new WalletError("wallet_changed", "The wallet changed after the retry started.");
+        }
+        return { txid };
+      } catch (error) {
+        // This payment predates the retry. A refused or unacknowledged retry
+        // never releases its inputs or deletes the original durable receipt.
+        if (!started) throw error;
+        if (!wait.aborted && runtime.submitVerdict(error) === "rejected") {
+          throw new WalletError("broadcast_rejected", "The retry was refused. The saved transaction remains pending; check its history before another payment.", error, { txid });
+        }
+        throw new WalletError("broadcast_failed", "The retry outcome is unknown. The signed transaction remains saved; check its history before another payment.", error, { txid });
+      } finally {
+        if (runtime.runtimeState.spendingOperation === wait) runtime.runtimeState.spendingOperation = null;
+      }
+    });
+  }
+
   function requireSeed(action: string): string {
     const seed = ctx.spendingSeed || runtime.runtimeState.moduleSpendingSeed;
     if (!seed) {
@@ -582,5 +663,5 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
     if (typeof v.maxSendZat !== "number") throw new Error("invalid max send");
     return v;
   }
-  return { transparentSendSource, proveAndSubmit, proveAndSubmitHere, hardwareSubmit, requireSeed, finishSpend, parseFeeJson, parseMaxJson };
+  return { retryPendingSubmission, transparentSendSource, proveAndSubmit, proveAndSubmitHere, hardwareSubmit, requireSeed, finishSpend, parseFeeJson, parseMaxJson };
 }

@@ -14,7 +14,7 @@ export function engineSourceHash() {
   });
   const inputs = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml",
     "scripts/build-wasm.mjs", "scripts/build-wasm-mt.mjs", "scripts/wasm-build-inputs.mjs", "scripts/wasm-build-variant.mjs",
-    ...walk("crates/z-engine"), ...walk("crates/z-wasm"), ...walk("vendor/zakura")].sort();
+    ...walk("crates/z-engine"), ...walk("crates/z-wasm"), ...walk("crates/z-enhance-pir"), ...walk("vendor/pir"), ...walk("vendor/zakura")].sort();
   const hash = createHash("sha256");
   for (const path of inputs) hash.update(path).update("\0").update(readFileSync(join(root, path))).update("\0");
   return hash.digest("hex");

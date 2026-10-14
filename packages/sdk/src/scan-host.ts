@@ -1,3 +1,4 @@
+import type { PrivateEnhanceHost, PrivateEnhanceOperation } from "./private-enhance";
 /**
  * Wallet scan session: in-process (Node / tests) or a dedicated Worker (browser).
  * Apply runs off the UI thread so fetch + paint keep moving during catch-up.
@@ -22,6 +23,8 @@ export type HardwareAccountInput = {
   accountIndex: number;
 };
 
+export type PendingSubmission = { readonly txid: string; readonly hex: string };
+
 export type ScanRuntime = {
   mode: "single-thread" | "multi-thread";
   threads: number;
@@ -38,7 +41,7 @@ export type ApplySummary = {
   scanned: number;
 };
 
-export type ScanSession = {
+export type ScanSession = PrivateEnhanceHost & {
   readonly kind?: "local" | "worker";
   create: (network: string, mnemonic: string, birthday: number, accountIndex: number) => Promise<void>;
   fromUfvk: (network: string, ufvk: string, birthday: number, accountIndex: number) => Promise<void>;
@@ -79,6 +82,7 @@ export type ScanSession = {
   historyQuery: (limit: number, status: string, txid: string) => Promise<string>;
   /** Raw hex of unmined, unexpired sends, for an idempotent rebroadcast. */
   pendingRawTxs: () => Promise<string[]>;
+  pendingSubmissions: () => Promise<PendingSubmission[]>;
   scannedHeight: () => Promise<number>;
   birthday: () => Promise<number>;
   nextHeight: () => Promise<number>;
@@ -116,6 +120,7 @@ type WalletHandle = HardwareWalletHandle & {
   enhanceRawTx?: (hex: string) => number;
   applyTransparentBlocks?: (blob: Uint8Array) => number;
   applySharedMemos?: (json: string) => number;
+  privateEnhance?: (operation: PrivateEnhanceOperation, bytes: Uint8Array, time: number) => Uint8Array;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
   rewindToChecked?: (height: number) => number;
@@ -137,6 +142,7 @@ type WalletHandle = HardwareWalletHandle & {
   history: (limit: number) => string;
   historyQuery?: (limit: number, status: string, txid: string) => string;
   pendingRawTxs?: () => string;
+  pendingSubmissions?: () => string;
   scannedHeight: () => number;
   birthday: () => number;
   nextHeight: () => number;
@@ -155,6 +161,18 @@ function parseRawTxs(json: unknown): string[] {
   } catch {
     return [];
   }
+}
+
+function parsePendingSubmissions(json: unknown): PendingSubmission[] {
+  if (typeof json !== "string") throw new Error("WASM needs a signed submission context upgrade");
+  const value: unknown = JSON.parse(json);
+  if (!Array.isArray(value)) throw new Error("invalid pending submissions");
+  return value.map((entry: unknown) => {
+    if (typeof entry !== "object" || entry === null || !("txid" in entry) || !("hex" in entry)
+      || typeof entry.txid !== "string" || !/^[a-f0-9]{64}$/.test(entry.txid)
+      || typeof entry.hex !== "string" || entry.hex.length === 0) throw new Error("invalid pending submission");
+    return { txid: entry.txid, hex: entry.hex };
+  });
 }
 
 export function localScanSession(
@@ -246,6 +264,11 @@ export function localScanSession(
       if (!wallet.applySharedMemos) throw new Error("WASM needs a public-data upgrade");
       return wallet.applySharedMemos(json);
     },
+    privateEnhance: async (operation, bytes, time) => {
+      const wallet = w();
+      if (!wallet.privateEnhance) throw new Error("WASM needs an Enhance v7 upgrade");
+      return wallet.privateEnhance(operation, bytes, time);
+    },
     memoEnhancementTxids: async (limit) => {
       const cur = w();
       return cur.memoEnhancementTxids ? JSON.parse(cur.memoEnhancementTxids(limit)) as string[] : null;
@@ -328,6 +351,7 @@ export function localScanSession(
       return cur.historyQuery(limit, status, txid);
     },
     pendingRawTxs: async () => parseRawTxs(w().pendingRawTxs?.()),
+    pendingSubmissions: async () => parsePendingSubmissions(w().pendingSubmissions?.()),
     scannedHeight: async () => w().scannedHeight(),
     birthday: async () => w().birthday(),
     nextHeight: async () => w().nextHeight(),
@@ -805,6 +829,12 @@ export function workerScanSession(): ScanSession | null {
     applySharedMemos: async (json) => {
       return Number((await sessionRpc("applySharedMemos", { json }, undefined, 180_000)).n) || 0;
     },
+    privateEnhance: async (operation, bytes, time) => {
+      const buf = bytes.slice().buffer as ArrayBuffer;
+      const data = await sessionRpc("privateEnhance", { operation, blob: buf, time }, [buf], 180_000);
+      if (!(data.blob instanceof ArrayBuffer)) throw new Error("enhance_engine_invalid");
+      return new Uint8Array(data.blob);
+    },
     enhanceRawTx: async (hex) => {
       const data = await sessionRpc("enhanceRawTx", { hex });
       return Number(data.n) || 0;
@@ -896,6 +926,7 @@ export function workerScanSession(): ScanSession | null {
       return Number(data.nextHeight) || 1;
     },
     pendingRawTxs: async () => parseRawTxs((await sessionRpc("pendingRawTxs")).json),
+    pendingSubmissions: async () => parsePendingSubmissions((await sessionRpc("pendingSubmissions")).json),
     treesReady: async () => {
       const data = await sessionRpc("meta");
       return !!data.treesReady;

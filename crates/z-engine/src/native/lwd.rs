@@ -81,11 +81,18 @@ impl http_body::Body for TreeStatusBody {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceAccess {
+    Direct,
+    ReadOnly,
+    Wallet,
+}
+
 #[derive(Clone)]
 pub struct LwdChannel {
     inner: Channel,
     skip_ironwood_subtrees: bool,
-    read_only: bool,
+    access: SourceAccess,
 }
 
 impl LwdChannel {
@@ -93,7 +100,7 @@ impl LwdChannel {
         Self {
             inner,
             skip_ironwood_subtrees,
-            read_only: false,
+            access: SourceAccess::Direct,
         }
     }
 }
@@ -172,7 +179,7 @@ impl Service<http::Request<Body>> for LwdChannel {
     fn call(&mut self, req: http::Request<Body>) -> Self::Future {
         let mut inner = self.inner.clone();
         let skip = self.skip_ironwood_subtrees;
-        let read_only = self.read_only;
+        let access = self.access;
         Box::pin(async move {
             async fn ready_call(
                 inner: &mut Channel,
@@ -188,7 +195,7 @@ impl Service<http::Request<Body>> for LwdChannel {
             }
 
             let path = req.uri().path().to_string();
-            if read_only
+            if access != SourceAccess::Direct
                 && !matches!(
                     path.as_str(),
                     "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo"
@@ -198,6 +205,8 @@ impl Service<http::Request<Body>> for LwdChannel {
                         | "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlockRange"
                         | "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetSubtreeRoots"
                 )
+                && !(access == SourceAccess::Wallet
+                    && path == "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction")
             {
                 return Err(super::source::refused());
             }
@@ -216,7 +225,7 @@ impl Service<http::Request<Body>> for LwdChannel {
                 let rebuilt =
                     http::Request::from_parts(parts, Body::new(http_body_util::Full::new(bytes)));
                 let resp = ready_call(&mut inner, rebuilt).await?;
-                if !read_only && ironwood && grpc_invalid_argument(&resp) {
+                if access == SourceAccess::Direct && ironwood && grpc_invalid_argument(&resp) {
                     tracing::warn!(
                         "GetSubtreeRoots(Ironwood) rejected by light server; treating as empty"
                     );
@@ -244,7 +253,13 @@ pub fn client(channel: Channel, skip_ironwood_subtrees: bool) -> LwdClient {
 
 pub(super) fn read_only_client(channel: Channel) -> LwdClient {
     let mut channel = LwdChannel::new(channel, false);
-    channel.read_only = true;
+    channel.access = SourceAccess::ReadOnly;
+    CompactTxStreamerClient::new(channel)
+}
+
+pub(super) fn wallet_source_client(channel: Channel) -> LwdClient {
+    let mut channel = LwdChannel::new(channel, false);
+    channel.access = SourceAccess::Wallet;
     CompactTxStreamerClient::new(channel)
 }
 

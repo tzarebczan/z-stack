@@ -330,7 +330,7 @@ await wallet.send(to, "0.25", undefined, { signer });
 - a local `z-wallet pipe` URL (`http://127.0.0.1:1239`), which is faster for a node you run yourself
 - any `BlockTransport`. Its `submit` throws `BroadcastRejection(code, reason)`
   when the node refuses a transaction; any other error counts as an unknown
-  outcome, so the send is kept and resent rather than undone.
+  outcome, so the send is kept. The submission policy controls later resubmission.
 
 Compact-block scanning and memo decryption run locally; the server receives no
 seed or viewing key. Requests still expose metadata to the server:
@@ -363,6 +363,52 @@ the current tuning. The 32 MiB prefetch response limit remains unchanged, so cho
 a span that also fits the transport's byte bound. Check
 `SDK_TRANSPORT_CAPABILITIES.maxBlocksPerRequest === true` before relying on this
 hint with a separately supplied archive; older runtimes may silently ignore it.
+
+A custom transport may also declare `readonly maxSharedMemoBlocksPerRequest: 1`.
+The SDK accepts integers from 1 through 10, captures the value before wallet
+ownership or storage setup, and defaults to 10. Shared memo retrieval splits
+requests at this cap and the existing common ten-block boundaries. Each complete
+response is checked and checkpointed before the next range. This hint limits
+block count, not response bytes; the adapter must still enforce its byte bounds.
+Check `SDK_TRANSPORT_CAPABILITIES.maxSharedMemoBlocksPerRequest === true` before
+relying on it with another archive.
+
+`BlockTransport.submit(rawHex, signal, context)` receives a
+`SubmissionContext` with the exact signed transaction's display-order `txid`.
+The ID comes from Rust software proving, hardware finalization, or the Rust
+wallet's saved pending record. A signed relay transport can require this context
+and bind its reply to that ID without parsing transactions in TypeScript.
+Ordinary transports may ignore the optional third argument. Check the frozen
+root marker `SDK_TRANSPORT_CAPABILITIES.submitContext === true` before depending
+on this contract. Pending resubmission requires the matching WASM
+`pendingSubmissions` binding; an older binding cannot supply that context and
+causes the SDK to skip that resubmission pass.
+
+The root export `SubmissionPolicy` is `"explicit" | "saved-bytes-auto"`.
+Pass `submissionPolicy: "explicit"` to `createWallet` to keep ordinary sync from
+resubmitting saved signed transactions. The default, `"saved-bytes-auto"`, retains
+same-byte resubmission after sync. Both policies preserve pending transactions,
+reserved inputs and application receipts after an unknown submission result.
+Explicit `send` and its `beforeSubmit` durability checks are unchanged, and no
+policy constructs a replacement payment. This option controls saved transaction
+resubmission; automatic shielding remains a separate opt-in. The policy is
+captured for the client's lifetime. Supply it again when reopening the wallet.
+Check `SDK_TRANSPORT_CAPABILITIES.submissionPolicy === true` before relying on
+explicit mode with another archive. The capability object is frozen.
+
+Call `wallet.retryPendingSubmission(txid, { signal })` from an explicit recovery
+action to resubmit one saved transaction. The canonical lowercase transaction ID
+selects Rust-owned signed bytes; the API does not expose those bytes or sign a
+new payment. No unlock or mnemonic is required. It holds the spend lock,
+refreshes the current wallet and commits its state before submitting once with
+`SubmissionContext`. The result is `{ txid }`; acknowledgement leaves the payment
+pending until the chain confirms it. Failure preserves its existing receipt and
+input reservations, including when the node refuses this retry. Lock, close,
+replacement and caller cancellation abort the request and fence late results.
+The method does not change the client's submission policy. Check
+`SDK_TRANSPORT_CAPABILITIES.pendingSubmissionRetry === true` before exposing this
+action with a separately supplied archive. Never use a new `send` to recover an
+uncertain payment.
 
 Check `SDK_TRANSPORT_CAPABILITIES.requiredBirthdayTreeState === true` before
 using strict mode with a separately supplied SDK archive. Older archives lack
@@ -406,9 +452,11 @@ still possible; it is not a guarantee of encrypted upstream transport.
 Every failure is a `WalletError` with a stable `code` and a user-facing
 message (`walletErrorMessage`). Switch on `code`; do not parse `message`, which
 is diagnostic text that changes. `broadcast_failed` means the outcome is
-unknown: the transaction (`error.txid`) is saved and resent, so show it as
-pending and do not offer a retry, which could pay twice. `broadcast_rejected`
-means the node refused it and the send was undone. `wallet_changed` means
+unknown: the transaction (`error.txid`) is saved, so show it as pending. The
+submission policy controls sync resubmission; an explicit recovery action can
+retry only those saved bytes. Never offer a replacement payment as recovery.
+`broadcast_rejected` means the node refused the request. A fresh send is undone;
+a saved-byte retry preserves the earlier receipt and reservations. `wallet_changed` means
 another tab saved the wallet first; this tab has reloaded it, so retry.
 Passkey failures are `PasskeyError`s. Use `isPasskeyCancel(e)` to ignore
 cancellations.
