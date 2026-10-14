@@ -178,11 +178,55 @@ fn root_range(roots: &[StoredSubtreeRoot]) -> (u64, u64) {
     (from as u64, roots.len() as u64)
 }
 
+/// Coinbase maturity can only be waived by independently observed transaction structure.
+/// Old boolean false snapshots and address-UTXO replies did not carry that evidence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum CoinbaseStatus {
+    #[default]
+    Unknown,
+    Coinbase,
+    NonCoinbase,
+}
+
+impl CoinbaseStatus {
+    pub(crate) fn from_transaction(coinbase: bool) -> Self {
+        if coinbase {
+            Self::Coinbase
+        } else {
+            Self::NonCoinbase
+        }
+    }
+
+    pub(crate) fn from_unverified(coinbase: bool) -> Self {
+        if coinbase {
+            Self::Coinbase
+        } else {
+            Self::Unknown
+        }
+    }
+
+    fn from_snapshot<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Saved {
+            Current(CoinbaseStatus),
+            Legacy(bool),
+        }
+        Ok(match Saved::deserialize(deserializer)? {
+            Saved::Current(status) => status,
+            Saved::Legacy(value) => Self::from_unverified(value),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StoredUtxo {
-    #[serde(default)]
-    pub coinbase: bool,
+    #[serde(default, deserialize_with = "CoinbaseStatus::from_snapshot")]
+    pub coinbase: CoinbaseStatus,
     pub txid: String,
     pub index: u32,
     pub script: String,
@@ -1429,7 +1473,7 @@ impl WebWallet {
         {
             return false;
         }
-        if u.coinbase {
+        if u.coinbase != CoinbaseStatus::NonCoinbase {
             return u.height > 0 && u.height.saturating_add(100) <= u32::from(target);
         }
         #[cfg(feature = "transparent-inputs")]
@@ -3579,6 +3623,11 @@ impl WebWallet {
             .filter(|u| u.spent)
             .map(|u| ((u.txid.clone(), u.index), u.spent_in.clone()))
             .collect();
+        let prior_coinbase: std::collections::HashMap<_, _> = self
+            .utxos
+            .iter()
+            .map(|u| ((u.txid.clone(), u.index), u.coinbase))
+            .collect();
         let mut next = Vec::with_capacity(arr.len());
         for item in arr {
             let txid = item
@@ -3597,10 +3646,17 @@ impl WebWallet {
             let spent =
                 spent_in.is_some() || pending_spent.contains_key(&(txid.to_string(), index));
             next.push(StoredUtxo {
-                coinbase: item
-                    .get("coinbase")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
+                // Address-UTXO replies do not establish non-coinbase transaction
+                // structure. Preserve independently known classification and never
+                // clear a conservative coinbase restriction with a missing/false flag.
+                coinbase: if item.get("coinbase").and_then(|v| v.as_bool()) == Some(true) {
+                    CoinbaseStatus::Coinbase
+                } else {
+                    prior_coinbase
+                        .get(&(txid.to_owned(), index))
+                        .copied()
+                        .unwrap_or(CoinbaseStatus::Unknown)
+                },
                 txid: txid.to_string(),
                 index,
                 script: item

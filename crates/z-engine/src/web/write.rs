@@ -1302,7 +1302,7 @@ impl WalletWrite for WebWallet {
             self.confirm_public_transparent_output(&txid, index);
         }
         self.utxos.push(super::store::StoredUtxo {
-            coinbase: false,
+            coinbase: super::store::CoinbaseStatus::Unknown,
             txid,
             index,
             script: super::to_hex(&output.txout().script_pubkey().0 .0),

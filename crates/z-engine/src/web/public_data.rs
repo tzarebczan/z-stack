@@ -1,7 +1,7 @@
 //! Wallet-independent block-range data. Coverage is separate from shielded scan
 //! progress so an old snapshot never claims it has scanned transparent activity.
 
-use super::store::StoredUtxo;
+use super::store::{CoinbaseStatus, StoredUtxo};
 use super::{decode_delimited, to_hex, WebWallet};
 use crate::error::{EngineError, Result};
 use serde::{Deserialize, Serialize};
@@ -180,7 +180,7 @@ mod tests {
         scan(&mut w, vec![block(100)]);
         assert_eq!(w.balance().transparent_available, 80_000);
         let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
-        assert!(restored.utxos[0].coinbase);
+        assert_eq!(restored.utxos[0].coinbase, CoinbaseStatus::Coinbase);
         assert_eq!(restored.balance().transparent_available, 80_000);
     }
 }
@@ -412,7 +412,7 @@ impl WebWallet {
                         .find(|u| u.txid == txid && u.index == index as u32)
                     {
                         u.height = height;
-                        u.coinbase = tx.index == 0;
+                        u.coinbase = CoinbaseStatus::from_transaction(tx.index == 0);
                         u.value_zat = output.value;
                         u.script = to_hex(&output.script_pub_key);
                     } else {
@@ -423,7 +423,7 @@ impl WebWallet {
                             value_zat: output.value,
                             height,
                             address: address.clone(),
-                            coinbase: tx.index == 0,
+                            coinbase: CoinbaseStatus::from_transaction(tx.index == 0),
                             spent: false,
                             spent_in: None,
                         });

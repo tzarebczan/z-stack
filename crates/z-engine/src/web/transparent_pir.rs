@@ -296,7 +296,7 @@ impl WebWallet {
                             value_zat: e.value,
                             height: e.height,
                             address: address.clone(),
-                            coinbase: e.coinbase,
+                            coinbase: CoinbaseStatus::from_unverified(e.coinbase),
                             spent: false,
                             spent_in: None,
                         });
@@ -621,6 +621,12 @@ mod tests {
                 w.apply_transparent_blocks(&super::super::super::encode_delimited(blocks))
                     .unwrap();
             } else {
+                let blocks = public_range(&mut w, false);
+                w.apply_transparent_blocks(&super::super::super::encode_delimited(vec![
+                    blocks[0].clone()
+                ]))
+                .unwrap();
+                assert_eq!(w.balance().transparent_available, 0);
                 let rows: Vec<_> = w.utxos.iter().map(|u| serde_json::json!({
                     "txid":u.txid,"index":u.index,"script":u.script,
                     "valueZat":u.value_zat,"height":if u.txid == "01".repeat(32) {1} else {0},
@@ -707,10 +713,153 @@ mod tests {
         assert!(restored.utxos[0].spent);
     }
     #[test]
+    fn legacy_false_or_absent_coinbase_is_unknown_through_refresh_and_wallet_write() {
+        use zcash_client_backend::{data_api::WalletWrite, wallet::WalletTransparentOutput};
+        for legacy in [None, Some(false), Some(true)] {
+            let mut w = wallet();
+            let c = checkpoint(&mut w, vec![receive()]);
+            apply_pir(&mut w, &c);
+            let mut saved: serde_json::Value =
+                serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+            if let Some(value) = legacy {
+                saved["utxos"][0]["coinbase"] = serde_json::json!(value);
+            } else {
+                saved["utxos"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("coinbase");
+            }
+            let mut restored =
+                WebWallet::from_snapshot(&serde_json::to_vec(&saved).unwrap()).unwrap();
+            let u = restored.utxos[0].clone();
+            let expected = CoinbaseStatus::from_unverified(legacy.unwrap_or(false));
+            assert_eq!(u.coinbase, expected);
+            let row = serde_json::json!({"txid":u.txid,"index":u.index,"script":u.script,"valueZat":u.value_zat,"height":u.height,"address":u.address,"coinbase":false});
+            restored
+                .apply_utxos_json(&serde_json::json!({"utxos":[row]}).to_string())
+                .unwrap();
+            assert_eq!(restored.utxos[0].coinbase, expected);
+            assert_eq!(restored.balance().transparent_available, 0);
+            let output = WalletTransparentOutput::from_parts(
+                transparent::bundle::OutPoint::new([1; 32], 0),
+                transparent::bundle::TxOut::new(
+                    zcash_protocol::value::Zatoshis::from_u64(150000).unwrap(),
+                    transparent::address::Script(zcash_script::script::Code(
+                        super::super::super::from_hex(&u.script).unwrap(),
+                    )),
+                ),
+                Some(1.into()),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            restored.put_received_transparent_utxo(&output).unwrap();
+            assert_eq!(restored.utxos[0].coinbase, expected);
+            assert_eq!(restored.balance().transparent_available, 0);
+            let cold = WebWallet::from_snapshot(&restored.to_snapshot().unwrap()).unwrap();
+            assert_eq!(cold.utxos[0].coinbase, expected);
+            assert_eq!(cold.balance().transparent_available, 0);
+        }
+    }
+
+    #[test]
+    fn public_non_coinbase_classification_survives_refresh_and_cold_reopen() {
+        let mut w = wallet();
+        let c = checkpoint(&mut w, vec![receive()]);
+        apply_pir(&mut w, &c);
+        let blocks = public_range(&mut w, false);
+        w.apply_transparent_blocks(&super::super::super::encode_delimited(blocks))
+            .unwrap();
+        assert_eq!(w.utxos[0].coinbase, CoinbaseStatus::NonCoinbase);
+        let u = w.utxos[0].clone();
+        let row = serde_json::json!({"txid":u.txid,"index":u.index,"script":u.script,"valueZat":u.value_zat,"height":u.height,"address":u.address});
+        w.apply_utxos_json(&serde_json::json!({"utxos":[row]}).to_string())
+            .unwrap();
+        assert_eq!(w.utxos[0].coinbase, CoinbaseStatus::NonCoinbase);
+        assert_eq!(w.balance().transparent_available, 150000);
+        let cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(cold.utxos[0].coinbase, CoinbaseStatus::NonCoinbase);
+        assert_eq!(cold.balance().transparent_available, 150000);
+    }
+
+    #[test]
+    fn actual_full_transaction_classifies_unknown_zero_conf_without_pir() {
+        let mut w = wallet();
+        let script = w.public_transparent_scripts().unwrap()[0].0.clone();
+        // Disposable structurally valid legacy non-coinbase bytes, not a consensus fixture.
+        let mut raw = 1u32.to_le_bytes().to_vec();
+        raw.push(1);
+        raw.extend([7; 32]);
+        raw.extend(0u32.to_le_bytes());
+        raw.push(0);
+        raw.extend(u32::MAX.to_le_bytes());
+        raw.push(1);
+        raw.extend(150000u64.to_le_bytes());
+        raw.push(u8::try_from(script.len()).unwrap());
+        raw.extend(script);
+        raw.extend(0u32.to_le_bytes());
+        let tx = zcash_primitives::transaction::Transaction::read(
+            &raw[..],
+            zcash_protocol::consensus::BranchId::for_height(&Network::Regtest, 4.into()),
+        )
+        .unwrap();
+        let txid = super::super::super::to_hex(tx.txid().as_ref());
+        let row = serde_json::json!({"txid":txid,"index":0,"script":super::super::super::to_hex(&w.public_transparent_scripts().unwrap()[0].0),"valueZat":150000,"height":0,"address":w.public_transparent_scripts().unwrap()[0].1});
+        w.apply_utxos_json(&serde_json::json!({"utxos":[row]}).to_string())
+            .unwrap();
+        assert_eq!(w.utxos[0].coinbase, CoinbaseStatus::Unknown);
+        assert_eq!(w.balance().transparent_available, 0);
+        w.apply_raw_tx(&raw).unwrap();
+        assert_eq!(w.utxos[0].coinbase, CoinbaseStatus::NonCoinbase);
+        assert_eq!(w.balance().transparent_available, 150000);
+        let cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(cold.balance().transparent_available, 150000);
+    }
+
+    #[test]
+    fn address_refresh_preserves_immature_pir_coinbase_maturity() {
+        let mut w = wallet();
+        let mut reward = receive();
+        if let TransparentEvent::Receive(event) = &mut reward {
+            event.coinbase = true;
+        }
+        let c = checkpoint(&mut w, vec![reward]);
+        apply_pir(&mut w, &c);
+        assert_eq!(w.balance().transparent_available, 0);
+        let u = w.utxos[0].clone();
+        // Exact fields returned by GetAddressUtxos: coinbase is absent.
+        let listed = serde_json::json!({"utxos":[{
+            "txid":u.txid,"index":u.index,"script":u.script,
+            "valueZat":u.value_zat,"height":u.height,"address":u.address
+        }]});
+        w.apply_utxos_json(&listed.to_string()).unwrap();
+        assert_eq!(w.balance().transparent_available, 0);
+        assert_eq!(w.balance().transparent_pending, 150000);
+        assert!(w.prove_shield(REGTEST_FAUCET_MNEMONIC, 1).is_err());
+        assert!(w.pending_txs.is_empty());
+        let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(restored.balance().transparent_available, 0);
+        assert_eq!(restored.balance().transparent_pending, 150000);
+        w.scanned_height = 99;
+        assert_eq!(w.balance().transparent_available, 0);
+        w.scanned_height = 100;
+        assert_eq!(w.balance().transparent_available, 150000);
+    }
+
+    #[test]
     fn independent_address_refresh_promotes_pir_receive_without_releasing_pending_spend() {
         let mut w = wallet();
         let c = checkpoint(&mut w, vec![receive()]);
         apply_pir(&mut w, &c);
+        // A public prefix establishes transaction structure, not complete unspent coverage.
+        let blocks = public_range(&mut w, false);
+        w.apply_transparent_blocks(&super::super::super::encode_delimited(vec![
+            blocks[0].clone()
+        ]))
+        .unwrap();
+        assert_eq!(w.balance().transparent_available, 0);
+
         let u = w.utxos[0].clone();
         let listed = serde_json::json!({"utxos":[{"txid":u.txid,"index":u.index,"script":u.script,"valueZat":u.value_zat,"height":u.height,"address":u.address}]});
         w.apply_utxos_json(&listed.to_string()).unwrap();
@@ -736,7 +885,7 @@ mod tests {
         assert!(w.pending_txs == pending);
     }
     #[test]
-    fn confirmed_wallet_write_promotes_pir_receive_but_unmined_output_does_not() {
+    fn confirmed_wallet_write_waits_for_transaction_structure_evidence() {
         use zcash_client_backend::{data_api::WalletWrite, wallet::WalletTransparentOutput};
         let mut w = wallet();
         let c = checkpoint(&mut w, vec![receive()]);
@@ -758,11 +907,16 @@ mod tests {
             )
             .unwrap();
             w.put_received_transparent_utxo(&output).unwrap();
+            assert_eq!(w.balance().transparent_available, 0);
             assert_eq!(
-                w.balance().transparent_available,
-                if mined.is_some() { 150000 } else { 0 }
+                w.pir_funding_unverified(&"01".repeat(32), 0),
+                mined.is_none()
             );
         }
+        let blocks = public_range(&mut w, false);
+        w.apply_transparent_blocks(&super::super::super::encode_delimited(blocks))
+            .unwrap();
+        assert_eq!(w.balance().transparent_available, 150000);
         replace_pir(&mut w, c.checkpoint_id, vec![], 0);
         assert_eq!(w.balance().transparent_available, 150000);
         assert_eq!(w.history(20).len(), 1);
@@ -785,7 +939,10 @@ mod tests {
             let c = checkpoint(&mut w, vec![receive()]);
             apply_pir(&mut w, &c);
             assert_eq!(w.utxos[0].height, height);
-            assert_eq!(w.utxos[0].coinbase, coinbase);
+            assert_eq!(
+                w.utxos[0].coinbase,
+                CoinbaseStatus::from_unverified(coinbase)
+            );
             assert_eq!(w.balance().transparent_available, available);
             replace_pir(&mut w, c.checkpoint_id, vec![], 0);
             assert_eq!(w.utxos[0].height, height);
@@ -1033,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_zero_conf_funding_without_pir_is_unchanged() {
+    fn unknown_zero_conf_funding_without_pir_waits_for_classification() {
         let mut w = wallet();
         let script = w.public_transparent_scripts().unwrap()[0].0.clone();
         w.apply_utxos_json(
@@ -1044,13 +1201,13 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        assert_eq!(w.balance().transparent_available, 150000);
+        assert_eq!(w.balance().transparent_available, 0);
         let mut cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
-        assert_eq!(cold.balance().transparent_available, 150000);
+        assert_eq!(cold.balance().transparent_available, 0);
         assert_eq!(cold.transparent_pir_status()["rescanRequired"], false);
         let c = checkpoint(&mut cold, vec![]);
         apply_pir(&mut cold, &c);
-        assert_eq!(cold.balance().transparent_available, 150000);
+        assert_eq!(cold.balance().transparent_available, 0);
     }
 
     #[test]
@@ -1229,6 +1386,28 @@ mod tests {
             .apply_transparent_pir_checkpoint(&serde_json::to_string(&c).unwrap())
             .is_err());
         assert!(w.utxos.is_empty());
+    }
+    #[test]
+    fn known_coinbase_zero_conf_never_becomes_available() {
+        let mut w = wallet();
+        let script = w.public_transparent_scripts().unwrap()[0].0.clone();
+        let row = serde_json::json!({
+            "txid":"01".repeat(32),"index":0,"script":super::super::super::to_hex(&script),
+            "valueZat":150000,"height":0,"coinbase":true
+        });
+        w.apply_utxos_json(&serde_json::json!({"utxos":[row]}).to_string())
+            .unwrap();
+        assert_eq!(w.utxos[0].coinbase, CoinbaseStatus::Coinbase);
+        assert_eq!(w.balance().transparent_available, 0);
+        assert_eq!(w.balance().transparent_pending, 150000);
+        assert!(w.prove_shield(REGTEST_FAUCET_MNEMONIC, 1).is_err());
+        assert!(w.pending_txs.is_empty());
+        let cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(cold.utxos[0].coinbase, CoinbaseStatus::Coinbase);
+        assert_eq!(cold.balance().transparent_available, 0);
+        assert_eq!(cold.balance().transparent_pending, 150000);
+        w.scanned_height = 1000;
+        assert_eq!(w.balance().transparent_available, 0);
     }
 }
 

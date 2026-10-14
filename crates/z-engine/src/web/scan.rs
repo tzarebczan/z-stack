@@ -806,12 +806,20 @@ impl WebWallet {
                     continue;
                 }
                 let idx = i as u32;
-                if self.utxos.iter().any(|u| u.txid == txid && u.index == idx) {
+                if let Some(u) = self
+                    .utxos
+                    .iter_mut()
+                    .find(|u| u.txid == txid && u.index == idx)
+                {
+                    if u.coinbase != super::store::CoinbaseStatus::Coinbase {
+                        u.coinbase =
+                            super::store::CoinbaseStatus::from_transaction(tb.is_coinbase());
+                    }
                     found += 1;
                     continue;
                 }
                 self.utxos.push(super::store::StoredUtxo {
-                    coinbase: false,
+                    coinbase: super::store::CoinbaseStatus::from_transaction(tb.is_coinbase()),
                     txid: txid.clone(),
                     index: idx,
                     script: super::to_hex(&out.script_pubkey().0 .0),

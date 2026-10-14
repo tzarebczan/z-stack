@@ -84,6 +84,51 @@ pub fn from_hex(s: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Add explicit all-pool transaction positions to the synthetic funding fixtures.
+/// These accepted-chain blocks exercise the public scanner; they do not prove consensus inclusion.
+#[cfg(all(test, feature = "transparent-inputs"))]
+pub(crate) fn scan_address_fixture_structure(w: &mut WebWallet) {
+    use zcash_client_backend::proto::compact_formats::{CompactBlock, CompactTx, TxOut};
+    let blocks: Vec<_> = (w.transparent_next_height()..=w.scanned_height())
+        .map(|height| {
+            let mut by_tx = std::collections::BTreeMap::<String, Vec<TxOut>>::new();
+            for u in w.utxos.iter().filter(|u| u.height == height) {
+                let outputs = by_tx.entry(u.txid.clone()).or_default();
+                outputs.resize(u.index as usize + 1, TxOut::default());
+                outputs[u.index as usize] = TxOut {
+                    value: u.value_zat,
+                    script_pub_key: from_hex(&u.script).unwrap(),
+                };
+            }
+            let mut transactions = vec![CompactTx {
+                index: 0,
+                txid: vec![0xff; 32],
+                ..Default::default()
+            }];
+            transactions.extend(by_tx.into_iter().enumerate().map(|(index, (txid, vout))| {
+                CompactTx {
+                    index: index as u64 + 1,
+                    txid: from_hex(&txid).unwrap(),
+                    vout,
+                    ..Default::default()
+                }
+            }));
+            CompactBlock {
+                height: u64::from(height),
+                hash: from_hex(w.hash_at(height).unwrap()).unwrap(),
+                prev_hash: w
+                    .hash_at(height.saturating_sub(1))
+                    .map(|s| from_hex(s).unwrap())
+                    .unwrap_or_else(|| vec![0; 32]),
+                vtx: transactions,
+                ..Default::default()
+            }
+        })
+        .collect();
+    w.apply_transparent_blocks(&encode_delimited(blocks))
+        .unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,7 +357,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
-        assert!(w.balance().transparent_available >= 100000);
+        assert_eq!(w.balance().transparent_available, 0);
+        assert_eq!(w.balance().transparent_pending, 100000);
         assert!(w.prove_shield(REGTEST_FAUCET_MNEMONIC, 1).is_err());
     }
 
@@ -331,6 +377,7 @@ mod tests {
             r#"{"utxos":[{"txid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","index":0,"script":"76a914d3c0870e8e13a9ec320f1280889127aa15a4c0a188ac","valueZat":625000000,"height":1,"address":"tmV1zYhR2xisn6VWdCNKHpeD4S7L1U1nPH6"}]}"#,
         )
         .unwrap();
+        scan_address_fixture_structure(&mut w);
         let raw = w
             .prove_shield(REGTEST_FAUCET_MNEMONIC, 1)
             .unwrap_or_else(|e| panic!("prove_shield: {e}"));
