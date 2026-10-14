@@ -134,6 +134,7 @@ class ScanWorker extends EventTarget {
         break;
       case "toSnapshot": data = { snapshot: this.snapshot.buffer }; break;
       case "pendingRawTxs": data = { json: JSON.stringify(this.pendingRaw) }; break;
+      case "pendingSubmissions": data = { json: JSON.stringify(this.pendingRaw.map((hex, index) => ({ txid: (index ? "bb" : "aa").repeat(32), hex }))) }; break;
       case "persistenceSnapshot":
         this.snapshotHeights.push(this.scanned);
         data = { snapshot: this.snapshot.buffer,
@@ -299,13 +300,13 @@ test("each sync resubmits saved unmined sends and a node that already has one is
   const worker = new ScanWorker();
   await restartScanWorker(() => worker as unknown as Worker);
   t.after(() => cancelWasmSync());
-  const submitted: string[] = [];
+  const submitted: { hex: string; txid: string | undefined }[] = [];
   let tip = worker.scanned;
   const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => tip,
     blocks: async () => new Uint8Array([1]),
-    submit: async (hex: string) => {
-      submitted.push(hex);
+    submit: async (hex, _signal, context) => {
+      submitted.push({ hex, txid: context?.txid });
       if (hex === "bb") throw new Error("transaction is already in the mempool");
       return "txid";
     },
@@ -314,10 +315,10 @@ test("each sync resubmits saved unmined sends and a node that already has one is
   worker.pendingRaw = ["aa", "bb"];
   tip++;
   await client.sync();
-  assert.deepEqual(submitted, ["aa", "bb"]);
+  assert.deepEqual(submitted, [{ hex: "aa", txid: "aa".repeat(32) }, { hex: "bb", txid: "bb".repeat(32) }]);
   worker.pendingRaw = [];
   await client.sync();
-  assert.deepEqual(submitted, ["aa", "bb"], "nothing pending, nothing sent");
+  assert.equal(submitted.length, 2, "nothing pending, nothing sent");
 });
 
 test("a mistyped recovery phrase is rejected before it can fence out the saved wallet", async (t) => {
