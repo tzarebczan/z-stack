@@ -95,6 +95,13 @@ an advancing target, the old anchor is independently revalidated on the current
 selected chain before any older observation is inherited. A mismatch discards
 that cache and uses fresh observations through the unchanged rollback rules.
 Same-height anchor changes also invalidate inheritance; lower targets are refused.
+While prior-anchor lineage is undecided, Init/Map failures and resource deadlines
+stop without emitting a replacement checkpoint. The canonical owner keeps the
+exact prior continuation, facts, coverage and cover debt. Receiving an old-anchor
+reply alone does not authorize replacement: the Rust future must process the
+independent acceptance/rejection and atomically merge or discard its old cache
+before any new-target checkpoint is possible. An unpolled reply or dropped future
+therefore cannot erase durable progress. Cancellation still wins without a drain.
 
 The supported metadata domain is explicit: at most 1024 current shards (2048
 boundary heights), 4096 distinct retained coverage endpoints, and genesis,

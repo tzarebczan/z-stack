@@ -17,7 +17,7 @@ use futures::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     rc::Rc,
     task::{Context, Poll},
@@ -372,6 +372,9 @@ pub struct Pass {
     scope: Scope,
     store: SharedStore,
     driver: Driver,
+    // Prior evidence remains owned by the external durable checkpoint until
+    // its anchor is independently accepted or rejected on this target chain.
+    lineage_pending: Rc<Cell<bool>>,
     future: Option<LocalBoxFuture<'static, Result<Status>>>,
     previous: Option<String>,
     // Validated prior metadata, with large records/continuation owned by store.
@@ -565,6 +568,11 @@ impl Pass {
                 && old.genesis.is_some()
                 && old.genesis.as_ref() == driver.chain.borrow().get(&0)
         });
+        let lineage_pending = Rc::new(Cell::new(
+            restored_chain
+                .as_ref()
+                .is_some_and(|old| old.anchor != scope.anchor),
+        ));
         if let Some(old) = &restored_chain {
             if old.anchor == scope.anchor {
                 for (height, hash) in &old.headers {
@@ -581,6 +589,7 @@ impl Pass {
         let chain = Chain(driver.chain.clone());
         let mut state = store.clone();
         let request = scope.clone();
+        let lineage = lineage_pending.clone();
         let future = Box::pin(async move {
             let (init, _) = transport.init().await.map_err(|_| Error("init"))?;
             let parsed =
@@ -684,6 +693,10 @@ impl Pass {
                     }
                 }
             }
+            // No await separates the accepted-cache merge / rejected-cache
+            // discard from this decision. Only now may a replacement checkpoint
+            // bind the journal and observations to the new target.
+            lineage.set(false);
             for e in &map.shards {
                 if e.end_height <= request.anchor.height {
                     owned.point(e.end_height, &e.terminal_block_hash).await?;
@@ -770,6 +783,7 @@ impl Pass {
             scope,
             store,
             driver,
+            lineage_pending,
             future: (!unsupported_history).then_some(future),
             previous,
             prior,
@@ -811,6 +825,13 @@ impl Pass {
                     self.future = None;
                 }
             }
+        }
+        if self.lineage_pending.get() && self.finished.is_some() {
+            // The caller keeps its exact acknowledged prior checkpoint. An Init,
+            // Map or old-anchor failure/deadline is not an invalidation decision.
+            return Ok(Step::Stopped {
+                status: self.finished.clone().unwrap(),
+            });
         }
         let state_changed = encoded(&self.store.inner.borrow())? != self.state_baseline;
         if state_changed && retained_endpoints(&self.store.inner.borrow()).is_err() {
@@ -864,6 +885,9 @@ impl Pass {
         }
     }
     fn checkpoint(&self, bytes: &[u8]) -> Result<Checkpoint> {
+        if self.lineage_pending.get() {
+            return Err(Error("lineage_pending"));
+        }
         let state = self.store.inner.borrow();
         let complete = self.finished == Some(Status::Complete);
         let records = state
@@ -1050,6 +1074,10 @@ impl Pass {
         io.pending = None;
         io.reply = None;
         io.chain_reply = None;
+        if self.lineage_pending.get() {
+            self.final_ack = true;
+            return Ok(());
+        }
         // With no new accepted work, the preceding durable checkpoint already
         // represents this pass; do not emit a conflicting same-ID replay.
         if self.held.is_none() {

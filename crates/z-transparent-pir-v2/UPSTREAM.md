@@ -78,3 +78,9 @@ coverage endpoints plus three anchor/genesis points (6147 observations); excess
 old metadata fails incomplete without altering the evidence journal. The actual
 136-old-shard to one-wide-shard fork fixture records elapsed and chain-budget
 cold passes and requires the unchanged upstream walker to reach verified rewind.
+
+Before prior-anchor lineage is decided, the wrapper emits no replacement
+checkpoint on Init/Map failure or resource interruption. The canonical owner
+retains the exact prior continuation. Cache inheritance/invalidation becomes
+checkpointable only after Rust processes the independent anchor decision. This
+is a suspension-boundary rule; upstream validation and rollback are unchanged.

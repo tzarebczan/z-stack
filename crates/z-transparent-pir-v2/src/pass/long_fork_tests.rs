@@ -314,6 +314,13 @@ fn long_fork_observations_survive_budget_and_elapsed_cold_restarts() {
                     }
                 }
             }
+            if scenario == "stable" && round == 0 {
+                interrupted_advance_keeps_prior_evidence(
+                    &advanced_server,
+                    &request,
+                    previous.as_ref().unwrap(),
+                );
+            }
             eprintln!(
                 "LONG_FORK_CENSUS {}",
                 serde_json::json!({"scenario":scenario,"fork_epoch":epoch,"round":round,"exit":if round==0{"elapsed"}else{"chain_budget"},"reads":reads,"mismatches":mismatches,"refetched":refetched,"initial_live":initial_live,"live":p.driver.chain.borrow().len(),"durable":p.driver.chain.borrow().len(),"walker_reached":walker,"rewind":rewound,"complete":complete})
@@ -325,6 +332,150 @@ fn long_fork_observations_survive_budget_and_elapsed_cold_restarts() {
         assert!(
             complete,
             "bounded cold passes must reach verified long-fork rollback: {scenario}"
+        );
+    }
+}
+
+fn observed_count(cp: &Checkpoint) -> usize {
+    let decoded: Continuation = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .deserialize(&STANDARD.decode(&cp.continuation).unwrap())
+        .unwrap();
+    decoded.chain.headers.len()
+}
+fn interrupted_advance_keeps_prior_evidence(
+    server: &InProcess,
+    prior_scope: &Scope,
+    prior: &Checkpoint,
+) {
+    let prior_count = observed_count(prior);
+    assert!(
+        prior_count > 10,
+        "genuine checkpoint must contain a nontrivial independently observed prefix"
+    );
+    let mut scope = prior_scope.clone();
+    scope.anchor = Anchor {
+        height: 246,
+        hash: synthetic(1246).to_display_hex(),
+    };
+    scope.accepted_headers.retain(|p| p.height == 0);
+    scope.accepted_headers.push(scope.anchor.clone());
+    for mode in [
+        "init_error",
+        "map_error",
+        "before_init_deadline",
+        "init_deadline",
+        "map_deadline",
+        "anchor_deadline",
+        "unpolled_anchor_deadline",
+        "accepted_anchor_budget",
+        "rejected_anchor_budget",
+    ] {
+        let decided = mode == "accepted_anchor_budget" || mode == "rejected_anchor_budget";
+        let mut selected = scope.clone();
+        if mode == "rejected_anchor_budget" {
+            selected.anchor.hash = synthetic(2246).to_display_hex();
+            selected.accepted_headers.pop();
+            selected.accepted_headers.push(selected.anchor.clone());
+        }
+        let mut limits = Limits::default();
+        if decided {
+            limits.max_chain_reads = 1;
+        }
+        let mut p = Pass::new(selected.clone(), Some(prior.clone()), limits).unwrap();
+        let state_before = encoded(&p.store.inner.borrow()).unwrap();
+        let mut persisted = prior.clone();
+        let mut checkpoints = 0;
+        if mode == "before_init_deadline" {
+            p.finish_budget().unwrap();
+        }
+        for _ in 0..20 {
+            match p.advance().unwrap() {
+                Step::Exchange {
+                    request_id,
+                    operation,
+                } => {
+                    let at_init = matches!(operation, Operation::Init);
+                    let at_map = matches!(operation, Operation::Map);
+                    assert!(at_init || at_map, "no query may precede lineage decision");
+                    if (at_init && mode == "init_deadline") || (at_map && mode == "map_deadline") {
+                        p.finish_budget().unwrap();
+                    } else if (at_init && mode == "init_error") || (at_map && mode == "map_error") {
+                        p.accept(request_id, Reply::Unavailable).unwrap();
+                    } else {
+                        p.accept(request_id, answer(server, operation)).unwrap();
+                    }
+                }
+                Step::NeedChain { height, hash } => {
+                    assert_eq!(height, prior.anchor.height);
+                    assert_eq!(hash, prior.anchor.hash);
+                    assert!(
+                        decided || mode == "anchor_deadline" || mode == "unpolled_anchor_deadline"
+                    );
+                    if decided {
+                        let actual = if mode == "rejected_anchor_budget" {
+                            synthetic(2245).to_display_hex()
+                        } else {
+                            hash
+                        };
+                        p.accept_chain(height, actual).unwrap();
+                    } else {
+                        if mode == "unpolled_anchor_deadline" {
+                            p.accept_chain(height, hash).unwrap();
+                        }
+                        p.finish_budget().unwrap();
+                    }
+                }
+                Step::Checkpoint { checkpoint } => {
+                    checkpoints += 1;
+                    p.acknowledge(&checkpoint.checkpoint_id).unwrap();
+                    persisted = checkpoint;
+                }
+                Step::Stopped { status } => {
+                    assert!(matches!(status, Status::Incomplete { .. }));
+                    break;
+                }
+            }
+        }
+        eprintln!(
+            "LINEAGE_CENSUS {}",
+            serde_json::json!({"mode":mode,"prior_observed":prior_count,"persisted_observed":observed_count(&persisted),"replacement_checkpoints":checkpoints,"facts_unchanged":encoded(&p.store.inner.borrow()).unwrap()==state_before,"continuation_unchanged":persisted.continuation==prior.continuation})
+        );
+        if decided {
+            assert_eq!(
+                checkpoints, 1,
+                "decided lineage must durably publish its atomic cache decision"
+            );
+            assert_ne!(persisted.anchor, prior.anchor);
+            assert_eq!(
+                persisted.records.len(),
+                3,
+                "header-only decision preserves genuine facts"
+            );
+            assert!(persisted.rewind_to.is_none());
+            assert_eq!(
+                p.driver.chain.borrow().contains_key(&110),
+                mode == "accepted_anchor_budget",
+                "only accepted lineage inherits older observations"
+            );
+            let cold = Pass::new(selected, Some(persisted.clone()), Limits::default()).unwrap();
+            assert_eq!(
+                cold.driver.chain.borrow().contains_key(&110),
+                mode == "accepted_anchor_budget"
+            );
+        } else {
+            assert_eq!(
+                checkpoints, 0,
+                "an undecided lineage must not replace its prior evidence: {mode}"
+            );
+            assert!(
+                persisted.continuation == prior.continuation,
+                "prior opaque continuation must survive exactly"
+            );
+        }
+        assert!(
+            encoded(&p.store.inner.borrow()).unwrap() == state_before,
+            "facts/debt cannot change before lineage decision"
         );
     }
 }

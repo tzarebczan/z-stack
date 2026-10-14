@@ -108,9 +108,36 @@ fn version_two_migrates_only_after_its_original_digest_is_verified() {
     );
     let upgraded = snapshot(&restored);
     assert_eq!(
-        &STANDARD.decode(upgraded.continuation).unwrap()[..4],
+        &STANDARD.decode(&upgraded.continuation).unwrap()[..4],
         &3u32.to_le_bytes()
     );
+    let mut moved = scope();
+    moved.anchor = Anchor {
+        height: 101,
+        hash: "c".repeat(64),
+    };
+    moved.accepted_headers.pop();
+    moved.accepted_headers.push(moved.anchor.clone());
+    let mut interrupted = Pass::new(moved, Some(upgraded), Limits::default()).unwrap();
+    interrupted.finish_budget().unwrap();
+    assert!(
+        matches!(interrupted.advance().unwrap(),Step::Stopped{status:Status::Incomplete{reason}} if reason=="budget")
+    );
+    assert_eq!(
+        interrupted.store.inner.borrow().pending().unwrap()[0].dummy_debt,
+        Some((2, 3))
+    );
+    assert_eq!(
+        interrupted
+            .store
+            .inner
+            .borrow()
+            .entry_failures(0, &script)
+            .unwrap(),
+        1
+    );
+    interrupted.cancel();
+    assert!(interrupted.finish_budget().is_err());
     cp.checkpoint_id = "f".repeat(64);
     assert!(Pass::new(scope(), Some(cp), Limits::default()).is_err());
 }
