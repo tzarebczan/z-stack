@@ -105,10 +105,9 @@ impl ProjectionState {
             if old.source_id == source && old.anchor == anchor && old.scope_id == scope_id {
                 return Ok(old.clone());
             }
-            // A changed chain must first pass through the wallet's canonical rewind.
-            if anchor.height < old.anchor.height
-                || (anchor.height == old.anchor.height && anchor.hash != old.anchor.hash)
-            {
+            // A lower target cannot authenticate the saved anchor yet. Keep the
+            // private journal until canonical scanning reaches that height again.
+            if anchor.height < old.anchor.height {
                 return Err(refused("transparent_pir_rewind_required"));
             }
         }
@@ -118,6 +117,15 @@ impl ProjectionState {
             .ok_or_else(|| refused("transparent_pir_generation_exhausted"))?;
         let same_source = self.bound_source.as_deref() == Some(source)
             || self.scope.as_ref().is_some_and(|s| s.source_id == source);
+        if self
+            .scope
+            .as_ref()
+            .is_some_and(|old| old.scope_id != scope_id)
+        {
+            // Aggregate coverage belongs to this exact script inventory. The
+            // continuation retains each old script's independent coverage.
+            self.covered_through = 0;
+        }
         self.bound_source = Some(source.into());
         self.generation = generation;
         let scope = TransparentPirScope {
@@ -299,12 +307,11 @@ impl ProjectionState {
             return;
         }
         self.rewind_floor = Some(self.rewind_floor.map_or(height, |old| old.min(height)));
+        self.projection_invalidated = true;
         self.complete = false;
         self.covered_through = self.covered_through.min(u64::from(height));
-        self.checkpoint_id = None;
-        self.checkpoint_digest = None;
-        self.continuation = None;
-        self.scope = None;
+        // Canonical rows have their own rewind authority. Acquisition must
+        // retain its source evidence and owed cover queries for core revalidation.
         self.durable = false;
     }
 
@@ -346,6 +353,130 @@ fn checkpoint_payload(checkpoint: &TransparentPirCheckpoint) -> Result<Vec<u8>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn enrolled() -> ProjectionState {
+        let mut state = ProjectionState::default();
+        let scope = state
+            .begin(
+                &"ab".repeat(32),
+                TransparentPirAnchor {
+                    height: 3,
+                    hash: "03".repeat(32),
+                },
+                vec![TransparentPirScript {
+                    script: "51".into(),
+                    required_from: 0,
+                }],
+            )
+            .unwrap();
+        let checkpoint = TransparentPirCheckpoint {
+            source_id: scope.source_id,
+            scope_id: scope.scope_id,
+            generation: scope.generation,
+            anchor: scope.anchor,
+            checkpoint_id: "cd".repeat(32),
+            previous_checkpoint_id: None,
+            covered_through: 3,
+            complete: false,
+            pending_pages: 1,
+            unresolved_spends: 0,
+            records: vec![],
+            coverage: vec![],
+            rewind_to: None,
+            continuation: "opaque-private-journal-and-cover-debt".into(),
+        };
+        state.stage(&checkpoint, &[]).unwrap();
+        state
+    }
+    #[test]
+    fn same_height_scope_change_preserves_private_checkpoint_for_core_revalidation() {
+        let mut state = enrolled();
+        let saved = state.continuation.clone().unwrap();
+        let scope = state
+            .begin(
+                &"ab".repeat(32),
+                TransparentPirAnchor {
+                    height: 3,
+                    hash: "83".repeat(32),
+                },
+                state.scope.as_ref().unwrap().scripts.clone(),
+            )
+            .unwrap();
+        assert_eq!(scope.anchor.hash, "83".repeat(32));
+        assert!(
+            serde_json::to_vec(&state.continuation).unwrap()
+                == serde_json::to_vec(&Some(saved)).unwrap(),
+            "fork enrollment must preserve private evidence and debt"
+        );
+        assert!(!state.complete);
+    }
+    #[test]
+    fn canonical_rewind_preserves_private_journal_and_refuses_lower_enrollment() {
+        let mut state = enrolled();
+        let saved = serde_json::to_vec(&state.continuation).unwrap();
+        state.rewind(1);
+        assert!(
+            serde_json::to_vec(&state.continuation).unwrap() == saved,
+            "canonical rewind must retain private cover debt"
+        );
+        assert_eq!(state.rewind_floor, Some(1));
+        assert!(state
+            .begin(
+                &"ab".repeat(32),
+                TransparentPirAnchor {
+                    height: 1,
+                    hash: "01".repeat(32)
+                },
+                state.scope.as_ref().unwrap().scripts.clone()
+            )
+            .is_err());
+        assert!(
+            serde_json::to_vec(&state.continuation).unwrap() == saved,
+            "closed lower target must preserve checkpoint"
+        );
+    }
+    #[test]
+    fn expanded_scope_frontier_is_incomplete_without_erasing_acquisition() {
+        let mut state = enrolled();
+        let saved = serde_json::to_vec(&state.continuation).unwrap();
+        let mut scripts = state.scope.as_ref().unwrap().scripts.clone();
+        scripts.push(TransparentPirScript {
+            script: "52".into(),
+            required_from: 0,
+        });
+        let scope = state
+            .begin(
+                &"ab".repeat(32),
+                TransparentPirAnchor {
+                    height: 3,
+                    hash: "03".repeat(32),
+                },
+                scripts,
+            )
+            .unwrap();
+        assert_eq!(state.covered_through, 0);
+        assert!(
+            serde_json::to_vec(&state.continuation).unwrap() == saved,
+            "scope growth must preserve acquisition and cover debt"
+        );
+        let partial = TransparentPirCheckpoint {
+            source_id: scope.source_id,
+            scope_id: scope.scope_id,
+            generation: scope.generation,
+            anchor: scope.anchor,
+            checkpoint_id: "de".repeat(32),
+            previous_checkpoint_id: state.checkpoint_id.clone(),
+            covered_through: 0,
+            complete: false,
+            pending_pages: 1,
+            unresolved_spends: 0,
+            records: vec![],
+            coverage: vec![],
+            rewind_to: None,
+            continuation: "continued-private-journal-and-cover-debt".into(),
+        };
+        state.validate(&partial).unwrap();
+    }
 
     #[test]
     fn never_enrolled_rewind_preserves_exact_serialized_state() {

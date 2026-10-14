@@ -232,14 +232,6 @@ impl NativeWallet {
                     hash: block.block_hash().to_string(),
                 };
                 let mut state = load(ext)?;
-                if let Some(old) = &state.scope {
-                    let known = wdb
-                        .get_block_hash(u32::try_from(old.anchor.height)?.into())?
-                        .map(|h| h.to_string());
-                    if known.as_deref() != Some(&old.anchor.hash) {
-                        state.rewind(0);
-                    }
-                }
                 let mut scope = state.begin(source_id, anchor, scripts(wdb, ext, self.network)?)?;
                 scope.accepted_headers.retain(|h| h.height != 0);
                 scope.accepted_headers.push(TransparentPirAnchor {
@@ -291,7 +283,7 @@ impl NativeWallet {
             let height = u32::try_from(checkpoint.anchor.height)?;
             let block = wdb.block_fully_scanned()?.ok_or_else(||anyhow::anyhow!("transparent_pir_anchor_unavailable"))?;
             if u32::from(block.block_height()) != height || block.block_hash().to_string() != checkpoint.anchor.hash { anyhow::bail!("transparent_pir_chain_changed"); }
-            if state.checkpoint_id.as_ref() == Some(&checkpoint.checkpoint_id) {
+            if state.checkpoint_id.as_ref() == Some(&checkpoint.checkpoint_id) && !state.projection_invalidated {
                 state.durable = true;
                 return Ok(state.status());
             }
@@ -335,6 +327,7 @@ impl NativeWallet {
             let unspent:u64=ext.query_row("SELECT COALESCE(SUM(n.value_zat),0) FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.mined_height IS NOT NULL AND NOT EXISTS(SELECT 1 FROM transparent_received_output_spends s WHERE s.transparent_received_output_id=n.id)",[],|r|r.get(0))?;
             Zatoshis::from_u64(unspent).map_err(|_|anyhow::anyhow!("transparent_pir_amount_invalid"))?;
             state.stage(&checkpoint,&records)?;
+            state.projection_invalidated=false;
             let next_scripts = scripts(wdb,ext,self.network)?;
             if next_scripts.len() != current_scripts.len() || current_id != pass.scope.scope_id { state.complete=false; }
             state.durable=true;

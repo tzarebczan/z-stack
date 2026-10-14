@@ -1271,8 +1271,34 @@ mod retirement_tests {
             .unwrap();
         w.acknowledge_transparent_pir_checkpoint(&c.checkpoint_id)
             .unwrap();
+        let saved = w.transparent_pir_checkpoint();
         w.rewind_to_height(1).unwrap();
+        assert!(
+            w.transparent_pir_checkpoint() == saved,
+            "canonical rewind retains private acquisition"
+        );
+        assert!(
+            w.begin_transparent_pir(&"ab".repeat(32)).is_err(),
+            "lower target remains closed until scanning catches up"
+        );
+        let compact = crate::web::encode_delimited((2..=3).map(|height| {
+            zcash_client_backend::proto::compact_formats::CompactBlock {
+                height,
+                hash: vec![height as u8 + 0x80; 32],
+                prev_hash: vec![if height == 2 { 1 } else { 0x82 }; 32],
+                time: 1,
+                chain_metadata: Some(Default::default()),
+                ..Default::default()
+            }
+        }));
+        w.apply_compact_blocks_blob(&compact).unwrap();
         let mut partial = checkpoint(&mut w, vec![]);
+        partial.checkpoint_id = "de".repeat(32);
+        partial.previous_checkpoint_id = Some(c.checkpoint_id);
+        partial.rewind_to = Some(TransparentPirAnchor {
+            height: 1,
+            hash: "01".repeat(32),
+        });
         partial.covered_through = 1;
         for c in &mut partial.coverage {
             c.through = 1;
@@ -1287,11 +1313,7 @@ mod retirement_tests {
             "incomplete"
         );
         let mut complete = checkpoint(&mut restored, vec![receive()]);
-        complete.covered_through = 1;
-        for c in &mut complete.coverage {
-            c.through = 1;
-        }
-        complete.checkpoint_id = "de".repeat(32);
+        complete.checkpoint_id = "ef".repeat(32);
         complete.previous_checkpoint_id = Some(partial.checkpoint_id);
         restored
             .apply_transparent_pir_checkpoint(&serde_json::to_string(&complete).unwrap())

@@ -557,3 +557,6 @@ fn web_reset_scan_keeps_real_malformed_page_cover_debt_across_cold_resumes() {
     assert_eq!(web.history(20).len(), 2);
     assert_eq!(web.transparent_pir_status()["completion"], "incomplete");
 }
+
+#[path = "transparent_pir_host_reorg_tests.rs"]
+mod host_reorg;

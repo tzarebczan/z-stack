@@ -143,6 +143,18 @@ impl Fixture {
                                 .unwrap()
                                 .to_bytes();
                             let payload = &raw[5..];
+                            // Mode 4 is an independently selected synthetic fork for host reorg tests.
+                            let compact = |height| {
+                                let mut result = block(height, &g.lock().unwrap());
+                                if m.load(Ordering::Acquire) == 4 && height >= 2 {
+                                    result.hash = vec![(height as u8).wrapping_add(0x80); 32];
+                                    if height > 2 {
+                                        result.prev_hash =
+                                            vec![(height as u8 - 1).wrapping_add(0x80); 32];
+                                    }
+                                }
+                                result
+                            };
                             let response = match method.as_str() {
                                 "GetLightdInfo" => reply(
                                     vec![LightdInfo {
@@ -156,17 +168,14 @@ impl Fixture {
                                 "GetLatestBlock" => reply(
                                     vec![BlockId {
                                         height: 2,
-                                        hash: vec![2; 32],
+                                        hash: compact(2).hash,
                                     }
                                     .encode_to_vec()],
                                     "0",
                                 ),
                                 "GetBlock" => reply(
-                                    vec![block(
-                                        BlockId::decode(payload).unwrap().height,
-                                        &g.lock().unwrap(),
-                                    )
-                                    .encode_to_vec()],
+                                    vec![compact(BlockId::decode(payload).unwrap().height)
+                                        .encode_to_vec()],
                                     "0",
                                 ),
                                 "GetTreeState" => {
@@ -178,7 +187,18 @@ impl Fixture {
                                             hash: if id.height == 0 {
                                                 g.lock().unwrap().clone()
                                             } else {
-                                                format!("{:02x}", id.height as u8).repeat(32)
+                                                let height = id.height as u8;
+                                                format!(
+                                                    "{:02x}",
+                                                    if m.load(Ordering::Acquire) == 4
+                                                        && id.height >= 2
+                                                    {
+                                                        height.wrapping_add(0x80)
+                                                    } else {
+                                                        height
+                                                    }
+                                                )
+                                                .repeat(32)
                                             },
                                             time: 1,
                                             sapling_tree: "000000".into(),
@@ -193,7 +213,7 @@ impl Fixture {
                                     let range = BlockRange::decode(payload).unwrap();
                                     reply(
                                         (range.start.unwrap().height..=range.end.unwrap().height)
-                                            .map(|h| block(h, &g.lock().unwrap()).encode_to_vec())
+                                            .map(|h| compact(h).encode_to_vec())
                                             .collect(),
                                         "0",
                                     )

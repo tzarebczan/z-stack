@@ -375,6 +375,28 @@ async fn native_transparent_pir_canonical_receive_spend_reopen_and_cancel() {
         reopened.transparent_pir_status().unwrap()["completion"],
         "incomplete"
     );
+    let saved = reopened.transparent_pir_checkpoint().unwrap();
+    code(
+        reopened.begin_transparent_pir_with_source(
+            &fixture.source,
+            &"ab".repeat(32),
+            Arc::new(RecoveryCancellation::new()),
+        ),
+        "transparent_pir_rewind_required",
+    );
+    assert!(
+        reopened.transparent_pir_checkpoint().unwrap() == saved,
+        "lower target must retain private acquisition"
+    );
+    fixture.mode.store(4, Ordering::Release);
+    reopened
+        .sync_with_wallet_source_reported_cancellable(
+            &fixture.source,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
     let mut after_reorg = reopened
         .begin_transparent_pir_with_source(
             &fixture.source,
@@ -384,8 +406,12 @@ async fn native_transparent_pir_canonical_receive_spend_reopen_and_cancel() {
         .unwrap();
     let scope: TransparentPirScope =
         serde_json::from_str(&after_reorg.scope_json().unwrap()).unwrap();
-    assert_eq!(scope.anchor.height, 1);
-    let mut partial = checkpoint(scope.clone(), &script, vec![], None, 6);
+    assert_eq!(scope.anchor.height, 2);
+    let mut partial = checkpoint(scope.clone(), &script, vec![], Some(c5.checkpoint_id), 6);
+    partial.rewind_to = Some(crate::transparent_pir::TransparentPirAnchor {
+        height: 1,
+        hash: "01".repeat(32),
+    });
     partial.complete = false;
     partial.pending_pages = 1;
     reopened
