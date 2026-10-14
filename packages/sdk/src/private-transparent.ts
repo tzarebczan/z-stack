@@ -44,7 +44,7 @@ async function syncPrivateTransparentPass({ source, transport, signal, assertCur
   assertCurrent: () => void;
   checkpoint: () => Promise<void>;
   treeState: ((height: number, signal: AbortSignal) => Promise<{ height: number; hash: string }>) | undefined;
-}): Promise<"complete" | "scanning" | "scope-growth"> {
+}, budget: { signal: AbortSignal; deadline: AbortSignal; exceeded: Error }): Promise<"complete" | "scanning" | "scope-growth"> {
   const engine = source.privateTransparent;
   if (!engine) throw new Error("WASM needs a transparent PIR upgrade");
   if (!/^[0-9a-f]{64}$/.test(transport.sourceId)) throw new Error("transparent_pir_source_invalid");
@@ -104,6 +104,38 @@ async function syncPrivateTransparentPass({ source, transport, signal, assertCur
       }
     }
     return "scanning";
+  } catch (error) {
+    if (error !== budget.exceeded && (!budget.deadline.aborted || error !== budget.deadline.reason)) throw error;
+    const currentBudget = () => { budget.signal.throwIfAborted(); assertCurrent(); };
+    const invokeBudget = async (operation: PrivateTransparentOperation, bytes = EMPTY) => {
+      currentBudget();
+      const result = await engine(operation, bytes);
+      currentBudget();
+      return result;
+    };
+    // Only this task's resource budget may checkpoint validated work after its network signal expires.
+    // User cancellation, replacement and storage failures retain their ordinary discard behavior.
+    for (let steps = 0; steps < 8; steps++) {
+      const step = json(await invokeBudget("advance", steps === 0 ? encode({ budget_yield: true }) : EMPTY), 1024 * 1024);
+      if (typeof step !== "object" || step === null || !("kind" in step)) throw new Error("transparent_pir_engine_invalid");
+      if (step.kind === "checkpoint") {
+        if (!("checkpoint_id" in step) || typeof step.checkpoint_id !== "string"
+          || !/^[0-9a-f]{64}$/.test(step.checkpoint_id)) throw new Error("transparent_pir_engine_invalid");
+        await checkpoint();
+        currentBudget();
+        await invokeBudget("ack", encoder.encode(step.checkpoint_id));
+        await checkpoint();
+        currentBudget();
+      } else if (step.kind === "stopped") {
+        if (!("status" in step) || typeof step.status !== "object" || step.status === null || !("kind" in step.status))
+          throw new Error("transparent_pir_engine_invalid");
+        if (step.status.kind !== "complete") return "scanning";
+        const status = json(await invokeBudget("status"), 16 * 1024);
+        return typeof status === "object" && status !== null && "completion" in status
+          && status.completion === "complete-for-enrolled-scope" ? "complete" : "scanning";
+      } else throw new Error("transparent_pir_budget_yield_invalid");
+    }
+    throw new Error("transparent_pir_budget_yield_limit");
   } finally {
     // Cancel only this engine session; obsolete worker RPC guards cannot reach a successor.
     await engine("cancel", EMPTY).catch(() => {});
@@ -112,7 +144,8 @@ async function syncPrivateTransparentPass({ source, transport, signal, assertCur
 
 /** Repeat activity-driven gap expansion within one bounded, cancellable sync task. */
 export async function syncPrivateTransparent(input: Parameters<typeof syncPrivateTransparentPass>[0]): Promise<"complete" | "scanning"> {
-  const signal = AbortSignal.any([input.signal, AbortSignal.timeout(120_000)]);
+  const deadline = AbortSignal.timeout(120_000);
+  const signal = AbortSignal.any([input.signal, deadline]);
   let exchanges = 0, chainReads = 0, downloaded = 0, uploaded = 0;
   const budgetExceeded = new Error("transparent_pir_pass_budget");
   const transport: PrivateTransparentTransport = { sourceId: input.transport.sourceId, exchange: async (request, wait) => {
@@ -130,7 +163,7 @@ export async function syncPrivateTransparent(input: Parameters<typeof syncPrivat
   } : undefined;
   try {
     for (let pass = 0; pass < 4; pass++) {
-      const result = await syncPrivateTransparentPass({ ...input, transport, signal, treeState });
+      const result = await syncPrivateTransparentPass({ ...input, transport, signal, treeState }, { signal: input.signal, deadline, exceeded: budgetExceeded });
       if (result !== "scope-growth") return result;
     }
     return "scanning";

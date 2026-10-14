@@ -57,20 +57,37 @@ impl WasmWallet {
             .ok_or_else(|| js_err("transparent_pir_context_consumed"))?;
         // Recheck the wallet's source/scope and accepted anchor on each state mutation in z-engine.
         match operation {
-            "advance" if bytes.is_empty() => match state.pass.advance().map_err(js_err)? {
-                Step::Checkpoint { checkpoint } => {
-                    let id = checkpoint.checkpoint_id.clone();
-                    self.inner
-                        .apply_transparent_pir_checkpoint(
-                            &serde_json::to_string(&checkpoint).map_err(js_err)?,
-                        )
-                        .map_err(js_err)?;
-                    state.staged = Some(id.clone());
-                    serde_json::to_vec(&serde_json::json!({"kind":"checkpoint","checkpoint_id":id}))
-                        .map_err(js_err)
+            "advance" => {
+                if !bytes.is_empty() {
+                    #[derive(serde::Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Advance {
+                        budget_yield: bool,
+                    }
+                    let input: Advance = serde_json::from_slice(bytes)
+                        .map_err(|_| js_err("transparent_pir_input_invalid"))?;
+                    if !input.budget_yield {
+                        return Err(js_err("transparent_pir_input_invalid"));
+                    }
+                    state.pass.finish_budget().map_err(js_err)?;
                 }
-                step => serde_json::to_vec(&step).map_err(js_err),
-            },
+                match state.pass.advance().map_err(js_err)? {
+                    Step::Checkpoint { checkpoint } => {
+                        let id = checkpoint.checkpoint_id.clone();
+                        self.inner
+                            .apply_transparent_pir_checkpoint(
+                                &serde_json::to_string(&checkpoint).map_err(js_err)?,
+                            )
+                            .map_err(js_err)?;
+                        state.staged = Some(id.clone());
+                        serde_json::to_vec(
+                            &serde_json::json!({"kind":"checkpoint","checkpoint_id":id}),
+                        )
+                        .map_err(js_err)
+                    }
+                    step => serde_json::to_vec(&step).map_err(js_err),
+                }
+            }
             "accept" => {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]
