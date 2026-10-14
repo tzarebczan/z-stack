@@ -14,7 +14,10 @@ mod recovery_guard;
 pub use recovery_blocks::{verify_regtest_recovery_blocks, VerifiedRegtestRecoveryBlocks};
 #[cfg(feature = "native-pir")]
 pub use recovery_cancellation::RecoveryCancellation;
+mod memo_status;
 mod payments;
+mod shared_memos;
+pub use shared_memos::NativeSharedMemosPass;
 #[cfg(feature = "private-enhance")]
 mod private_enhance;
 #[cfg(feature = "private-enhance")]
@@ -3196,9 +3199,25 @@ impl NativeWallet {
             pending.push(r.map_err(|e| EngineError::WalletDb(format!("history row: {e}")))?);
         }
         drop(stmt);
+        let work_status = memo_status::work(&conn, self.network);
         let mut out = Vec::with_capacity(pending.len());
         for (txid, mut e) in pending {
-            e.memos = memos_for_txid(&conn, &txid);
+            let (memos, authenticated_empty) = memos_for_txid(&conn, &txid);
+            e.memos = memos;
+            e.memo_status = if !e.memos.is_empty() {
+                crate::MemoStatus::Available
+            } else {
+                txid.as_slice()
+                    .try_into()
+                    .ok()
+                    .map(TxId::from_bytes)
+                    .and_then(|id| work_status.as_ref()?.get(&id).copied())
+                    .unwrap_or(if authenticated_empty && work_status.is_some() {
+                        crate::MemoStatus::Empty
+                    } else {
+                        crate::MemoStatus::Unknown
+                    })
+            };
             out.push(e);
         }
         Ok(out)
@@ -4561,34 +4580,46 @@ fn zip_payment(to: &str, zat: u64, memo: Option<&str>) -> Result<Payment> {
     }
 }
 
-fn memos_for_txid(conn: &rusqlite::Connection, txid: &[u8]) -> Vec<String> {
+fn memos_for_txid(conn: &rusqlite::Connection, txid: &[u8]) -> (Vec<String>, bool) {
     let sql = "SELECT memo FROM orchard_received_notes n
-         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1 AND n.memo IS NOT NULL
+         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1
          UNION ALL
          SELECT memo FROM sapling_received_notes n
-         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1 AND n.memo IS NOT NULL
+         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1
          UNION ALL
          SELECT memo FROM ironwood_received_notes n
-         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1 AND n.memo IS NOT NULL
+         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1
          UNION ALL
          SELECT memo FROM sent_notes n
-         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1 AND n.memo IS NOT NULL";
+         JOIN transactions t ON t.id_tx = n.transaction_id WHERE t.txid = ?1";
     let Ok(mut stmt) = conn.prepare(sql) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
-    let Ok(rows) = stmt.query_map([txid], |row| row.get::<_, Vec<u8>>(0)) else {
-        return Vec::new();
+    let Ok(rows) = stmt.query_map([txid], |row| row.get::<_, Option<Vec<u8>>>(0)) else {
+        return (Vec::new(), false);
     };
     let mut out = Vec::new();
-    for r in rows.flatten() {
-        if let Ok(Memo::Text(t)) = Memo::from_bytes(&r) {
-            let s = t.to_string();
-            if !s.is_empty() && !out.contains(&s) {
-                out.push(s);
+    let mut authenticated = false;
+    let mut missing_or_invalid = false;
+    for row in rows {
+        let Ok(Some(bytes)) = row else {
+            missing_or_invalid = true;
+            continue;
+        };
+        match Memo::from_bytes(&bytes) {
+            Ok(memo) => {
+                authenticated = true;
+                if let Memo::Text(text) = memo {
+                    let text = text.to_string();
+                    if !text.is_empty() && !out.contains(&text) {
+                        out.push(text);
+                    }
+                }
             }
+            Err(_) => missing_or_invalid = true,
         }
     }
-    out
+    (out, authenticated && !missing_or_invalid)
 }
 
 /// Most unmined sends one sync resubmits.
@@ -6031,8 +6062,8 @@ mod tests {
             [memo.as_slice()],
         )
         .unwrap();
-        assert_eq!(memos_for_txid(&conn, &[1; 32]), ["ironwood"]);
-        assert!(memos_for_txid(&conn, &[2; 32]).is_empty());
+        assert_eq!(memos_for_txid(&conn, &[1; 32]).0, ["ironwood"]);
+        assert!(memos_for_txid(&conn, &[2; 32]).0.is_empty());
     }
 
     #[cfg(feature = "transparent-inputs")]

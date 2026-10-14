@@ -485,7 +485,7 @@ impl ProductPolicy {
 }
 
 /// Payment-note recovery state. Empty means no text memo was recovered; binary
-/// memos are not displayed. Unknown covers older snapshots and native providers.
+/// memos are not displayed. Unknown covers older snapshots and incomplete local evidence.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MemoStatus {

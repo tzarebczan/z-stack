@@ -19,6 +19,8 @@ mod public_data;
 pub use private_enhance::PrivateEnhanceRequest;
 mod scan;
 mod store;
+#[cfg(all(test, feature = "native"))]
+pub(crate) use store::performance_tests::shielded_memo_transaction;
 mod write;
 
 pub use framed::{decode_delimited, encode_delimited, encode_one, SNAPSHOT_MAGIC};
