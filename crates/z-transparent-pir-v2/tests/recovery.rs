@@ -390,7 +390,10 @@ fn nonzero_async_walker_matches_pinned_upstream_store() {
             revision: e.revision_digest,
         })
         .collect();
-    assert_eq!(cp.records, expected);
+    assert!(
+        cp.records == expected,
+        "recovered facts differ from the pinned oracle"
+    );
     for script in &scope().scripts {
         let held = oracle
             .coverage(&hex::decode(&script.script).unwrap())
@@ -583,4 +586,282 @@ fn malformed_private_content_remains_incomplete_and_failure_cap_survives_resume(
         .records
         .iter()
         .all(|r| r.script != hex::encode(script(1).as_slice())));
+}
+
+#[test]
+fn genesis_only_publication_emits_real_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let genesis = transparent_filter::BlockHash::from_display_hex(
+        transparent_filter::MAINNET_GENESIS_DISPLAY,
+    )
+    .unwrap();
+    publish(
+        dir.path(),
+        &[ShardSpec::first(0, 0, true, vec![])],
+        SEAL,
+        |_| genesis,
+        vec![],
+    );
+    let server = InProcess::serve(dir.path());
+    let mut request = scope();
+    request.anchor = Anchor {
+        height: 0,
+        hash: genesis.to_display_hex(),
+    };
+    request.accepted_headers = vec![request.anchor.clone()];
+    request.scripts.truncate(1);
+    request.scripts[0].required_from = 0;
+    let mut pass = Pass::new(request, None, Limits::default()).unwrap();
+    let checkpoint = drive(&mut pass, &server);
+    assert!(checkpoint.complete);
+    assert_eq!(
+        checkpoint.coverage.len(),
+        1,
+        "genesis coverage must carry its revision"
+    );
+    assert_eq!(checkpoint.coverage[0].through, 0);
+    assert_eq!(checkpoint.coverage[0].revision.len(), 64);
+}
+
+#[test]
+fn malformed_page_dummy_debt_survives_budget_and_cold_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let history = (0..3u8)
+        .map(|n| {
+            (
+                script(1),
+                TransparentEvent::Receive(ReceiveEvent {
+                    metadata: None,
+                    height: 101 + u32::from(n),
+                    txid: Txid([70 + n; 32]),
+                    transaction_index: 0,
+                    output_index: 0,
+                    value: 100,
+                    coinbase: false,
+                }),
+            )
+        })
+        .collect();
+    let mut spec = ShardSpec::first(100, 110, true, history);
+    spec.malformed_page_heads = true;
+    publish(dir.path(), &[spec], SEAL, synthetic, vec![]);
+    let server = InProcess::serve(dir.path());
+    let mut request = scope();
+    request.scripts.truncate(1);
+    let mut previous = None;
+    let mut page_counts = Vec::new();
+    let mut reasons = Vec::new();
+    for budget in [3, 1, 1, 1] {
+        let mut limits = Limits::default();
+        limits.max_queries = budget;
+        let mut pass = Pass::new(request.clone(), previous.take(), limits).unwrap();
+        let mut page_queries = 0;
+        for _ in 0..100 {
+            match pass.advance().unwrap() {
+                Step::Exchange {
+                    request_id,
+                    operation,
+                } => {
+                    if matches!(
+                        operation,
+                        Operation::Query {
+                            table: Table::Pages { .. },
+                            ..
+                        }
+                    ) {
+                        page_queries += 1;
+                    }
+                    let reply = answer(&server, operation);
+                    pass.accept(request_id, reply).unwrap();
+                }
+                Step::Checkpoint { mut checkpoint } => {
+                    assert!(!checkpoint.complete);
+                    pass.acknowledge(&checkpoint.checkpoint_id).unwrap();
+                    checkpoint.records.clear(); // Exact engine persistence boundary.
+                    previous = Some(checkpoint);
+                }
+                Step::Stopped {
+                    status: Status::Incomplete { reason },
+                } => {
+                    reasons.push(reason);
+                    break;
+                }
+                _ => panic!("unexpected fixture step"),
+            }
+        }
+        page_counts.push(page_queries);
+    }
+    assert_eq!(
+        page_counts,
+        vec![1, 1, 1, 1],
+        "all three owed dummy queries must survive cold budget boundaries before another real head"
+    );
+    assert_eq!(
+        reasons,
+        vec![
+            "query_budget",
+            "query_budget",
+            "query_budget",
+            "content_failed"
+        ],
+        "partial dummy rounds must keep debt and remain budget-incomplete until fully paid"
+    );
+}
+
+fn page_session(
+    server: &InProcess,
+    request: Scope,
+    previous: Option<Checkpoint>,
+    limits: Limits,
+    stop: &str,
+) -> (Checkpoint, usize, Status) {
+    let mut pass = Pass::new(request, previous, limits).unwrap();
+    let mut latest = None;
+    let mut pages = 0;
+    for _ in 0..100 {
+        match pass.advance().unwrap() {
+            Step::Exchange {
+                request_id,
+                operation,
+            } => {
+                let is_page = matches!(
+                    operation,
+                    Operation::Query {
+                        table: Table::Pages { .. },
+                        ..
+                    }
+                );
+                pages += usize::from(is_page);
+                let reply = if is_page
+                    && ((stop == "overload" && pages == 2)
+                        || (stop == "partial_overload" && pages == 3))
+                {
+                    Reply::Overloaded {
+                        retry_after: Some(1),
+                    }
+                } else {
+                    answer(server, operation)
+                };
+                pass.accept(request_id, reply).unwrap();
+            }
+            Step::Checkpoint { mut checkpoint } => {
+                assert!(!checkpoint.complete);
+                pass.acknowledge(&checkpoint.checkpoint_id).unwrap();
+                checkpoint.records.clear();
+                if stop == "cancel" && pages == 1 {
+                    // Native/Web may drop the pass after this durable ack,
+                    // before dispatching the pending dummy exchange.
+                    pass.cancel();
+                    return (checkpoint, pages, Status::Cancelled);
+                }
+                latest = Some(checkpoint);
+            }
+            Step::Stopped { status } => return (latest.unwrap(), pages, status),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    panic!("page session did not stop");
+}
+
+#[test]
+fn malformed_page_debt_precedes_real_queries_after_cancel_overload_and_anchor_advance() {
+    let dir = tempfile::tempdir().unwrap();
+    let history = (0..3u8)
+        .map(|n| {
+            (
+                script(1),
+                TransparentEvent::Receive(ReceiveEvent {
+                    metadata: None,
+                    height: 101 + u32::from(n),
+                    txid: Txid([80 + n; 32]),
+                    transaction_index: 0,
+                    output_index: 0,
+                    value: 100,
+                    coinbase: false,
+                }),
+            )
+        })
+        .collect();
+    let mut spec = ShardSpec::first(100, 120, true, history);
+    spec.malformed_page_heads = true;
+    publish(dir.path(), &[spec], SEAL, synthetic, vec![]);
+    let server = InProcess::serve(dir.path());
+    let mut original = scope();
+    original.scripts.truncate(1);
+    let (_, uninterrupted, status) =
+        page_session(&server, original.clone(), None, Limits::default(), "");
+    assert_eq!(
+        uninterrupted, 4,
+        "one genuine head followed by its three dummy queries"
+    );
+    assert_eq!(
+        status,
+        Status::Incomplete {
+            reason: "content_failed".into()
+        }
+    );
+    for stop in ["cancel", "overload", "partial_overload"] {
+        let (first, attempted, status) =
+            page_session(&server, original.clone(), None, Limits::default(), stop);
+        if stop == "cancel" {
+            assert_eq!(attempted, 1);
+            assert_eq!(status, Status::Cancelled);
+        } else {
+            assert_eq!(
+                status,
+                Status::Incomplete {
+                    reason: "overloaded".into()
+                }
+            );
+        }
+        let mut request = original.clone();
+        // A new block/expanded scope must not erase a debt under the same revision.
+        request.anchor = Anchor {
+            height: 111,
+            hash: synthetic(111).to_display_hex(),
+        };
+        request.accepted_headers.push(request.anchor.clone());
+        request.generation += 1;
+        request.scope_id = "4".repeat(64);
+        let mut previous = Some(first);
+        let mut paid = Vec::new();
+        for phase in 0..3 {
+            let mut limits = Limits::default();
+            limits.max_queries = 1;
+            let (checkpoint, queries, status) =
+                page_session(&server, request.clone(), previous.take(), limits, "");
+            let reason = if phase < 2 {
+                "query_budget"
+            } else {
+                "content_failed"
+            };
+            assert_eq!(
+                status,
+                Status::Incomplete {
+                    reason: reason.into()
+                },
+                "a partial dummy round cannot forgive the unpaid suffix"
+            );
+            paid.push(queries);
+            previous = Some(checkpoint);
+        }
+        assert_eq!(
+            paid,
+            vec![1, 1, 1],
+            "{stop}: persisted debt must be paid before retrying a malformed head"
+        );
+        let mut limits = Limits::default();
+        limits.max_queries = 1;
+        let (_, queries, status) = page_session(&server, request, previous, limits, "");
+        assert_eq!(
+            queries, 1,
+            "the next pass may retry the real head only after paying the debt"
+        );
+        assert_eq!(
+            status,
+            Status::Incomplete {
+                reason: "query_budget".into()
+            }
+        );
+    }
 }

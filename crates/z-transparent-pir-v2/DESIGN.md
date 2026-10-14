@@ -56,3 +56,20 @@ Private query contexts remain opaque Rust memory between Exchange and accept.
 Reopen discards contexts and regenerates fresh ciphertext from the acknowledged
 logical continuation. Retries and malformed-content dummy obligations remain the
 upstream walker's. Busy yields bounded delayed progress, never thread sleep.
+
+
+The private continuation is version 2. A malformed page run records its remaining
+cover-query count on the existing pending item, bound to that script, revision,
+and accepted target. The failure count and this obligation commit together before
+another exchange is yielded. Reopening pays that debt before another real query
+for the entry; a query budget can pay only a returned prefix. A refused round
+retains its obligation, matching an honest round whose local replies were lost.
+Normal anchor advancement preserves debt under the same revision. Public revision
+retirement/reorg handling still retires the corresponding old pending work.
+No query bytes, random coins, NativeSecret, or in-flight response context is saved.
+Incomplete failure checkpoints never publish completion. Unpublished version-1
+transparent continuations are rejected; existing wallet/payment data is unchanged.
+
+Coverage walks from the script's inclusive required height using an optional end,
+so a range covering genesis alone produces a revision-bearing 0..0 coverage row.
+A completing checkpoint must carry every enrolled script through its accepted anchor.

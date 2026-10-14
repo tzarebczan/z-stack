@@ -748,7 +748,7 @@ pub async fn sync_into<S: WalletStore>(
         .pending()?
         .iter()
         .filter(|p| {
-            p.target_anchor.as_ref() != Some(target_anchor)
+            (p.target_anchor.as_ref() != Some(target_anchor) && p.dummy_debt.is_none())
                 || p.id.is_some_and(|id| dropped.contains(&id))
         })
         .filter_map(|p| p.id)
@@ -784,6 +784,15 @@ pub async fn sync_into<S: WalletStore>(
     let mut active: Cow<'_, ShardMap> = Cow::Borrowed(map);
     let mut completion = Completion::Complete;
     let mut failures = Failures::default();
+    // A cold pass must retain both the cover obligation and the failed-entry
+    // hold until the obligation is paid; otherwise it could query the real head.
+    for item in store
+        .pending()?
+        .iter()
+        .filter(|item| item.dummy_debt.is_some())
+    {
+        record_failure(store, &mut failures.entries, item.shard_id, &item.script)?;
+    }
 
     'passes: for pass in 0..=MAX_DISCOVERY_PASSES {
         if pass == MAX_DISCOVERY_PASSES {
@@ -812,7 +821,7 @@ pub async fn sync_into<S: WalletStore>(
             let mut kept = Vec::with_capacity(items.len());
             for item in items {
                 if !hold(store, &mut failures.entries, shard_id, &item.script)?
-                    || failures.owes(shard_id, &item.script).is_some()
+                    || item.dummy_debt.is_some()
                 {
                     kept.push(item);
                 }
@@ -2150,9 +2159,7 @@ async fn retrieve_shard_into<S: WalletStore, T: ShardTransport>(
         .collect();
     let mut resumed = Vec::with_capacity(pending.len());
     for item in &pending {
-        if !held(store, &failures.entries, shard_id, &item.script)?
-            || failures.owes(shard_id, &item.script).is_some()
-        {
+        if !held(store, &failures.entries, shard_id, &item.script)? || item.dummy_debt.is_some() {
             resumed.push(item.clone());
         }
     }
@@ -2294,6 +2301,7 @@ async fn retrieve_shard_into<S: WalletStore, T: ShardTransport>(
                         },
                         fragments: Vec::new(),
                         carried: found.inline.clone(),
+                        dummy_debt: None,
                         attempts: 0,
                         target_anchor: Some(target_anchor.clone()),
                     }),
@@ -2810,10 +2818,14 @@ async fn walk_chains<S: WalletStore, R: RowSource>(
             done: false,
             dummies: None,
         };
-        if let Some(owed) = failures.owes(entry.shard_id, &item.script) {
-            // Failed earlier in this sync, before a retry: it still sends
-            // what it owed.
-            walk.dummies = Some(owed);
+        if let Some((child, count)) = item.dummy_debt {
+            let page = walker.child(child)?;
+            let space = geometry.page_rows * page.page_segments.len() as u64;
+            if count == 0 || u64::from(count) > space.saturating_add(1) {
+                return Err(SyncError::Invalid("invalid pending dummy debt".into()));
+            }
+            walker.locate(child, 0)?;
+            walk.dummies = Some((child, count));
         } else if let Some(raw) = item.fragments.first() {
             let head = walker
                 .fragment(
@@ -2913,11 +2925,29 @@ async fn walk_chains<S: WalletStore, R: RowSource>(
             if walk.done {
                 continue;
             }
-            // A failed walk's dummies were this round's; their replies are
-            // not read, and the walk ends.
-            if walk.dummies.take().is_some() {
-                failures.settle(entry.shard_id, &walk.item.script);
-                walk.done = true;
+            // Only the successfully returned prefix pays debt. A budget can
+            // split this round, and a checkpoint/cold resume must retain the rest.
+            // If fetch refuses the round, no prefix is committed, exactly as for
+            // an honest fragment round whose local replies are discarded.
+            if let Some((child, count)) = walk.dummies {
+                let paid = answers.len().saturating_sub(start).min(end - start) as u32;
+                if paid > 0 {
+                    let remaining = count.checked_sub(paid).ok_or_else(|| {
+                        SyncError::Invalid("a dummy round returned extra answers".into())
+                    })?;
+                    walk.item.dummy_debt = (remaining > 0).then_some((child, remaining));
+                    walk.item.target_anchor = Some(target_anchor.clone());
+                    walker.commit(
+                        store,
+                        &walk.item.script,
+                        Vec::new(),
+                        Some(walk.item.clone()),
+                        None,
+                        Vec::new(),
+                    )?;
+                    walk.dummies = walk.item.dummy_debt;
+                    walk.done = remaining == 0;
+                }
                 continue;
             }
             if start >= answers.len() && start != end {
@@ -3362,6 +3392,25 @@ impl Walker<'_> {
             return Err(error);
         };
         let entry = self.entry;
+        // A failed round must not save its uncommitted prefix: an honest
+        // refused round retries that prefix too. Attach debt to the last
+        // durable pending item, atomically with the failure count.
+        let id = walk
+            .item
+            .id
+            .ok_or_else(|| SyncError::Invalid("uncommitted failed walk".into()))?;
+        let mut durable = store
+            .pending()?
+            .into_iter()
+            .find(|held| {
+                held.id == Some(id)
+                    && held.shard_id == entry.shard_id
+                    && held.revision_digest == entry.manifest_digest
+                    && held.script == walk.item.script
+            })
+            .ok_or_else(|| SyncError::Invalid("missing failed walk".into()))?;
+        durable.dummy_debt = (dummies > 0).then_some((child, dummies));
+        walk.item = durable;
         commit_bounded(
             store,
             self.target_anchor,
@@ -3374,6 +3423,7 @@ impl Walker<'_> {
                 end_height: entry.end_height,
                 terminal_block_hash: entry.terminal_block_hash.clone(),
                 failed_entries: vec![walk.item.script.clone()],
+                pending_upsert: vec![walk.item.clone()],
                 ..Default::default()
             },
         )?;
@@ -3385,9 +3435,6 @@ impl Walker<'_> {
         )?;
         if dummies > 0 {
             walk.dummies = Some((child, dummies));
-            failures
-                .owed
-                .push((entry.shard_id, walk.item.script.clone(), child, dummies));
         } else {
             walk.done = true;
         }
@@ -3726,24 +3773,6 @@ fn encode_fragment(fragment: &PageEntry) -> Result<Vec<u8>, SyncError> {
 #[derive(Default)]
 struct Failures {
     entries: Vec<FailedEntry>,
-    /// Shard id, script, page shard and the number of dummies owed.
-    owed: Vec<(u64, Vec<u8>, u8, u32)>,
-}
-
-impl Failures {
-    /// The dummies the walk of `script`'s entry in `shard_id` still owes.
-    fn owes(&self, shard_id: u64, script: &[u8]) -> Option<(u8, u32)> {
-        self.owed
-            .iter()
-            .find(|(shard, owner, ..)| *shard == shard_id && owner == script)
-            .map(|&(_, _, child, count)| (child, count))
-    }
-
-    /// Records that the dummies `owes` names were sent.
-    fn settle(&mut self, shard_id: u64, script: &[u8]) {
-        self.owed
-            .retain(|(shard, owner, ..)| !(*shard == shard_id && owner == script));
-    }
 }
 
 /// Whether `script`'s entry in shard `shard_id` is held out of this sync:

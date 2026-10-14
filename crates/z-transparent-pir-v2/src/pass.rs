@@ -346,7 +346,7 @@ impl Pass {
                 .reject_trailing_bytes()
                 .deserialize(&bytes)
                 .map_err(|_| Error("checkpoint_decode"))?;
-            if restored.version != 1 || restored.source_id != scope.source_id {
+            if restored.version != 2 || restored.source_id != scope.source_id {
                 return Err(Error("checkpoint_source"));
             }
             let mut state = restored.state;
@@ -623,16 +623,19 @@ impl Pass {
         let mut through = self.scope.anchor.height;
         for script in state.scripts().map_err(|_| Error("store"))? {
             let ranges = state.coverage(&script.script).map_err(|_| Error("store"))?;
-            let mut end = script.required_from.saturating_sub(1);
+            let mut end: Option<u64> = None;
             let mut revision = String::new();
             for r in ranges {
-                if r.start_height <= end.saturating_add(1) && r.end_height > end {
-                    end = r.end_height;
-                    revision = r.revision_digest
+                let next = end
+                    .map(|height| height.saturating_add(1))
+                    .unwrap_or(script.required_from);
+                if r.start_height <= next && r.end_height >= next {
+                    end = Some(r.end_height);
+                    revision = r.revision_digest;
                 }
             }
-            through = through.min(end);
-            if end >= script.required_from && !revision.is_empty() {
+            through = through.min(end.unwrap_or(script.required_from.saturating_sub(1)));
+            if let Some(end) = end {
                 coverage.push(Coverage {
                     script: hex::encode(script.script),
                     required_from: script.required_from,
@@ -641,10 +644,18 @@ impl Pass {
                 });
             }
         }
+        if complete
+            && (coverage.len() != self.scope.scripts.len()
+                || coverage
+                    .iter()
+                    .any(|range| range.through < self.scope.anchor.height))
+        {
+            return Err(Error("coverage_incomplete"));
+        }
         let durable = bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .serialize(&Continuation {
-                version: 1,
+                version: 2,
                 source_id: self.scope.source_id.clone(),
                 state: state.clone(),
             })

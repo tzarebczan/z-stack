@@ -68,6 +68,89 @@ fn spend() -> TransparentEvent {
 }
 
 #[tokio::test]
+async fn native_transparent_pass_drop_does_not_commit_or_leave_a_pending_session() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(root.path()).await;
+    let wallet = fixture.restore(root.path()).await;
+    wallet
+        .sync_with_wallet_source_reported_cancellable(
+            &fixture.source,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+    let source_id = "ab".repeat(32);
+    let cancel = Arc::new(RecoveryCancellation::new());
+    let pass = wallet
+        .begin_transparent_pir_with_source(&fixture.source, &source_id, cancel.clone())
+        .unwrap();
+    let original_scope = pass.scope_json().unwrap();
+    assert!(database_lease::exclusive(&wallet.paths.data_db).is_err());
+    drop(pass);
+    drop(database_lease::exclusive(&wallet.paths.data_db).unwrap());
+    assert!(!cancel.is_cancelled());
+    assert!(wallet.transparent_pir_checkpoint().unwrap().is_none());
+    assert!(wallet.history(20).unwrap().is_empty());
+
+    // A budget/transport abandonment can begin again with the same live token.
+    let pass = wallet
+        .begin_transparent_pir_with_source(&fixture.source, &source_id, cancel.clone())
+        .unwrap();
+    assert!(
+        pass.scope_json().unwrap() == original_scope,
+        "abandoned scope must be reusable"
+    );
+    cancel.cancel();
+    drop(pass);
+    assert!(wallet.transparent_pir_checkpoint().unwrap().is_none());
+    assert!(wallet.history(20).unwrap().is_empty());
+
+    // Explicit cancellation poisons that token, not the durable wallet session.
+    let mut restarted = wallet
+        .begin_transparent_pir_with_source(
+            &fixture.source,
+            &source_id,
+            Arc::new(RecoveryCancellation::new()),
+        )
+        .unwrap();
+    let scope: TransparentPirScope =
+        serde_json::from_str(&restarted.scope_json().unwrap()).unwrap();
+    let script = scope.scripts[0].script.clone();
+    let complete = checkpoint(scope, &script, vec![], None, 0x71);
+    wallet
+        .apply_transparent_pir_checkpoint_with_source(
+            &fixture.source,
+            &mut restarted,
+            &serde_json::to_string(&complete).unwrap(),
+        )
+        .unwrap();
+    drop(restarted);
+    let enrolled = wallet.transparent_pir_status_for(&source_id).unwrap();
+    assert_eq!(enrolled["completion"], "complete-for-enrolled-scope");
+    assert_eq!(enrolled["checkpointId"], complete.checkpoint_id);
+    let other_source = "cd".repeat(32);
+    let masked = wallet.transparent_pir_status_for(&other_source).unwrap();
+    assert_eq!(masked["completion"], "incomplete");
+    assert!(masked.get("scope").is_none());
+    assert!(masked.get("confirmedZat").is_none());
+    assert!(wallet
+        .begin_transparent_pir_with_source(
+            &fixture.source,
+            &other_source,
+            Arc::new(RecoveryCancellation::new()),
+        )
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("transparent_pir_source_changed"));
+    assert_eq!(
+        wallet.transparent_pir_status_for(&source_id).unwrap(),
+        enrolled
+    );
+}
+
+#[tokio::test]
 async fn native_transparent_pir_canonical_receive_spend_reopen_and_cancel() {
     use zcash_keys::encoding::AddressCodec;
     let root = tempfile::tempdir().unwrap();

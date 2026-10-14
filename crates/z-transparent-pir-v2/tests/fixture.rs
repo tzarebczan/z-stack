@@ -86,6 +86,8 @@ pub struct ShardSpec {
     /// decode, so a wallet's query for the script fails on content. Any other
     /// script sharing such a row fails with it. Empty for an honest shard.
     pub malformed_entries: Vec<ScriptBytes>,
+    /// Structurally encoded heads whose claimed three-fragment run links to itself.
+    pub malformed_page_heads: bool,
 }
 
 impl ShardSpec {
@@ -107,6 +109,7 @@ impl ShardSpec {
             page_span: 0,
             events,
             malformed_entries: Vec::new(),
+            malformed_page_heads: false,
         }
     }
 
@@ -176,7 +179,7 @@ pub fn publish_for_network(
                 (height, events)
             })
             .collect();
-        let (mut built, children) = build_directory_shard(
+        let (mut built, mut children) = build_directory_shard(
             shard_id,
             geometry,
             genesis,
@@ -193,6 +196,26 @@ pub fn publish_for_network(
             geometry,
             &spec.malformed_entries,
         );
+        if spec.malformed_page_heads {
+            for child in &mut children {
+                for raw in child.pages.chunks_exact_mut(geometry.page_row_bytes) {
+                    let mut entries = transparent_shard::page_row::decode_page_row(raw).unwrap();
+                    for entry in &mut entries {
+                        if entry.ordinal == 0 {
+                            entry.fragment_count = 3;
+                            entry.link = transparent_shard::page_row::RunLink {
+                                prev_child: child.index as u8,
+                                prev_row: 1,
+                                older_runs: 1,
+                            };
+                        }
+                    }
+                    raw.copy_from_slice(
+                        &transparent_shard::page_row::encode_page_row(&entries).unwrap(),
+                    );
+                }
+            }
+        }
         let page_children: Vec<_> = children
             .iter()
             .map(|child| child.describe(geometry))

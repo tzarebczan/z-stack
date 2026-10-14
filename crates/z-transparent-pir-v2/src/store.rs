@@ -208,6 +208,9 @@ pub struct PendingPages {
     /// Checked fragments of the current run, each encoded as a page row holding
     /// only this script. They are revalidated on resume and cleared at the next run.
     pub fragments: Vec<Vec<u8>>,
+    /// Logical cover traffic owed after malformed content; never a PIR secret or query.
+    /// Bound to this pending script, revision and accepted target.
+    pub dummy_debt: Option<(u8, u32)>,
     pub attempts: u32,
     pub target_anchor: Option<Anchor>,
 }

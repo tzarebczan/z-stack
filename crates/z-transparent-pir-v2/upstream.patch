@@ -1,23 +1,11 @@
 --- a/src/adapters.rs
 +++ b/src/adapters.rs
-@@ -1,3 +1,5 @@
+@@ -0,0 +1,2 @@
 +// Adapted from valargroup/wallet-pir c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2.
 +// Copyright (c) 2025-2026 Roman Akhtariev. MIT; see LICENSE-MIT and UPSTREAM.md.
- //! What the embedding wallet supplies besides storage.
- //!
- //! The library does not know the wallet's derivation rules, gap limit or
-@@ -6,7 +8,6 @@
- //! follows the wallet's own policies rather than inventing parallel ones.
- 
- use crate::store::{Anchor, ScriptEntry};
+@@ -9 +10,0 @@
 -use std::collections::BTreeMap;
- 
- /// Whether a block the wallet's coverage rests on is still on its chain.
- #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-@@ -51,44 +52,3 @@
-         Vec::new()
-     }
- }
+@@ -54,41 +54,0 @@
 -
 -/// A chain view from a fixed height-to-hash table: accepted if it matches,
 -/// rejected if it differs, unknown if absent.
@@ -61,16 +49,10 @@
 -}
 --- a/src/client.rs
 +++ b/src/client.rs
-@@ -1,3 +1,5 @@
+@@ -0,0 +1,2 @@
 +// Adapted from valargroup/wallet-pir c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2.
 +// Copyright (c) 2025-2026 Roman Akhtariev. MIT; see LICENSE-MIT and UPSTREAM.md.
- //! Private retrieval of directory rows and pages from a shard set.
- //!
- //! One `TableClient` per geometry per table, reused across every shard naming
-@@ -69,44 +71,7 @@
-     },
- }
- 
+@@ -72,38 +74 @@
 -/// Which table a query addresses.
 -///
 -/// A directory shard has one directory table and up to
@@ -110,13 +92,7 @@
 -    }
 -}
 +pub use transparent_wallet::client::Table;
- 
- /// A prepared query and the secret needed to decode its response.
- pub struct PreparedQuery {
-@@ -160,24 +125,6 @@
-     /// which must reproduce. `served_dithered` is the 44-bit dithered scheme,
-     /// if the service advertised one: queries use it only when it reproduces
-     /// too, and otherwise fall back to 49 bits.
+@@ -163,18 +127,0 @@
 -    pub fn new(
 -        table: Table,
 -        geometry: &str,
@@ -135,213 +111,88 @@
 -            served_dithered,
 -        )
 -    }
- 
-     pub fn new_with_schema(
-         schema: &str,
-@@ -435,7 +382,7 @@
-     /// [`prepare_prefix`](Self::prepare_prefix). Uses a query a batch already
-     /// sent for this row when one is stashed; the charge is the same either way.
-     #[allow(clippy::too_many_arguments)]
+@@ -438 +385 @@
 -    pub fn fetch_row(
 +    pub async fn fetch_row(
-         &mut self,
-         transport: &mut impl ShardTransport,
-         shard_id: u64,
-@@ -486,6 +433,7 @@
-         let uploaded = query.body.len() as u64;
-         let response = transport
-             .query(shard_id, revision, table, &query.body)
+@@ -488,0 +436 @@
 +            .await
-             .map_err(classify_transport)?;
-         charges.add_query(table, uploaded, response.len() as u64);
-         self.decode(revision, table, segments, query, &response)
-@@ -506,4 +454,3 @@
-     }
-     ClientError::Transport(crate::transport::describe_error(error.as_ref()))
- }
+@@ -509 +456,0 @@
 -
 --- a/src/store.rs
 +++ b/src/store.rs
-@@ -1,3 +1,5 @@
+@@ -0,0 +1,2 @@
 +// Adapted from valargroup/wallet-pir c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2.
 +// Copyright (c) 2025-2026 Roman Akhtariev. MIT; see LICENSE-MIT and UPSTREAM.md.
- //! What a wallet keeps between syncs, and the one boundary it changes at.
- //!
- //! A sync that starts from nothing every time cannot be a returning wallet: it
-@@ -59,10 +61,6 @@
- }
- 
- impl SetIdentity {
+@@ -62,4 +63,0 @@
 -    pub fn of(map: &ShardMap) -> Self {
 -        Self::of_schema(map, transparent_shard::SCHEMA)
 -    }
 -
-     pub fn of_schema(map: &ShardMap, schema: &str) -> Self {
-         Self {
-             shard_schema: schema.to_string(),
-@@ -150,18 +148,20 @@
- }
- 
- /// One event the wallet keeps, with where it came from.
+@@ -153 +151 @@
 -#[derive(Clone, Debug, PartialEq, Eq)]
 +#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
- pub struct StoredEvent {
-     pub script: Vec<u8>,
+@@ -155,0 +154 @@
 +    #[serde(with = "crate::serialization::event")]
-     pub event: TransparentEvent,
-     pub shard_id: u64,
-     pub revision_digest: String,
- }
- 
- /// Last committed fragment's boundary, needed to validate greedy packing after resume.
+@@ -162 +161 @@
 -#[derive(Clone, Debug, PartialEq, Eq)]
 +#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
- pub struct PageBoundary {
-     pub event_bytes: u32,
+@@ -164,0 +164 @@
 +    #[serde(with = "crate::serialization::event")]
-     pub last_event: TransparentEvent,
- }
- 
-@@ -170,7 +170,7 @@
- /// A script's history in a directory shard is a chain of runs, newest first,
- /// each in an earlier page shard than the one before. The directory entry
- /// names the newest; every run's first fragment names the next older one.
+@@ -173 +173 @@
 -#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 +#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
- pub struct RunCursor {
-     /// The page shard `j` holding the run; its table is `pages-<j>`.
-     pub child: u8,
-@@ -189,7 +189,7 @@
- /// durably so an exhausted budget or an outage leaves resumable work, not a
- /// synchronized balance. Keyed by the directory shard revision alone, whose
- /// digest commits to every page shard.
+@@ -192 +192 @@
 -#[derive(Clone, Debug, PartialEq, Eq)]
 +#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
- pub struct PendingPages {
-     /// Assigned by the store; `None` until first committed.
-     pub id: Option<u64>,
-@@ -203,6 +203,7 @@
-     /// at the cursor must be older than both, and each of its events was
-     /// pushed out by the event two places after it, which these supply for
-     /// its last two.
+@@ -205,0 +206 @@
 +    #[serde(with = "crate::serialization::events")]
-     pub carried: Vec<TransparentEvent>,
-     /// Checked fragments of the current run, each encoded as a page row holding
-     /// only this script. They are revalidated on resume and cleared at the next run.
-@@ -223,7 +224,7 @@
- ///
- /// A store drops a directory shard's cached runs for a script once it covers
- /// that script over the shard sealed: no later walk of the shard is expected.
+@@ -209,0 +211,3 @@
++    /// Logical cover traffic owed after malformed content; never a PIR secret or query.
++    /// Bound to this pending script, revision and accepted target.
++    pub dummy_debt: Option<(u8, u32)>,
+@@ -226 +230 @@
 -#[derive(Clone, Debug, PartialEq, Eq)]
 +#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
- pub struct CachedRun {
-     /// The page shard's chained identity, in hex.
-     pub child_digest: String,
-@@ -231,6 +232,7 @@
-     /// The directory shard the run belongs to.
-     pub shard_id: u64,
-     /// The run's own events, oldest first.
+@@ -233,0 +238 @@
 +    #[serde(with = "crate::serialization::events")]
-     pub events: Vec<TransparentEvent>,
-     /// The chained identity of the page shard holding the script's previous
-     /// run, or `None` when this is its oldest run in the directory shard.
-@@ -238,7 +240,7 @@
- }
- 
- /// What one shard's retrieval commits, all at once.
+@@ -241 +246 @@
 -#[derive(Clone, Debug, Default)]
 +#[derive(Clone, Debug, Default, Serialize, Deserialize)]
- pub struct ShardCommit {
-     /// Original publication endpoint when coverage is clipped to a wallet anchor.
-     pub source_anchor: Option<Anchor>,
-@@ -289,18 +291,17 @@
- /// What a setup is keyed by: the set lineage, the exact revision, the table
- /// and the segment. Anything less would reuse parameters against bytes they
- /// were not derived from.
+@@ -292 +297 @@
 -#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 +#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
- pub struct SetupKey {
-     pub set_digest: String,
-     pub revision_digest: String,
+@@ -295,0 +301 @@
 +    #[serde(with = "crate::serialization::table")]
-     pub table: Table,
-     pub segment: u32,
- }
- 
- #[derive(Debug, thiserror::Error)]
- pub enum StoreError {
+@@ -302,2 +307,0 @@
 -    #[error("store I/O: {0}")]
 -    Io(String),
-     #[error("store is corrupt: {0}")]
-     Corrupt(String),
-     /// A repeat that differs. Nothing is written.
-@@ -308,8 +309,6 @@
-     Contradiction(#[from] LedgerError),
-     #[error("the store is bound to set {stored}, this map is {offered}")]
-     SetMismatch { stored: String, offered: String },
+@@ -311,2 +314,0 @@
 -    #[error("the store's anchor is {stored}, which the offered map at {offered} does not reach")]
 -    AnchorRegressed { stored: u64, offered: u64 },
-     #[error("the commit would leave more than {limit} pending page retrievals")]
-     PendingLimit { limit: usize },
- }
-@@ -554,4 +553,3 @@
-     gaps.retain(|(a, b)| a <= b);
-     gaps
- }
+@@ -557 +558,0 @@
 -
 --- a/src/memory_store.rs
 +++ b/src/memory_store.rs
-@@ -1,3 +1,5 @@
+@@ -0,0 +1,2 @@
 +// Adapted from valargroup/wallet-pir c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2.
 +// Copyright (c) 2025-2026 Roman Akhtariev. MIT; see LICENSE-MIT and UPSTREAM.md.
- //! The store, in memory: the reference semantics every other implementation
- //! has to match, and what the one-shot `sync` uses.
- 
-@@ -7,6 +9,7 @@
-     PendingPages, ScriptEntry, SetIdentity, SetupBlob, SetupKey, ShardCommit, StoreError,
-     StoredEvent, WalletStore,
- };
+@@ -9,0 +12 @@
 +use serde::{Deserialize, Serialize};
- use std::collections::BTreeMap;
- use transparent_events::{TransparentEvent, Txid};
- 
-@@ -16,7 +19,7 @@
- type ReceiveKey = (Txid, u32);
- type SpendKey = (Txid, u32, Txid, u32);
- 
+@@ -19 +22 @@
 -#[derive(Clone, Debug, Default)]
 +#[derive(Clone, Debug, Default, Serialize, Deserialize)]
- struct State {
-     identity: Option<SetIdentity>,
-     anchor: Option<Anchor>,
-@@ -24,9 +27,12 @@
-     covered_through: Option<u64>,
-     scripts: BTreeMap<Vec<u8>, ScriptEntry>,
-     coverage: BTreeMap<Vec<u8>, Vec<CoverageRange>>,
+@@ -26,0 +30 @@
 +    #[serde(with = "crate::serialization::receives")]
-     receives: BTreeMap<ReceiveKey, StoredEvent>,
+@@ -27,0 +32 @@
 +    #[serde(with = "crate::serialization::spends")]
-     spends: BTreeMap<SpendKey, StoredEvent>,
-     /// Which spend consumes each outpoint, for the double-spend rule.
+@@ -29,0 +35 @@
 +    #[serde(skip)]
-     spent_by: BTreeMap<ReceiveKey, SpendKey>,
-     pending: BTreeMap<u64, PendingPages>,
-     next_pending: u64,
-@@ -39,8 +45,8 @@
-     commits: u64,
- }
- 
+@@ -42,2 +48,2 @@
 -/// An in-memory [`WalletStore`] with snapshot and restore for crash tests.
 -#[derive(Clone, Debug, Default)]
 +/// Private source-evidence store with versioned logical continuation.
 +#[derive(Clone, Debug, Default, Serialize, Deserialize)]
- pub struct MemoryStore {
-     state: State,
-     pending_limit: Option<usize>,
-@@ -51,20 +57,30 @@
-         Self::default()
-     }
- 
+@@ -54,14 +60,24 @@
 -    pub fn with_pending_limit(limit: usize) -> Self {
 -        Self {
 -            state: State::default(),
@@ -380,54 +231,27 @@
 +                );
 +            }
 +        }
-     }
- 
-     fn height_of(event: &TransparentEvent) -> u64 {
 --- a/src/sync.rs
 +++ b/src/sync.rs
-@@ -1,3 +1,5 @@
+@@ -0,0 +1,2 @@
 +// Adapted from valargroup/wallet-pir c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2.
 +// Copyright (c) 2025-2026 Roman Akhtariev. MIT; see LICENSE-MIT and UPSTREAM.md.
- //! Birthday to balance: the join between public filters and private retrieval.
- //!
- //! This is the path the whole design exists to make cheap:
-@@ -44,20 +46,17 @@
- //! periods than quiet ones. This code does not hide it and must not be
- //! described as if it did.
- 
+@@ -47 +49 @@
 -use crate::adapters::{Acceptance, ChainView, ScriptProvider, StaticScripts};
 +use crate::adapters::{Acceptance, ChainView, ScriptProvider};
- use crate::client::{classify_transport, ClientError, Table, TableClient};
- use crate::ledger::{Ledger, LedgerError};
+@@ -50 +51,0 @@
 -use crate::memory_store::MemoryStore;
- use crate::store::{
-     uncovered, Anchor, CachedRun, CoverageKind, CoverageRange, PendingPages, RunCursor,
+@@ -53,2 +54 @@
 -    ScriptEntry, ScriptOrigin, SetIdentity, SetupBlob, SetupKey, ShardCommit, StoreError,
 -    StoredEvent, WalletStore,
 +    SetIdentity, SetupBlob, SetupKey, ShardCommit, StoreError, StoredEvent, WalletStore,
- };
- use crate::transport::ShardRequest;
- use crate::transport::{ByteCharges, FilterSource, ShardTransport, StaleRevision};
- use std::borrow::Cow;
- use std::collections::{BTreeMap, HashMap};
+@@ -60 +59,0 @@
 -use std::time::Duration;
- use transparent_events::TransparentEvent;
- use transparent_filter::{BlockHash, FilterLimits, ScriptBytes, ShardKey, ShardMap};
- use transparent_shard::build::candidate_rows;
-@@ -144,9 +143,6 @@
-         stale: StaleRevision,
-         refreshes: u32,
-     },
+@@ -147,3 +145,0 @@
 -    /// The service stayed at its capacity limit for the whole retry budget.
 -    #[error("shard {shard_id}: the service had no free cache capacity after {attempts} attempts")]
 -    Overloaded { shard_id: u64, attempts: u32 },
-     /// A shard's manifest does not describe the shard the map named.
-     ///
-     /// Terminal for the sync, and coverage stops where it was. Every field a
-@@ -210,17 +206,6 @@
- /// revision, so this bounds genuine republication rather than a loop.
- const MAX_MAP_REFRESHES: u32 = 4;
- 
+@@ -213,11 +208,0 @@
 -/// Attempts one shard gets against a service that is out of cache capacity.
 -const MAX_OVERLOAD_ATTEMPTS: u32 = 4;
 -
@@ -439,21 +263,9 @@
 -/// implausible delay cannot park a sync inside it.
 -const OVERLOAD_BACKOFF_CAP: Duration = Duration::from_secs(2);
 -
- /// Passes a sync makes while the wallet's rules keep adding scripts. A
- /// gap-limit advance that never converges is a wallet fault; this stops it
- /// from becoming an unbounded sync.
-@@ -240,6 +225,7 @@
- /// than adopt either. A service naming a registry geometry but publishing other
- /// row counts under it is refused; so is one publishing the registry's row
- /// counts with a scheme they do not derive.
+@@ -242,0 +228 @@
 +#[allow(dead_code)] // Published compatibility fields are retained for source parity.
- pub struct GeometryParams {
-     pub name: String,
-     pub directory_rows: u64,
-@@ -349,39 +335,6 @@
-     }
- }
- 
+@@ -352,33 +337,0 @@
 -/// What one sync recovered.
 -pub struct SyncOutcome {
 -    pub ledger: Ledger,
@@ -487,13 +299,7 @@
 -    pub map_refreshes: u32,
 -}
 -
- /// One provisional revision a sync took coverage from.
- #[derive(Clone, Debug, PartialEq, Eq)]
- pub struct ProvisionalCoverage {
-@@ -404,14 +357,6 @@
-     pub max_private_bytes: Option<u64>,
- }
- 
+@@ -407,8 +359,0 @@
 -impl WorkLimits {
 -    pub const UNLIMITED: Self = Self {
 -        max_queries: None,
@@ -502,21 +308,9 @@
 -}
 -
 -/// Why a sync stopped short.
- #[derive(Clone, Debug, PartialEq, Eq)]
- pub enum IncompleteReason {
-     QueryBudget,
-@@ -450,6 +395,7 @@
- }
- 
- /// What one [`sync_into`] call did.
+@@ -452,0 +398 @@
 +#[allow(dead_code)] // Internal parity report, never a product balance API.
- pub struct SyncReport {
-     /// The store's whole ledger after this sync, not only what it added.
-     pub ledger: Ledger,
-@@ -489,81 +435,6 @@
-     pub failures: u32,
- }
- 
+@@ -492,75 +437,0 @@
 -/// Runs one sync from `birthday` to the explicit wallet-accepted target.
 -///
 -/// `scripts` is the wallet's derived script set. It never leaves the machine:
@@ -592,164 +386,81 @@
 -    }
 -}
 -
- /// Syncs a wallet's store to its accepted target, independently of publication tip.
- ///
- /// See the module documentation for the shape of a sync. The store is the
-@@ -571,7 +442,7 @@
- /// fetched is committed to it shard by shard. On return the store is
- /// consistent whether the sync completed or not.
- #[allow(clippy::too_many_arguments)]
+@@ -574 +445 @@
 -pub fn sync_into<S: WalletStore>(
 +pub async fn sync_into<S: WalletStore>(
-     store: &mut S,
-     map: &ShardMap,
-     map_bytes: u64,
-@@ -970,7 +841,7 @@
-                 transport,
-                 &mut charges,
-                 limits,
+@@ -880 +751 @@
+-            p.target_anchor.as_ref() != Some(target_anchor)
++            (p.target_anchor.as_ref() != Some(target_anchor) && p.dummy_debt.is_none())
+@@ -915,0 +787,9 @@
++    // A cold pass must retain both the cover obligation and the failed-entry
++    // hold until the obligation is paid; otherwise it could query the real head.
++    for item in store
++        .pending()?
++        .iter()
++        .filter(|item| item.dummy_debt.is_some())
++    {
++        record_failure(store, &mut failures.entries, item.shard_id, &item.script)?;
++    }
+@@ -944 +824 @@
+-                    || failures.owes(shard_id, &item.script).is_some()
++                    || item.dummy_debt.is_some()
+@@ -973 +853 @@
 -                |store, prepared, transport, charges, manifest| {
 +                async |store, prepared, transport, charges, manifest| {
-                     finish_pages(
-                         store,
-                         &entry,
-@@ -984,8 +855,10 @@
-                         chain,
-                         &mut failures,
-                     )
+@@ -986,0 +867 @@
 +                    .await
-                 },
+@@ -988 +869,2 @@
 -            );
 +            )
 +            .await;
-             match outcome {
-                 Ok(Some(stopped)) => {
-                     completion = stopped;
-@@ -1049,6 +922,7 @@
-         if filters.uses_parents() {
-             charges.filter_bytes += filters
-                 .prepare_parents(&active, &uncached, store)
+@@ -1051,0 +934 @@
 +                .await
-                 .map_err(|e| SyncError::Transport(e.to_string()))?;
-         } else {
-             // Every uncached filter in the walk is downloaded anyway; overlap
-@@ -1070,7 +944,8 @@
-                 target_anchor,
-                 chain,
-                 &failures.entries,
+@@ -1073 +956,2 @@
 -            )?;
 +            )
 +            .await?;
-         }
-         let mut position = 0usize;
-         while position < index_iter.len() {
-@@ -1096,7 +971,8 @@
-                 target_anchor,
-                 chain,
-                 &mut failures,
+@@ -1099 +983,2 @@
 -            );
 +            )
 +            .await;
-             match result {
-                 Ok(ShardRead::Done { matched }) => {
-                     if !matched.is_empty() {
-@@ -1139,7 +1015,8 @@
-                         });
-                     }
-                     let (covered, _) = coverage_summary(store, &active, target_anchor.height)?;
+@@ -1142 +1027,2 @@
 -                    let (fresh, digest) = refresh_map(&active, covered, filters, &mut charges)?;
 +                    let (fresh, digest) =
 +                        refresh_map(&active, covered, filters, &mut charges).await?;
-                     check_target_hash(&fresh, target_anchor)?;
-                     if fresh
-                         .shards
-@@ -1527,7 +1404,7 @@
- 
- /// Reads one shard for the scripts that need it, committing to the store.
- #[allow(clippy::too_many_arguments)]
+@@ -1530 +1416 @@
 -fn read_shard_into<S: WalletStore>(
 +async fn read_shard_into<S: WalletStore>(
-     store: &mut S,
-     map: &ShardMap,
-     entry: &transparent_filter::ShardMapEntry,
-@@ -1567,6 +1444,7 @@
-     let (parent_negative, parent_cost) = if cached.is_none() {
-         filters
-             .parent_negative(map, entry.shard_id, scripts, store)
+@@ -1569,0 +1456 @@
 +            .await
-             .map_err(|e| SyncError::Transport(e.to_string()))?
-     } else {
-         (false, 0)
-@@ -1578,7 +1456,7 @@
-         let bytes = match cached {
-             Some(bytes) => bytes,
-             None => {
+@@ -1581 +1468 @@
 -                let (bytes, cost) = filters.filter(entry.shard_id).map_err(|error| {
 +                let (bytes, cost) = filters.filter(entry.shard_id).await.map_err(|error| {
-                     SyncError::Transport(crate::transport::describe_error(error.as_ref()))
-                 })?;
-                 charges.filter_bytes += cost;
-@@ -1689,7 +1567,7 @@
-         transport,
-         charges,
-         limits,
+@@ -1692 +1579 @@
 -        |store, prepared, transport, charges, manifest| {
 +        async |store, prepared, transport, charges, manifest| {
-             // Validated when the manifest was verified; decoded again here
-             // rather than carried, since it is a few kilobytes.
-             let choice = directory_choice(manifest)?;
-@@ -1710,8 +1588,10 @@
-                 chain,
-                 failures,
-             )
+@@ -1712,0 +1600 @@
 +            .await
-         },
+@@ -1714 +1602,2 @@
 -    )?;
 +    )
 +    .await?;
-     match outcome {
-         Some(stopped) => Ok(ShardRead::Stopped(stopped)),
-         None => {
-@@ -1790,10 +1670,9 @@
- 
- /// Runs `work` against a shard, verifying the manifest first and lifting the
- /// service's two refusals: a withdrawn revision propagates for the map
+@@ -1793,2 +1682 @@
 -/// refresh, an overload is retried with backoff and then reported as an
 -/// incomplete sync with the store consistent.
 +/// refresh. An overload returns incomplete so the host can schedule a later pass.
- #[allow(clippy::too_many_arguments)]
+@@ -1796 +1684 @@
 -fn with_refusals<S: WalletStore, T: ShardTransport, F>(
 +async fn with_refusals<S: WalletStore, T: ShardTransport, F>(
-     store: &mut S,
-     map: &ShardMap,
-     entry: &transparent_filter::ShardMapEntry,
-@@ -1806,7 +1685,7 @@
-     mut work: F,
- ) -> Result<Option<Completion>, SyncError>
- where
+@@ -1809 +1697 @@
 -    F: FnMut(
 +    F: AsyncFnMut(
-         &mut S,
-         &mut GeometryClients,
-         &mut T,
-@@ -1815,12 +1694,11 @@
-     ) -> Result<Option<Completion>, SyncError>,
- {
-     let _ = limits;
+@@ -1818 +1705,0 @@
 -    let mut attempt = 1u32;
-     let mut manifest: Option<ShardManifest> = None;
-     loop {
-         let verified = match &manifest {
-             Some(verified) => verified,
+@@ -1823 +1710 @@
 -            None => match fetch_manifest(entry, previous_digest, map, transport, charges) {
 +            None => match fetch_manifest(entry, previous_digest, map, transport, charges).await {
-                 Ok(verified) => {
-                     if verified.schema != geometry.schema {
-                         return Err(SyncError::ManifestMismatch {
-@@ -1837,24 +1715,19 @@
-                         refreshes: 0,
-                     })
-                 }
+@@ -1840,12 +1727,7 @@
 -                Err(SyncError::Client(ClientError::Overloaded(overloaded))) => {
 -                    if attempt >= MAX_OVERLOAD_ATTEMPTS {
 -                        return Ok(Some(Completion::Incomplete {
@@ -769,20 +480,10 @@
 +                        },
 +                        pending: store.pending()?.len(),
 +                    }));
-                 }
-                 Err(other) => return Err(other),
-             },
-         };
-         let prepared = clients.prepare(&verified.geometry, &geometry.geometries)?;
+@@ -1857 +1739 @@
 -        match work(store, prepared, transport, charges, verified) {
 +        match work(store, prepared, transport, charges, verified).await {
-             Ok(stopped) => return Ok(stopped),
-             Err(SyncError::Client(ClientError::Stale(stale))) => {
-                 return Err(SyncError::StaleRevision {
-@@ -1863,19 +1736,15 @@
-                     refreshes: 0,
-                 })
-             }
+@@ -1866,9 +1748 @@
 -            Err(SyncError::Client(ClientError::Overloaded(overloaded))) => {
 -                if attempt >= MAX_OVERLOAD_ATTEMPTS {
 -                    return Ok(Some(Completion::Incomplete {
@@ -793,8 +494,7 @@
 -                    }));
 -                }
 +            Err(SyncError::Client(ClientError::Overloaded(_overloaded))) => {
-                 // Nothing partial is lost: every commit so far stands, and
-                 // the work resumes from the store on the next attempt.
+@@ -1877,2 +1751,6 @@
 -                std::thread::sleep(overload_backoff(attempt, overloaded.retry_after));
 -                attempt += 1;
 +                return Ok(Some(Completion::Incomplete {
@@ -803,30 +503,12 @@
 +                    },
 +                    pending: store.pending()?.len(),
 +                }));
-             }
-             Err(SyncError::Client(ClientError::SetupMismatch {
-                 revision,
-@@ -1929,7 +1798,7 @@
- }
- 
- /// Fetches a matched shard's manifest and verifies it against the map.
+@@ -1932 +1810 @@
 -fn fetch_manifest(
 +async fn fetch_manifest(
-     entry: &transparent_filter::ShardMapEntry,
-     previous_digest: &str,
-     map: &ShardMap,
-@@ -1938,6 +1807,7 @@
- ) -> Result<ShardManifest, SyncError> {
-     let (raw, cost) = transport
-         .manifest(entry.shard_id, &entry.manifest_digest)
+@@ -1940,0 +1819 @@
 +        .await
-         .map_err(|error| SyncError::from(classify_transport(error)))?;
-     charges.add_manifest(cost);
-     verify_manifest(&raw, entry, previous_digest, map)
-@@ -1967,6 +1837,15 @@
-     let mismatch = |field: &'static str| SyncError::ManifestMismatch { shard_id, field };
-     let manifest: ShardManifest = serde_json::from_slice(raw)
-         .map_err(|error| SyncError::Invalid(format!("shard {shard_id} manifest: {error}")))?;
+@@ -1969,0 +1849,9 @@
 +    if manifest.directory_segments.len() > 64
 +        || manifest.page_children.len() > 32
 +        || manifest
@@ -836,71 +518,34 @@
 +    {
 +        return Err(mismatch("resource_bounds"));
 +    }
-     if manifest.digest() != entry.manifest_digest {
-         return Err(mismatch("digest"));
-     }
-@@ -2075,10 +1954,6 @@
- /// misconfigured or hostile service could use to park a sync inside one call.
- /// Either way the wait is jittered by up to half again, so wallets refused
- /// together do not return together.
+@@ -2078,4 +1965,0 @@
 -fn overload_backoff(attempt: u32, asked: Option<Duration>) -> Duration {
 -    let wait = asked.unwrap_or_else(|| OVERLOAD_BACKOFF * 2u32.saturating_pow(attempt - 1));
 -    crate::backoff::jittered(wait.min(OVERLOAD_BACKOFF_CAP))
 -}
- 
- /// Refetches the map after a withdrawn revision, and checks it continues the
- /// one in hand.
-@@ -2086,7 +1961,7 @@
- /// Returns the map and the digest of the bytes it came from, so a later refusal
- /// naming that same digest can be recognised as unresolvable rather than
- /// spending another refresh on it.
+@@ -2089 +1973 @@
 -fn refresh_map(
 +async fn refresh_map(
-     started_from: &ShardMap,
-     covered_through: u64,
-     filters: &mut impl FilterSource,
-@@ -2094,6 +1969,7 @@
- ) -> Result<(ShardMap, String), SyncError> {
-     let (bytes, cost) = filters
-         .shard_map()
+@@ -2096,0 +1981 @@
 +        .await
-         .map_err(|error| SyncError::Transport(crate::transport::describe_error(error.as_ref())))?;
-     charges.map_bytes += cost;
-     let fresh: ShardMap = serde_json::from_slice(&bytes).map_err(|error| {
-@@ -2243,7 +2119,7 @@
- /// A retry after an overload sends them again for every script without a
- /// saved walk, failed ones included, so it too is the honest retry.
- #[allow(clippy::too_many_arguments)]
+@@ -2246 +2131 @@
 -fn retrieve_shard_into<S: WalletStore, T: ShardTransport>(
 +async fn retrieve_shard_into<S: WalletStore, T: ShardTransport>(
-     store: &mut S,
-     entry: &transparent_filter::ShardMapEntry,
-     manifest: &ShardManifest,
-@@ -2293,7 +2169,9 @@
-             target_anchor,
-             chain,
-             failures,
+@@ -2277,3 +2162 @@
+-        if !held(store, &failures.entries, shard_id, &item.script)?
+-            || failures.owes(shard_id, &item.script).is_some()
+-        {
++        if !held(store, &failures.entries, shard_id, &item.script)? || item.dummy_debt.is_some() {
+@@ -2296 +2179,3 @@
 -        )? {
 +        )
 +        .await?
 +        {
-             return Ok(Some(stopped));
-         }
-     }
-@@ -2329,7 +2207,8 @@
-         transport,
-         charges,
-         None,
+@@ -2332 +2217,2 @@
 -    )?;
 +    )
 +    .await?;
- 
-     if let Some(reason) = budget_stopped(charges, limits) {
-         return Ok(Some(Completion::Incomplete {
-@@ -2362,16 +2241,19 @@
-         for &row in queried {
-             let (_, within) = transparent_shard::layout::split_row(row, geometry.directory_rows);
-             let directory_rows = clients.directory.rows();
+@@ -2365,10 +2251,13 @@
 -            let answer = clients.directory.fetch_row(
 -                transport,
 -                shard_id,
@@ -924,66 +569,26 @@
 +                    charges,
 +                )
 +                .await;
-             replies.push((row, answer?));
-         }
-         if failed {
-@@ -2474,6 +2356,7 @@
-         chain,
-         failures,
-     )
+@@ -2414,0 +2304 @@
++                        dummy_debt: None,
+@@ -2476,0 +2367 @@
 +    .await
- }
- 
- /// The entry tagged `wanted` among the replies to one script's candidate
-@@ -2540,7 +2423,7 @@
- /// Every query of `pages-<j>` selects among that page shard's first
- /// [`PageChild::query_rows`]. See [`walk_chains`] for the walk itself.
- #[allow(clippy::too_many_arguments)]
+@@ -2543 +2434 @@
 -fn finish_pages<S: WalletStore, T: ShardTransport>(
 +async fn finish_pages<S: WalletStore, T: ShardTransport>(
-     store: &mut S,
-     entry: &transparent_filter::ShardMapEntry,
-     manifest: &ShardManifest,
-@@ -2588,6 +2471,7 @@
-         target_anchor,
-         failures,
-     )
+@@ -2590,0 +2482 @@
 +    .await
- }
- 
- /// One page row a walk asks for: page shard `child`, and a row over its
-@@ -2613,7 +2497,7 @@
-     fn stopped(&self) -> Option<IncompleteReason>;
-     /// Replies for a prefix of the requests, in order. A budget may stop
-     /// dispatch between requests; each reply contains every table segment.
+@@ -2616 +2508 @@
 -    fn fetch<S: WalletStore>(
 +    async fn fetch<S: WalletStore>(
-         &mut self,
-         store: &mut S,
-         requests: &[RowRequest],
-@@ -2644,7 +2528,7 @@
-     /// Sends a round's queries together when the transport overlaps
-     /// requests, one at a time otherwise. Which queries are sent is the
-     /// walk's alone; a batch changes only when.
+@@ -2647 +2539 @@
 -    fn fetch<S: WalletStore>(
 +    async fn fetch<S: WalletStore>(
-         &mut self,
-         store: &mut S,
-         requests: &[RowRequest],
-@@ -2684,7 +2568,8 @@
-                     self.transport,
-                     self.charges,
-                     None,
+@@ -2687 +2579,2 @@
 -                )?;
 +                )
 +                .await?;
-                 let (_, within) =
-                     transparent_shard::layout::split_row(request.row, geometry.page_rows);
-                 planned.push((
-@@ -2697,16 +2582,20 @@
-             let mut answers = Vec::with_capacity(planned.len());
-             if self.transport.concurrency() <= 1 || planned.len() <= 1 {
-                 for (table, segments, query_rows, within) in planned {
+@@ -2700,10 +2593,14 @@
 -                    answers.push(self.client.fetch_row(
 -                        self.transport,
 -                        shard_id,
@@ -1008,22 +613,10 @@
 +                            )
 +                            .await?,
 +                    );
-                 }
-                 return Ok(answers);
-             }
-@@ -2727,7 +2616,7 @@
-                     body: &query.body,
-                 })
-                 .collect();
+@@ -2730 +2627 @@
 -            let replies = self.transport.batch(&batch);
 +            let replies = self.transport.batch(&batch).await;
-             drop(batch);
-             for (((table, segments, query_rows, within), query), reply) in
-                 planned.into_iter().zip(queries).zip(replies)
-@@ -2745,16 +2634,20 @@
-                         );
-                     }
-                     Some(Err(error)) => return Err(SyncError::Client(classify_transport(error))),
+@@ -2748,10 +2645,14 @@
 -                    None => answers.push(self.client.fetch_row(
 -                        self.transport,
 -                        shard_id,
@@ -1048,23 +641,12 @@
 +                            )
 +                            .await?,
 +                    ),
-                 }
-             }
-             return Ok(answers);
-@@ -2783,23 +2676,29 @@
-                 self.transport,
-                 self.charges,
-                 Some(self.limits),
+@@ -2786 +2687,3 @@
 -            )? {
 +            )
 +            .await?
 +            {
-                 break;
-             }
-             if self.stopped().is_some() {
-                 break;
-             }
-             let (_, within) = transparent_shard::layout::split_row(request.row, geometry.page_rows);
+@@ -2793,10 +2696,14 @@
 -            answers.push(self.client.fetch_row(
 -                self.transport,
 -                shard_id,
@@ -1089,61 +671,112 @@
 +                    )
 +                    .await?,
 +            );
-         }
-         Ok(answers)
-     }
-@@ -2868,7 +2767,7 @@
- /// table, sends one dummy to its own page shard in the link's place, unless
- /// the honest walk would not query a head after this run. Nothing that
- /// depends on the bad reply is sent.
+@@ -2871 +2778 @@
 -fn walk_chains<S: WalletStore, R: RowSource>(
 +async fn walk_chains<S: WalletStore, R: RowSource>(
-     store: &mut S,
-     entry: &transparent_filter::ShardMapEntry,
-     manifest: &ShardManifest,
-@@ -3004,7 +2903,7 @@
-             }
-             spans.push((start, requests.len(), older));
-         }
+@@ -2914,4 +2821,8 @@
+-        if let Some(owed) = failures.owes(entry.shard_id, &item.script) {
+-            // Failed earlier in this sync, before a retry: it still sends
+-            // what it owed.
+-            walk.dummies = Some(owed);
++        if let Some((child, count)) = item.dummy_debt {
++            let page = walker.child(child)?;
++            let space = geometry.page_rows * page.page_segments.len() as u64;
++            if count == 0 || u64::from(count) > space.saturating_add(1) {
++                return Err(SyncError::Invalid("invalid pending dummy debt".into()));
++            }
++            walker.locate(child, 0)?;
++            walk.dummies = Some((child, count));
+@@ -3007 +2918 @@
 -        let answers = rows.fetch(store, &requests)?;
 +        let answers = rows.fetch(store, &requests).await?;
-         if answers.len() > requests.len()
-             || answers.is_empty() && !requests.is_empty() && rows.stopped().is_none()
-         {
-@@ -3693,7 +3592,7 @@
- /// Each segment publishes its own `c1`, so each is opened separately; a shard
- /// with one segment — the ordinary case — costs exactly one setup per table.
- #[allow(clippy::too_many_arguments)]
+@@ -3017,5 +2928,23 @@
+-            // A failed walk's dummies were this round's; their replies are
+-            // not read, and the walk ends.
+-            if walk.dummies.take().is_some() {
+-                failures.settle(entry.shard_id, &walk.item.script);
+-                walk.done = true;
++            // Only the successfully returned prefix pays debt. A budget can
++            // split this round, and a checkpoint/cold resume must retain the rest.
++            // If fetch refuses the round, no prefix is committed, exactly as for
++            // an honest fragment round whose local replies are discarded.
++            if let Some((child, count)) = walk.dummies {
++                let paid = answers.len().saturating_sub(start).min(end - start) as u32;
++                if paid > 0 {
++                    let remaining = count.checked_sub(paid).ok_or_else(|| {
++                        SyncError::Invalid("a dummy round returned extra answers".into())
++                    })?;
++                    walk.item.dummy_debt = (remaining > 0).then_some((child, remaining));
++                    walk.item.target_anchor = Some(target_anchor.clone());
++                    walker.commit(
++                        store,
++                        &walk.item.script,
++                        Vec::new(),
++                        Some(walk.item.clone()),
++                        None,
++                        Vec::new(),
++                    )?;
++                    walk.dummies = walk.item.dummy_debt;
++                    walk.done = remaining == 0;
++                }
+@@ -3465,0 +3395,19 @@
++        // A failed round must not save its uncommitted prefix: an honest
++        // refused round retries that prefix too. Attach debt to the last
++        // durable pending item, atomically with the failure count.
++        let id = walk
++            .item
++            .id
++            .ok_or_else(|| SyncError::Invalid("uncommitted failed walk".into()))?;
++        let mut durable = store
++            .pending()?
++            .into_iter()
++            .find(|held| {
++                held.id == Some(id)
++                    && held.shard_id == entry.shard_id
++                    && held.revision_digest == entry.manifest_digest
++                    && held.script == walk.item.script
++            })
++            .ok_or_else(|| SyncError::Invalid("missing failed walk".into()))?;
++        durable.dummy_debt = (dummies > 0).then_some((child, dummies));
++        walk.item = durable;
+@@ -3477,0 +3426 @@
++                pending_upsert: vec![walk.item.clone()],
+@@ -3489,3 +3437,0 @@
+-            failures
+-                .owed
+-                .push((entry.shard_id, walk.item.script.clone(), child, dummies));
+@@ -3696 +3642 @@
 -fn open_table<S: WalletStore>(
 +async fn open_table<S: WalletStore>(
-     store: &mut S,
-     set_digest: &str,
-     shard_id: u64,
-@@ -3732,6 +3631,7 @@
-                 }
-                 let (raw, cost) = transport
-                     .setup(shard_id, revision, table, segment)
+@@ -3734,0 +3681 @@
 +                    .await
-                     .map_err(|error| SyncError::from(classify_transport(error)))?;
-                 charges.add_setup(table, cost);
-                 let parsed: serde_json::Value = serde_json::from_slice(&raw)
-@@ -3999,4 +3899,3 @@
-         failed_entries: Vec::new(),
-     })
- }
+@@ -3829,18 +3775,0 @@
+-    /// Shard id, script, page shard and the number of dummies owed.
+-    owed: Vec<(u64, Vec<u8>, u8, u32)>,
+-}
+-
+-impl Failures {
+-    /// The dummies the walk of `script`'s entry in `shard_id` still owes.
+-    fn owes(&self, shard_id: u64, script: &[u8]) -> Option<(u8, u32)> {
+-        self.owed
+-            .iter()
+-            .find(|(shard, owner, ..)| *shard == shard_id && owner == script)
+-            .map(|&(_, _, child, count)| (child, count))
+-    }
+-
+-    /// Records that the dummies `owes` names were sent.
+-    fn settle(&mut self, shard_id: u64, script: &[u8]) {
+-        self.owed
+-            .retain(|(shard, owner, ..)| !(*shard == shard_id && owner == script));
+-    }
+@@ -4002 +3930,0 @@
 -
 --- a/src/sync_ahead.rs
 +++ b/src/sync_ahead.rs
-@@ -1,3 +1,5 @@
+@@ -0,0 +1,2 @@
 +// Adapted from valargroup/wallet-pir c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2.
 +// Copyright (c) 2025-2026 Roman Akhtariev. MIT; see LICENSE-MIT and UPSTREAM.md.
- //! Cross-shard request concurrency: the requests of a pass, sent together.
- //!
- //! The sequential walk reads one shard at a time: its filter, its manifest, its
-@@ -96,18 +98,22 @@
- }
- 
- impl<T: ShardTransport> ShardTransport for Staged<'_, T> {
+@@ -99,5 +101,9 @@
 -    fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
 -        self.inner.init()
 -    }
@@ -1158,8 +791,7 @@
 +        shard_id: u64,
 +        revision: &str,
 +    ) -> Result<(Vec<u8>, u64), BoxError> {
-         match self.manifests.remove(&(shard_id, revision.to_string())) {
-             Some(reply) => reply,
+@@ -106,5 +112,5 @@
 -            None => self.inner.manifest(shard_id, revision),
 -        }
 -    }
@@ -1170,13 +802,7 @@
 +    }
 +
 +    async fn setup(
-         &mut self,
-         shard_id: u64,
-         revision: &str,
-@@ -119,26 +125,26 @@
-             .remove(&(shard_id, revision.to_string(), table, segment))
-         {
-             Some(reply) => reply,
+@@ -122,5 +128,5 @@
 -            None => self.inner.setup(shard_id, revision, table, segment),
 -        }
 -    }
@@ -1187,31 +813,15 @@
 +    }
 +
 +    async fn query(
-         &mut self,
-         shard_id: u64,
-         revision: &str,
-         table: Table,
-         body: &[u8],
-     ) -> Result<Vec<u8>, BoxError> {
+@@ -133 +139 @@
 -        self.inner.query(shard_id, revision, table, body)
 +        self.inner.query(shard_id, revision, table, body).await
-     }
- 
-     fn concurrency(&self) -> usize {
-         self.inner.concurrency()
-     }
- 
+@@ -140,2 +146,2 @@
 -    fn batch(&mut self, requests: &[ShardRequest<'_>]) -> Vec<Option<ShardReply>> {
 -        self.inner.batch(requests)
 +    async fn batch(&mut self, requests: &[ShardRequest<'_>]) -> Vec<Option<ShardReply>> {
 +        self.inner.batch(requests).await
-     }
- }
- 
-@@ -170,14 +176,14 @@
-         self.inner.uses_parents()
-     }
- 
+@@ -173,5 +179,5 @@
 -    fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
 -        self.inner.shard_map()
 -    }
@@ -1222,24 +832,13 @@
 +    }
 +
 +    async fn filter(&mut self, shard_id: u64) -> Result<(Vec<u8>, u64), BoxError> {
-         match self.filters.remove(&shard_id) {
-             Some(reply) => reply,
+@@ -180 +186 @@
 -            None => self.inner.filter(shard_id),
 +            None => self.inner.filter(shard_id).await,
-         }
-     }
- 
-@@ -185,23 +191,25 @@
-         self.inner.prefetch(shard_ids)
-     }
- 
+@@ -188 +194 @@
 -    fn prepare_parents(
 +    async fn prepare_parents(
-         &mut self,
-         map: &ShardMap,
-         uncached: &[u64],
-         store: &mut dyn WalletStore,
-     ) -> Result<u64, BoxError> {
+@@ -194,4 +200,4 @@
 -        self.inner.prepare_parents(map, uncached, store)
 -    }
 -
@@ -1248,52 +847,20 @@
 +    }
 +
 +    async fn parent_negative(
-         &mut self,
-         map: &ShardMap,
-         shard_id: u64,
-         scripts: &[Vec<u8>],
-         store: &mut dyn WalletStore,
-     ) -> Result<(bool, u64), BoxError> {
+@@ -204 +210,3 @@
 -        self.inner.parent_negative(map, shard_id, scripts, store)
 +        self.inner
 +            .parent_negative(map, shard_id, scripts, store)
 +            .await
-     }
- }
- 
-@@ -231,7 +239,7 @@
- /// leaves the rest to the walk, which meets the same condition in its own
- /// place and handles it as it always has.
- #[allow(clippy::too_many_arguments)]
+@@ -234 +242 @@
 -pub(super) fn look_ahead<S: WalletStore, F: FilterSource, T: ShardTransport>(
 +pub(super) async fn look_ahead<S: WalletStore, F: FilterSource, T: ShardTransport>(
-     store: &S,
-     map: &ShardMap,
-     genesis: BlockHash,
-@@ -265,7 +273,7 @@
-                 // Whatever came back is the walk's outcome for this fetch, a
-                 // failure or bytes that do not hash to the map included: its
-                 // own check of them is what starts a refresh.
+@@ -268 +276 @@
 -                let reply = filters.inner.filter(entry.shard_id);
 +                let reply = filters.inner.filter(entry.shard_id).await;
-                 let usable = match &reply {
-                     Ok((bytes, _))
-                         if transparent_filter::filter_hash(bytes).to_display_hex()
-@@ -354,7 +362,7 @@
-             }
-         }
-     }
+@@ -357 +365 @@
 -    let replies = transport.inner.batch(&requests);
 +    let replies = transport.inner.batch(&requests).await;
-     let mut manifests: HashMap<u64, ShardManifest> = HashMap::new();
-     for (request, reply) in requests.iter().zip(replies) {
-         // A sent request's outcome is kept whatever it was: a refusal reaches
-@@ -456,7 +464,7 @@
-             body: &ahead.query.body,
-         })
-         .collect();
+@@ -459 +467 @@
 -    let replies = transport.inner.batch(&requests);
 +    let replies = transport.inner.batch(&requests).await;
-     drop(requests);
-     // A revision's stash must be a prefix of what the walk will ask for it.
-     // After an unsent query the walk prepares and sends that one and the rest

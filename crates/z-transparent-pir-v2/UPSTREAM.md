@@ -58,3 +58,13 @@ Core tests use a real native PIR server against nonzero receive/spend data,
 upstream MemoryStore as a separate protocol oracle, and literal fixture events.
 The engine integration adds an independent canonical full-block oracle. Fixture
 agreement cannot prove that a production publisher has indexed every block.
+
+
+The yielding adaptation additionally makes malformed-content dummy debt durable
+on PendingPages. This is a Coffer suspension-boundary extension: the upstream
+one-shot Failures.owed vector is not sufficient after an acknowledged checkpoint
+or an out-of-call overload. Only logical child/count debt is saved, never crypto
+contexts. Tests exercise the real server with malformed but digest-bound page
+heads, partial budgets, cancellation, overload and cold anchor advancement.
+The wrapper also uses inclusive optional coverage accumulation for genesis-only
+ranges; saturating_sub(1) at zero is zero, not an unsigned wraparound.
