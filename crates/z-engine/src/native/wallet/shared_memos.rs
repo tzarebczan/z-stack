@@ -62,6 +62,8 @@ struct Bundle {
     transactions: Vec<String>,
 }
 
+type ValidatedSharedBlock = (Vec<(u32, Transaction)>, [u8; 32]);
+
 impl NativeWallet {
     pub fn begin_shared_memos_with_source(
         &self,
@@ -170,7 +172,7 @@ impl NativeWallet {
         pass: &NativeSharedMemosPass,
         range: (u32, u32),
         bytes: &[u8],
-    ) -> Result<(Vec<(u32, Transaction)>, [u8; 32])> {
+    ) -> Result<ValidatedSharedBlock> {
         if pass.owner.is_none() {
             return Err(refused("shared_memos_context_consumed"));
         }

@@ -120,3 +120,15 @@ test("CI timing preserves command arguments, failures and the existing summary",
   assert.match(report, /Exit status: 0/);
   assert.match(report, /Exit status: 37/);
 });
+
+test("hosted native engine gates include private enhancement", () => {
+  const workflow = readFileSync(resolve(import.meta.dirname, "../.github/workflows/ci.yml"), "utf8");
+  const commands = [...workflow.matchAll(/bash scripts\/ci-time\.sh "(Engine library tests|Native runtime configuration|Engine binaries check)" (cargo [^\n]+)/g)];
+  assert.deepEqual(commands.map(([, label]) => label).sort(), ["Engine binaries check", "Engine library tests", "Native runtime configuration"]);
+  for (const [, label, command] of commands) {
+    const args = command.trim().split(/\s+/);
+    const features = args[args.indexOf("--features") + 1].split(",");
+    assert.ok(features.includes("native-pir"), `${label}: canonical PIR coverage missing`);
+    assert.ok(features.includes("private-enhance"), `${label}: native private enhancement coverage missing`);
+  }
+});
