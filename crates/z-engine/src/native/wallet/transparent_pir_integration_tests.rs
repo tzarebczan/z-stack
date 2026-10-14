@@ -348,6 +348,45 @@ fn transparent_pir_real_service_matches_independent_transaction_native_and_web_i
     let restored = crate::web::WebWallet::from_snapshot(&web.to_snapshot().unwrap()).unwrap();
     assert_eq!(restored.history(20).len(), 2);
     assert_eq!(restored.transparent_pir_status()["confirmedZat"], "0");
+    // Finish any gap expansion, then reset and rescan to the unchanged tip.
+    let scope =
+        serde_json::from_str(&web.begin_transparent_pir(&"ab".repeat(32)).unwrap()).unwrap();
+    let prior = serde_json::from_str(&web.transparent_pir_checkpoint().unwrap()).unwrap();
+    drive(scope, Some(prior), &server, |cp| {
+        web.apply_transparent_pir_checkpoint(&serde_json::to_string(cp).unwrap())
+            .unwrap();
+        web.acknowledge_transparent_pir_checkpoint(&cp.checkpoint_id)
+            .unwrap();
+    });
+    assert_eq!(
+        web.transparent_pir_status()["completion"],
+        "complete-for-enrolled-scope"
+    );
+    let continuation = web.transparent_pir_checkpoint().unwrap();
+    web.reset_scan();
+    assert!(web.history(20).is_empty());
+    assert!(web.transparent_pir_checkpoint().unwrap() == continuation);
+    let mut web = crate::web::WebWallet::from_snapshot(&web.to_snapshot().unwrap()).unwrap();
+    web.apply_compact_blocks_blob(&compact).unwrap();
+    let scope =
+        serde_json::from_str(&web.begin_transparent_pir(&"ab".repeat(32)).unwrap()).unwrap();
+    let prior = serde_json::from_str(&web.transparent_pir_checkpoint().unwrap()).unwrap();
+    drive(scope, Some(prior), &server, |cp| {
+        web.apply_transparent_pir_checkpoint(&serde_json::to_string(cp).unwrap())
+            .unwrap();
+        web.acknowledge_transparent_pir_checkpoint(&cp.checkpoint_id)
+            .unwrap();
+    });
+    assert_eq!(
+        web.transparent_pir_status()["completion"],
+        "complete-for-enrolled-scope"
+    );
+    assert_eq!(web.transparent_pir_status()["confirmedZat"], "0");
+    assert_eq!(web.history(20).len(), 2);
+    assert_eq!(
+        web.balance().transparent_available + web.balance().transparent_pending,
+        0
+    );
     drop(native);
     drop(wallet);
     let reopened = NativeWallet::open_with_wallet_source(root.path(), &fixture.source).unwrap();
@@ -360,4 +399,161 @@ fn transparent_pir_real_service_matches_independent_transaction_native_and_web_i
     drop(fixture);
     drop(reference_fixture);
     drop(runtime);
+}
+
+#[test]
+fn web_reset_scan_keeps_real_malformed_page_cover_debt_across_cold_resumes() {
+    use crate::transparent_pir::acquisition::Status;
+    let account = account_from_mnemonic(PUBLIC_SEED, Network::Regtest, 0).unwrap();
+    let mut web = crate::web::WebWallet::from_account(account, 1).unwrap();
+    web.next_diversifier = 1;
+    let compact =
+        crate::web::encode_delimited((1..=3).map(|h| block(h, Network::Regtest.genesis_hash())));
+    web.apply_compact_blocks_blob(&compact).unwrap();
+    let script = web.public_transparent_scripts().unwrap()[0].0.clone();
+    let events = (1..=3)
+        .map(|h| {
+            (
+                ScriptBytes::new(script.clone()),
+                TransparentEvent::Receive(ReceiveEvent {
+                    metadata: None,
+                    height: h,
+                    txid: Txid([h as u8 + 0x70; 32]),
+                    transaction_index: 0,
+                    output_index: 0,
+                    value: 100,
+                    coinbase: false,
+                }),
+            )
+        })
+        .collect();
+    let mut shard = service::ShardSpec::first(0, 3, true, events);
+    shard.malformed_page_heads = true;
+    let publication = tempfile::tempdir().unwrap();
+    let genesis = BlockHash::from_display_hex(Network::Regtest.genesis_hash()).unwrap();
+    service::publish_for_network(
+        publication.path(),
+        &[shard],
+        service::SEAL,
+        |h| {
+            if h == 0 {
+                genesis
+            } else {
+                BlockHash::from_internal_bytes([h as u8; 32])
+            }
+        },
+        vec![],
+        "regtest",
+        genesis,
+    );
+    let server = service::InProcess::serve(publication.path());
+    let scope: Scope =
+        serde_json::from_str(&web.begin_transparent_pir(&"ab".repeat(32)).unwrap()).unwrap();
+    let mut pass = Pass::new(scope, None, Limits::default()).unwrap();
+    let mut first_pages = 0;
+    let mut cancelled = false;
+    for _ in 0..200 {
+        match pass.advance().unwrap() {
+            Step::Exchange {
+                request_id,
+                operation,
+            } => {
+                first_pages += usize::from(matches!(
+                    operation,
+                    Operation::Query {
+                        table: Table::Pages { .. },
+                        ..
+                    }
+                ));
+                pass.accept(request_id, answer(&server, operation)).unwrap();
+            }
+            Step::NeedChain { height, hash } => pass.accept_chain(height, hash).unwrap(),
+            Step::Checkpoint { checkpoint } => {
+                web.apply_transparent_pir_checkpoint(&serde_json::to_string(&checkpoint).unwrap())
+                    .unwrap();
+                web.acknowledge_transparent_pir_checkpoint(&checkpoint.checkpoint_id)
+                    .unwrap();
+                pass.acknowledge(&checkpoint.checkpoint_id).unwrap();
+                if first_pages == 1 {
+                    pass.cancel();
+                    cancelled = true;
+                    break;
+                }
+            }
+            Step::Stopped { .. } => {
+                panic!("must stop immediately after the failed head checkpoint")
+            }
+        }
+    }
+    assert!(cancelled);
+    drop(pass);
+    let continuation = web.transparent_pir_checkpoint().unwrap();
+    web.reset_scan();
+    assert!(web.transparent_pir_checkpoint().unwrap() == continuation);
+    let mut web = crate::web::WebWallet::from_snapshot(&web.to_snapshot().unwrap()).unwrap();
+    web.apply_compact_blocks_blob(&compact).unwrap();
+    let mut pages = Vec::new();
+    let mut reasons = Vec::new();
+    for _ in 0..3 {
+        let scope =
+            serde_json::from_str(&web.begin_transparent_pir(&"ab".repeat(32)).unwrap()).unwrap();
+        let checkpoint = serde_json::from_str(&web.transparent_pir_checkpoint().unwrap()).unwrap();
+        let mut pass = Pass::new(
+            scope,
+            Some(checkpoint),
+            Limits {
+                max_queries: 1,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        let mut count = 0;
+        let mut stopped = false;
+        for _ in 0..200 {
+            match pass.advance().unwrap() {
+                Step::Exchange {
+                    request_id,
+                    operation,
+                } => {
+                    count += usize::from(matches!(
+                        operation,
+                        Operation::Query {
+                            table: Table::Pages { .. },
+                            ..
+                        }
+                    ));
+                    pass.accept(request_id, answer(&server, operation)).unwrap();
+                }
+                Step::NeedChain { height, hash } => pass.accept_chain(height, hash).unwrap(),
+                Step::Checkpoint { checkpoint } => {
+                    web.apply_transparent_pir_checkpoint(
+                        &serde_json::to_string(&checkpoint).unwrap(),
+                    )
+                    .unwrap();
+                    web.acknowledge_transparent_pir_checkpoint(&checkpoint.checkpoint_id)
+                        .unwrap();
+                    pass.acknowledge(&checkpoint.checkpoint_id).unwrap();
+                }
+                Step::Stopped {
+                    status: Status::Incomplete { reason },
+                } => {
+                    reasons.push(reason);
+                    stopped = true;
+                    break;
+                }
+                Step::Stopped { .. } => panic!("malformed content must remain incomplete"),
+            }
+        }
+        assert!(stopped);
+        pages.push(count);
+        web = crate::web::WebWallet::from_snapshot(&web.to_snapshot().unwrap()).unwrap();
+    }
+    assert_eq!(pages, vec![1, 1, 1]);
+    assert_eq!(
+        reasons,
+        vec!["query_budget", "query_budget", "content_failed"]
+    );
+    assert_eq!(web.transparent_pir_status()["confirmedZat"], "200");
+    assert_eq!(web.history(20).len(), 2);
+    assert_eq!(web.transparent_pir_status()["completion"], "incomplete");
 }

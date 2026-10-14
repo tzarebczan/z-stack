@@ -29,6 +29,8 @@ pub(crate) struct ProjectionState {
     pub rewind_floor: Option<u32>,
     pub checkpoint_id: Option<String>,
     pub checkpoint_digest: Option<String>,
+    #[serde(default)]
+    pub projection_invalidated: bool,
     pub continuation: Option<TransparentPirCheckpoint>,
     pub covered_through: u64,
     pub complete: bool,
@@ -153,15 +155,17 @@ impl ProjectionState {
             return Err(refused("transparent_pir_context_changed"));
         }
         let bytes = checkpoint_payload(checkpoint)?;
-        if self.checkpoint_id.as_ref() == Some(&checkpoint.checkpoint_id) {
-            return if self.checkpoint_digest.as_ref() == Some(&digest(&bytes)) {
-                Ok(Vec::new())
-            } else {
-                Err(refused("transparent_pir_checkpoint_conflict"))
-            };
+        let replay = self.checkpoint_id.as_ref() == Some(&checkpoint.checkpoint_id);
+        if replay {
+            if self.checkpoint_digest.as_ref() != Some(&digest(&bytes)) {
+                return Err(refused("transparent_pir_checkpoint_conflict"));
+            }
+            if !self.projection_invalidated {
+                return Ok(Vec::new());
+            }
         }
         if !hash(&checkpoint.checkpoint_id)
-            || checkpoint.previous_checkpoint_id != self.checkpoint_id
+            || (!replay && checkpoint.previous_checkpoint_id != self.checkpoint_id)
             || checkpoint.covered_through < self.covered_through
             || checkpoint.covered_through > scope.anchor.height
             || checkpoint.records.len() > 65_536
@@ -271,6 +275,20 @@ impl ProjectionState {
         Ok(())
     }
 
+    pub fn invalidate_projection(&mut self) {
+        if self.bound_source.is_none() && self.scope.is_none() {
+            return;
+        }
+        // The scanner erased canonical rows, not acquisition progress. Keep the
+        // continuation and its owed cover queries; replay its records atomically.
+        self.projection_invalidated = true;
+        self.complete = false;
+        self.durable = false;
+        self.projected_outputs.clear();
+        self.projected_spends.clear();
+        self.projected_transactions.clear();
+    }
+
     pub fn rewind(&mut self, height: u32) {
         if self.bound_source.is_none() && self.scope.is_none() {
             return;
@@ -287,7 +305,7 @@ impl ProjectionState {
 
     pub fn status(&self) -> serde_json::Value {
         serde_json::json!({ "trust":"publisher-provided-confirmed-history", "spendingEnabled":false,
-            "completion":if self.complete && self.durable { "complete-for-enrolled-scope" } else if self.complete { "checkpoint-pending" } else { "incomplete" },
+            "completion":if self.complete && !self.projection_invalidated && self.durable { "complete-for-enrolled-scope" } else if self.complete && !self.projection_invalidated { "checkpoint-pending" } else { "incomplete" },
             "scope": self.scope.as_ref().map(|s|serde_json::json!({"sourceId":s.source_id,"scopeId":s.scope_id,"generation":s.generation,"anchor":s.anchor,"scriptCount":s.scripts.len()})), "checkpointId":self.checkpoint_id, "coveredThrough":self.covered_through,
             "pendingPages":self.pending_pages, "unresolvedSpends":self.unresolved_spends })
     }

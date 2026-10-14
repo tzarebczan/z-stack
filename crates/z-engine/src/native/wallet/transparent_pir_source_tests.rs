@@ -427,3 +427,108 @@ async fn native_transparent_pir_canonical_receive_spend_reopen_and_cancel() {
         "GetTransaction" | "GetAddressUtxos" | "SendTransaction"
     )));
 }
+
+#[tokio::test]
+async fn native_transparent_pir_amount_counts_only_pir_recovered_receives() {
+    use zcash_keys::encoding::AddressCodec;
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(root.path()).await;
+    let wallet = fixture.restore(root.path()).await;
+    wallet
+        .sync_with_wallet_source_reported_cancellable(
+            &fixture.source,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+    let address = transparent::address::TransparentAddress::decode(
+        &wallet.network,
+        &wallet.transparent_address().unwrap().unwrap(),
+    )
+    .unwrap();
+    let script: transparent::address::Script = address.script().into();
+    {
+        let mut db = wallet.open_db().unwrap();
+        let account = NativeWallet::primary_account_id(&db).unwrap();
+        for (txid, value) in [([0x11; 32], 150000), ([0x33; 32], 40000)] {
+            let output = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
+                transparent::bundle::OutPoint::new(txid, 0),
+                transparent::bundle::TxOut::new(
+                    zcash_protocol::value::Zatoshis::from_u64(value).unwrap(),
+                    script.clone(),
+                ),
+                Some(1.into()),
+                Some(account),
+                None,
+                None,
+            )
+            .unwrap();
+            db.put_received_transparent_utxo(&output).unwrap();
+        }
+    }
+    assert_eq!(
+        wallet.transparent_pir_status().unwrap()["confirmedZat"],
+        "0"
+    );
+    let mut pass = wallet
+        .begin_transparent_pir_with_source(
+            &fixture.source,
+            &"ab".repeat(32),
+            Arc::new(RecoveryCancellation::new()),
+        )
+        .unwrap();
+    let scope: TransparentPirScope = serde_json::from_str(&pass.scope_json().unwrap()).unwrap();
+    let script = crate::web::to_hex(&script.0 .0);
+    let empty = checkpoint(scope.clone(), &script, vec![], None, 0x81);
+    wallet
+        .apply_transparent_pir_checkpoint_with_source(
+            &fixture.source,
+            &mut pass,
+            &serde_json::to_string(&empty).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        wallet.transparent_pir_status().unwrap()["confirmedZat"],
+        "0"
+    );
+    let recovered = checkpoint(
+        scope.clone(),
+        &script,
+        vec![receive()],
+        Some(empty.checkpoint_id),
+        0x82,
+    );
+    wallet
+        .apply_transparent_pir_checkpoint_with_source(
+            &fixture.source,
+            &mut pass,
+            &serde_json::to_string(&recovered).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        wallet.transparent_pir_status().unwrap()["confirmedZat"],
+        "150000"
+    );
+    let spent = checkpoint(
+        scope,
+        &script,
+        vec![receive(), spend()],
+        Some(recovered.checkpoint_id),
+        0x83,
+    );
+    wallet
+        .apply_transparent_pir_checkpoint_with_source(
+            &fixture.source,
+            &mut pass,
+            &serde_json::to_string(&spent).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        wallet.transparent_pir_status().unwrap()["confirmedZat"],
+        "0"
+    );
+    let db = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+    let ordinary:u64 = db.query_row("SELECT n.value_zat FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.txid=?1", [[0x33u8;32].as_slice()], |r|r.get(0)).unwrap();
+    assert_eq!(ordinary, 40000);
+}

@@ -349,7 +349,16 @@ impl NativeWallet {
             if let Some(scope)=&state.scope {
                 if wdb.block_fully_scanned()?.is_none_or(|b|u64::from(u32::from(b.block_height()))!=scope.anchor.height || b.block_hash().to_string()!=scope.anchor.hash) { state.complete=false; }
             }
-            let total:u64=ext.query_row("SELECT COALESCE(SUM(n.value_zat),0) FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.mined_height IS NOT NULL AND NOT EXISTS(SELECT 1 FROM transparent_received_output_spends s WHERE s.transparent_received_output_id=n.id)",[],|r|r.get(0))?;
+            let mut rows=ext.prepare("SELECT t.txid,n.output_index,n.value_zat FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.mined_height IS NOT NULL AND NOT EXISTS(SELECT 1 FROM transparent_received_output_spends s WHERE s.transparent_received_output_id=n.id)")?;
+            let outputs=rows.query_map([],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,u32>(1)?,r.get::<_,u64>(2)?)))?;
+            let mut total=0u64;
+            for output in outputs {
+                let (txid,index,value)=output?;
+                if state.records.contains_key(&format!("r:{}:{index}",crate::web::to_hex(&txid))) {
+                    total=total.checked_add(value).ok_or_else(||anyhow::anyhow!("transparent_pir_amount_invalid"))?;
+                }
+            }
+            Zatoshis::from_u64(total).map_err(|_|anyhow::anyhow!("transparent_pir_amount_invalid"))?;
             let mut status=state.status();status["confirmedZat"]=serde_json::json!(total.to_string());Ok(status)
         })
     }

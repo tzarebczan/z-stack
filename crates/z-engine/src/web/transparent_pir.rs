@@ -128,7 +128,9 @@ impl WebWallet {
         {
             return Err(refused("transparent_pir_chain_changed"));
         }
-        if self.transparent_pir.checkpoint_id.as_ref() == Some(&checkpoint.checkpoint_id) {
+        if self.transparent_pir.checkpoint_id.as_ref() == Some(&checkpoint.checkpoint_id)
+            && !self.transparent_pir.projection_invalidated
+        {
             return serde_json::to_string(&self.transparent_pir_status())
                 .map_err(|_| refused("transparent_pir_status_invalid"));
         }
@@ -330,6 +332,7 @@ impl WebWallet {
                 .map_err(|_| refused("transparent_pir_amount_invalid"))?;
         }
         state.stage(&checkpoint, &records)?;
+        state.projection_invalidated = false;
         // A received gap address expands inventory, so this checkpoint cannot
         // assert completeness for the new scripts until a further pass covers them.
         if next_diversifier != self.next_diversifier {
@@ -455,6 +458,44 @@ mod tests {
         );
         assert_eq!(restored.history(20).len(), 1);
     }
+    #[test]
+    fn reset_scan_replays_unchanged_checkpoint_without_discarding_acquisition_state() {
+        for spent in [false, true] {
+            let mut w = wallet();
+            let events = if spent {
+                vec![receive(), spend()]
+            } else {
+                vec![receive()]
+            };
+            let mut c = checkpoint(&mut w, events);
+            c.continuation = "opaque-acquisition-with-unpaid-cover-queries".into();
+            w.apply_transparent_pir_checkpoint(&serde_json::to_string(&c).unwrap())
+                .unwrap();
+            w.acknowledge_transparent_pir_checkpoint(&c.checkpoint_id)
+                .unwrap();
+            let saved = w.transparent_pir_checkpoint().unwrap();
+            let expected = if spent { "0" } else { "150000" };
+            assert_eq!(w.transparent_pir_status()["confirmedZat"], expected);
+            w.reset_scan();
+            assert!(w.utxos.is_empty());
+            assert!(w.history(20).is_empty());
+            assert!(w.transparent_pir_checkpoint().unwrap() == saved);
+            // The shielded scanner has returned to the exact same accepted tip.
+            w.scanned_height = 3;
+            w.block_hashes.insert(3, "03".repeat(32));
+            let mut reopened = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+            reopened
+                .apply_transparent_pir_checkpoint(&serde_json::to_string(&c).unwrap())
+                .unwrap();
+            reopened
+                .acknowledge_transparent_pir_checkpoint(&c.checkpoint_id)
+                .unwrap();
+            assert_eq!(reopened.transparent_pir_status()["confirmedZat"], expected);
+            assert_eq!(reopened.history(20).len(), if spent { 2 } else { 1 });
+            assert!(reopened.transparent_pir_checkpoint().unwrap() == saved);
+        }
+    }
+
     #[test]
     fn receive_then_spend_offline_projects_zero_and_real_history() {
         let mut w = wallet();

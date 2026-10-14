@@ -2111,6 +2111,8 @@ impl WebWallet {
     /// Drop notes, trees, UTXOs, and history. Keep UFVK, birthday, and addresses.
     /// Next `sync` trial-decrypts from birthday.
     pub fn reset_scan(&mut self) {
+        #[cfg(feature = "transparent-pir")]
+        self.transparent_pir.invalidate_projection();
         self.scan_error = None;
         self.invalidate_live_trees();
         self.leaf_validation = Default::default();
