@@ -35,7 +35,7 @@ import type { WasmClientContext } from './wasm-client-context';
 import * as runtime from './wasm-client-runtime';
 
 /** Block scanning and optional public-data enhancement. */
-export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" | "bus" | "session" | "snap" | "currentSession" | "syncLock" | "memoLock" | "loadIfNeeded" | "preferWorker" | "transport" | "memoFetch" | "persist" | "opts" | "transparentScan" | "localLight" | "syncOpts" | "grpcWeb" | "lwdPipe" | "retireFailedSession" | "spendingSeed" | "prewarmProvingKey" | "sessionOperation" | "client" | "unlockPolicy" | "rootsChecked" | "assertSource" | "network" | "refreshIfStale" | "stateEpoch" | "transparentScanStatus" | "sharedMemoStatus" | "selectiveMemoStatus" | "memoAbort" | "storageGeneration" | "rescanning">) {
+export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" | "bus" | "session" | "snap" | "currentSession" | "syncLock" | "memoLock" | "loadIfNeeded" | "preferWorker" | "transport" | "memoFetch" | "persist" | "opts" | "transparentScan" | "localLight" | "maxBlocksPerRequest" | "syncOpts" | "grpcWeb" | "lwdPipe" | "retireFailedSession" | "spendingSeed" | "prewarmProvingKey" | "sessionOperation" | "client" | "unlockPolicy" | "rootsChecked" | "assertSource" | "network" | "refreshIfStale" | "stateEpoch" | "transparentScanStatus" | "sharedMemoStatus" | "selectiveMemoStatus" | "memoAbort" | "storageGeneration" | "rescanning">) {
 
   function progressScope(): () => boolean {
     const epoch = runtime.runtimeState.wasmSyncEpoch;
@@ -316,7 +316,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     // queue behind browser sockets/Zaino and exhaust their response deadlines.
     // Bound both range size and concurrency, keeping the same checkpoint span.
     const prefetch = combinedTransparent ? Math.min(shieldedPrefetch, 4) : shieldedPrefetch;
-    const batch = combinedTransparent ? Math.min(tuned.batch, 500) : tuned.batch;
+    const batch = Math.min(combinedTransparent ? Math.min(tuned.batch, 500) : tuned.batch, ctx.maxBlocksPerRequest);
     const persistEvery = Math.ceil(tuned.batch * tuned.persistEvery / batch);
     let batches = 0;
     let persistTail: Promise<void> = Promise.resolve();
@@ -955,7 +955,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       };
       try {
         const status = await syncPublicData({
-          source, transport: ctx.transport, signal: wait,
+          source, transport: ctx.transport, signal: wait, maxBlocksPerRequest: ctx.maxBlocksPerRequest,
           transparent: kind === "transparent", memos: kind === "memos",
           assertCurrent: current, checkpoint: ctx.persist
         });

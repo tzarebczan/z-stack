@@ -5,7 +5,7 @@
 
 import { WalletError, type UnlockPolicy, type WalletSnapshot } from "@z-stack/core";
 import type { CreationPreparation, EngineClient } from "./engine";
-import { grpcWebTransport, httpLwdTransport, isLoopbackUrl, looksLikeLwdPipe, type BlockTransport } from "./lwd";
+import { compactBlockRequestLimit, grpcWebTransport, httpLwdTransport, isLoopbackUrl, looksLikeLwdPipe, type BlockTransport } from "./lwd";
 import { initialize, wasmRuntime, type Network, type SdkInitOptions, type WasmRuntime } from "./runtime";
 import { observeEngineProgress, type EngineLoadProgress } from "./engine-progress";
 import { cancelWasmSync, createWasmClient, forgetWasmWallet, peekWasmWallet, type WasmClient, type WasmProgress } from "./wasm-client";
@@ -180,6 +180,7 @@ export function lightServer(url: string, opts: { network: Network; transparent?:
 export async function createWallet(opts: WalletOptions): Promise<Wallet> {
   if (!["mainnet", "testnet", "regtest"].includes(opts.network)) throw new WalletError("invalid_network", "Choose mainnet, testnet or regtest.");
   if (opts.unlockPolicy !== undefined && !["session", "each-spend"].includes(opts.unlockPolicy)) throw new WalletError("unknown", "Invalid browser unlock policy.");
+  if (typeof opts.server !== "string") compactBlockRequestLimit(opts.server.maxBlocksPerRequest);
   const claimed = claimWalletOwner();
   if (!claimed) throw new WalletError("owner_conflict", "Only one browser wallet client can own the engine. Close it before creating another.");
   const lease = claimed;

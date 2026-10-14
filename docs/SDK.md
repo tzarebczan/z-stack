@@ -353,6 +353,17 @@ chain height and inclusive compact ranges. Compact bytes use a four-byte
 big-endian length before each original protobuf block; an adapter can split a
 large SDK range into smaller authenticated requests without decoding wallet data.
 
+A custom transport may declare `readonly maxBlocksPerRequest: 1000` to cap
+SDK compact-block request spans. The SDK validates an integer from 1 through
+4,000 before initialization, captures it for the client's lifetime, and uses the
+smaller of this cap and its existing tuned batch size. It applies to compact sync
+and optional transparent compact backfill, including prefetch; memo ranges,
+subtree requests and `blockStream` have separate contracts. Omitting it preserves
+the current tuning. The 32 MiB prefetch response limit remains unchanged, so choose
+a span that also fits the transport's byte bound. Check
+`SDK_TRANSPORT_CAPABILITIES.maxBlocksPerRequest === true` before relying on this
+hint with a separately supplied archive; older runtimes may silently ignore it.
+
 Check `SDK_TRANSPORT_CAPABILITIES.requiredBirthdayTreeState === true` before
 using strict mode with a separately supplied SDK archive. Older archives lack
 this export, even when their package version is the same. Set

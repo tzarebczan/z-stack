@@ -162,3 +162,31 @@ for (const method of ["info", "transparentBlocks", "sharedMemos"] as const) {
     assert.deepEqual(f.state, before);
   });
 }
+
+test("compact backfill honors the cap without changing memo ranges", async () => {
+  const f = fixture(12);
+  assert.deepEqual(await syncPublicData({ ...f.opts, maxBlocksPerRequest: 3 }), { transparent: "complete", memos: "complete" });
+  assert.deepEqual(f.calls, [["blocks", 1, 3], ["blocks", 4, 6], ["blocks", 7, 9], ["blocks", 10, 12],
+    ["memos", 1, 9], ["memos", 10, 12]]);
+  assert.equal(f.state.transparentScanHeight, 12);
+});
+
+for (const [cap, expected] of [[3, [null, 5001, 10_001]], [1000, [null, 5000, 10_000, 10_001]]] as const) {
+  test(`compact backfill keeps checkpoint cadence with cap ${cap}`, async () => {
+    const f = fixture(10_001), checkpoints: Array<number | null> = [];
+    await syncPublicData({ ...f.opts, memos: false, maxBlocksPerRequest: cap,
+      checkpoint: async () => { checkpoints.push(f.state.transparentScanHeight); } });
+    assert.deepEqual(checkpoints, expected);
+    assert.equal(f.state.transparentScanHeight, 10_001);
+  });
+}
+
+test("compact backfill unsafe cap refuses before snapshot, mutation or provider", async () => {
+  const f = fixture();
+  let calls = 0;
+  f.source.snapshotJson = async () => { calls++; return "{}"; };
+  await assert.rejects(syncPublicData({ ...f.opts, maxBlocksPerRequest: 0 }), /maxBlocksPerRequest/);
+  assert.equal(calls, 0);
+  assert.deepEqual(f.calls, []);
+  assert.equal(f.state.transparentScanHeight, null);
+});
