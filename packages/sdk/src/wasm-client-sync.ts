@@ -27,7 +27,8 @@ import {
   scanWorkerRuntime,
   treeConflictUserMessage,
   workerScanSession,
-  type ScanSession
+  type ScanSession,
+  type PendingSubmission
 } from "./scan-host";
 import { fetchSubtreeRoots, SUBTREE_ROOTS_PAGE } from "./subtree-roots";
 import { captureWalletOperation } from "./wallet-lifecycle";
@@ -913,13 +914,13 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         throw e;
       }
       const epoch = ctx.stateEpoch;
-      let raws: string[];
-      try { raws = await source.pendingRawTxs(); } catch { return; }
+      let submissions: PendingSubmission[];
+      try { submissions = await source.pendingSubmissions(); } catch { return; }
       if (ctx.stateEpoch !== epoch) return;
-      for (const hex of raws.slice(0, 8)) {
+      for (const { hex, txid } of submissions.slice(0, 8)) {
         if (ctx.stateEpoch !== epoch) return;
         try {
-          await abortable(wait, () => ctx.transport.submit!(hex, wait));
+          await abortable(wait, () => ctx.transport.submit!(hex, wait, { txid }));
         } catch (e) {
           wait.throwIfAborted();
           ctx.assertSource(operation, source);

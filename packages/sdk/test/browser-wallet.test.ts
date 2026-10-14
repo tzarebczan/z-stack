@@ -49,6 +49,7 @@ function fixture(t: TestContext) {
       birthday: () => state.birthday ?? 8,
       treesReady: () => false,
       pendingRawTxs: () => JSON.stringify(state.pending ? ["synthetic-transaction"] : []),
+      pendingSubmissions: () => JSON.stringify(state.pending ? [{ txid, hex: "synthetic-transaction" }] : []),
       rescanFrom(height: number) {
         state.birthday = height; state.scanned = height - 1;
         state.transparentScanHeight = null; state.memoScanHeight = null;
@@ -284,7 +285,7 @@ test("close releases the owner and session even when hardware rollback cannot be
   const reviewing = new Promise<void>(resolve => { entered = resolve; });
   const signed = new Promise<Uint8Array>(resolve => { release = resolve; });
   const wallet = await f.open({ storage, server: { kind: "fixture", label: "offline", tip: async () => 10,
-    blocks: async () => new Uint8Array(), submit: async () => { submissions++; return txid; } } });
+    blocks: async () => new Uint8Array(), submit: async (_hex, _signal, context) => { assert.deepEqual(context, { txid }); submissions++; return txid; } } });
   const initial = await wallet.create({ birthday: 1 });
   const rejected = assert.rejects(wallet.send("fixture", "0.00005", undefined,
     { signer: keystoneSigner(async () => { entered(); return signed; }) }), error => error === failure);
@@ -1362,7 +1363,7 @@ for (const signing of ["software", "hardware"] as const) {
     const journal = new Promise<void>(resolve => { release = resolve; });
     const waiting = new Promise<void>(resolve => { entered = resolve; });
     const wallet = await f.open({ server: { kind: "fixture", label: "offline", tip: async () => 10,
-      blocks: async () => new Uint8Array(), submit: async () => { submissions++; return txid; } } });
+      blocks: async () => new Uint8Array(), submit: async (_hex, _signal, context) => { assert.deepEqual(context, { txid }); submissions++; return txid; } } });
     await wallet.create({ birthday: 1 });
     if (signing === "software") await wallet.unlock(words);
     const sending = wallet.send("fixture", "0.00005", undefined, {
@@ -1544,7 +1545,7 @@ for (const policy of [undefined, "saved-bytes-auto", "explicit"] as const) {
   test(`${policy ?? "default"} submission policy controls sync of a durable unknown payment after reopen`, async t => {
     const f = fixture(t), submitted: string[] = [];
     const server = { kind: "fixture", label: "offline", tip: async () => 10,
-      blocks: async () => new Uint8Array(), submit: async (hex: string) => { submitted.push(hex); throw new TypeError("fixture lost acknowledgement"); } };
+      blocks: async () => new Uint8Array(), submit: async (hex: string, _signal?: AbortSignal, context?: { readonly txid: string }) => { assert.deepEqual(context, { txid }); submitted.push(hex); throw new TypeError("fixture lost acknowledgement"); } };
     const options = { server, submissionPolicy: policy };
     const wallet = await f.open(options);
     await wallet.create({ birthday: 8 });
@@ -1609,5 +1610,6 @@ test("unsafe memo hints and submission policies refuse before ownership, storage
 test("memo request and explicit submission policy capabilities are frozen root contracts", () => {
   assert.equal(SDK_TRANSPORT_CAPABILITIES.maxSharedMemoBlocksPerRequest, true);
   assert.equal(SDK_TRANSPORT_CAPABILITIES.submissionPolicy, true);
+  assert.equal(SDK_TRANSPORT_CAPABILITIES.submitContext, true);
   assert.equal(Object.isFrozen(SDK_TRANSPORT_CAPABILITIES), true);
 });

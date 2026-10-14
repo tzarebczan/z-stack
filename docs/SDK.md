@@ -373,6 +373,17 @@ block count, not response bytes; the adapter must still enforce its byte bounds.
 Check `SDK_TRANSPORT_CAPABILITIES.maxSharedMemoBlocksPerRequest === true` before
 relying on it with another archive.
 
+`BlockTransport.submit(rawHex, signal, context)` receives a
+`SubmissionContext` with the exact signed transaction's display-order `txid`.
+The ID comes from Rust software proving, hardware finalization, or the Rust
+wallet's saved pending record. A signed relay transport can require this context
+and bind its reply to that ID without parsing transactions in TypeScript.
+Ordinary transports may ignore the optional third argument. Check the frozen
+root marker `SDK_TRANSPORT_CAPABILITIES.submitContext === true` before depending
+on this contract. Pending resubmission requires the matching WASM
+`pendingSubmissions` binding; an older binding cannot supply that context and
+causes the SDK to skip that resubmission pass.
+
 The root export `SubmissionPolicy` is `"explicit" | "saved-bytes-auto"`.
 Pass `submissionPolicy: "explicit"` to `createWallet` to keep ordinary sync from
 resubmitting saved signed transactions. The default, `"saved-bytes-auto"`, retains

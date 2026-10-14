@@ -24,7 +24,9 @@ mod write;
 pub use framed::{decode_delimited, encode_delimited, encode_one, SNAPSHOT_MAGIC};
 pub use prove::{orchard_proving_key_ready, warm_orchard_proving_key, SHIELD_NOT_READY};
 pub use scan::ScanDelta;
-pub use store::{HardwareAccount, HistoryOutpoint, HistoryOutput, TreeFinalizeTick, WebWallet};
+pub use store::{
+    HardwareAccount, HistoryOutpoint, HistoryOutput, PendingSubmission, TreeFinalizeTick, WebWallet,
+};
 
 /// An explicit minimum applies equally to received notes and wallet change.
 fn explicit_confirmations_policy(

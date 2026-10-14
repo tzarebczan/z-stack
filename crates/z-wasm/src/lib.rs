@@ -732,6 +732,12 @@ impl WasmWallet {
         serde_json::to_string(&self.inner.pending_raw_txs()).map_err(js_err)
     }
 
+    /// Saved signed bytes paired with their display-order Rust transaction ID.
+    #[wasm_bindgen(js_name = pendingSubmissions)]
+    pub fn pending_submissions(&self) -> Result<String, JsValue> {
+        serde_json::to_string(&self.inner.pending_submissions()).map_err(js_err)
+    }
+
     #[wasm_bindgen(js_name = abandon)]
     pub fn abandon(&mut self, txid: &str) -> Result<bool, JsValue> {
         self.inner.abandon_unmined(txid).map_err(js_err)

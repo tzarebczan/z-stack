@@ -186,6 +186,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       }
       assertBroadcastAllowed();
       if (!sentTxid) throw new WalletError("unknown", "The engine did not return a transaction ID; nothing was broadcast.");
+      const submissionContext = { txid: sentTxid };
       const reservationGeneration = runtime.runtimeState.persistGen;
       if (!sameLineage()) throw new WalletError("wallet_changed", "the wallet was saved by another tab");
       await ctx.persist({ epoch: stateAtSend, baseKey: baseAtSend });
@@ -211,7 +212,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       finishDrain?.();
       // Stop waiting on close/replacement without claiming the already-started
       // request was cancelled. The pending transaction and known ID survive.
-      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(hex, operation.signal));
+      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(hex, operation.signal, submissionContext));
       ctx.assertSource(operation, source);
       return txid ?? (/^[0-9a-f]{64}$/i.test(submitted) ? submitted.toLowerCase() : undefined);
     } catch (e) {
@@ -449,6 +450,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       ctx.assertSource(operation, source);
       if (!done.hex) throw new Error("finalize returned no transaction");
       if (!finalizedTxid) throw new WalletError("unknown", "The engine did not return a transaction ID; nothing was broadcast.");
+      const submissionContext = { txid: finalizedTxid };
       if (ctx.stateEpoch !== stateAtHardware) {
         throw new WalletError("wallet_changed", "the wallet was saved by another tab");
       }
@@ -479,7 +481,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       assertReviewCurrent();
       broadcastStarted = true;
       finishDrain?.();
-      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(done.hex!, operation.signal));
+      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(done.hex!, operation.signal, submissionContext));
       ctx.assertSource(operation, source);
       return done.txid ?? (/^[0-9a-f]{64}$/i.test(submitted) ? submitted.toLowerCase() : undefined);
     } catch (e) {

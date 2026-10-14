@@ -35,6 +35,13 @@ use zip32::{DiversifierIndex, Scope};
 // rebuilds older retained history from the unchanged snapshot leaves/metadata.
 pub(crate) const TREE_CHECKPOINTS: usize = offload::TIP_CHECKPOINT_BLOCKS as usize + 1;
 pub(crate) use crate::scan::{CHECKPOINT_EVERY, HASH_KEEP};
+/// One persisted, unmined and unexpired transaction eligible for exact-byte submission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingSubmission {
+    pub txid: String,
+    pub hex: String,
+}
+
 /// JSON snapshot layout. Magic stays `zstk1`; this field distinguishes selective shard scanning + tree-size marks.
 const SNAPSHOT_VERSION: u32 = 2;
 fn snapshot_version_legacy() -> u32 {
@@ -2092,11 +2099,11 @@ impl WebWallet {
     /// Unmined, with a nonzero expiry height the scanned chain has passed: it
     /// can no longer be mined (zero never expires).
     /// Raw bytes of our sends still waiting to be mined, keyed like `txs`.
-    fn unmined_pending_txs(&self) -> impl Iterator<Item = (String, &Vec<u8>)> + '_ {
+    fn unmined_pending_txs(&self) -> impl Iterator<Item = (TxId, &Vec<u8>)> + '_ {
         self.pending_txs.iter().filter_map(|(id, raw)| {
             let key = to_hex(id.as_ref());
             let agg = self.txs.get(&key)?;
-            (agg.mined_height.is_none() && !self.expired_unmined(agg)).then_some((key, raw))
+            (agg.mined_height.is_none() && !self.expired_unmined(agg)).then_some((*id, raw))
         })
     }
 
@@ -2119,6 +2126,16 @@ impl WebWallet {
     pub fn pending_raw_txs(&self) -> Vec<String> {
         self.unmined_pending_txs()
             .map(|(_, raw)| to_hex(raw))
+            .collect()
+    }
+
+    /// The exact saved bytes and their display-order ID from the Rust wallet.
+    pub fn pending_submissions(&self) -> Vec<PendingSubmission> {
+        self.unmined_pending_txs()
+            .map(|(txid, raw)| PendingSubmission {
+                txid: txid.to_string(),
+                hex: to_hex(raw),
+            })
             .collect()
     }
 

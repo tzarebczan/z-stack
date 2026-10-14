@@ -65,6 +65,7 @@ type Wallet = HardwareWalletHandle & {
   history: (limit: number) => string;
   historyQuery?: (limit: number, status: string, txid: string) => string;
   pendingRawTxs?: () => string;
+  pendingSubmissions?: () => string;
   scannedHeight: () => number;
   birthday: () => number;
   nextHeight: () => number;
@@ -442,6 +443,12 @@ async function handle(msg: Req): Promise<void> {
       }
       case "snapshotJson": {
         post({ id: msg.id, json: needWallet().snapshotJson(msg.server ?? "") });
+        return;
+      }
+      case "pendingSubmissions": {
+        const read = needWallet().pendingSubmissions;
+        if (!read) throw new Error("WASM needs a signed submission context upgrade");
+        post({ id: msg.id, json: read.call(needWallet()) });
         return;
       }
       case "pendingRawTxs": {

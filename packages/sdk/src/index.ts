@@ -60,6 +60,7 @@ export {
   BroadcastRejection,
   type BlockTransport,
   type SubmissionPolicy,
+  type SubmissionContext,
   type GrpcWebTransportOpts,
   type TransparentUtxo,
 } from "./lwd";

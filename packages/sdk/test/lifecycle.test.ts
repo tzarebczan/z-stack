@@ -1132,6 +1132,7 @@ test("sync cancellation releases an ignored rebroadcast wait and preserves its e
     handle.treesReady = () => true;
     handle.recomputePools = () => {};
     handle.pendingRawTxs = () => JSON.stringify([raw]);
+    handle.pendingSubmissions = () => JSON.stringify([{ txid: "ab".repeat(32), hex: raw }]);
     handle.toSnapshot = () => encode({ name, pending: true });
   });
   const started = deferred<AbortSignal | undefined>();

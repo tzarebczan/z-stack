@@ -23,6 +23,7 @@ export const SDK_TRANSPORT_CAPABILITIES = Object.freeze({
   maxSharedMemoBlocksPerRequest: true,
   submissionPolicy: true,
   enhanceV7: true,
+  submitContext: true,
 });
 
 export type TransparentUtxo = {
@@ -33,6 +34,9 @@ export type TransparentUtxo = {
   height: number;
   address: string;
 };
+
+/** Identity of the exact signed bytes, returned by Rust proving or saved state. */
+export type SubmissionContext = { readonly txid: string };
 
 export type BlockTransport = {
   /** Optional Ironwood-only v7 exchange. Query construction and record application remain in Rust. */
@@ -54,9 +58,11 @@ export type BlockTransport = {
   /**
    * Broadcast a raw transaction hex. Loopback proxy posts `/lwd/sendraw`.
    * The node's explicit refusal throws a {@link BroadcastRejection}; any
-   * other error is an unknown outcome.
+   * other error is an unknown outcome. The SDK supplies the exact Rust-produced
+   * display-order txid in context for software, hardware and saved-byte submissions.
+   * Ordinary transports may ignore context; a signed relay can require it.
    */
-  submit?: (rawHex: string, signal?: AbortSignal) => Promise<string>;
+  submit?: (rawHex: string, signal?: AbortSignal, context?: SubmissionContext) => Promise<string>;
   /** Loopback-only. Leaks t-addrs to local Zaino; never call against public LWD. */
   utxos?: (addresses: string[], startHeight?: number, signal?: AbortSignal) => Promise<TransparentUtxo[]>;
   /** Loopback-only regtest mine via Zebra `generate`. */

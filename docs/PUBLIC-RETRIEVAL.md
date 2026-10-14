@@ -227,3 +227,12 @@ query leakage but do not hide transparent on-chain activity. A malicious or
 incomplete light server can still deny data. Memo text, viewing keys and seeds
 remain local. Enabling compatibility lookups intentionally restores selective
 query disclosure.
+
+A signed submission transport can require `SubmissionContext`, exported from
+`@z-stack/sdk`. The SDK passes `{ txid }` as the third `submit` argument for
+software and hardware submissions and for optional saved-byte resubmission.
+Rust supplies the display-order ID together with the exact transaction bytes;
+TypeScript does not derive an ID. Check
+`SDK_TRANSPORT_CAPABILITIES.submitContext === true` before enabling such a
+transport. This context binds the reply to a signed transaction; application
+review and durable unknown-outcome handling remain separate responsibilities.

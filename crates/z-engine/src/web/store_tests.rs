@@ -3115,3 +3115,39 @@ fn explicit_transparent_send_never_uses_hardware_seed_path() {
         .contains("hardware"));
     assert_eq!(hw.to_snapshot().unwrap(), before);
 }
+
+#[test]
+fn pending_submission_identity_and_bytes_survive_reload_without_mined_or_expired_entries() {
+    let mut w = wallet();
+    let id = TxId::from_bytes(core::array::from_fn(|index| index as u8));
+    w.pending_txs.insert(id, vec![0x12, 0x34, 0x56]);
+    w.txs.insert(
+        to_hex(id.as_ref()),
+        TxAgg {
+            expiry_height: Some(101),
+            spent_notes: 1,
+            ..Default::default()
+        },
+    );
+    record_test_height(&mut w, 100);
+    let expected = vec![PendingSubmission {
+        txid: "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100".into(),
+        hex: "123456".into(),
+    }];
+    assert_eq!(w.pending_submissions(), expected);
+    let mut reopened = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+    assert_eq!(reopened.pending_submissions(), expected);
+    reopened
+        .txs
+        .get_mut(&to_hex(id.as_ref()))
+        .unwrap()
+        .mined_height = Some(100);
+    assert!(reopened.pending_submissions().is_empty());
+    reopened
+        .txs
+        .get_mut(&to_hex(id.as_ref()))
+        .unwrap()
+        .mined_height = None;
+    record_test_height(&mut reopened, 101);
+    assert!(reopened.pending_submissions().is_empty());
+}
