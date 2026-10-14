@@ -569,7 +569,7 @@ fn malformed_private_content_remains_incomplete_and_failure_cap_survives_resume(
     let mut previous = None;
     let mut counts = Vec::new();
     for _ in 0..4 {
-        let mut p = Pass::new(scope(), previous.take(), Limits::default()).unwrap();
+        let mut p = Pass::new(scope(), previous.clone(), Limits::default()).unwrap();
         let mut queries = 0;
         for _ in 0..100 {
             match p.advance().unwrap() {
