@@ -22,7 +22,7 @@ required-features = ["cli"]
 default = ["http-client"]
 http-client = ["dep:reqwest"]
 native-reinspiring = ["dep:pir-native", "dep:reinspiring", "dep:rand_chacha", "ipir-sp/native-reinspiring"]
-cli = ["dep:clap", "dep:tokio"]
+cli = ["http-client", "dep:clap", "dep:tokio"]
 
 [dependencies]
 base64 = "0.22"

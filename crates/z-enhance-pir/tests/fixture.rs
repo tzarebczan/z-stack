@@ -30,10 +30,21 @@ pub fn record(position: u64) -> [u8; 653] {
 }
 impl<'a> Fixture<'a> {
     pub fn new(profile: &'a ProductionSimplePirParams) -> Self {
+        Self::with_records(
+            profile,
+            &(0..67).map(record).collect::<Vec<_>>(),
+            [0xef; 32],
+        )
+    }
+    pub fn with_records(
+        profile: &'a ProductionSimplePirParams,
+        records: &[[u8; 653]],
+        anchor_hash: [u8; 32],
+    ) -> Self {
         let params = profile.ypir();
         let columns = params.db_cols;
-        let mut rows = vec![0u16; 3 * columns];
-        for position in 0..67 {
+        let mut rows = vec![0u16; records.len().div_ceil(33) * columns];
+        for (position, record) in records.iter().enumerate() {
             let (row, slot) = (position / 33, position % 33);
             let mut bytes = vec![0u8; columns * 2];
             // Read previous slots from their complete u16 words before adding
@@ -44,7 +55,7 @@ impl<'a> Fixture<'a> {
             {
                 pair.copy_from_slice(&value.to_le_bytes());
             }
-            bytes[slot * 653..(slot + 1) * 653].copy_from_slice(&record(position as u64));
+            bytes[slot * 653..(slot + 1) * 653].copy_from_slice(record);
             for (value, pair) in rows[row * columns..(row + 1) * columns]
                 .iter_mut()
                 .zip(bytes.chunks_exact(2))
@@ -69,7 +80,7 @@ impl<'a> Fixture<'a> {
         let pre = build_pack_preprocessed_blocks(profile.rlwe(), &offline.crs_blocks).unwrap();
         let public = published_c1_rows(&pre, profile.rlwe().q);
         let coverage = Lifecycle::default()
-            .coverage(67, Geometry::default())
+            .coverage(records.len() as u64, Geometry::default())
             .unwrap();
         let unit = coverage.shards[0].units[0].clone();
         let manifest = Manifest {
@@ -82,7 +93,7 @@ impl<'a> Fixture<'a> {
             pool: "ironwood".into(),
             generation: 1,
             anchor_height: 3_500_000,
-            anchor_block_hash: "ef".repeat(32),
+            anchor_block_hash: hex::encode(anchor_hash),
             geometry: Geometry::default(),
             coverage,
             sessions: vec![SessionRef {

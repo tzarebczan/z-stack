@@ -135,7 +135,14 @@ impl WebWallet {
         Ok(self
             .private_enhance
             .iter()
-            .filter(|a| !a.done && !a.suspended)
+            .filter(|a| {
+                !a.done
+                    && !a.suspended
+                    && self
+                        .txs()
+                        .get(&a.txid)
+                        .is_some_and(|tx| !tx.enhancement_complete)
+            })
             .take(24)
             .cloned()
             .map(|action| PrivateEnhanceRequest {
@@ -180,10 +187,9 @@ impl WebWallet {
         };
         if action.done
             || action.suspended
-            || !self
-                .txs()
-                .get(&action.txid)
-                .is_some_and(|tx| tx.mined_height == Some(action.height))
+            || !self.txs().get(&action.txid).is_some_and(|tx| {
+                tx.mined_height == Some(action.height) && !tx.enhancement_complete
+            })
         {
             return Ok(EnhancePirStoreResult::AlreadyResolved);
         }
