@@ -665,6 +665,23 @@ impl NativeWallet {
         )
     }
 
+    /// Prepare locally under the fresh wallet's exact source binding.
+    pub fn prepare_payment_with_source(
+        &self,
+        source: &super::super::NativeWalletSource,
+        to: &str,
+        amount: u64,
+        memo: Option<&str>,
+    ) -> Result<PaymentReceipt> {
+        self.prepare_payment_with_access(
+            Some(source),
+            to,
+            amount,
+            memo,
+            crate::confirmations_policy(self.network),
+        )
+    }
+
     fn prepare_payment_with_policy(
         &self,
         to: &str,
@@ -672,8 +689,29 @@ impl NativeWallet {
         memo: Option<&str>,
         policy: ConfirmationsPolicy,
     ) -> Result<PaymentReceipt> {
+        self.prepare_payment_with_access(None, to, amount, memo, policy)
+    }
+
+    fn require_payment_source(
+        &self,
+        source: Option<&super::super::NativeWalletSource>,
+    ) -> Result<()> {
+        match source {
+            Some(source) => self.require_wallet_source(source),
+            None => self.require_source_spending_access(),
+        }
+    }
+
+    fn prepare_payment_with_access(
+        &self,
+        source: Option<&super::super::NativeWalletSource>,
+        to: &str,
+        amount: u64,
+        memo: Option<&str>,
+        policy: ConfirmationsPolicy,
+    ) -> Result<PaymentReceipt> {
         let _source_lease = database_lease::shared(&self.paths.data_db)?;
-        self.require_source_spending_access()?;
+        self.require_payment_source(source)?;
         if to.trim().to_ascii_lowercase().starts_with("zcash:") {
             return Err(failed("payment_plain_address_required"));
         }
@@ -752,8 +790,27 @@ impl NativeWallet {
     /// receipt commit in ONE SQLite transaction before this returns. No broadcast.
     /// A failed/interrupted transaction leaves the review prepared and sends nothing.
     pub fn sign_payment(&self, auth: &SeedAuth, id: &str) -> Result<PaymentReceipt> {
+        self.sign_payment_with_access(None, auth, id)
+    }
+
+    /// Sign only an already-reviewed proposal, with no transport activity.
+    pub fn sign_payment_with_source(
+        &self,
+        source: &super::super::NativeWalletSource,
+        auth: &SeedAuth,
+        id: &str,
+    ) -> Result<PaymentReceipt> {
+        self.sign_payment_with_access(Some(source), auth, id)
+    }
+
+    fn sign_payment_with_access(
+        &self,
+        source: Option<&super::super::NativeWalletSource>,
+        auth: &SeedAuth,
+        id: &str,
+    ) -> Result<PaymentReceipt> {
         let _source_lease = database_lease::shared(&self.paths.data_db)?;
-        self.require_source_spending_access()?;
+        self.require_payment_source(source)?;
         self.ensure_recovery_selection_ready()?;
         let conn = connection(self)?;
         let receipt = read(&conn, id)?;
@@ -835,6 +892,89 @@ impl NativeWallet {
             receipt.phase = "mined".into();
         }
         Ok(receipt)
+    }
+
+    /// Submit the already-saved native transaction through the accepted channel.
+    /// No automatic retry, signing, address query or direct endpoint is reachable.
+    /// Cancellation after the attempt begins preserves its unknown receipt.
+    pub async fn submit_payment_with_source(
+        &self,
+        source: &super::super::NativeWalletSource,
+        id: &str,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<PaymentReceipt> {
+        let _lease = Arc::new(database_lease::shared(&self.paths.data_db)?);
+        self.require_wallet_source(source)?;
+        let cancelled = || EngineError::Message("native_operation_cancelled".into());
+        if cancel.load(Ordering::Acquire) {
+            return Err(cancelled());
+        }
+        let cancellation = async {
+            loop {
+                if cancel.load(Ordering::Acquire) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        let operation = async {
+            let conn = connection(self)?;
+            let receipt = self.payment_receipt(id)?;
+            if matches!(receipt.phase.as_str(), "accepted" | "mined") {
+                return Ok(receipt);
+            }
+            if !matches!(receipt.phase.as_str(), "signed" | "unknown") {
+                return Err(failed("payment_not_signed"));
+            }
+            // The source's own client is retained after identity verification.
+            // In particular, never call connect_submission or read self.server.
+            let mut supplied = source.submission_client();
+            Self::assert_wallet_source_chain(&mut supplied, self.network).await?;
+            self.require_wallet_source(source)?;
+            if cancel.load(Ordering::Acquire) {
+                return Err(cancelled());
+            }
+            let changed = conn.execute(
+                "UPDATE ext_native_payments_v1 SET phase='unknown' WHERE id=?1 AND phase IN ('signed','unknown')",
+                [id],
+            ).map_err(|_| failed("payment_storage_failed"))?;
+            if changed != 1 {
+                return self.payment_receipt(id);
+            }
+            let mut client = Some(BroadcastConnection::Supplied(
+                Box::new(supplied),
+                _lease.clone(),
+                source.clone(),
+            ));
+            let mut db = self.open_db()?;
+            for txid in &receipt.txids {
+                if cancel.load(Ordering::Acquire) {
+                    return Err(cancelled());
+                }
+                let txid = TxId::from_hex(txid).ok_or_else(|| failed("payment_storage_failed"))?;
+                if !submission_acknowledged(
+                    self.broadcast_one(&mut client, &mut db, txid, &_lease)
+                        .await,
+                )? {
+                    return self.payment_receipt(&receipt.id);
+                }
+            }
+            if cancel.load(Ordering::Acquire) {
+                return Err(cancelled());
+            }
+            self.require_wallet_source(source)?;
+            conn.execute(
+                "UPDATE ext_native_payments_v1 SET phase='accepted' WHERE id=?1",
+                [&receipt.id],
+            )
+            .map_err(|_| failed("payment_storage_failed"))?;
+            self.payment_receipt(&receipt.id)
+        };
+        tokio::select! {
+            biased;
+            _ = cancellation => Err(cancelled()),
+            result = tokio::time::timeout(Duration::from_secs(180), operation) => result.unwrap_or_else(|_| Err(EngineError::Transport("supplied source submission deadline exceeded".into()))),
+        }
     }
 
     /// Submit ONLY the already-saved signed bytes. Retrying this operation cannot

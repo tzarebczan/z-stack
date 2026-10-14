@@ -14,7 +14,7 @@ mod seed;
 mod selective_scan;
 mod source;
 mod submission_channel;
-pub use source::NativeReadOnlySource;
+pub use source::{NativeReadOnlySource, NativeWalletSource};
 mod transparent_funding;
 mod transparent_refresh;
 mod tree_state;
