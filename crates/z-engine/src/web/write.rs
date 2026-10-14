@@ -84,7 +84,7 @@ impl Account for WebAccount {
 }
 
 impl WebWallet {
-    fn account(&self) -> Result<WebAccount, String> {
+    pub(super) fn account(&self) -> Result<WebAccount, String> {
         let ufvk = self.decode_ufvk().map_err(|e| e.to_string())?;
         Ok(WebAccount {
             id: ACCOUNT,

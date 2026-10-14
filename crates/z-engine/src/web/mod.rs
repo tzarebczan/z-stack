@@ -13,8 +13,10 @@ pub use hardware::{
 };
 mod history;
 mod live_trees;
+mod private_enhance;
 mod prove;
 mod public_data;
+pub use private_enhance::PrivateEnhanceRequest;
 mod scan;
 mod store;
 mod write;

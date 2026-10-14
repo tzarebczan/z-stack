@@ -318,6 +318,8 @@ struct Snapshot {
     #[serde(default)]
     spend_notes: Vec<StoredNote>,
     #[serde(default)]
+    private_enhance: Vec<super::private_enhance::CompactEnhanceAction>,
+    #[serde(default)]
     sapling_leaves: Vec<TreeLeaf>,
     #[serde(default)]
     orchard_leaves: Vec<TreeLeaf>,
@@ -397,6 +399,7 @@ struct SnapshotRef<'a> {
     notes: &'a [TrackedNote],
     txs: &'a BTreeMap<String, TxAgg>,
     spend_notes: &'a [StoredNote],
+    private_enhance: &'a [super::private_enhance::CompactEnhanceAction],
     sapling_leaves: SnapshotLeaves<'a>,
     orchard_leaves: SnapshotLeaves<'a>,
     ironwood_leaves: SnapshotLeaves<'a>,
@@ -495,6 +498,7 @@ pub struct WebWallet {
     notes: Vec<TrackedNote>,
     txs: BTreeMap<String, TxAgg>,
     pub(crate) spend_notes: Vec<StoredNote>,
+    pub(crate) private_enhance: Vec<super::private_enhance::CompactEnhanceAction>,
     pub(crate) sapling_leaves: Vec<TreeLeaf>,
     pub(crate) orchard_leaves: Vec<TreeLeaf>,
     pub(crate) ironwood_leaves: Vec<TreeLeaf>,
@@ -571,6 +575,7 @@ impl WebWallet {
             notes: Vec::new(),
             txs: BTreeMap::new(),
             spend_notes: Vec::new(),
+            private_enhance: Vec::new(),
             sapling_leaves: Vec::new(),
             orchard_leaves: Vec::new(),
             ironwood_leaves: Vec::new(),
@@ -948,6 +953,7 @@ impl WebWallet {
             notes: &self.notes,
             txs: &self.txs,
             spend_notes: &self.spend_notes,
+            private_enhance: &self.private_enhance,
             sapling_leaves: SnapshotLeaves {
                 retained: &self.sapling_leaves,
                 buffered: self
@@ -1034,6 +1040,7 @@ impl WebWallet {
             notes: snap.notes,
             txs: snap.txs,
             spend_notes: snap.spend_notes,
+            private_enhance: snap.private_enhance,
             sapling_leaves: snap.sapling_leaves,
             orchard_leaves: snap.orchard_leaves,
             ironwood_leaves: snap.ironwood_leaves,
@@ -1642,6 +1649,13 @@ impl WebWallet {
         })
     }
 
+    pub(crate) fn private_enhance_tree_size(&self, height: u32) -> Option<u64> {
+        self.tree_sizes
+            .iter()
+            .find(|m| m.height == height)
+            .map(|m| m.ironwood)
+    }
+
     fn record_tree_size(&mut self, height: u32) {
         let mark = TreeSizeMark {
             height,
@@ -1944,6 +1958,7 @@ impl WebWallet {
             }
         }
         self.spend_notes.retain(|n| n.mined_height <= keep);
+        self.private_enhance.retain(|a| a.height() <= keep);
         for n in &mut self.spend_notes {
             if n.spent && !stays_pending(&n.spent_in) {
                 if let Some(txid) = &n.spent_in {
@@ -2050,6 +2065,7 @@ impl WebWallet {
         self.notes.clear();
         self.txs.clear();
         self.spend_notes.clear();
+        self.private_enhance.clear();
         self.sapling_leaves.clear();
         self.orchard_leaves.clear();
         self.ironwood_leaves.clear();

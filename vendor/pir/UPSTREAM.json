@@ -1,0 +1,44 @@
+{
+  "enhance-pir": {
+    "source": "enhance/crates/enhance-pir",
+    "upstream": "https://github.com/valargroup/wallet-pir/tree/24f7694cd4f8274172a11cbff43c158bcab5d500",
+    "originalFileHashes": {
+      "Cargo.toml": "e35d5ef3c20d39ab507b654a40abea67d1cfa307ea18056bdb29db4d1d9b393b",
+      "LICENSE": "37b5e27327b5a5075b601e205ba8730ce2a9241dc4480ea1486bc939991c051c",
+      "README.md": "50ba92b5313cc33424b8173e867b66eb65ace745d74c66babb5e9b28372a1f4f",
+      "examples/v7_vector.rs": "e8fe4e9609334cbec4755f8793140a89711bccee2a5c516cbae9d4737853fda6",
+      "src/bin/client.rs": "be10775fd5c1fdc93aef41183d19dd083b418ebbc0ecd43c7dd6cdd4e5050b4c",
+      "src/client.rs": "ff180bc30e138d37a0d6ac59cda62d6e09fdf4e00dea66a373b17832357aa8e0",
+      "src/lib.rs": "199db6ed02b778cf8b483d0f84fba1276860488706d7c35ceb3992af58826455",
+      "src/native.rs": "cca9e9f8fac0ba75b6002f423fd4e1d355b20a537c65982d70ebb13ce563b159",
+      "src/protocol.rs": "593e2aec88c9ba2693c220f57518b734e23b4f7b726b2567a277f0d992a8b880",
+      "src/record.rs": "ed423d50002ee03e3c45d4ed8d98c397488245a86f421a79ac15a1f5a9b80fd5",
+      "src/status.rs": "5c9c132b54a31cd19c44b1fdaa467799916ef72622a3b3a1bb7fbc18f358f7d2",
+      "src/types.rs": "76a95ffb8adcf33e0db51536951204161b6ddad9d4698f52b5ae05c8447accc0",
+      "tests/fixtures/query-rows.json": "e390f959ecf00a270ecde91888b0689ce86735428e9dc26267767d6d4c3b5a07",
+      "tests/fixtures/schema11-record.hex": "e2a4c8f51ffa7d7ed43bd496de9d8513c768f07824532a110cd7b4261e315176",
+      "tests/fixtures/schema7-record.hex": "8eb95b1cf9f35aa6843be6b26a767f9e9a160dcb674c4d6521d72a059930af9f",
+      "tests/fixtures/v7-session.json": "2ac4aeb64e25914a50b5ed96b2e95daf616ad3ac967b313d552079ba4de802e6",
+      "tests/routing_contract.rs": "f32ff7e1bd3d46357dc2b0292ad97b9adc7a5d85244909afdd6c7965bb9dff69",
+      "tests/v7_contract.rs": "ee70f747159dbf466a980baf8957cf13de8f3edeed1074c7683dd58dc3ebb832"
+    }
+  },
+  "pir-native": {
+    "source": "shared/pir-native",
+    "upstream": "https://github.com/valargroup/wallet-pir/tree/24f7694cd4f8274172a11cbff43c158bcab5d500",
+    "originalFileHashes": {
+      "Cargo.toml": "91e98744f0fc30366fbd75cc12e6da8e754579ac1eea4f5ba0ae4a17b5af193c",
+      "src/lib.rs": "b7f3c6765eeefad7cd7f3eb8e2091cb5c8fd087b392a7882f7f32fd33cb66f1c",
+      "tests/dithered.rs": "c6cfb07bdf1d0be077ada9525a7e5684510bed982a4c35969ae1d99f7252d60a",
+      "tests/golden.rs": "9bb9e3cc695d249560121fdf50a239fd7d0c1bfd80277c79cb7158841bc3c228",
+      "tests/p8.rs": "8ebbef766542c9110e887c9514740dbb0c126ccfe5c68e9a3ae0aa1b2dbe549f"
+    }
+  },
+  "publishedCryptoDependencies": {
+    "ipir-sp": "=0.1.0-rc.7",
+    "inspiring": "=0.1.0-rc.3",
+    "reinspiring": "=0.1.3-rc.1",
+    "valar-spiral-rs": "=0.5.3-rc.1",
+    "patches": "none; source-exact registry dependency math with existing scalar fallback"
+  }
+}

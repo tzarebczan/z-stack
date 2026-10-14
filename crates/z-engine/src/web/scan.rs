@@ -38,6 +38,7 @@ struct Head {
     shielded: bool,
     txids: Vec<String>,
     spends: Vec<(String, Vec<u8>)>,
+    enhance: Vec<super::private_enhance::CompactEnhanceAction>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -311,6 +312,7 @@ impl WebWallet {
             }
         }
 
+        let enhance = super::private_enhance::candidates(&block);
         let block_time = block.time;
         let block_txids: Vec<String> = block.vtx.iter().map(|t| to_hex(&t.txid)).collect();
         if !compact_has_shielded(&block) {
@@ -359,6 +361,7 @@ impl WebWallet {
             Self::make_prior(height, hash, sapling_sz, orchard_sz, ironwood_sz),
         )?;
         self.stamp_block_time(block_time, &block_txids);
+        self.retain_enhance_candidates(enhance);
 
         Ok(ScanDelta {
             height,
@@ -433,6 +436,7 @@ impl WebWallet {
         for (i, block) in blocks.into_iter().enumerate() {
             let height = block.height as u32;
             let shielded = compact_has_shielded(&block);
+            let enhance = super::private_enhance::candidates(&block);
             let (sap, orch, iron) = match &block.chain_metadata {
                 Some(m) => (
                     m.sapling_commitment_tree_size,
@@ -467,6 +471,7 @@ impl WebWallet {
                     shielded: true,
                     txids,
                     spends,
+                    enhance,
                 });
                 decrypts.push(self, i, block)?;
             } else {
@@ -480,6 +485,7 @@ impl WebWallet {
                     shielded: false,
                     txids: Vec::new(),
                     spends: Vec::new(),
+                    enhance: Vec::new(),
                 });
             }
         }
@@ -519,6 +525,7 @@ impl WebWallet {
                         true,
                     )?;
                     self.stamp_block_time(head.time, &head.txids);
+                    self.retain_enhance_candidates(head.enhance.clone());
                     out.push(ScanDelta {
                         height: head.height,
                         notes_found: 0,
@@ -558,6 +565,7 @@ impl WebWallet {
                         ),
                     )?;
                     self.stamp_block_time(head.time, &head.txids);
+                    self.retain_enhance_candidates(head.enhance.clone());
                     out.push(ScanDelta {
                         height: head.height,
                         notes_found,

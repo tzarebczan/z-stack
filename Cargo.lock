@@ -1965,6 +1965,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
+name = "enhance-pir"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "hex",
+ "ipir-sp",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "enumflags2"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2595,9 +2609,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 5.3.0",
  "wasip2",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -8614,6 +8630,25 @@ dependencies = [
  "zcash_script",
  "zeroize",
  "zip32",
+]
+
+[[package]]
+name = "z-enhance-pir"
+version = "0.1.0-alpha.11"
+dependencies = [
+ "base64",
+ "enhance-pir",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "hex",
+ "inspiring",
+ "ipir-sp",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "wasm-bindgen",
+ "wasm-bindgen-rayon",
 ]
 
 [[package]]
