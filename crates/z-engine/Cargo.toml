@@ -180,6 +180,7 @@ getrandom = { version = "0.2", features = ["js"] }
 time = { version = "0.3.22", default-features = false, features = ["std", "wasm-bindgen"] }
 
 [dev-dependencies]
+rand_08 = { package = "rand", version = "0.8" }
 hex = "0.4"
 enhance-pir = { path = "../../vendor/pir/enhance-pir", default-features = false }
 ipir-sp = "=0.1.0-rc.7"

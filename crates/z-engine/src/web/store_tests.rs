@@ -856,7 +856,7 @@ fn ironwood_memo_transaction(sender: &WebWallet, recipient: &WebWallet, memo: &s
 }
 
 #[cfg(feature = "native")]
-fn shielded_memo_transaction(
+pub(crate) fn shielded_memo_transaction(
     sender: &WebWallet,
     recipient: &WebWallet,
     memo: &str,

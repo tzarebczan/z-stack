@@ -204,6 +204,9 @@ pub struct TxAgg {
     pub is_shielding: bool,
     #[serde(default)]
     pub fee_zat: Option<u64>,
+    /// Fee derived from complete transaction bytes; PIR assertions never set this.
+    #[serde(default)]
+    pub fee_from_full_transaction: bool,
     #[serde(default)]
     pub expiry_height: Option<u32>,
     #[serde(default)]
@@ -4201,7 +4204,7 @@ fn diversifier_u32(j: DiversifierIndex) -> u32 {
 
 #[cfg(test)]
 #[path = "store_tests.rs"]
-mod performance_tests;
+pub(crate) mod performance_tests;
 
 #[cfg(test)]
 mod tests {

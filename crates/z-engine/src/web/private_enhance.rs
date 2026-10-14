@@ -44,6 +44,8 @@ pub(crate) struct CompactEnhanceAction {
     done: bool,
     #[serde(default)]
     suspended: bool,
+    #[serde(default)]
+    recovered_outgoing_value: Option<u64>,
 }
 
 impl CompactEnhanceAction {
@@ -102,6 +104,7 @@ pub(crate) fn candidates(block: &CompactBlock) -> Vec<CompactEnhanceAction> {
                     prefix: to_hex(&action.ciphertext),
                     done: false,
                     suspended: false,
+                    recovered_outgoing_value: None,
                 });
             }
             position += 1;
@@ -113,10 +116,10 @@ pub(crate) fn candidates(block: &CompactBlock) -> Vec<CompactEnhanceAction> {
 impl WebWallet {
     pub(crate) fn retain_enhance_candidates(&mut self, actions: Vec<CompactEnhanceAction>) {
         for action in actions {
-            if !self
+            if self
                 .txs()
                 .get(&action.txid)
-                .is_some_and(|tx| tx.mined_height == Some(action.height))
+                .is_none_or(|tx| tx.mined_height != Some(action.height))
             {
                 continue;
             }
@@ -262,6 +265,66 @@ impl Apply<'_> {
             })
             .transpose()
     }
+    fn retire_value_balanced_padding(&mut self) {
+        // NotRecoverable alone cannot distinguish padding from an OVK-discarded payment.
+        // Require full-transaction-derived fee metadata, never the fee asserted by PIR.
+        let txid = &self.captured.txid;
+        let Some(tx) = self.wallet.txs().get(txid) else {
+            return;
+        };
+        let Some(fee) = tx.fee_zat.filter(|_| tx.fee_from_full_transaction) else {
+            return;
+        };
+        let actions: Vec<_> = self
+            .wallet
+            .private_enhance
+            .iter()
+            .filter(|a| &a.txid == txid)
+            .collect();
+        if actions.is_empty() || actions.iter().any(|a| !a.done && !a.suspended) {
+            return;
+        }
+        let sum = |values: Vec<u64>| values.into_iter().try_fold(0u64, u64::checked_add);
+        let spent: Vec<_> = self
+            .wallet
+            .notes()
+            .iter()
+            .filter(|n| n.pool == "ironwood" && n.spent_in.as_deref() == Some(txid.as_str()))
+            .map(|n| n.value_zat)
+            .collect();
+        if spent.is_empty() {
+            return;
+        }
+        let incoming = sum(self
+            .wallet
+            .spend_notes
+            .iter()
+            .filter(|n| n.pool == "ironwood" && &n.txid == txid)
+            .map(|n| n.value_zat)
+            .collect());
+        let outgoing = sum(actions
+            .iter()
+            .filter_map(|a| a.recovered_outgoing_value)
+            .collect());
+        let recovered = incoming
+            .zip(outgoing)
+            .and_then(|(a, b)| a.checked_add(b))
+            .and_then(|value| value.checked_add(fee));
+        if sum(spent)
+            .zip(recovered)
+            .is_some_and(|(spent, recovered)| spent == recovered)
+        {
+            for action in self
+                .wallet
+                .private_enhance
+                .iter_mut()
+                .filter(|a| &a.txid == txid && a.suspended)
+            {
+                action.done = true;
+                action.suspended = false;
+            }
+        }
+    }
     fn commit(&mut self, parts: IronwoodEnhancementData<u32>) -> Result<()> {
         if parts.has_transparent {
             return Err(refused("enhance_public_data_required"));
@@ -312,11 +375,22 @@ impl Apply<'_> {
                 agg.memos.push(memo);
             }
         }
-        if let Some(value) = outgoing {
-            agg.outgoing_shielded_zat = agg.outgoing_shielded_zat.saturating_add(value);
-        }
+        self.wallet.private_enhance[index].recovered_outgoing_value = outgoing;
+        let outgoing_total = self
+            .wallet
+            .private_enhance
+            .iter()
+            .filter(|a| a.txid == self.captured.txid)
+            .filter_map(|a| a.recovered_outgoing_value)
+            .fold(0u64, u64::saturating_add);
+        self.wallet
+            .txs_mut()
+            .get_mut(&self.captured.txid)
+            .expect("validated transaction")
+            .outgoing_shielded_zat = outgoing_total;
         self.wallet.private_enhance[index].done = !suspended;
         self.wallet.private_enhance[index].suspended = suspended;
+        self.retire_value_balanced_padding();
         let complete = self
             .wallet
             .private_enhance
@@ -372,8 +446,12 @@ impl EnhancePirStorage for Apply<'_> {
         &self,
         _: Position,
     ) -> Result<Option<PendingIronwoodOutgoing<u32>>> {
-        Ok(self
-            .wallet
+        // Authenticated incoming change is complete on the incoming path. Its internal OVK
+        // must not be confused with a failed external outgoing recovery.
+        if self.incoming()?.is_some() {
+            return Ok(None);
+        }
+        self.wallet
             .txs()
             .get(&self.captured.txid)
             .filter(|_| {
@@ -383,7 +461,7 @@ impl EnhancePirStorage for Apply<'_> {
                 })
             })
             .map(|_| {
-                Ok::<_, EngineError>(PendingIronwoodOutgoing {
+                Ok(PendingIronwoodOutgoing {
                     request_id: self.request()?.request_id(),
                     account_ids: vec![0],
                     nullifier: bytes(&self.captured.nullifier)?,
@@ -392,7 +470,7 @@ impl EnhancePirStorage for Apply<'_> {
                     compact_ciphertext: bytes(&self.captured.prefix)?,
                 })
             })
-            .transpose()?)
+            .transpose()
     }
     fn compare_and_apply_ironwood_enhancement(
         &mut self,
@@ -494,6 +572,228 @@ mod tests {
         });
         (block, record)
     }
+    fn encrypted_action(
+        recipient: orchard::Address,
+        ovk: Option<orchard::keys::OutgoingViewingKey>,
+        value: u64,
+        nf: [u8; 32],
+        fee: Option<u64>,
+    ) -> (CompactOrchardAction, EnhanceRecord) {
+        use orchard::value::{ValueCommitTrapdoor, ValueCommitment, ValueSum};
+        let rho = Rho::from_bytes(&nf).unwrap();
+        let note = Note::from_parts(
+            recipient,
+            NoteValue::from_raw(value),
+            rho,
+            RandomSeed::from_bytes([7; 32], &rho).unwrap(),
+            NoteVersion::V3,
+        )
+        .unwrap();
+        let mut memo = [0; 512];
+        memo[..13].copy_from_slice(b"private hello");
+        let enc = IronwoodNoteEncryption::new(ovk, note, memo);
+        let ciphertext = enc.encrypt_note_plaintext();
+        let cmx = ExtractedNoteCommitment::from(note.commitment());
+        let mut trapdoor = [0; 32];
+        trapdoor[0] = 1;
+        let cv = ValueCommitment::derive(
+            ValueSum::default(),
+            ValueCommitTrapdoor::from_bytes(trapdoor).unwrap(),
+        );
+        let record = EnhanceRecord::from_parts(EnhanceRecordParts {
+            enc_ciphertext_suffix: ciphertext[52..].try_into().unwrap(),
+            cv_net: cv.to_bytes(),
+            out_ciphertext: enc.encrypt_outgoing_plaintext(&cv, &cmx, &mut rand_08::thread_rng()),
+            has_transparent_inputs: false,
+            has_transparent_outputs: false,
+            metadata: EnhanceTransactionMetadata::new(HEIGHT + 500, fee).unwrap(),
+        });
+        (
+            CompactOrchardAction {
+                nullifier: nf.to_vec(),
+                cmx: cmx.to_bytes().to_vec(),
+                ephemeral_key: IronwoodDomain::epk_bytes(enc.epk()).0.to_vec(),
+                ciphertext: ciphertext[..52].to_vec(),
+            },
+            record,
+        )
+    }
+    fn spent_change_padding(
+        fee: Option<u64>,
+        discard_payment: bool,
+    ) -> (WebWallet, Vec<EnhanceRecord>) {
+        let mut w = wallet();
+        let fvk = w.decode_ufvk().unwrap().orchard().unwrap().clone();
+        let stranger = account_from_mnemonic(
+            "legal winner thank year wave sausage worth useful legal winner thank yellow",
+            Network::Regtest,
+            0,
+        )
+        .unwrap();
+        let foreign =
+            zcash_keys::keys::UnifiedFullViewingKey::decode(&Network::Regtest, &stranger.ufvk)
+                .unwrap()
+                .orchard()
+                .unwrap()
+                .clone();
+        let (funding, _) = encrypted_action(
+            fvk.address_at(0u32, Scope::External),
+            None,
+            100000,
+            [1; 32],
+            None,
+        );
+        let (mut first, _) = fixture(&w);
+        first.vtx[0].ironwood_actions = vec![funding];
+        w.apply_compact_block(&first.encode_to_vec()).unwrap();
+        let nf = bytes(&w.spend_notes[0].nf).unwrap();
+        let outputs = [
+            encrypted_action(
+                foreign.address_at(0u32, Scope::External),
+                (!discard_payment).then(|| fvk.to_ovk(Scope::External)),
+                60000,
+                nf,
+                fee,
+            ),
+            encrypted_action(
+                fvk.address_at(0u32, Scope::Internal),
+                Some(fvk.to_ovk(Scope::Internal)),
+                30000,
+                [5; 32],
+                fee,
+            ),
+            encrypted_action(
+                foreign.address_at(1u32, Scope::External),
+                None,
+                0,
+                [6; 32],
+                fee,
+            ),
+        ];
+        let mut second = first.clone();
+        second.height += 1;
+        second.prev_hash = first.hash;
+        second.hash = vec![8; 32];
+        second.vtx[0].txid = vec![4; 32];
+        second.vtx[0].ironwood_actions = outputs.iter().map(|(action, _)| action.clone()).collect();
+        second
+            .chain_metadata
+            .as_mut()
+            .unwrap()
+            .ironwood_commitment_tree_size = 4;
+        w.apply_compact_block(&second.encode_to_vec()).unwrap();
+        assert!(w
+            .notes()
+            .iter()
+            .any(|note| note.spent_in.as_deref() == Some(&"04".repeat(32))));
+        (w, outputs.into_iter().map(|(_, record)| record).collect())
+    }
+    #[test]
+    fn genuine_spend_change_and_padding_complete_only_after_recovered_value_balance() {
+        let (mut w, records) = spent_change_padding(Some(10000), false);
+        {
+            let tx = w.txs_mut().get_mut(&"04".repeat(32)).unwrap();
+            tx.fee_zat = Some(10000);
+            tx.fee_from_full_transaction = true;
+        }
+        let work: Vec<_> = w
+            .private_enhance_work()
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.action.txid == "04".repeat(32))
+            .collect();
+        assert_eq!(work.len(), 3);
+        assert_eq!(
+            w.apply_private_enhance_record(work[2].clone(), records[2].as_bytes())
+                .unwrap(),
+            EnhancePirStoreResult::NotRecoverable
+        );
+        assert!(!w.txs()[&"04".repeat(32)].enhancement_complete);
+        assert_eq!(
+            w.apply_private_enhance_record(work[1].clone(), records[1].as_bytes())
+                .unwrap(),
+            EnhancePirStoreResult::Stored
+        );
+        assert!(!w.txs()[&"04".repeat(32)].enhancement_complete);
+        assert_eq!(
+            w.apply_private_enhance_record(work[0].clone(), records[0].as_bytes())
+                .unwrap(),
+            EnhancePirStoreResult::Stored
+        );
+        let tx = &w.txs()[&"04".repeat(32)];
+        assert!(tx.enhancement_complete);
+        assert_eq!(tx.outgoing_shielded_zat, 60000);
+        assert_eq!(tx.memo_recovered, Some(true));
+        let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert!(restored.txs()[&"04".repeat(32)].enhancement_complete);
+    }
+    #[test]
+    fn missing_fee_wrong_balance_and_discarded_payment_remain_unresolved() {
+        for (fee, discard) in [
+            (None, false),
+            (Some(9000), false),
+            (Some(10000), false),
+            (Some(10000), true),
+        ] {
+            let (mut w, records) = spent_change_padding(fee, discard);
+            if discard || fee == Some(9000) {
+                let tx = w.txs_mut().get_mut(&"04".repeat(32)).unwrap();
+                tx.fee_zat = fee;
+                tx.fee_from_full_transaction = true;
+            }
+            let work: Vec<_> = w
+                .private_enhance_work()
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.action.txid == "04".repeat(32))
+                .collect();
+            for (request, record) in work.into_iter().zip(records) {
+                if fee.is_none() {
+                    let before = w.to_snapshot().unwrap();
+                    assert!(w
+                        .apply_private_enhance_record(request, record.as_bytes())
+                        .is_err());
+                    assert_eq!(w.to_snapshot().unwrap(), before);
+                } else {
+                    w.apply_private_enhance_record(request, record.as_bytes())
+                        .unwrap();
+                }
+            }
+            assert!(!w.txs()[&"04".repeat(32)].enhancement_complete);
+            if fee.is_none() {
+                continue;
+            }
+            assert!(w
+                .private_enhance
+                .iter()
+                .any(|a| a.txid == "04".repeat(32) && a.suspended && !a.done));
+        }
+    }
+    #[cfg(feature = "native")]
+    #[test]
+    fn fee_provenance_requires_complete_raw_transaction_and_survives_snapshot() {
+        use zcash_primitives::transaction::Transaction;
+        use zcash_protocol::consensus::BranchId;
+        let mut w = wallet();
+        // Genuine encrypted zero-value note; inert consensus proof/signature fixture.
+        // Its complete serialized value balance determines fee zero without PIR metadata.
+        let raw = super::super::store::performance_tests::shielded_memo_transaction(
+            &w,
+            &w,
+            "fee proof",
+            0,
+            true,
+        );
+        let tx = Transaction::read(raw.as_slice(), BranchId::Nu6_3).unwrap();
+        w.enhance_raw_tx(&raw).unwrap();
+        let agg = &w.txs()[&to_hex(tx.txid().as_ref())];
+        assert_eq!(agg.fee_zat, Some(0));
+        assert!(agg.fee_from_full_transaction);
+        let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert!(restored.txs()[&to_hex(tx.txid().as_ref())].fee_from_full_transaction);
+        w.reset_scan();
+        assert!(w.txs().is_empty());
+    }
     #[test]
     fn authentic_suffix_survives_snapshot_and_preserves_untrusted_expiry() {
         let mut w = wallet();
@@ -514,6 +814,10 @@ mod tests {
         let tx = w.txs().get(&"03".repeat(32)).unwrap();
         assert_eq!(tx.memos, vec!["private hello"]);
         assert_eq!(tx.fee_zat, Some(10000));
+        assert!(
+            !tx.fee_from_full_transaction,
+            "PIR metadata cannot grant fee provenance"
+        );
         assert_eq!(tx.expiry_height, None);
         assert!(tx.enhancement_complete);
         assert!(!tx.history_metadata_complete);

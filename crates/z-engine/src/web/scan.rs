@@ -1051,6 +1051,7 @@ impl WebWallet {
         agg.transparent_outputs = transparent_outputs;
         if chain_fee.is_some() {
             agg.fee_zat = chain_fee;
+            agg.fee_from_full_transaction = true;
         }
         Ok(agg.memos.len() as u32)
     }
