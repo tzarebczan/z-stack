@@ -60,6 +60,8 @@ export interface WasmClientContext {
   rootsChecked: { source: ScanSession; at: number; } | null;
   refreshIfStale: (source: ScanSession, operation: WalletOperation) => Promise<void>;
   transparentScanStatus: PublicDataStatus;
+  transparentScanFailure: WalletSnapshot["transparentScanFailure"];
+  readonly transparentScanEpoch: number;
   sharedMemoStatus: PublicDataStatus;
   selectiveMemoStatus: PublicDataStatus;
   memoAbort: AbortController | null;

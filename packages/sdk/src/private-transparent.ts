@@ -44,7 +44,7 @@ async function syncPrivateTransparentPass({ source, transport, signal, assertCur
   assertCurrent: () => void;
   checkpoint: () => Promise<void>;
   treeState: ((height: number, signal: AbortSignal) => Promise<{ height: number; hash: string }>) | undefined;
-}, budget: { signal: AbortSignal; deadline: AbortSignal; exceeded: Error }): Promise<"complete" | "scanning" | "scope-growth"> {
+}, budget: { signal: AbortSignal; deadline: AbortSignal; exceeded: Error }): Promise<"complete" | "scanning" | "history-metadata-limit" | "scope-growth"> {
   const engine = source.privateTransparent;
   if (!engine) throw new Error("WASM needs a transparent PIR upgrade");
   if (!/^[0-9a-f]{64}$/.test(transport.sourceId)) throw new Error("transparent_pir_source_invalid");
@@ -95,7 +95,8 @@ async function syncPrivateTransparentPass({ source, transport, signal, assertCur
         case "stopped": {
           if (!("status" in step) || typeof step.status !== "object" || step.status === null || !("kind" in step.status))
             throw new Error("transparent_pir_engine_invalid");
-          if (step.status.kind !== "complete") return "scanning";
+          if (step.status.kind !== "complete") return step.status.kind === "incomplete"
+            && "reason" in step.status && step.status.reason === "history_metadata_limit" ? "history-metadata-limit" : "scanning";
           const status = json(await invoke("status"), 16 * 1024);
           return typeof status === "object" && status !== null && "completion" in status
             && status.completion === "complete-for-enrolled-scope" ? "complete" : "scope-growth";
@@ -129,7 +130,8 @@ async function syncPrivateTransparentPass({ source, transport, signal, assertCur
       } else if (step.kind === "stopped") {
         if (!("status" in step) || typeof step.status !== "object" || step.status === null || !("kind" in step.status))
           throw new Error("transparent_pir_engine_invalid");
-        if (step.status.kind !== "complete") return "scanning";
+        if (step.status.kind !== "complete") return step.status.kind === "incomplete"
+            && "reason" in step.status && step.status.reason === "history_metadata_limit" ? "history-metadata-limit" : "scanning";
         const status = json(await invokeBudget("status"), 16 * 1024);
         return typeof status === "object" && status !== null && "completion" in status
           && status.completion === "complete-for-enrolled-scope" ? "complete" : "scanning";
@@ -143,7 +145,7 @@ async function syncPrivateTransparentPass({ source, transport, signal, assertCur
 }
 
 /** Repeat activity-driven gap expansion within one bounded, cancellable sync task. */
-export async function syncPrivateTransparent(input: Parameters<typeof syncPrivateTransparentPass>[0]): Promise<"complete" | "scanning"> {
+export async function syncPrivateTransparent(input: Parameters<typeof syncPrivateTransparentPass>[0]): Promise<"complete" | "scanning" | "history-metadata-limit"> {
   const deadline = AbortSignal.timeout(120_000);
   const signal = AbortSignal.any([input.signal, deadline]);
   let exchanges = 0, chainReads = 0, downloaded = 0, uploaded = 0;

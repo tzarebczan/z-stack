@@ -28,10 +28,15 @@ function fixture(t: TestContext) {
   let onSnapshot: (() => void) | undefined;
   let onRevive: (() => void) | undefined;
   let onRescan: (() => void) | undefined;
+  let onPrivateTransparent: ((operation: string, input: Uint8Array) => Uint8Array | Promise<Uint8Array>) | undefined;
   const make = (initial: { address: string; pending: boolean; reserved?: boolean; birthday?: number; scanned?: number; transparentScanHeight?: number | null; memoScanHeight?: number | null }) => {
     const state = { ...initial };
     return {
       free() { frees++; },
+      privateTransparent: (operation: string, input: Uint8Array) => {
+        if (!onPrivateTransparent) throw new Error("unexpected_private_scan");
+        return onPrivateTransparent(operation, input);
+      },
       toSnapshot: () => { onSnapshot?.(); return encode(state); },
       snapshotJson: () => JSON.stringify({ network: "regtest", unifiedAddress: state.address, ufvk,
         birthdayHeight: state.birthday ?? 8, scannedHeight: state.scanned ?? 10,
@@ -89,6 +94,7 @@ function fixture(t: TestContext) {
     onSnapshot(callback: () => void) { onSnapshot = callback; },
     onRevive(callback?: () => void) { onRevive = callback; },
     onRescan(callback?: () => void) { onRescan = callback; },
+    onPrivateTransparent(callback: NonNullable<typeof onPrivateTransparent>) { onPrivateTransparent = callback; },
     async open(extra: Partial<Parameters<typeof createWallet>[0]> = {}) {
       wallet = await createWallet({ network: "regtest", storage, prewarmProvingKey: false,
         server: { kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(), submit: async () => txid }, ...extra });
@@ -1876,3 +1882,94 @@ test("public transparent mode setter rejects automatic shielding before changing
   assert.equal((await wallet.getWallet()).transparentScanStatus, "off");
   assert.ok(JSON.stringify(await readSavedSnapshotRecord()) === JSON.stringify(before), "rejected mode change must preserve saved wallet state");
 });
+
+function privatePolicyFixture(t: TestContext) {
+  const f = fixture(t);
+  let outcome = "history_metadata_limit";
+  let delayed: (() => Promise<Uint8Array>) | undefined;
+  f.onPrivateTransparent(operation => {
+    if (operation === "begin") return encode({ height: 10, hash: "22".repeat(32) });
+    if (operation === "advance") return delayed ? delayed() : encode({ kind: "stopped", status: outcome === "complete" ? { kind: "complete" } : { kind: "incomplete", reason: outcome } });
+    if (operation === "status") return encode({ completion: "complete-for-enrolled-scope" });
+    return new Uint8Array();
+  });
+  return { f, complete: () => { outcome = "complete"; }, delay: (value: () => Promise<Uint8Array>) => { delayed = value; }, clearDelay: () => { delayed = undefined; },
+    open: () => f.open({ transparentScan: "pir", server: {
+      kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+      transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+    } }),
+  };
+}
+test("public private-history limit publishes unavailable and clears on mode changes and successful retry", async t => {
+  const f = privatePolicyFixture(t), wallet = await f.open();
+  await wallet.create({ birthday: 8 });
+  const limited = await wallet.sync();
+  assert.equal(limited.transparentScanStatus, "unavailable");
+  assert.equal(limited.transparentScanFailure, "history-metadata-limit");
+  for (const mode of ["off", "compact"] as const) {
+    wallet.setTransparentScan(mode);
+    assert.equal((await wallet.getWallet()).transparentScanFailure, undefined);
+    wallet.setTransparentScan("pir");
+    assert.equal((await wallet.getWallet()).transparentScanFailure, undefined);
+    await wallet.sync();
+  }
+  f.complete();
+  const complete = await wallet.sync();
+  assert.equal(complete.transparentScanStatus, "complete");
+  assert.equal(complete.transparentScanFailure, undefined);
+});
+test("old metadata-limit response cannot publish after disabling and re-enabling the same owner", async t => {
+  const f = privatePolicyFixture(t), wallet = await f.open();
+  await wallet.create({ birthday: 8 });
+  let enter!: () => void, finish!: (value: Uint8Array) => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  f.delay(() => { enter(); return new Promise<Uint8Array>(resolve => { finish = resolve; }); });
+  const old = wallet.sync();
+  await entered;
+  wallet.setTransparentScan("off"); wallet.setTransparentScan("pir");
+  finish(encode({ kind: "stopped", status: { kind: "incomplete", reason: "history_metadata_limit" } }));
+  await assert.rejects(old, /Privacy settings changed/);
+  assert.equal((await wallet.getWallet()).transparentScanFailure, undefined);
+  assert.equal((await wallet.getWallet()).transparentScanStatus, "scanning");
+  f.clearDelay(); f.complete();
+  assert.equal((await wallet.sync()).transparentScanStatus, "complete");
+});
+test("metadata policy limit does not auto-retry private history but still follows memos and new blocks", async t => {
+  const clock = autoSyncClock(t), f = fixture(t); let tip = 10;
+  const wallet = await f.open({ autoSync: true, server: { kind: "fixture", label: "offline", tip: async () => tip, blocks: async () => new Uint8Array() } });
+  await wallet.create({ birthday: 1 });
+  const snapshot = { ...await wallet.getWallet(), transparentScanStatus: "unavailable" as const, transparentScanFailure: "history-metadata-limit" as const, memoFetchStatus: "off" as const };
+  t.mock.method(wallet, "getWallet", async () => snapshot);
+  let syncs = 0; t.mock.method(wallet, "sync", async () => { syncs++; return snapshot; });
+  await clock.tick(); assert.equal(syncs, 0);
+  wallet.setMemoFetch("auto"); Object.assign(snapshot, { memoFetchStatus: "unavailable" });
+  await clock.tick(); assert.equal(syncs, 1);
+  Object.assign(snapshot, { memoFetchStatus: "off" }); tip = 11;
+  await clock.tick(); assert.equal(syncs, 2);
+});
+
+test("replacing the wallet source clears the previous history policy failure", async t => {
+  const f = privatePolicyFixture(t), wallet = await f.open();
+  await wallet.create({ birthday: 8 });
+  assert.equal((await wallet.sync()).transparentScanFailure, "history-metadata-limit");
+  const replaced = await wallet.restore(words, { birthday: 8, replace: true });
+  assert.equal(replaced.transparentScanFailure, undefined);
+  assert.equal((await wallet.getWallet()).transparentScanFailure, undefined);
+});
+for (const action of ["lock", "replace"] as const) {
+  test(`${action === "lock" ? "cancelled lock" : action} wins over an old metadata policy stop`, async t => {
+    const f = privatePolicyFixture(t), wallet = await f.open();
+    await wallet.create({ birthday: 8 });
+    let enter!: () => void, finish!: (value: Uint8Array) => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    f.delay(() => { enter(); return new Promise<Uint8Array>(resolve => { finish = resolve; }); });
+    const old = wallet.sync();
+    const rejected = assert.rejects(old, /cancelled|aborted|AbortError/i);
+    await entered;
+    if (action === "lock") wallet.cancelSync();
+    const changed = action === "lock" ? wallet.lock() : wallet.restore(words, { birthday: 8, replace: true });
+    finish(encode({ kind: "stopped", status: { kind: "incomplete", reason: "history_metadata_limit" } }));
+    await changed; await rejected;
+    assert.equal((await wallet.getWallet()).transparentScanFailure, undefined);
+  });
+}

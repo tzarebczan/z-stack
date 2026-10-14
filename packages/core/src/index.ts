@@ -139,6 +139,8 @@ export type WalletSnapshot = {
   transparentScanComplete?: boolean;
   memoScanHeight?: number | null;
   transparentScanStatus?: "off" | "unsupported" | "scanning" | "complete" | "unavailable";
+  /** This client cannot process the saved history metadata; retrying or rescanning does not lift the limit. */
+  transparentScanFailure?: "history-metadata-limit";
   /** Memo retrieval progress. On-demand starts off; after fetchMemos(), scanning means another batch remains. */
   memoFetchStatus?: "off" | "unsupported" | "scanning" | "complete" | "unavailable";
   sharedMemoStatus?: "off" | "unsupported" | "scanning" | "complete" | "unavailable";

@@ -315,3 +315,29 @@ test("elapsed deadline after durable completion does not downgrade or acknowledg
   assert.equal(writes, 3);
   assert.equal(f.calls.filter(op => op === "ack").length, 1);
 });
+
+for (const drain of [false, true]) {
+  test(`metadata policy limit is a closed terminal result${drain ? " during budget drain" : ""}`, async t => {
+    const deadline = new AbortController();
+    t.mock.method(AbortSignal, "timeout", () => deadline.signal);
+    const f = setup([
+      ...(drain ? [{ kind: "need_chain", height: 1, hash }] : []),
+      { kind: "checkpoint", checkpoint_id: checkpointId },
+      { kind: "stopped", status: { kind: "incomplete", reason: "history_metadata_limit" } },
+    ]);
+    const result = await syncPrivateTransparent({ ...f.input, treeState: async () => {
+      deadline.abort(new DOMException("owned deadline", "TimeoutError"));
+      return new Promise<{ height: number; hash: string }>(() => {});
+    } });
+    assert.equal(result, "history-metadata-limit");
+    assert.equal(f.calls.filter(op => op === "ack").length, 1);
+    assert.equal(f.calls.includes("exchange"), false);
+    assert.equal(f.calls.includes("status"), false);
+  });
+}
+test("only the exact incomplete metadata limit is terminal", async () => {
+  for (const status of [{ kind: "incomplete", reason: "history_metadata_limit_extra" }, { kind: "incomplete", reason: "chain_budget" }]) {
+    const f = setup([{ kind: "stopped", status }]);
+    assert.equal(await syncPrivateTransparent(f.input), "scanning");
+  }
+});

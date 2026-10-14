@@ -38,7 +38,7 @@ import type { WasmClientContext } from './wasm-client-context';
 import * as runtime from './wasm-client-runtime';
 
 /** Block scanning and optional public-data enhancement. */
-export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" | "bus" | "session" | "snap" | "currentSession" | "syncLock" | "memoLock" | "loadIfNeeded" | "preferWorker" | "transport" | "memoFetch" | "persist" | "opts" | "transparentScan" | "localLight" | "maxBlocksPerRequest" | "maxSharedMemoBlocksPerRequest" | "submissionPolicy" | "syncOpts" | "grpcWeb" | "lwdPipe" | "retireFailedSession" | "spendingSeed" | "prewarmProvingKey" | "sessionOperation" | "client" | "unlockPolicy" | "rootsChecked" | "assertSource" | "network" | "refreshIfStale" | "stateEpoch" | "transparentScanStatus" | "sharedMemoStatus" | "selectiveMemoStatus" | "memoAbort" | "storageGeneration" | "rescanning">) {
+export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" | "bus" | "session" | "snap" | "currentSession" | "syncLock" | "memoLock" | "loadIfNeeded" | "preferWorker" | "transport" | "memoFetch" | "persist" | "opts" | "transparentScan" | "localLight" | "maxBlocksPerRequest" | "maxSharedMemoBlocksPerRequest" | "submissionPolicy" | "syncOpts" | "grpcWeb" | "lwdPipe" | "retireFailedSession" | "spendingSeed" | "prewarmProvingKey" | "sessionOperation" | "client" | "unlockPolicy" | "rootsChecked" | "assertSource" | "network" | "refreshIfStale" | "stateEpoch" | "transparentScanStatus" | "transparentScanFailure" | "transparentScanEpoch" | "sharedMemoStatus" | "selectiveMemoStatus" | "memoAbort" | "storageGeneration" | "rescanning">) {
 
   function progressScope(): () => boolean {
     const epoch = runtime.runtimeState.wasmSyncEpoch;
@@ -973,21 +973,25 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const source = ctx.session;
     if (!source || ctx.transparentScan !== "pir") return;
     const transport = ctx.transport.transparentPir;
-    if (!transport) { ctx.transparentScanStatus = "unsupported"; return; }
+    if (!transport) { ctx.transparentScanFailure = undefined; ctx.transparentScanStatus = "unsupported"; return; }
+    const epoch = ctx.transparentScanEpoch;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     const wait = AbortSignal.any([operation.signal, signal]);
     const current = () => {
       wait.throwIfAborted(); ctx.assertSource(operation, source);
-      if (ctx.transparentScan !== "pir" || ctx.transport.transparentPir !== transport)
+      if (ctx.transparentScan !== "pir" || ctx.transparentScanEpoch !== epoch || ctx.transport.transparentPir !== transport)
         throw new Error("Privacy settings changed during retrieval");
     };
     try {
+      ctx.transparentScanFailure = undefined;
       ctx.transparentScanStatus = "scanning";
-      ctx.transparentScanStatus = await syncPrivateTransparent({ source, transport, signal: wait,
+      const result = await syncPrivateTransparent({ source, transport, signal: wait,
         assertCurrent: current, checkpoint: async () => {
           try { await ctx.persist(); } catch (error) { ctx.retireFailedSession(source); throw error; }
         }, treeState: ctx.transport.treeState });
       current();
+      ctx.transparentScanFailure = result === "history-metadata-limit" ? result : undefined;
+      ctx.transparentScanStatus = result === "history-metadata-limit" ? "unavailable" : result;
     } catch (error) {
       signal.throwIfAborted(); operation.signal.throwIfAborted();
       current();

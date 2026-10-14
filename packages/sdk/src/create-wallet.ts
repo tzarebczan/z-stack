@@ -279,7 +279,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
         if (closed || forgetting || epoch !== keyEpoch) return;
         // Manual memo batches cannot be advanced by ordinary sync. Only the
         // automatic policies count as background work at an unchanged tip.
-        const pending = [snapshot.transparentScanStatus, memoFetchMode === "on-demand"
+        const pending = [snapshot.transparentScanFailure === "history-metadata-limit" ? undefined : snapshot.transparentScanStatus, memoFetchMode === "on-demand"
           ? undefined : snapshot.memoFetchStatus ?? snapshot.sharedMemoStatus]
           .some((status) => status === "scanning" || status === "unavailable");
         if (behind > 0 || pending) await wallet.sync();
