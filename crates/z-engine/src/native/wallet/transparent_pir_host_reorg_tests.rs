@@ -145,6 +145,15 @@ fn composed_native_same_height_fork_preserves_private_lineage_and_protected_stat
             Ok(())
         })
         .unwrap();
+    let (intent, raw) = saved_transaction(&wallet);
+    let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+    conn.execute(
+        "UPDATE ext_native_payments_v1 SET phase='unknown' WHERE id=?1",
+        [&intent],
+    )
+    .unwrap();
+    conn.execute("UPDATE transparent_received_outputs SET lock_owner=?1,lock_expiry_height=100 WHERE transaction_id IN(SELECT id_tx FROM transactions WHERE txid=?2)",rusqlite::params![[9u8;32].as_slice(),independent.txid().as_ref()]).unwrap();
+    let mut original_full = None;
     for _ in 0..4 {
         let mut host = wallet
             .begin_transparent_pir_with_source(
@@ -158,7 +167,7 @@ fn composed_native_same_height_fork_preserves_private_lineage_and_protected_stat
             .transparent_pir_checkpoint()
             .unwrap()
             .map(|s| serde_json::from_str(&s).unwrap());
-        walk(scope, prior, &old, false, Limits::default(), None, |cp| {
+        let (full, _) = walk(scope, prior, &old, false, Limits::default(), None, |cp| {
             wallet
                 .apply_transparent_pir_checkpoint_with_source(
                     &fixture.source,
@@ -167,6 +176,7 @@ fn composed_native_same_height_fork_preserves_private_lineage_and_protected_stat
                 )
                 .unwrap();
         });
+        original_full = Some(full);
         drop(host);
         if wallet.transparent_pir_status().unwrap()["completion"] == "complete-for-enrolled-scope" {
             break;
@@ -176,6 +186,7 @@ fn composed_native_same_height_fork_preserves_private_lineage_and_protected_stat
         wallet.transparent_pir_status().unwrap()["completion"],
         "complete-for-enrolled-scope"
     );
+    let original_full = original_full.unwrap();
     let native_saved = wallet.transparent_pir_checkpoint().unwrap().unwrap();
     // A canonical scanner may rewind and return to the very same accepted hash.
     // The unchanged acquisition checkpoint must reconstruct its erased effects.
@@ -191,6 +202,58 @@ fn composed_native_same_height_fork_preserves_private_lineage_and_protected_stat
             Arc::new(AtomicBool::new(false)),
         ))
         .unwrap();
+    // No new Pass or checkpoint may mask the unchanged-ID path.
+    let missing_mining: Option<u32> = conn
+        .query_row(
+            "SELECT mined_height FROM transactions WHERE txid=?1",
+            [[0x22u8; 32].as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        missing_mining, None,
+        "the real scanner must erase spending metadata"
+    );
+    let completion_before_original_replay =
+        wallet.transparent_pir_status().unwrap()["completion"].clone();
+    assert!(
+        wallet.transparent_pir_checkpoint().unwrap().as_deref() == Some(native_saved.as_str()),
+        "detecting canonical loss must keep exact acquisition and debt"
+    );
+    {
+        let host = wallet
+            .begin_transparent_pir_with_source(
+                &fixture.source,
+                SOURCE,
+                Arc::new(RecoveryCancellation::new()),
+            )
+            .unwrap();
+        let scope = serde_json::from_str(&host.scope_json().unwrap()).unwrap();
+        let mut no_work = Pass::new(
+            scope,
+            Some(serde_json::from_str(&native_saved).unwrap()),
+            Limits::default(),
+        )
+        .unwrap();
+        no_work.finish_budget().unwrap();
+        assert!(
+            matches!(
+                no_work.advance().unwrap(),
+                Step::Stopped {
+                    status: Status::Incomplete { .. }
+                }
+            ),
+            "a no-work budget stop must not replace the original checkpoint"
+        );
+        assert_eq!(
+            wallet.transparent_pir_status().unwrap()["completion"],
+            "incomplete"
+        );
+    }
+    drop(wallet);
+    let wallet = NativeWallet::open_with_wallet_source(root.path(), &fixture.source).unwrap();
+    let cold_completion_before_original_replay =
+        wallet.transparent_pir_status().unwrap()["completion"].clone();
     let mut replay = wallet
         .begin_transparent_pir_with_source(
             &fixture.source,
@@ -198,39 +261,109 @@ fn composed_native_same_height_fork_preserves_private_lineage_and_protected_stat
             Arc::new(RecoveryCancellation::new()),
         )
         .unwrap();
-    let scope = serde_json::from_str(&replay.scope_json().unwrap()).unwrap();
-    walk(
-        scope,
-        Some(serde_json::from_str(&native_saved).unwrap()),
-        &old,
-        false,
-        Limits::default(),
-        None,
-        |cp| {
-            wallet
-                .apply_transparent_pir_checkpoint_with_source(
-                    &fixture.source,
-                    &mut replay,
-                    &serde_json::to_string(cp).unwrap(),
-                )
-                .unwrap();
-        },
+    assert_eq!(
+        original_full.checkpoint_id,
+        serde_json::from_str::<Checkpoint>(&native_saved)
+            .unwrap()
+            .checkpoint_id
     );
+    wallet
+        .apply_transparent_pir_checkpoint_with_source(
+            &fixture.source,
+            &mut replay,
+            &serde_json::to_string(&original_full).unwrap(),
+        )
+        .unwrap();
     drop(replay);
+    let restored_mining: Option<u32> = conn
+        .query_row(
+            "SELECT mined_height FROM transactions WHERE txid=?1",
+            [[0x22u8; 32].as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        (
+            completion_before_original_replay.as_str(),
+            cold_completion_before_original_replay.as_str(),
+            restored_mining
+        ),
+        (Some("incomplete"), Some("incomplete"), Some(2)),
+        "status must stay incomplete until the original checkpoint ID restores spending metadata"
+    );
     assert_eq!(
         wallet.transparent_pir_status().unwrap()["confirmedZat"],
-        "0",
-        "same-branch replay must restore the canonical spend"
+        "0"
     );
-    let native_saved = wallet.transparent_pir_checkpoint().unwrap().unwrap();
-    let (intent, raw) = saved_transaction(&wallet);
-    let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+    assert_eq!(
+        wallet.transparent_pir_status().unwrap()["completion"],
+        "complete-for-enrolled-scope"
+    );
+    assert_eq!(wallet.payment_receipt(&intent).unwrap().phase, "unknown");
+    let independent_state:(u64,u32,u32)=conn.query_row("SELECT n.value_zat,t.mined_height,n.lock_expiry_height FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.txid=?1",[independent.txid().as_ref()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(independent_state, (70000, 1, 100));
+    assert!(
+        wallet.transparent_pir_checkpoint().unwrap().as_deref() == Some(native_saved.as_str()),
+        "original-ID repair must preserve exact private acquisition"
+    );
+    let stored: Vec<u8> = conn
+        .query_row(
+            "SELECT raw FROM transactions WHERE created IS NOT NULL LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        stored == raw,
+        "repair must preserve unknown transaction bytes"
+    );
+    // Check the final transaction fence independently of the status/begin read:
+    // erase only the same owned mining metadata after obtaining the pass.
+    let mut replay = wallet
+        .begin_transparent_pir_with_source(
+            &fixture.source,
+            SOURCE,
+            Arc::new(RecoveryCancellation::new()),
+        )
+        .unwrap();
     conn.execute(
-        "UPDATE ext_native_payments_v1 SET phase='unknown' WHERE id=?1",
-        [&intent],
+        "UPDATE transactions SET mined_height=NULL,tx_index=NULL WHERE txid=?1",
+        [[0x22u8; 32].as_slice()],
     )
     .unwrap();
-    conn.execute("UPDATE transparent_received_outputs SET lock_owner=?1,lock_expiry_height=100 WHERE transaction_id IN(SELECT id_tx FROM transactions WHERE txid=?2)",rusqlite::params![[9u8;32].as_slice(),independent.txid().as_ref()]).unwrap();
+    wallet
+        .apply_transparent_pir_checkpoint_with_source(
+            &fixture.source,
+            &mut replay,
+            &serde_json::to_string(&original_full).unwrap(),
+        )
+        .unwrap();
+    conn.execute("DELETE FROM transparent_received_output_spends WHERE transaction_id IN(SELECT id_tx FROM transactions WHERE txid=?1)",[[0x22u8;32].as_slice()]).unwrap();
+    wallet
+        .apply_transparent_pir_checkpoint_with_source(
+            &fixture.source,
+            &mut replay,
+            &serde_json::to_string(&original_full).unwrap(),
+        )
+        .unwrap();
+    let linked:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM transparent_received_output_spends s JOIN transactions t ON t.id_tx=s.transaction_id WHERE t.txid=?1)",[[0x22u8;32].as_slice()],|r|r.get(0)).unwrap();
+    assert!(
+        linked,
+        "original-ID repair must restore the actual UTXO spend link, not just pending metadata"
+    );
+    drop(replay);
+    let restored_mining: Option<u32> = conn
+        .query_row(
+            "SELECT mined_height FROM transactions WHERE txid=?1",
+            [[0x22u8; 32].as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        restored_mining,
+        Some(2),
+        "transaction guard must repair without a preceding status read"
+    );
     // Canonical SQLite rollback and independently selected compact rescan own chain authority.
     wallet
         .open_db()

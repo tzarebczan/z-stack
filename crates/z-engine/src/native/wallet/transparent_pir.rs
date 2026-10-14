@@ -100,6 +100,125 @@ where
     }
     Ok(result)
 }
+/// Canonical truncation can erase a projection even after scanning returns to
+/// the same hash. Check only this source's owned effects in bounded SQL batches.
+fn missing_projection(
+    tx: &rusqlite::Transaction<'_>,
+    state: &ProjectionState,
+) -> anyhow::Result<std::collections::BTreeMap<String, u32>> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut expected = Vec::new();
+    let mut ids = BTreeSet::new();
+    if state
+        .projected_outputs
+        .len()
+        .saturating_add(state.projected_spends.len())
+        > 65_536
+    {
+        anyhow::bail!("transparent_pir_state_invalid");
+    }
+    for key in state
+        .projected_outputs
+        .iter()
+        .chain(&state.projected_spends)
+    {
+        let fields: Vec<_> = key.split(':').collect();
+        let height = state
+            .records
+            .get(key)
+            .ok_or_else(|| anyhow::anyhow!("transparent_pir_state_invalid"))?
+            .0;
+        if !matches!(fields.as_slice(), ["r", _, _] | ["s", _, _, _, _]) {
+            anyhow::bail!("transparent_pir_state_invalid");
+        }
+        let id = crate::web::from_hex(fields[1])
+            .map_err(|_| anyhow::anyhow!("transparent_pir_state_invalid"))?;
+        ids.insert(id.clone());
+        let output = fields.last().unwrap().parse::<u32>()?;
+        let previous = if fields[0] == "s" {
+            Some(
+                crate::web::from_hex(fields[3])
+                    .map_err(|_| anyhow::anyhow!("transparent_pir_state_invalid"))?,
+            )
+        } else {
+            None
+        };
+        expected.push((key.clone(), id, height, output, previous));
+    }
+    let ids: Vec<_> = ids.into_iter().collect();
+    let mut mined = BTreeMap::new();
+    let mut outputs = BTreeSet::new();
+    let mut spends = BTreeSet::new();
+    for batch in ids.chunks(256) {
+        let parameters = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut stmt = tx.prepare(&format!(
+            "SELECT txid,mined_height,tx_index FROM transactions WHERE txid IN({parameters})"
+        ))?;
+        for row in stmt.query_map(rusqlite::params_from_iter(batch), |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, Option<u32>>(1)?,
+                r.get::<_, Option<u32>>(2)?,
+            ))
+        })? {
+            let (id, height, index) = row?;
+            mined.insert(id, (height, index));
+        }
+        let mut stmt = tx.prepare(&format!("SELECT t.txid,n.output_index FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.txid IN({parameters})"))?;
+        for row in stmt.query_map(rusqlite::params_from_iter(batch), |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, u32>(1)?))
+        })? {
+            outputs.insert(row?);
+        }
+        // A completed source projection must have its actual UTXO spend link.
+        // A pending map alone is sufficient only for an explicitly unresolved input.
+        let pending_allowed = u8::from(!state.complete && state.unresolved_spends > 0);
+        let mut stmt = tx.prepare(&format!("SELECT t.txid,p.txid,n.output_index FROM transparent_received_output_spends s JOIN transactions t ON t.id_tx=s.transaction_id JOIN transparent_received_outputs n ON n.id=s.transparent_received_output_id JOIN transactions p ON p.id_tx=n.transaction_id WHERE t.txid IN({parameters}) UNION SELECT t.txid,s.prevout_txid,s.prevout_output_index FROM transparent_spend_map s JOIN transactions t ON t.id_tx=s.spending_transaction_id WHERE t.txid IN({parameters}) AND {pending_allowed}=1 AND NOT EXISTS(SELECT 1 FROM transparent_received_outputs n JOIN transactions p ON p.id_tx=n.transaction_id WHERE p.txid=s.prevout_txid AND n.output_index=s.prevout_output_index)"))?;
+        for row in stmt.query_map(rusqlite::params_from_iter(batch.iter().chain(batch)), |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, u32>(2)?,
+            ))
+        })? {
+            spends.insert(row?);
+        }
+    }
+    Ok(expected
+        .into_iter()
+        .filter_map(|(key, id, height, index, previous)| {
+            let present = mined
+                .get(&id)
+                .is_some_and(|(mined, position)| *mined == Some(height) && position.is_some())
+                && match previous {
+                    Some(previous) => spends.contains(&(id, previous, index)),
+                    None => outputs.contains(&(id, index)),
+                };
+            (!present).then_some((key, height))
+        })
+        .collect())
+}
+fn invalidate_missing(
+    state: &mut ProjectionState,
+    missing: &std::collections::BTreeMap<String, u32>,
+) -> bool {
+    let Some(floor) = missing
+        .values()
+        .copied()
+        .map(|height| height.saturating_sub(1))
+        .min()
+    else {
+        return false;
+    };
+    let changed = !state.projection_invalidated
+        || state.complete
+        || state.rewind_floor.is_none_or(|old| floor < old);
+    state.rewind(floor);
+    changed
+}
+
 fn retire_projection(
     tx: &rusqlite::Transaction<'_>,
     state: &mut ProjectionState,
@@ -233,6 +352,8 @@ impl NativeWallet {
                 };
                 let mut state = load(ext)?;
                 let mut scope = state.begin(source_id, anchor, scripts(wdb, ext, self.network)?)?;
+                let missing = missing_projection(ext, &state)?;
+                invalidate_missing(&mut state, &missing);
                 scope.accepted_headers.retain(|h| h.height != 0);
                 scope.accepted_headers.push(TransparentPirAnchor {
                     height: 0,
@@ -271,15 +392,19 @@ impl NativeWallet {
         pass.cancel.transaction(|| self.transparent_transaction(|wdb,ext| -> anyhow::Result<_> {
             let mut state = load(ext)?;
             let old_records = state.records.clone();
+            let missing = missing_projection(ext,&state)?;
+            invalidate_missing(&mut state,&missing);
+            let replay = state.checkpoint_id.as_ref()==Some(&checkpoint.checkpoint_id);
+            let repair = replay && state.projection_invalidated;
             let retirement_floor = state.rewind_floor.into_iter().chain(checkpoint.rewind_to.as_ref().map(|a|a.height as u32)).min();
-            if let Some(floor)=retirement_floor { state.prepare_rewind(floor); }
+            if !repair { if let Some(floor)=retirement_floor { state.prepare_rewind(floor); } }
             if let Some(ancestor)=&checkpoint.rewind_to {
                 let height=u32::try_from(ancestor.height)?;
                 let known=if height==0 {Some(self.network.genesis_hash().to_string())} else {wdb.get_block_hash(height.into())?.map(|h|h.to_string())};
                 if known.as_deref()!=Some(&ancestor.hash) {anyhow::bail!("transparent_pir_rewind_anchor_unknown");}
-                state.prepare_rewind(height);
+                if !repair { state.prepare_rewind(height); }
             }
-            let records = state.validate(&checkpoint)?;
+            let mut records = state.validate(&checkpoint)?;
             let height = u32::try_from(checkpoint.anchor.height)?;
             let block = wdb.block_fully_scanned()?.ok_or_else(||anyhow::anyhow!("transparent_pir_anchor_unavailable"))?;
             if u32::from(block.block_height()) != height || block.block_hash().to_string() != checkpoint.anchor.hash { anyhow::bail!("transparent_pir_chain_changed"); }
@@ -298,7 +423,11 @@ impl NativeWallet {
                 save(ext,&state)?;
                 return Ok(state.status());
             }
-            if let Some(floor)=retirement_floor { retire_projection(ext,&mut state,&old_records,&records,floor)?; }
+            if repair {
+                // The original source-bound checkpoint is already accepted. Rebuild
+                // only its erased owned effects; do not retire or rewrite independent rows.
+                records.retain(|(_,event)|missing.contains_key(&crate::transparent_pir::event_key(*event)));
+            } else if let Some(floor)=retirement_floor { retire_projection(ext,&mut state,&old_records,&records,floor)?; }
             for (script,event) in &records {
                 let (id,position,mined) = match event { TransparentEvent::Receive(e) => (e.txid,e.transaction_index,e.height), TransparentEvent::Spend(e)=>(e.spending_txid,e.transaction_index,e.height) };
                 let old:Option<(Option<u32>,Option<u32>)> = ext.query_row("SELECT mined_height,tx_index FROM transactions WHERE txid=?1",[id.0.as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
@@ -327,6 +456,7 @@ impl NativeWallet {
             let unspent:u64=ext.query_row("SELECT COALESCE(SUM(n.value_zat),0) FROM transparent_received_outputs n JOIN transactions t ON t.id_tx=n.transaction_id WHERE t.mined_height IS NOT NULL AND NOT EXISTS(SELECT 1 FROM transparent_received_output_spends s WHERE s.transparent_received_output_id=n.id)",[],|r|r.get(0))?;
             Zatoshis::from_u64(unspent).map_err(|_|anyhow::anyhow!("transparent_pir_amount_invalid"))?;
             state.stage(&checkpoint,&records)?;
+            if repair && !missing_projection(ext,&state)?.is_empty() { anyhow::bail!("transparent_pir_projection_incomplete"); }
             state.projection_invalidated=false;
             let next_scripts = scripts(wdb,ext,self.network)?;
             if next_scripts.len() != current_scripts.len() || current_id != pass.scope.scope_id { state.complete=false; }
@@ -338,7 +468,10 @@ impl NativeWallet {
 
     pub fn transparent_pir_status(&self) -> Result<serde_json::Value> {
         self.transparent_transaction(|wdb,ext| -> anyhow::Result<_> {
-            let mut state=load(ext)?; state.durable=state.checkpoint_id.is_some();
+            let mut state=load(ext)?;
+            let missing=missing_projection(ext,&state)?;
+            if invalidate_missing(&mut state,&missing) { save(ext,&state)?; }
+            state.durable=state.checkpoint_id.is_some();
             if let Some(scope)=&state.scope {
                 if wdb.block_fully_scanned()?.is_none_or(|b|u64::from(u32::from(b.block_height()))!=scope.anchor.height || b.block_hash().to_string()!=scope.anchor.hash) { state.complete=false; }
             }
