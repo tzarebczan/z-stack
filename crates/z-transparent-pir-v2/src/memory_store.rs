@@ -50,11 +50,17 @@ struct State {
 pub struct MemoryStore {
     state: State,
     pending_limit: Option<usize>,
+    // Runtime profile policy; never changes the stored MemoryStore encoding.
+    #[serde(skip)]
+    event_limit: Option<usize>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
+    }
+    pub(crate) fn set_event_limit(&mut self, limit: usize) {
+        self.event_limit = Some(limit);
     }
 
     pub(crate) fn retain_scope(&mut self, scripts: &std::collections::BTreeSet<Vec<u8>>) {
@@ -246,6 +252,24 @@ impl WalletStore for MemoryStore {
                     "page shard {} holds two histories for one script",
                     run.child_digest
                 )));
+            }
+        }
+
+        if let Some(limit) = self.event_limit {
+            let receives: std::collections::BTreeSet<_> =
+                new_receives.iter().map(|(key, _)| *key).collect();
+            let spends: std::collections::BTreeSet<_> =
+                new_spends.iter().map(|(key, _)| *key).collect();
+            if self
+                .state
+                .receives
+                .len()
+                .saturating_add(self.state.spends.len())
+                .saturating_add(receives.len())
+                .saturating_add(spends.len())
+                > limit
+            {
+                return Err(StoreError::HistoryMetadataLimit);
             }
         }
 

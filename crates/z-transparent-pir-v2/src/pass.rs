@@ -2,7 +2,7 @@ use crate::{
     adapters::{Acceptance, ChainView, StaticScripts},
     client::Table as NativeTable,
     memory_store::MemoryStore,
-    shared_store::SharedStore,
+    shared_store::{SharedStore, MAX_CONTINUATION_BYTES, MAX_RETAINED_EVENTS, MAX_STORE_BYTES},
     store::{ScriptEntry, ScriptOrigin, WalletStore},
     sync::{self, Completion, GeometryParams, ServiceGeometry, WorkLimits},
     transport::{BoxError, FilterSource, Overloaded, ShardTransport, StaleRevision},
@@ -69,11 +69,19 @@ fn bounded_headers<'de, D: serde::Deserializer<'de>>(
     d.deserialize_map(Headers)
 }
 #[derive(Serialize, Deserialize)]
+struct LegacyContinuationV3 {
+    version: u32,
+    source_id: String,
+    state: MemoryStore,
+    chain: ObservedChain,
+}
+#[derive(Serialize, Deserialize)]
 struct Continuation {
     version: u32,
     source_id: String,
     state: MemoryStore,
     chain: ObservedChain,
+    policy_limit: bool,
 }
 // Coverage compaction is per script and revision: old recuts and partial
 // targets across scripts have no map-size bound. Refuse an explicit supported
@@ -386,6 +394,7 @@ pub struct Pass {
     finished: Option<Status>,
     cancelled: bool,
     final_ack: bool,
+    terminal_without_checkpoint: bool,
 }
 fn encoded(store: &MemoryStore) -> Result<Vec<u8>> {
     bincode::DefaultOptions::new()
@@ -393,11 +402,16 @@ fn encoded(store: &MemoryStore) -> Result<Vec<u8>> {
         .serialize(store)
         .map_err(|_| Error("checkpoint_encode"))
 }
-fn durable(scope: &Scope, state: &MemoryStore, headers: &BTreeMap<u64, String>) -> Result<Vec<u8>> {
+fn durable(
+    scope: &Scope,
+    state: &MemoryStore,
+    headers: &BTreeMap<u64, String>,
+    policy_limit: bool,
+) -> Result<Vec<u8>> {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .serialize(&Continuation {
-            version: 3,
+            version: 4,
             source_id: scope.source_id.clone(),
             state: state.clone(),
             chain: ObservedChain {
@@ -405,6 +419,7 @@ fn durable(scope: &Scope, state: &MemoryStore, headers: &BTreeMap<u64, String>) 
                 genesis: headers.get(&0).cloned(),
                 headers: headers.clone(),
             },
+            policy_limit,
         })
         .map_err(|_| Error("checkpoint_encode"))
 }
@@ -452,6 +467,7 @@ impl Pass {
             return Err(Error("duplicate_script"));
         }
         let mut restored_chain = None;
+        let mut restored_policy = false;
         let mut memory = if let Some(cp) = &checkpoint {
             if cp.anchor.height > scope.anchor.height {
                 return Err(Error("anchor_rewound"));
@@ -480,13 +496,28 @@ impl Pass {
                     let original = encoded(&restored.state)?;
                     (restored.state, original)
                 }
-                3 => {
-                    let restored: Continuation = bincode::DefaultOptions::new()
+                3 | 4 => {
+                    let options = bincode::DefaultOptions::new()
                         .with_fixint_encoding()
-                        .with_limit(64 * 1024 * 1024)
-                        .reject_trailing_bytes()
-                        .deserialize(&bytes)
-                        .map_err(|_| Error("checkpoint_decode"))?;
+                        .with_limit(MAX_CONTINUATION_BYTES as u64)
+                        .reject_trailing_bytes();
+                    let restored: Continuation = if version == 3u32.to_le_bytes() {
+                        let old: LegacyContinuationV3 = options
+                            .deserialize(&bytes)
+                            .map_err(|_| Error("checkpoint_decode"))?;
+                        Continuation {
+                            version: 4,
+                            source_id: old.source_id,
+                            state: old.state,
+                            chain: old.chain,
+                            policy_limit: false,
+                        }
+                    } else {
+                        options
+                            .deserialize(&bytes)
+                            .map_err(|_| Error("checkpoint_decode"))?
+                    };
+                    restored_policy = restored.policy_limit;
                     if restored.source_id != scope.source_id
                         || restored.chain.anchor != cp.anchor
                         || restored.chain.headers.len() > MAX_OBSERVED_POINTS
@@ -529,11 +560,16 @@ impl Pass {
         memory.retain_scope(&current_scripts);
         let old_endpoints = retained_endpoints(&memory);
         let unsupported_history = old_endpoints.is_err();
+        let terminal_without_checkpoint = unsupported_history
+            || memory.events().map_err(|_| Error("store"))?.len() > MAX_RETAINED_EVENTS
+            || encoded(&memory)?.len() > MAX_STORE_BYTES;
+        memory.set_event_limit(MAX_RETAINED_EVENTS);
         let old_endpoints = old_endpoints.unwrap_or_default();
 
         let store = SharedStore {
             inner: Rc::new(RefCell::new(memory)),
             rewind: Rc::new(RefCell::new(None)),
+            policy_limit: Rc::new(Cell::new(restored_policy)),
         };
         let mut headers = BTreeMap::new();
         for point in &scope.accepted_headers {
@@ -765,7 +801,12 @@ impl Pass {
                 }),
             }
         });
-        let baseline = durable(&scope, &store.inner.borrow(), &driver.chain.borrow())?;
+        let baseline = durable(
+            &scope,
+            &store.inner.borrow(),
+            &driver.chain.borrow(),
+            store.policy_limit.get(),
+        )?;
         let state_baseline = encoded(&store.inner.borrow())?;
         let prior_baseline_matches = checkpoint.as_ref().is_some_and(|cp| {
             cp.scope_id == scope.scope_id
@@ -784,25 +825,48 @@ impl Pass {
             store,
             driver,
             lineage_pending,
-            future: (!unsupported_history).then_some(future),
+            future: (!terminal_without_checkpoint && !restored_policy).then_some(future),
             previous,
             prior,
             prior_baseline_matches,
             baseline,
             state_baseline,
             held: None,
-            finished: unsupported_history.then(|| Status::Incomplete {
-                reason: "history_metadata_limit".into(),
+            finished: (terminal_without_checkpoint || restored_policy).then(|| {
+                Status::Incomplete {
+                    reason: "history_metadata_limit".into(),
+                }
             }),
             cancelled: false,
-            final_ack: unsupported_history,
+            final_ack: terminal_without_checkpoint || restored_policy,
+            terminal_without_checkpoint,
         })
+    }
+    fn stop_for_policy(&mut self) {
+        self.future = None;
+        self.finished = Some(Status::Incomplete {
+            reason: "history_metadata_limit".into(),
+        });
+        let mut io = self.driver.io.borrow_mut();
+        io.pending = None;
+        io.reply = None;
+        io.chain_reply = None;
     }
     pub fn advance(&mut self) -> Result<Step> {
         if self.cancelled {
             return Ok(Step::Stopped {
                 status: Status::Cancelled,
             });
+        }
+        if self.terminal_without_checkpoint {
+            return Ok(Step::Stopped {
+                status: Status::Incomplete {
+                    reason: "history_metadata_limit".into(),
+                },
+            });
+        }
+        if self.store.policy_limit.get() {
+            self.stop_for_policy();
         }
         if let Some(cp) = &self.held {
             return Ok(Step::Checkpoint {
@@ -826,6 +890,9 @@ impl Pass {
                 }
             }
         }
+        if self.store.policy_limit.get() {
+            self.stop_for_policy();
+        }
         if self.lineage_pending.get() && self.finished.is_some() {
             // The caller keeps its exact acknowledged prior checkpoint. An Init,
             // Map or old-anchor failure/deadline is not an invalidation decision.
@@ -835,23 +902,16 @@ impl Pass {
         }
         let state_changed = encoded(&self.store.inner.borrow())? != self.state_baseline;
         if state_changed && retained_endpoints(&self.store.inner.borrow()).is_err() {
-            // A newly committed range can cross the supported metadata domain.
-            // Preserve its accepted facts/debt, but never publish Complete or
-            // continue IO with a journal the next pass cannot process.
-            self.future = None;
-            self.finished = Some(Status::Incomplete {
-                reason: "history_metadata_limit".into(),
-            });
-            let mut io = self.driver.io.borrow_mut();
-            io.pending = None;
-            io.reply = None;
-            io.chain_reply = None;
+            // Preserve every accepted fact and outstanding cover obligation.
+            self.store.policy_limit.set(true);
+            self.stop_for_policy();
         }
         if state_changed || self.finished.is_some() {
             let bytes = durable(
                 &self.scope,
                 &self.store.inner.borrow(),
                 &self.driver.chain.borrow(),
+                self.store.policy_limit.get(),
             )?;
             if self.prior_baseline_matches
                 && bytes == self.baseline
@@ -901,7 +961,7 @@ impl Pass {
                 revision: e.revision_digest,
             })
             .collect();
-        if state.events().map_err(|_| Error("store"))?.len() > 65536 {
+        if state.events().map_err(|_| Error("store"))?.len() > MAX_RETAINED_EVENTS {
             return Err(Error("event_limit"));
         }
         let mut coverage = Vec::new();
@@ -941,7 +1001,7 @@ impl Pass {
         {
             return Err(Error("coverage_incomplete"));
         }
-        if bytes.len() > 64 * 1024 * 1024 {
+        if bytes.len() > MAX_CONTINUATION_BYTES {
             return Err(Error("checkpoint_limit"));
         }
         let continuation = STANDARD.encode(bytes);
@@ -1042,6 +1102,7 @@ impl Pass {
             &self.scope,
             &self.store.inner.borrow(),
             &self.driver.chain.borrow(),
+            self.store.policy_limit.get(),
         )?;
         self.state_baseline = encoded(&self.store.inner.borrow())?;
         self.prior_baseline_matches = true;
@@ -1087,6 +1148,7 @@ impl Pass {
                         &self.scope,
                         &self.store.inner.borrow(),
                         &self.driver.chain.borrow(),
+                        self.store.policy_limit.get(),
                     )?;
         }
         Ok(())

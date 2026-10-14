@@ -1,17 +1,92 @@
 use crate::memory_store::MemoryStore;
 use crate::store::*;
-use std::{cell::RefCell, rc::Rc};
+use bincode::Options;
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
+pub(crate) const MAX_RETAINED_EVENTS: usize = 65_536;
+pub(crate) const MAX_STORE_BYTES: usize = 63 * 1024 * 1024;
+pub(crate) const MAX_TERMINAL_STORE_BYTES: usize = MAX_STORE_BYTES + 512 * 1024;
+pub(crate) const MAX_CONTINUATION_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone)]
 pub(crate) struct SharedStore {
     pub inner: Rc<RefCell<MemoryStore>>,
     pub rewind: Rc<RefCell<Option<Anchor>>>,
+    pub policy_limit: Rc<Cell<bool>>,
+}
+impl SharedStore {
+    // A refused growth mutation leaves the complete journal, including owed
+    // cover work, unchanged. Only typed local caps set the terminal flag.
+    fn update<T>(
+        &mut self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        self.update_with_cover_reserve(false, f)
+    }
+    fn update_with_cover_reserve<T>(
+        &mut self,
+        cover_failure: bool,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let mut candidate = self.inner.borrow().clone();
+        let result = f(&mut candidate).and_then(|value| {
+            let bytes = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .serialized_size(&candidate)
+                .map_err(|_| StoreError::Corrupt("store encoding".into()))?;
+            if bytes > MAX_STORE_BYTES as u64 {
+                if !cover_failure || bytes > MAX_TERMINAL_STORE_BYTES as u64 {
+                    return Err(StoreError::HistoryMetadataLimit);
+                }
+                // The failed reply has already created this obligation. Preserve
+                // it in reserved space, then stop before returning another IO.
+                self.policy_limit.set(true);
+            }
+            *self.inner.borrow_mut() = candidate;
+            Ok(value)
+        });
+        if matches!(result, Err(StoreError::HistoryMetadataLimit)) {
+            self.policy_limit.set(true);
+        }
+        result
+    }
+    fn cover_failure(&self, commit: &ShardCommit) -> Result<bool, StoreError> {
+        let [pending] = commit.pending_upsert.as_slice() else {
+            return Ok(false);
+        };
+        if commit.failed_entries.as_slice() != [pending.script.clone()]
+            || pending.script.len() > 40
+            || pending.dummy_debt.is_none()
+            || !commit.events.is_empty()
+            || !commit.covered_scripts.is_empty()
+            || !commit.pending_complete.is_empty()
+            || !commit.cached_runs.is_empty()
+            || commit.source_anchor.is_some()
+            || pending.shard_id != commit.shard_id
+            || pending.revision_digest != commit.revision_digest
+        {
+            return Ok(false);
+        }
+        let Some(mut prior) = self
+            .inner
+            .borrow()
+            .pending()?
+            .into_iter()
+            .find(|held| held.id.is_some() && held.id == pending.id)
+        else {
+            return Ok(false);
+        };
+        prior.dummy_debt = pending.dummy_debt;
+        Ok(prior == *pending)
+    }
 }
 impl WalletStore for SharedStore {
     fn set_identity(&self) -> Result<Option<SetIdentity>, StoreError> {
         self.inner.borrow().set_identity()
     }
     fn bind_set(&mut self, identity: &SetIdentity) -> Result<(), StoreError> {
-        self.inner.borrow_mut().bind_set(identity)
+        self.update(|state| state.bind_set(identity))
     }
     fn anchor(&self) -> Result<Option<Anchor>, StoreError> {
         self.inner.borrow().anchor()
@@ -20,7 +95,7 @@ impl WalletStore for SharedStore {
         self.inner.borrow().scripts()
     }
     fn add_scripts(&mut self, entries: &[ScriptEntry]) -> Result<usize, StoreError> {
-        self.inner.borrow_mut().add_scripts(entries)
+        self.update(|state| state.add_scripts(entries))
     }
     fn coverage(&self, script: &[u8]) -> Result<Vec<CoverageRange>, StoreError> {
         self.inner.borrow().coverage(script)
@@ -32,7 +107,8 @@ impl WalletStore for SharedStore {
         self.inner.borrow().events()
     }
     fn commit_shard(&mut self, commit: ShardCommit) -> Result<u64, StoreError> {
-        self.inner.borrow_mut().commit_shard(commit)
+        let cover_failure = self.cover_failure(&commit)?;
+        self.update_with_cover_reserve(cover_failure, |state| state.commit_shard(commit))
     }
     fn commit_anchor(
         &mut self,
@@ -40,12 +116,10 @@ impl WalletStore for SharedStore {
         settled_through: u64,
         covered_through: u64,
     ) -> Result<u64, StoreError> {
-        self.inner
-            .borrow_mut()
-            .commit_anchor(anchor, settled_through, covered_through)
+        self.update(|state| state.commit_anchor(anchor, settled_through, covered_through))
     }
     fn rollback_above(&mut self, anchor: &Anchor, reason: &str) -> Result<u64, StoreError> {
-        let result = self.inner.borrow_mut().rollback_above(anchor, reason)?;
+        let result = self.update(|state| state.rollback_above(anchor, reason))?;
         let mut rewind = self.rewind.borrow_mut();
         if rewind
             .as_ref()
@@ -81,7 +155,7 @@ impl WalletStore for SharedStore {
         self.inner.borrow().setup(key)
     }
     fn put_setup(&mut self, key: &SetupKey, blob: &SetupBlob) -> Result<(), StoreError> {
-        self.inner.borrow_mut().put_setup(key, blob)
+        self.update(|state| state.put_setup(key, blob))
     }
     fn drop_setup(&mut self, key: &SetupKey) -> Result<(), StoreError> {
         self.inner.borrow_mut().drop_setup(key)
@@ -100,9 +174,7 @@ impl WalletStore for SharedStore {
         sealed: bool,
         bytes: &[u8],
     ) -> Result<(), StoreError> {
-        self.inner
-            .borrow_mut()
-            .put_filter(revision_digest, filter_hash, sealed, bytes)
+        self.update(|state| state.put_filter(revision_digest, filter_hash, sealed, bytes))
     }
     fn last_commit(&self) -> Result<u64, StoreError> {
         self.inner.borrow().last_commit()

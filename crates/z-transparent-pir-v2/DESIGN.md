@@ -59,7 +59,7 @@ logical continuation. Retries and malformed-content dummy obligations remain the
 upstream walker's. Busy yields bounded delayed progress, never thread sleep.
 
 
-The private continuation is version 3; version 2 is accepted only after its original checkpoint digest is verified, then migrated without changing its source journal or cover-query obligations. A malformed page run records its remaining
+The private continuation is version 4. Versions 2 and 3 are accepted only after their original checkpoint digest is verified, then migrated without changing the source journal or cover-query obligations. The version-4 envelope produces a new checkpoint ID; it does not reinterpret the old digest. A malformed page run records its remaining
 cover-query count on the existing pending item, bound to that script, revision,
 and accepted target. The failure count and this obligation commit together before
 another exchange is yielded. Reopening pays that debt before another real query
@@ -119,6 +119,33 @@ not promised to resolve it, and no fallback is permitted. Oversized serialized
 observation maps are rejected before use. No PIR query bytes or randomness are
 cached. Acknowledged chain or elapsed-budget progress survives cold restart,
 including mismatches needed to reach a verified rollback.
+
+The local retained-event policy is 65,536 unique receive/spend records. A duplicate
+at the bound is accepted; retiring evidence frees capacity. Growth mutations are
+validated on a candidate journal before publication. The normal serialized store
+bound is 63 MiB. A refused mutation retains every previous record, coverage row,
+pending item, cache and anchor, and emits an incomplete checkpoint carrying a
+persistent `history_metadata_limit` marker. Cold resume of that marker performs
+no network IO. This is a client policy limit, not a publisher/transport failure;
+rescan retains the continuation and cannot remove the limit.
+
+Malformed-content cover obligations arise after a query reply is observed. The
+exact failed-walk update may therefore use reserved space: it changes only an
+existing pending item's dummy debt and its failure counter, preserving all other
+pending fields and all facts/coverage/caches. At most 4096 existing pending rows
+with scripts of at most 40 bytes add 266,240 bytes in the actual serializer.
+A 512 KiB terminal-store reserve preserves those new obligations, sets the same
+terminal marker, and stops before another Exchange can escape. Another 512 KiB
+bounds the actual serialized source/anchor/header envelope (at most 6147 points),
+so the complete continuation remains below 64 MiB. Encoder-bound tests cover
+both reserves. Pure reads and operations that only shrink state avoid candidate
+serialization; growth checks are proportional to the retained journal.
+
+Older valid continuations already beyond the new store/event policy stop
+without IO, replacement checkpoints, truncation or altered wallet intents. Their
+full original durable checkpoint stays with the canonical owner. Invalid input
+encodings, contradictory publisher data and transient service failures retain
+their existing error behavior and do not set the policy marker.
 
 A host resource deadline may call `finish_budget` while the same wallet session
 is still active, then drain only Checkpoint/ack/Stopped. This abandons live IO and

@@ -26,7 +26,13 @@ fn scope() -> Scope {
     }
 }
 fn snapshot(p: &Pass) -> Checkpoint {
-    let bytes = durable(&p.scope, &p.store.inner.borrow(), &p.driver.chain.borrow()).unwrap();
+    let bytes = durable(
+        &p.scope,
+        &p.store.inner.borrow(),
+        &p.driver.chain.borrow(),
+        p.store.policy_limit.get(),
+    )
+    .unwrap();
     p.checkpoint(&bytes).unwrap()
 }
 #[test]
@@ -109,7 +115,7 @@ fn version_two_migrates_only_after_its_original_digest_is_verified() {
     let upgraded = snapshot(&restored);
     assert_eq!(
         &STANDARD.decode(&upgraded.continuation).unwrap()[..4],
-        &3u32.to_le_bytes()
+        &4u32.to_le_bytes()
     );
     let mut moved = scope();
     moved.anchor = Anchor {
@@ -332,6 +338,7 @@ fn unchanged_complete_snapshot_reuses_exact_prior_metadata_and_rejects_conflict(
         &conflict.scope,
         &conflict.store.inner.borrow(),
         &conflict.driver.chain.borrow(),
+        conflict.store.policy_limit.get(),
     )
     .unwrap();
     assert!(conflict.checkpoint(&bytes).is_err());
@@ -465,5 +472,466 @@ fn excessive_history_metadata_is_closed_without_checkpoint_or_evidence_loss() {
         );
         assert_eq!(encoded(&cold.store.inner.borrow()).unwrap(), original_state);
         assert!(cold.driver.io.borrow().pending.is_none());
+    }
+}
+
+fn history_cap_seed(pass: &mut Pass, events: Vec<crate::store::StoredEvent>) {
+    let script = hex::decode(&scope().scripts[0].script).unwrap();
+    pass.store
+        .add_scripts(&[ScriptEntry {
+            script: script.clone(),
+            origin: ScriptOrigin::Derived,
+            required_from: 0,
+        }])
+        .unwrap();
+    pass.store
+        .commit_shard(crate::store::ShardCommit {
+            start_height: 0,
+            end_height: 100,
+            terminal_block_hash: "a".repeat(64),
+            revision_digest: "b".repeat(64),
+            events,
+            covered_scripts: vec![script.clone()],
+            pending_upsert: vec![crate::store::PendingPages {
+                id: None,
+                shard_id: 0,
+                revision_digest: "b".repeat(64),
+                script,
+                cursor: crate::store::RunCursor {
+                    child: 0,
+                    row: 0,
+                    older_runs: None,
+                },
+                carried: vec![],
+                fragments: vec![],
+                dummy_debt: Some((2, 3)),
+                attempts: 1,
+                target_anchor: Some(crate::store::Anchor {
+                    height: 100,
+                    hash: "a".repeat(64),
+                }),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+}
+fn history_cap_event(index: u32) -> crate::store::StoredEvent {
+    crate::store::StoredEvent {
+        script: hex::decode(&scope().scripts[0].script).unwrap(),
+        event: transparent_events::TransparentEvent::Receive(transparent_events::ReceiveEvent {
+            metadata: None,
+            height: 1,
+            txid: transparent_events::Txid([7; 32]),
+            transaction_index: 1,
+            output_index: index,
+            value: 1,
+            coinbase: false,
+        }),
+        shard_id: 0,
+        revision_digest: "b".repeat(64),
+    }
+}
+fn history_cap_ack_baseline(pass: &mut Pass) -> Checkpoint {
+    pass.future = None;
+    pass.finished = Some(Status::Incomplete {
+        reason: "budget".into(),
+    });
+    let Step::Checkpoint { checkpoint } = pass.advance().unwrap() else {
+        panic!("durable baseline required")
+    };
+    pass.acknowledge(&checkpoint.checkpoint_id).unwrap();
+    pass.finished = None;
+    pass.final_ack = false;
+    checkpoint
+}
+fn history_cap_assert_cold(checkpoint: Checkpoint, repeats: usize) {
+    for _ in 0..repeats {
+        let mut cold = Pass::new(scope(), Some(checkpoint.clone()), Limits::default()).unwrap();
+        assert!(
+            matches!(cold.advance().unwrap(),Step::Stopped{status:Status::Incomplete{reason}} if reason=="history_metadata_limit")
+        );
+        assert!(
+            cold.driver.io.borrow().pending.is_none(),
+            "terminal cold resume must not allocate IO"
+        );
+        assert_eq!(
+            cold.store.inner.borrow().pending().unwrap()[0].dummy_debt,
+            Some((2, 3))
+        );
+        cold.finish_budget().unwrap();
+        assert!(
+            matches!(cold.advance().unwrap(),Step::Stopped{status:Status::Incomplete{reason}} if reason=="history_metadata_limit")
+        );
+    }
+    let mut changed_scope = scope();
+    changed_scope.generation += 1;
+    changed_scope.scope_id = "e".repeat(64);
+    let mut changed = Pass::new(changed_scope, Some(checkpoint), Limits::default()).unwrap();
+    assert!(matches!(changed.advance().unwrap(), Step::Stopped {
+        status: Status::Incomplete { reason }
+    } if reason == "history_metadata_limit"));
+    assert!(changed.driver.io.borrow().pending.is_none());
+}
+#[test]
+fn history_cap_event_boundary_preserves_projection_debt_and_cold_terminal() {
+    let mut pass = Pass::new(scope(), None, Limits::default()).unwrap();
+    history_cap_seed(&mut pass, (0..65_536).map(history_cap_event).collect());
+    pass.store
+        .commit_shard(crate::store::ShardCommit {
+            events: vec![history_cap_event(0), history_cap_event(0)],
+            ..Default::default()
+        })
+        .unwrap();
+    let baseline = history_cap_ack_baseline(&mut pass);
+    assert_eq!(baseline.records.len(), 65_536);
+    let mut retired = Pass::new(scope(), Some(baseline.clone()), Limits::default()).unwrap();
+    retired
+        .store
+        .rollback_above(
+            &crate::store::Anchor {
+                height: 0,
+                hash: scope().accepted_headers[0].hash.clone(),
+            },
+            "fixture",
+        )
+        .unwrap();
+    retired
+        .store
+        .commit_shard(crate::store::ShardCommit {
+            events: vec![history_cap_event(65_536)],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(retired.store.events().unwrap().len(), 1);
+    assert!(!retired.store.policy_limit.get());
+    let before = encoded(&pass.store.inner.borrow()).unwrap();
+    let pending = pass.store.inner.borrow().pending().unwrap()[0].id.unwrap();
+    let refused = pass.store.commit_shard(crate::store::ShardCommit {
+        events: vec![history_cap_event(65_536)],
+        pending_complete: vec![pending],
+        ..Default::default()
+    });
+    let Step::Checkpoint { checkpoint } = pass.advance().expect(
+        "event policy limit must yield a durable terminal checkpoint, not event_limit exception",
+    ) else {
+        panic!("terminal checkpoint required")
+    };
+    assert!(refused.is_err());
+    assert!(!checkpoint.complete);
+    assert_eq!(checkpoint.records, baseline.records);
+    assert_eq!(
+        encoded(&pass.store.inner.borrow()).unwrap(),
+        before,
+        "refused commit cannot delete owed debt or accepted facts"
+    );
+    assert_eq!(
+        checkpoint.previous_checkpoint_id,
+        Some(baseline.checkpoint_id)
+    );
+    pass.acknowledge(&checkpoint.checkpoint_id).unwrap();
+    assert!(
+        matches!(pass.advance().unwrap(),Step::Stopped{status:Status::Incomplete{reason}} if reason=="history_metadata_limit")
+    );
+    history_cap_assert_cold(checkpoint, 3);
+}
+#[test]
+fn history_cap_byte_boundary_preserves_journal_and_cold_terminal() {
+    let mut pass = Pass::new(scope(), None, Limits::default()).unwrap();
+    history_cap_seed(&mut pass, vec![]);
+    let keys: Vec<_> = (0..8).map(|n| format!("{n:064x}")).collect();
+    for key in &keys {
+        pass.store
+            .put_filter(key, &"c".repeat(64), false, &[])
+            .unwrap();
+    }
+    let overhead = encoded(&pass.store.inner.borrow()).unwrap().len();
+    let mut remaining = 63 * 1024 * 1024 - overhead;
+    let mut last = 0;
+    for key in &keys {
+        let n = remaining.min(8 * 1024 * 1024);
+        remaining -= n;
+        last = n;
+        pass.store
+            .put_filter(key, &"c".repeat(64), false, &vec![0; n])
+            .unwrap();
+    }
+    assert_eq!(remaining, 0);
+    assert_eq!(
+        encoded(&pass.store.inner.borrow()).unwrap().len(),
+        63 * 1024 * 1024
+    );
+    let baseline = history_cap_ack_baseline(&mut pass);
+    let refused = pass.store.put_filter(
+        keys.last().unwrap(),
+        &"c".repeat(64),
+        false,
+        &vec![0; last + 1],
+    );
+    let Step::Checkpoint { checkpoint } = pass
+        .advance()
+        .expect("metadata policy must yield terminal checkpoint")
+    else {
+        panic!("terminal checkpoint required")
+    };
+    assert!(refused.is_err());
+    assert_eq!(checkpoint.records, baseline.records);
+    assert!(!checkpoint.complete);
+    assert_eq!(
+        encoded(&pass.store.inner.borrow()).unwrap().len(),
+        63 * 1024 * 1024
+    );
+    pass.acknowledge(&checkpoint.checkpoint_id).unwrap();
+    assert!(
+        matches!(pass.advance().unwrap(),Step::Stopped{status:Status::Incomplete{reason}} if reason=="history_metadata_limit")
+    );
+    history_cap_assert_cold(checkpoint, 1);
+    pass.store
+        .inner
+        .borrow_mut()
+        .put_filter(
+            keys.last().unwrap(),
+            &"c".repeat(64),
+            false,
+            &vec![0; last + 1],
+        )
+        .unwrap();
+    let legacy = history_cap_v3_checkpoint(&pass);
+    assert!(STANDARD.decode(&legacy.continuation).unwrap().len() < MAX_CONTINUATION_BYTES);
+    let before = encoded(&pass.store.inner.borrow()).unwrap();
+    history_cap_assert_cold(legacy.clone(), 1);
+    let cold = Pass::new(scope(), Some(legacy), Limits::default()).unwrap();
+    assert_eq!(encoded(&cold.store.inner.borrow()).unwrap(), before);
+    // The real failed-walk path changes only its existing pending debt and one
+    // failure count. Start from the acknowledged, nonterminal at-cap baseline.
+    pass = Pass::new(scope(), Some(baseline.clone()), Limits::default()).unwrap();
+    assert!(!pass.store.policy_limit.get());
+    let mut owed = pass.store.pending().unwrap().remove(0);
+    owed.dummy_debt = Some((4, 5));
+    let before = encoded(&pass.store.inner.borrow()).unwrap();
+    let mut invalid = owed.clone();
+    invalid.cursor.row += 1;
+    assert!(matches!(
+        pass.store.commit_shard(crate::store::ShardCommit {
+            revision_digest: owed.revision_digest.clone(),
+            failed_entries: vec![owed.script.clone()],
+            pending_upsert: vec![invalid],
+            ..Default::default()
+        }),
+        Err(crate::store::StoreError::HistoryMetadataLimit)
+    ));
+    assert_eq!(encoded(&pass.store.inner.borrow()).unwrap(), before);
+    pass = Pass::new(scope(), Some(baseline.clone()), Limits::default()).unwrap();
+    assert!(!pass.store.policy_limit.get());
+    pass.store
+        .commit_shard(crate::store::ShardCommit {
+            revision_digest: owed.revision_digest.clone(),
+            failed_entries: vec![owed.script.clone()],
+            pending_upsert: vec![owed],
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(pass.store.policy_limit.get());
+    let Step::Checkpoint { checkpoint } = pass.advance().unwrap() else {
+        panic!("newly owed cover work requires a terminal durable checkpoint");
+    };
+    assert!(!checkpoint.complete);
+    assert_eq!(checkpoint.records, baseline.records);
+    assert!(pass.driver.io.borrow().pending.is_none());
+    pass.acknowledge(&checkpoint.checkpoint_id).unwrap();
+    let mut cold = Pass::new(scope(), Some(checkpoint), Limits::default()).unwrap();
+    assert!(matches!(cold.advance().unwrap(), Step::Stopped {
+        status: Status::Incomplete {reason}
+    } if reason == "history_metadata_limit"));
+    assert_eq!(cold.store.pending().unwrap()[0].dummy_debt, Some((4, 5)));
+    assert!(cold.driver.io.borrow().pending.is_none());
+}
+
+fn history_cap_v3_checkpoint(pass: &Pass) -> Checkpoint {
+    let mut cp = snapshot(pass);
+    let bytes = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .serialize(&LegacyContinuationV3 {
+            version: 3,
+            source_id: pass.scope.source_id.clone(),
+            state: pass.store.inner.borrow().clone(),
+            chain: ObservedChain {
+                anchor: pass.scope.anchor.clone(),
+                genesis: pass.driver.chain.borrow().get(&0).cloned(),
+                headers: pass.driver.chain.borrow().clone(),
+            },
+        })
+        .unwrap();
+    cp.checkpoint_id = checkpoint_id(
+        &cp.source_id,
+        &cp.scope_id,
+        cp.generation,
+        &cp.anchor,
+        cp.complete,
+        &bytes,
+    );
+    cp.continuation = STANDARD.encode(bytes);
+    cp
+}
+
+#[test]
+fn history_cap_v3_migration_preserves_exact_state_debt_and_source_digest() {
+    let mut pass = Pass::new(scope(), None, Limits::default()).unwrap();
+    history_cap_seed(&mut pass, vec![history_cap_event(0)]);
+    pass.driver.chain.borrow_mut().insert(50, "b".repeat(64));
+    let cp = history_cap_v3_checkpoint(&pass);
+    let before = encoded(&pass.store.inner.borrow()).unwrap();
+    let restored = Pass::new(scope(), Some(cp.clone()), Limits::default()).unwrap();
+    assert_eq!(encoded(&restored.store.inner.borrow()).unwrap(), before);
+    assert_eq!(
+        restored.driver.chain.borrow().get(&50),
+        Some(&"b".repeat(64))
+    );
+    assert!(!restored.store.policy_limit.get());
+    let upgraded = snapshot(&restored);
+    assert_eq!(
+        &STANDARD.decode(&upgraded.continuation).unwrap()[..4],
+        &4u32.to_le_bytes()
+    );
+    let cold = Pass::new(scope(), Some(upgraded), Limits::default()).unwrap();
+    assert_eq!(encoded(&cold.store.inner.borrow()).unwrap(), before);
+    let mut tampered = cp.clone();
+    tampered.checkpoint_id = "f".repeat(64);
+    assert!(Pass::new(scope(), Some(tampered), Limits::default()).is_err());
+    let mut other_source = scope();
+    other_source.source_id = "e".repeat(64);
+    assert!(Pass::new(other_source, Some(cp), Limits::default()).is_err());
+}
+
+#[test]
+fn history_cap_reserve_encodes_the_maximum_supported_header_domain() {
+    let mut maximal = scope();
+    maximal.anchor.height = u64::MAX;
+    let headers: BTreeMap<_, _> = (0..MAX_OBSERVED_POINTS as u64 - 1)
+        .chain(std::iter::once(u64::MAX))
+        .map(|height| (height, "f".repeat(64)))
+        .collect();
+    assert_eq!(headers.len(), MAX_OBSERVED_POINTS);
+    let memory = MemoryStore::new();
+    let continuation = durable(&maximal, &memory, &headers, true).unwrap();
+    // Measure the actual fixed-int serializer, including both anchors, source,
+    // genesis, version and terminal flag. This reserve is independent of state.
+    let overhead = continuation.len() - encoded(&memory).unwrap().len();
+    assert!(overhead < 512 * 1024);
+    assert!(crate::shared_store::MAX_TERMINAL_STORE_BYTES + overhead < MAX_CONTINUATION_BYTES);
+}
+
+#[test]
+fn history_cap_invalid_commit_is_not_a_local_policy_failure_and_cancel_wins() {
+    let mut pass = Pass::new(scope(), None, Limits::default()).unwrap();
+    history_cap_seed(&mut pass, vec![history_cap_event(0)]);
+    pass.store.inner.borrow_mut().set_event_limit(1);
+    let before = encoded(&pass.store.inner.borrow()).unwrap();
+    let mut invalid = history_cap_event(0);
+    if let transparent_events::TransparentEvent::Receive(ref mut event) = invalid.event {
+        event.value = 2;
+    }
+    let result = pass.store.commit_shard(crate::store::ShardCommit {
+        events: vec![history_cap_event(1), invalid],
+        ..Default::default()
+    });
+    assert!(result.is_err());
+    assert!(!matches!(
+        result,
+        Err(crate::store::StoreError::HistoryMetadataLimit)
+    ));
+    assert!(!pass.store.policy_limit.get());
+    assert_eq!(encoded(&pass.store.inner.borrow()).unwrap(), before);
+    let refused = pass.store.commit_shard(crate::store::ShardCommit {
+        events: vec![history_cap_event(1)],
+        ..Default::default()
+    });
+    assert!(matches!(
+        refused,
+        Err(crate::store::StoreError::HistoryMetadataLimit)
+    ));
+    pass.cancel();
+    assert!(matches!(
+        pass.advance().unwrap(),
+        Step::Stopped {
+            status: Status::Cancelled
+        }
+    ));
+    assert!(pass.finish_budget().is_err());
+    assert_eq!(encoded(&pass.store.inner.borrow()).unwrap(), before);
+}
+
+#[test]
+fn history_cap_cover_failure_encoder_reserve_bounds_all_pending_work() {
+    let mut state = MemoryStore::new();
+    let pending: Vec<_> = (0..crate::memory_store::DEFAULT_PENDING_LIMIT)
+        .map(|index| {
+            let mut script = vec![0; 40];
+            script[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            crate::store::PendingPages {
+                id: None,
+                shard_id: 0,
+                revision_digest: "b".repeat(64),
+                script,
+                cursor: crate::store::RunCursor {
+                    child: 0,
+                    row: 0,
+                    older_runs: None,
+                },
+                carried: vec![],
+                fragments: vec![],
+                dummy_debt: None,
+                attempts: 0,
+                target_anchor: Some(crate::store::Anchor {
+                    height: 100,
+                    hash: "a".repeat(64),
+                }),
+            }
+        })
+        .collect();
+    state
+        .commit_shard(crate::store::ShardCommit {
+            pending_upsert: pending,
+            ..Default::default()
+        })
+        .unwrap();
+    let before = encoded(&state).unwrap().len();
+    let mut pending = state.pending().unwrap();
+    for item in &mut pending {
+        item.dummy_debt = Some((u8::MAX, u32::MAX));
+    }
+    let scripts = pending.iter().map(|item| item.script.clone()).collect();
+    state
+        .commit_shard(crate::store::ShardCommit {
+            failed_entries: scripts,
+            pending_upsert: pending,
+            ..Default::default()
+        })
+        .unwrap();
+    let delta = encoded(&state).unwrap().len() - before;
+    assert_eq!(delta, crate::memory_store::DEFAULT_PENDING_LIMIT * 65);
+    assert!(delta < crate::shared_store::MAX_TERMINAL_STORE_BYTES - MAX_STORE_BYTES);
+}
+
+#[test]
+fn history_cap_transport_and_malformed_reply_are_not_terminal_policy() {
+    for reply in [
+        Reply::Unavailable,
+        Reply::Data {
+            body: "invalid-base64!".into(),
+        },
+    ] {
+        let mut pass = Pass::new(scope(), None, Limits::default()).unwrap();
+        let Step::Exchange { request_id, .. } = pass.advance().unwrap() else {
+            panic!("init");
+        };
+        pass.accept(request_id, reply).unwrap();
+        let Step::Checkpoint { checkpoint } = pass.advance().unwrap() else {
+            panic!("failure checkpoint");
+        };
+        assert!(!pass.store.policy_limit.get());
+        pass.acknowledge(&checkpoint.checkpoint_id).unwrap();
+        assert!(matches!(pass.advance().unwrap(), Step::Stopped {
+            status: Status::Incomplete {reason}
+        } if reason != "history_metadata_limit"));
     }
 }

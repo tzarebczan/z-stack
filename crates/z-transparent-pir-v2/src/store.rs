@@ -305,6 +305,9 @@ pub struct SetupKey {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    /// Local supported-history policy; no part of the refused mutation is applied.
+    #[error("local history metadata limit")]
+    HistoryMetadataLimit,
     #[error("store is corrupt: {0}")]
     Corrupt(String),
     /// A repeat that differs. Nothing is written.
