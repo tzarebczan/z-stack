@@ -1862,3 +1862,17 @@ test("another tab winning the retry checkpoint prevents submission and preserves
   assert.equal((await wallet.getWallet()).unifiedAddress, "other-tab-address");
   assert.equal((await wallet.pending())[0]?.txid, txid);
 });
+
+test("public transparent mode setter rejects automatic shielding before changing wallet state", async t => {
+  const f = fixture(t);
+  const wallet = await f.open({ autoShield: true, unlockPolicy: "each-spend", server: {
+    kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(), submit: async () => txid,
+    transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+  } });
+  await wallet.create({ birthday: 8 });
+  const before = await readSavedSnapshotRecord();
+  assert.equal((await wallet.getWallet()).transparentScanStatus, "off");
+  assert.throws(() => wallet.setTransparentScan("pir"), /Automatic shielding is not enabled for publisher-provided PIR history/);
+  assert.equal((await wallet.getWallet()).transparentScanStatus, "off");
+  assert.ok(JSON.stringify(await readSavedSnapshotRecord()) === JSON.stringify(before), "rejected mode change must preserve saved wallet state");
+});

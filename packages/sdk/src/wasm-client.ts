@@ -1005,6 +1005,7 @@ export function createWasmClient(
     },
     setTransparentScan: (value) => {
       const mode = transparentScanMode(value);
+      if (mode === "pir" && opts.autoShield) throw new Error("Automatic shielding is not enabled for publisher-provided PIR history.");
       if (mode === "pir" && !transport.transparentPir) throw new Error("Private transparent scanning requires a separately consented PIR transport.");
       if (mode !== transparentScan) transparentScanStatus = mode !== "off" ? "scanning" : "off";
       transparentScan = mode;
