@@ -5,6 +5,39 @@ use crate::transparent_pir::{
 use transparent_events::TransparentEvent;
 
 impl WebWallet {
+    pub(crate) fn reconcile_transparent_pir_spend_history(&mut self) {
+        let owned: std::collections::BTreeSet<_> = self
+            .transparent_pir
+            .projected_spends
+            .iter()
+            .filter_map(|key| {
+                let fields: Vec<_> = key.split(':').collect();
+                match fields.as_slice() {
+                    ["s", spender, _, previous, index] => {
+                        Some((*spender, *previous, index.parse::<u32>().ok()?))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        let mut totals = std::collections::BTreeMap::<&str, (u64, u32)>::new();
+        for output in &self.utxos {
+            let Some(spender) = output.spent_in.as_deref().filter(|_| output.spent) else {
+                continue;
+            };
+            if owned.contains(&(spender, output.txid.as_str(), output.index)) {
+                let total = totals.entry(spender).or_default();
+                total.0 = total.0.saturating_add(output.value_zat);
+                total.1 = total.1.saturating_add(1);
+            }
+        }
+        for (txid, agg) in &mut self.txs {
+            let (value, count) = totals.get(txid.as_str()).copied().unwrap_or_default();
+            agg.pir_spent_zat = value;
+            agg.pir_spent_notes = count;
+        }
+    }
+
     /// The caller has accepted this exact transparent publisher profile. All scripts
     /// and the target are obtained from this wallet; no host-provided amount is used.
     pub fn begin_transparent_pir(&mut self, source_id: &str) -> Result<String> {
@@ -1327,6 +1360,270 @@ mod tests {
             assert_eq!(reopened.transparent_pir_status()["confirmedZat"], expected);
             assert_eq!(reopened.history(20).len(), if spent { 2 } else { 1 });
             assert!(reopened.transparent_pir_checkpoint().unwrap() == saved);
+        }
+    }
+
+    #[test]
+    fn pir_spend_generic_history_repairs_cold_legacy_and_same_checkpoint_replay() {
+        let mut w = wallet();
+        let c = checkpoint(&mut w, vec![receive(), spend()]);
+        apply_pir(&mut w, &c);
+        let assert_spend = |w: &WebWallet| {
+            let rows = w.history(20);
+            let spent = rows.iter().find(|r| r.transparent_spent == 150000).unwrap();
+            assert_eq!(spent.spent_zat, 150000);
+            assert_eq!(spent.sent_note_count, 1);
+            assert_eq!(spent.account_delta_zat, -150000);
+        };
+        assert_spend(&w);
+        apply_pir(&mut w, &c);
+        assert_spend(&w);
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+        for agg in legacy["txs"].as_object_mut().unwrap().values_mut() {
+            agg.as_object_mut().unwrap().remove("pirSpentZat");
+            agg.as_object_mut().unwrap().remove("pirSpentNotes");
+        }
+        legacy["txs"]["02".repeat(32)]["spentZat"] = serde_json::json!(0);
+        legacy["txs"]["02".repeat(32)]["spentNotes"] = serde_json::json!(0);
+        let mut restored = WebWallet::from_snapshot(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_spend(&restored);
+        apply_pir(&mut restored, &c);
+        assert_spend(&restored);
+        let mut progress = c.clone();
+        progress.previous_checkpoint_id = Some(c.checkpoint_id);
+        progress.checkpoint_id = "ce".repeat(32);
+        apply_pir(&mut restored, &progress);
+        assert_spend(&restored);
+        let mut reopened = WebWallet::from_snapshot(&restored.to_snapshot().unwrap()).unwrap();
+        assert_spend(&reopened);
+        reopened.block_hashes.insert(1, "01".repeat(32));
+        replace_pir(&mut reopened, progress.checkpoint_id, vec![receive()], 1);
+        assert!(!reopened.txs.contains_key(&"02".repeat(32)));
+        assert_eq!(reopened.history(20).len(), 1);
+    }
+
+    #[test]
+    fn pir_spend_generic_history_preserves_independent_totals_on_retirement() {
+        let mut w = wallet();
+        // Existing ordinary/full-transaction accounting, independently of the PIR input.
+        w.txs.insert(
+            "02".repeat(32),
+            crate::web::store::TxAgg {
+                mined_height: Some(2),
+                spent_zat: 700,
+                spent_notes: 2,
+                ..Default::default()
+            },
+        );
+        let c = checkpoint(&mut w, vec![receive(), spend()]);
+        apply_pir(&mut w, &c);
+        assert_eq!(w.txs[&"02".repeat(32)].spent_zat, 700);
+        assert_eq!(
+            w.history(20)
+                .iter()
+                .find(|r| r.transparent_spent == 150000)
+                .unwrap()
+                .spent_zat,
+            150700
+        );
+        assert_eq!(w.txs[&"02".repeat(32)].spent_notes, 2);
+        assert_eq!(
+            w.history(20)
+                .iter()
+                .find(|r| r.transparent_spent == 150000)
+                .unwrap()
+                .sent_note_count,
+            3
+        );
+        apply_pir(&mut w, &c);
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+        let agg = legacy["txs"]["02".repeat(32)].as_object_mut().unwrap();
+        agg.remove("pirSpentZat");
+        agg.remove("pirSpentNotes");
+        agg.insert("spentZat".into(), serde_json::json!(700));
+        agg.insert("spentNotes".into(), serde_json::json!(2));
+        let mut restored = WebWallet::from_snapshot(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(restored.txs[&"02".repeat(32)].spent_zat, 700);
+        assert_eq!(
+            restored
+                .history(20)
+                .iter()
+                .find(|r| r.transparent_spent == 150000)
+                .unwrap()
+                .spent_zat,
+            150700
+        );
+        assert_eq!(restored.txs[&"02".repeat(32)].spent_notes, 2);
+        assert_eq!(
+            restored
+                .history(20)
+                .iter()
+                .find(|r| r.transparent_spent == 150000)
+                .unwrap()
+                .sent_note_count,
+            3
+        );
+        restored.block_hashes.insert(1, "01".repeat(32));
+        replace_pir(&mut restored, c.checkpoint_id, vec![receive()], 1);
+        assert_eq!(restored.txs[&"02".repeat(32)].spent_zat, 700);
+        assert_eq!(restored.txs[&"02".repeat(32)].spent_notes, 2);
+        assert_eq!(restored.txs[&"02".repeat(32)].transparent_spent, 0);
+        let reopened = WebWallet::from_snapshot(&restored.to_snapshot().unwrap()).unwrap();
+        assert_eq!(reopened.txs[&"02".repeat(32)].spent_zat, 700);
+        assert_eq!(reopened.txs[&"02".repeat(32)].spent_notes, 2);
+    }
+
+    #[test]
+    fn pir_spend_generic_history_transfers_to_public_write_without_doubling() {
+        use zcash_client_backend::data_api::{SentTransaction, WalletWrite};
+        use zcash_client_backend::proto::compact_formats::{CompactTx, CompactTxIn, TxOut};
+        use zcash_primitives::transaction::Transaction;
+        use zcash_protocol::{
+            consensus::{BlockHeight, BranchId},
+            value::Zatoshis,
+        };
+        for rewound in [false, true] {
+            let mut w = wallet();
+            let script = w.public_transparent_scripts().unwrap()[0].0.clone();
+            let address = w.public_transparent_scripts().unwrap()[0].1.clone();
+            w.apply_utxos_json(
+                &serde_json::json!({"utxos":[{
+                    "txid":"03".repeat(32),"index":0,"script":super::super::super::to_hex(&script),
+                    "valueZat":700,"height":1,"address":address
+                }]})
+                .to_string(),
+            )
+            .unwrap();
+            // Structurally valid disposable bytes, with inert script signatures.
+            // This exercises WalletWrite accounting, not consensus or signing.
+            let mut raw = 1u32.to_le_bytes().to_vec();
+            raw.push(2);
+            for previous in [1, 3] {
+                raw.extend([previous; 32]);
+                raw.extend(0u32.to_le_bytes());
+                raw.push(0);
+                raw.extend(u32::MAX.to_le_bytes());
+            }
+            raw.push(1);
+            raw.extend(140700u64.to_le_bytes());
+            raw.push(u8::try_from(script.len()).unwrap());
+            raw.extend(&script);
+            raw.extend(0u32.to_le_bytes());
+            let tx = Transaction::read(&raw[..], BranchId::for_height(&Network::Regtest, 2.into()))
+                .unwrap();
+            let spender = super::super::super::to_hex(tx.txid().as_ref());
+            let mut event = spend();
+            if let TransparentEvent::Spend(e) = &mut event {
+                e.spending_txid = Txid(*tx.txid().as_ref());
+            }
+            let c = checkpoint(&mut w, vec![receive(), event]);
+            apply_pir(&mut w, &c);
+            assert_eq!(
+                (w.txs[&spender].spent_zat, w.txs[&spender].spent_notes),
+                (0, 0)
+            );
+            assert_eq!(
+                w.history(20)
+                    .iter()
+                    .find(|r| r.transparent_spent == 150000)
+                    .unwrap()
+                    .spent_zat,
+                150000
+            );
+            if rewound {
+                w.block_hashes.insert(1, "01".repeat(32));
+                w.rewind_to_height_checked(1).unwrap();
+                assert!(w.utxos.iter().all(|u| !u.spent));
+                // The synthetic shielded scanner catches back up to the same accepted tip.
+                w.scanned_height = 3;
+                w.block_hashes.insert(3, "03".repeat(32));
+            }
+            let sent = SentTransaction::new(
+                &tx,
+                std::time::UNIX_EPOCH.into(),
+                BlockHeight::from_u32(2).into(),
+                0,
+                &[],
+                Zatoshis::from_u64(10000).unwrap(),
+                &[],
+            );
+            w.store_transactions_to_be_sent(&[sent]).unwrap();
+            assert_eq!(
+                (w.txs[&spender].spent_zat, w.txs[&spender].spent_notes),
+                (150700, 2)
+            );
+            let pending = w.pending_txs.clone();
+            let mut blocked = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+            blocked.block_hashes.insert(1, "01".repeat(32));
+            let mut retirement = checkpoint(&mut blocked, vec![]);
+            retirement.checkpoint_id = "de".repeat(32);
+            retirement.previous_checkpoint_id = Some(c.checkpoint_id.clone());
+            retirement.rewind_to = Some(TransparentPirAnchor {
+                height: 0,
+                hash: Network::Regtest.genesis_hash().into(),
+            });
+            let before = blocked.to_snapshot().unwrap();
+            assert!(blocked
+                .apply_transparent_pir_checkpoint(&serde_json::to_string(&retirement).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("transparent_pir_pending_reconciliation_required"));
+            assert_eq!(blocked.to_snapshot().unwrap(), before);
+            assert_eq!(blocked.pending_txs, pending);
+            let mut blocks = public_range(&mut w, false);
+            blocks[0].vtx.push(CompactTx {
+                index: 2,
+                txid: vec![3; 32],
+                vout: vec![TxOut {
+                    value: 700,
+                    script_pub_key: script.clone(),
+                }],
+                ..Default::default()
+            });
+            blocks[1].vtx.push(CompactTx {
+                index: 1,
+                txid: tx.txid().as_ref().to_vec(),
+                vin: [1, 3]
+                    .into_iter()
+                    .map(|b| CompactTxIn {
+                        prevout_txid: vec![b; 32],
+                        prevout_index: 0,
+                    })
+                    .collect(),
+                vout: vec![TxOut {
+                    value: 140700,
+                    script_pub_key: script,
+                }],
+                ..Default::default()
+            });
+            w.apply_transparent_blocks(&super::super::super::encode_delimited(blocks))
+                .unwrap();
+            assert_eq!(
+                (w.txs[&spender].spent_zat, w.txs[&spender].spent_notes),
+                (150700, 2)
+            );
+            assert_eq!(
+                (
+                    w.txs[&spender].pir_spent_zat,
+                    w.txs[&spender].pir_spent_notes
+                ),
+                (0, 0)
+            );
+            w.block_hashes.insert(1, "01".repeat(32));
+            replace_pir(&mut w, c.checkpoint_id, vec![receive()], 1);
+            assert_eq!(
+                (w.txs[&spender].spent_zat, w.txs[&spender].spent_notes),
+                (150700, 2)
+            );
+            assert_eq!(w.pending_txs, pending);
+            let cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+            assert_eq!(
+                (cold.txs[&spender].spent_zat, cold.txs[&spender].spent_notes),
+                (150700, 2)
+            );
+            assert_eq!(cold.pending_txs, pending);
         }
     }
 

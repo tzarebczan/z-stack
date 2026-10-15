@@ -14,6 +14,13 @@ pub fn entries(
     let mut rows: Vec<HistoryEntry> = aggs
         .iter()
         .map(|(txid, agg)| {
+            #[cfg(feature = "transparent-pir")]
+            let (spent_zat, sent_note_count) = (
+                agg.spent_zat.saturating_add(agg.pir_spent_zat),
+                agg.spent_notes.saturating_add(agg.pir_spent_notes),
+            );
+            #[cfg(not(feature = "transparent-pir"))]
+            let (spent_zat, sent_note_count) = (agg.spent_zat, agg.spent_notes);
             // `received_zat` omits change, while per-pool receipts include it.
             // A wallet's balance delta must include change or a fee-only
             // self-transfer appears to lose its entire input note.
@@ -30,17 +37,17 @@ pub fn entries(
             let account_delta_zat = if pool_received > 0 || pool_spent > 0 {
                 pool_received as i64 - pool_spent as i64
             } else {
-                agg.received_zat as i64 - agg.spent_zat as i64
+                agg.received_zat as i64 - spent_zat as i64
             };
             HistoryEntry {
                 txid: WebWallet::display_txid(txid),
                 mined_height: agg.mined_height,
                 expiry_height: agg.expiry_height,
                 account_delta_zat,
-                spent_zat: agg.spent_zat,
+                spent_zat,
                 received_zat: agg.received_zat,
                 fee_zat: agg.fee_zat,
-                sent_note_count: agg.spent_notes,
+                sent_note_count,
                 received_note_count: agg.received_notes,
                 memo_count: agg.memos.len() as u32,
                 has_change: agg.has_change,

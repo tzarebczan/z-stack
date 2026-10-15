@@ -1376,6 +1376,8 @@ impl WalletWrite for WebWallet {
                     let prev = vin.prevout();
                     let hx = super::to_hex(prev.hash());
                     let idx = prev.n();
+                    #[cfg(feature = "transparent-pir")]
+                    let mut newly_credited = false;
                     for u in &mut self.utxos {
                         if !u.spent && u.txid == hx && u.index == idx {
                             u.spent = true;
@@ -1383,7 +1385,18 @@ impl WalletWrite for WebWallet {
                             spent_t = spent_t.saturating_add(u.value_zat);
                             spent_zat = spent_zat.saturating_add(u.value_zat);
                             spent_notes += 1;
+                            #[cfg(feature = "transparent-pir")]
+                            {
+                                newly_credited = true;
+                            }
                         }
+                    }
+                    #[cfg(feature = "transparent-pir")]
+                    if newly_credited {
+                        // The normal WalletWrite totals below already credit this input.
+                        self.release_pir_spend_ownership(&txid, &hx, idx);
+                    } else {
+                        self.record_public_transparent_spend(&txid, &hx, idx);
                     }
                 }
             }
@@ -1452,6 +1465,8 @@ impl WalletWrite for WebWallet {
             #[cfg(feature = "private-enhance")]
             self.reconcile_private_enhancement(&txid);
         }
+        #[cfg(feature = "transparent-pir")]
+        self.reconcile_transparent_pir_spend_history();
         // Unlock-on-store: the spend records now guard these notes.
         self.prune_locks();
         Ok(())

@@ -246,6 +246,14 @@ pub struct TxAgg {
     pub spent_zat: u64,
     pub received_notes: u32,
     pub spent_notes: u32,
+    // The share of generic history totals contributed by PIR-owned spend marks.
+    // Public observation transfers this accounting without removing its value.
+    #[cfg(feature = "transparent-pir")]
+    #[serde(default)]
+    pub(crate) pir_spent_zat: u64,
+    #[cfg(feature = "transparent-pir")]
+    #[serde(default)]
+    pub(crate) pir_spent_notes: u32,
     pub has_change: bool,
     #[serde(default)]
     pub is_shielding: bool,
@@ -926,6 +934,8 @@ impl WebWallet {
                 }
             }
         }
+        #[cfg(feature = "transparent-pir")]
+        self.reconcile_transparent_pir_spend_history();
     }
 
     pub fn record_recipient(&mut self, to: &str) {
@@ -1547,8 +1557,36 @@ impl WebWallet {
         previous: &str,
         index: u32,
     ) {
-        // Canonical spent state identifies a spender and outpoint, not the
-        // publisher's claimed input position. Retire every claim for that identity.
+        let Some(value) = self
+            .utxos
+            .iter()
+            .find(|u| {
+                u.txid == previous
+                    && u.index == index
+                    && u.spent
+                    && u.spent_in.as_deref() == Some(txid)
+            })
+            .map(|u| u.value_zat)
+        else {
+            return;
+        };
+        if self.release_pir_spend_ownership(txid, previous, index) {
+            let agg = self.txs.entry(txid.to_owned()).or_default();
+            // This canonical input was previously accounted only by PIR's
+            // history share. The independent source now owns that contribution.
+            agg.spent_zat = agg.spent_zat.saturating_add(value);
+            agg.spent_notes = agg.spent_notes.saturating_add(1);
+        }
+    }
+
+    #[cfg(feature = "transparent-pir")]
+    pub(crate) fn release_pir_spend_ownership(
+        &mut self,
+        txid: &str,
+        previous: &str,
+        index: u32,
+    ) -> bool {
+        // The canonical identity excludes the publisher's claimed input position.
         let prefix = format!("s:{txid}:");
         let suffix = format!(":{previous}:{index}");
         let claims: Vec<_> = self
@@ -1559,10 +1597,12 @@ impl WebWallet {
             .filter(|key| key.ends_with(&suffix))
             .cloned()
             .collect();
+        let owned = !claims.is_empty();
         for claim in claims {
             self.transparent_pir.projected_spends.remove(&claim);
         }
         self.transparent_pir.projected_transactions.remove(txid);
+        owned
     }
 
     fn transparent_pir_snapshot_status(&self) -> serde_json::Value {
