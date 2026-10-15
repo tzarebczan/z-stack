@@ -10,7 +10,7 @@ import { keystoneSigner } from "../src/hardware.ts";
 import { saveWalletSnapshot, readSavedSnapshotRecord, advanceWalletGeneration, clearSavedSnapshot } from "../src/snapshot-storage.ts";
 import { attachScanWorker, restartScanWorker } from "../src/scan-host.ts";
 import { checkWalletSetup } from "../src/diagnostics.ts";
-import { BroadcastRejection, assertCompactBlockHeight, SDK_TRANSPORT_CAPABILITIES } from "../src/lwd.ts";
+import { BroadcastRejection, assertCompactBlockHeight, httpLwdTransport, SDK_TRANSPORT_CAPABILITIES } from "../src/lwd.ts";
 
 // Public BIP-39 fixture; no network, real money, environment or private secrets.
 const words = [...Array(23).fill("abandon"), "art"].join(" ");
@@ -2309,3 +2309,141 @@ test("public forward compact scan preserves ordinary fallback for an unsupported
   await wallet.sync(); assert.equal(ordinary, 1); assert.equal(transparent, 0);
   assert.equal((await wallet.getWallet()).scannedHeight, 11);
 });
+
+
+for (const phase of ["forward", "backfill"] as const) {
+for (const changes of [["pir"], ["off"], ["pir", "compact"]] as const) {
+  for (const failure of ["gateway", "idle", "truncated"] as const) {
+   for (const retryMs of [100, 250]) {
+    const permittedRequests = retryMs === 100 ? 1 : 2;
+    test(`public real pipe ${phase} cancels internal ${failure} ${retryMs}ms retry after ${changes.join("/")}`, async t => {
+      const f = fixture(t); f.transparentCoverage(phase === "forward" ? 10 : 9);
+      const tip = phase === "forward" ? 11 : 10;
+      const pipe = httpLwdTransport("http://127.0.0.1:1239", "regtest", undefined, undefined, undefined, { blockIdleMs: 20 });
+      let requests = 0, changed = false;
+      const urls: string[] = [];
+      t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+        const url = String(input); urls.push(url); requests++;
+        if (requests <= permittedRequests) {
+          if (failure === "gateway") return Response.json({}, { status: 503 });
+          if (failure === "idle") return new Response(new ReadableStream<Uint8Array>());
+          return new Response(new ReadableStream<Uint8Array>({ start(stream) {
+            stream.enqueue(new Uint8Array([0, 0, 0, 36]));
+            queueMicrotask(() => stream.error(new TypeError("disposable transport truncation")));
+          } }));
+        }
+        return new Response(probeBlock(tip));
+      });
+      const wallet = await f.open({ transparentScan: "compact", server: {
+        ...pipe, tip: async () => tip,
+        info: async () => ({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }),
+        treeState: undefined, subtreeRoots: undefined, utxos: undefined, mempool: undefined,
+        transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+      } });
+      await wallet.create({ birthday: 8 });
+      const timers = globalThis.setTimeout;
+      t.mock.method(globalThis, "setTimeout", new Proxy(timers, { apply(target, receiver, args) {
+        const timer = Reflect.apply(target, receiver, args);
+        if (args[1] === retryMs && !changed) queueMicrotask(() => {
+          changed = true;
+          for (const mode of changes) wallet.setTransparentScan(mode);
+        });
+        return timer;
+      } }));
+      const error = await wallet.sync().then(() => undefined, (error: unknown) => error);
+      assert.equal(changed, true, "test must change mode inside the real pipe retry delay");
+      assert.equal(requests, permittedRequests, "a stale pipe must not dispatch its internal retry GET");
+      assert.ok(urls.every(url => new URL(url).searchParams.get("allPools") === "1"));
+      assert.ok(error instanceof Error && privacyChanged.test(error.message));
+      assert.equal((await wallet.getWallet()).scannedHeight, 10);
+    });
+  }
+}
+
+}
+
+}
+for (const phase of ["forward", "backfill"] as const) {
+for (const action of ["same-mode", "memo-mode", "reorg", "cancel", "lock"] as const) {
+  if (phase === "backfill" && action === "reorg") continue;
+  test(`public real pipe ${phase} internal retry preserves ${action} semantics`, async t => {
+    const f = fixture(t); f.transparentCoverage(phase === "forward" ? 10 : 9);
+    const tip = phase === "forward" ? 11 : 10;
+    const pipe = httpLwdTransport("http://127.0.0.1:1239", "regtest");
+    let requests = 0, acted = false, reorganized = false;
+    const urls: string[] = [];
+    t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+      urls.push(String(input)); requests++;
+      return requests === 1 ? Response.json({}, { status: 503 }) : new Response(probeBlock(tip));
+    });
+    const wallet = await f.open({ transparentScan: "compact", server: {
+      ...pipe, tip: async () => tip,
+      info: async () => ({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }),
+      treeState: undefined, subtreeRoots: undefined, utxos: undefined, mempool: undefined,
+      transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+    } });
+    await wallet.create({ birthday: 8 });
+    const timers = globalThis.setTimeout;
+    t.mock.method(globalThis, "setTimeout", new Proxy(timers, { apply(target, receiver, args) {
+      const timer = Reflect.apply(target, receiver, args);
+      if (args[1] === 100 && !acted) queueMicrotask(() => {
+        acted = true;
+        if (action === "same-mode") wallet.setTransparentScan("compact");
+        else if (action === "memo-mode") wallet.setMemoFetch("shared");
+        else if (action === "reorg") f.onApplyCompact(() => {
+          if (!reorganized) { reorganized = true; throw new Error("reorg at height 11; rescan from 11"); }
+        });
+        else {
+          wallet.setTransparentScan("pir"); wallet.cancelSync();
+          if (action === "lock") void wallet.lock();
+        }
+      });
+      return timer;
+    } }));
+    const error = await wallet.sync().then(() => undefined, (error: unknown) => error);
+    assert.equal(acted, true);
+    if (action === "cancel" || action === "lock") {
+      assert.equal(requests, 1);
+      assert.ok(error instanceof Error && /cancelled|aborted|AbortError/i.test(error.message));
+      assert.equal((await wallet.getWallet()).scannedHeight, 10);
+    } else {
+      assert.equal(error, undefined);
+      assert.equal(requests, action === "reorg" ? 3 : 2); assert.ok(urls.every(url => url === urls[0]));
+      assert.equal(reorganized, action === "reorg");
+      assert.equal((await wallet.getWallet()).scannedHeight, tip);
+    }
+  });
+}
+}
+
+for (const phase of ["forward", "backfill"] as const) {
+for (const changes of [["pir"], ["off"], ["pir", "compact"]] as const) {
+  test(`public real pipe ${phase} aborts an active idle request after ${changes.join("/")}`, async t => {
+    const f = fixture(t), entered = deferred<void>(); f.transparentCoverage(phase === "forward" ? 10 : 9);
+    const tip = phase === "forward" ? 11 : 10;
+    const pipe = httpLwdTransport("http://127.0.0.1:1239", "regtest", undefined, undefined, undefined, { blockIdleMs: 20 });
+    let requests = 0;
+    const signals: Array<AbortSignal | null | undefined> = [];
+    t.mock.method(globalThis, "fetch", async (_input: string | URL | Request, init?: RequestInit) => {
+      requests++; signals.push(init?.signal); entered.resolve();
+      return requests === 1 ? new Response(new ReadableStream<Uint8Array>()) : new Response(probeBlock(tip));
+    });
+    const wallet = await f.open({ transparentScan: "compact", server: {
+      ...pipe, tip: async () => tip,
+      info: async () => ({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }),
+      treeState: undefined, subtreeRoots: undefined, utxos: undefined, mempool: undefined,
+      transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+    } });
+    await wallet.create({ birthday: 8 });
+    const running = wallet.sync().then(() => undefined, (error: unknown) => error);
+    await entered.promise;
+    for (const mode of changes) wallet.setTransparentScan(mode);
+    const error = await running;
+    assert.equal(requests, 1, "the revoked active request must not reach an internal retry");
+    assert.equal(signals[0]?.aborted, true, "mode cancellation must reach the actual fetch signal");
+    assert.ok(error instanceof Error && privacyChanged.test(error.message));
+    assert.equal((await wallet.getWallet()).scannedHeight, 10);
+  });
+}
+
+}

@@ -62,6 +62,7 @@ export interface WasmClientContext {
   transparentScanStatus: PublicDataStatus;
   transparentScanFailure: WalletSnapshot["transparentScanFailure"];
   readonly transparentScanEpoch: number;
+  readonly transparentScanSignal: AbortSignal;
   sharedMemoStatus: PublicDataStatus;
   selectiveMemoStatus: PublicDataStatus;
   memoAbort: AbortController | null;

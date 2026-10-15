@@ -38,7 +38,7 @@ import type { WasmClientContext } from './wasm-client-context';
 import * as runtime from './wasm-client-runtime';
 
 /** Block scanning and optional public-data enhancement. */
-export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" | "bus" | "session" | "snap" | "currentSession" | "syncLock" | "memoLock" | "loadIfNeeded" | "preferWorker" | "transport" | "memoFetch" | "persist" | "opts" | "transparentScan" | "localLight" | "maxBlocksPerRequest" | "maxSharedMemoBlocksPerRequest" | "submissionPolicy" | "syncOpts" | "grpcWeb" | "lwdPipe" | "retireFailedSession" | "spendingSeed" | "prewarmProvingKey" | "sessionOperation" | "client" | "unlockPolicy" | "rootsChecked" | "assertSource" | "network" | "refreshIfStale" | "stateEpoch" | "transparentScanStatus" | "transparentScanFailure" | "transparentScanEpoch" | "sharedMemoStatus" | "selectiveMemoStatus" | "memoAbort" | "storageGeneration" | "rescanning">) {
+export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" | "bus" | "session" | "snap" | "currentSession" | "syncLock" | "memoLock" | "loadIfNeeded" | "preferWorker" | "transport" | "memoFetch" | "persist" | "opts" | "transparentScan" | "localLight" | "maxBlocksPerRequest" | "maxSharedMemoBlocksPerRequest" | "submissionPolicy" | "syncOpts" | "grpcWeb" | "lwdPipe" | "retireFailedSession" | "spendingSeed" | "prewarmProvingKey" | "sessionOperation" | "client" | "unlockPolicy" | "rootsChecked" | "assertSource" | "network" | "refreshIfStale" | "stateEpoch" | "transparentScanStatus" | "transparentScanFailure" | "transparentScanEpoch" | "transparentScanSignal" | "sharedMemoStatus" | "selectiveMemoStatus" | "memoAbort" | "storageGeneration" | "rescanning">) {
 
   function progressScope(): () => boolean {
     const epoch = runtime.runtimeState.wasmSyncEpoch;
@@ -301,6 +301,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     // older snapshots with a deposit gap retain the independent backfill path.
     let combinedTransparent = false;
     const combinedTransparentEpoch = ctx.transparentScanEpoch;
+    const combinedTransparentSignal = ctx.transparentScanSignal;
     const assertCombinedTransparentCurrent = () => {
       if (cancelled()) throw new Error("sync cancelled");
       if (ctx.transparentScan !== "compact" || ctx.transparentScanEpoch !== combinedTransparentEpoch)
@@ -491,7 +492,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         fetch: (h, end, signal) => {
           if (combinedTransparent) {
             assertCombinedTransparentCurrent();
-            return ctx.transport.transparentBlocks!(h, end, signal);
+            return ctx.transport.transparentBlocks!(h, end, AbortSignal.any([signal, combinedTransparentSignal]));
           }
           return ctx.transport.blocks(h, end, signal);
         },
@@ -549,6 +550,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
           job = await pipe.next();
         } catch (error) {
           pipe.dispose();
+          if (combinedTransparent) assertCombinedTransparentCurrent();
           try {
             await recovery.waitAfter(error);
           } catch (failure) {
@@ -1028,10 +1030,11 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const mode = ctx.memoFetch;
     const deposits = ctx.transparentScan;
     const transparentEpoch = ctx.transparentScanEpoch;
+    const transparentSignal = ctx.transparentScanSignal;
     const run = async (kind: "transparent" | "memos") => {
       const controller = kind === "memos" ? new AbortController() : undefined;
       if (controller) ctx.memoAbort = controller;
-      const wait = AbortSignal.any([operation.signal, signal, ...(controller ? [controller.signal] : [])]);
+      const wait = AbortSignal.any([operation.signal, signal, ...(controller ? [controller.signal] : [transparentSignal])]);
       const current = () => {
         wait.throwIfAborted();
         ctx.assertSource(operation, source);

@@ -141,6 +141,7 @@ export function createWasmClient(
   let transparentScan = transparentScanMode(opts.transparentScan);
 
   let transparentScanEpoch = 0;
+  let transparentScanAbort = new AbortController();
   let transparentScanFailure: WalletSnapshot["transparentScanFailure"];
   let transparentScanStatus: PublicDataStatus = transparentScan !== "off" ? "scanning" : "off";
 
@@ -397,6 +398,7 @@ export function createWasmClient(
     set rootsChecked(value: WasmClientContext["rootsChecked"]) { rootsChecked = value; },
     get refreshIfStale() { return refreshIfStale; },
     get transparentScanEpoch() { return transparentScanEpoch; },
+    get transparentScanSignal() { return transparentScanAbort.signal; },
     get transparentScanFailure() { return transparentScanFailure; },
     set transparentScanFailure(value: WasmClientContext["transparentScanFailure"]) { transparentScanFailure = value; },
     get transparentScanStatus() { return transparentScanStatus; },
@@ -1017,6 +1019,8 @@ export function createWasmClient(
       if (mode === "pir" && !transport.transparentPir) throw new Error("Private transparent scanning requires a separately consented PIR transport.");
       if (mode !== transparentScan) {
         ++transparentScanEpoch;
+        transparentScanAbort.abort(new Error("Privacy settings changed during retrieval"));
+        transparentScanAbort = new AbortController();
         transparentScanFailure = undefined;
         transparentScanStatus = mode !== "off" ? "scanning" : "off";
       }
