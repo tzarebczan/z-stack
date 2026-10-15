@@ -1288,6 +1288,7 @@ impl WalletWrite for WebWallet {
                     self.confirm_public_transparent_output(&txid, index);
                 }
             }
+            self.recompute_pool_fields();
             return Ok(i as u32);
         }
         #[cfg(feature = "transparent-inputs")]
@@ -1312,6 +1313,7 @@ impl WalletWrite for WebWallet {
             spent: false,
             spent_in: None,
         });
+        self.recompute_pool_fields();
         Ok(self.utxos.len() as u32 - 1)
     }
 
@@ -1403,10 +1405,6 @@ impl WalletWrite for WebWallet {
             let mut received_zat = 0u64;
             let mut received_notes = 0u32;
             #[cfg(feature = "transparent-inputs")]
-            let mut transparent_received = 0u64;
-            #[cfg(not(feature = "transparent-inputs"))]
-            let transparent_received = 0u64;
-            #[cfg(feature = "transparent-inputs")]
             let mut transparent_receipts = std::collections::BTreeMap::<u32, u64>::new();
             #[cfg(not(feature = "transparent-inputs"))]
             let transparent_receipts = std::collections::BTreeMap::<u32, u64>::new();
@@ -1434,9 +1432,6 @@ impl WalletWrite for WebWallet {
                     Recipient::InternalTransparent { .. }
                     | Recipient::EphemeralTransparent { .. } => {
                         let value = u64::from(o.value());
-                        received_zat = received_zat.saturating_add(value);
-                        received_notes += 1;
-                        transparent_received = transparent_received.saturating_add(value);
                         transparent_receipts.insert(o.output_index() as u32, value);
                     }
                     Recipient::External { .. } => {}
@@ -1447,11 +1442,32 @@ impl WalletWrite for WebWallet {
                     }
                 }
             }
+            let orchard_received = received_zat.saturating_sub(ironwood_received);
+            let receipt_totals_recorded = received_notes > 0 || !transparent_receipts.is_empty();
+            // Ordinary public output writes have already contributed their
+            // canonical rows to base history, even when they predate this map.
+            let mut observed_transparent_receipts = HashSet::new();
+            for output in self.utxos.iter().filter(|output| output.txid == txid) {
+                #[cfg(feature = "transparent-pir")]
+                if self.pir_receipt_unaccounted(&txid, output.index) {
+                    continue;
+                }
+                observed_transparent_receipts.insert(output.index);
+            }
             let agg = self.txs_mut().entry(txid.clone()).or_default();
             agg.mined_height = None;
-            agg.receipt_totals_recorded |= received_notes > 0;
-            agg.accounted_transparent_receipts
-                .extend(transparent_receipts);
+            agg.receipt_totals_recorded |= receipt_totals_recorded;
+            for (index, value) in transparent_receipts {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    agg.accounted_transparent_receipts.entry(index)
+                {
+                    entry.insert(value);
+                    if !observed_transparent_receipts.contains(&index) {
+                        received_zat = received_zat.saturating_add(value);
+                        received_notes = received_notes.saturating_add(1);
+                    }
+                }
+            }
             agg.spent_zat = agg.spent_zat.saturating_add(spent_zat);
             agg.spent_notes = agg.spent_notes.saturating_add(spent_notes);
             agg.received_zat = agg.received_zat.saturating_add(received_zat);
@@ -1470,9 +1486,7 @@ impl WalletWrite for WebWallet {
             agg.orchard_spent = agg.orchard_spent.saturating_add(orchard_spent);
             agg.ironwood_spent = agg.ironwood_spent.saturating_add(ironwood_spent);
             agg.ironwood_received = agg.ironwood_received.saturating_add(ironwood_received);
-            agg.orchard_received = agg
-                .orchard_received
-                .saturating_add(received_zat - ironwood_received - transparent_received);
+            agg.orchard_received = agg.orchard_received.saturating_add(orchard_received);
             if !memos.is_empty() {
                 agg.memos.extend(memos);
             }

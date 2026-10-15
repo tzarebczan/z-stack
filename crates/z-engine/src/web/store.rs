@@ -1487,10 +1487,23 @@ impl WebWallet {
                 _ => add(&mut orchard, &mut orchard_p, n.value_zat, ready),
             }
         }
+        let represented_transparent: std::collections::HashSet<_> = self
+            .utxos
+            .iter()
+            .map(|u| (u.txid.as_str(), u.index))
+            .collect();
         // Unmined sends/shields: change isn't in `notes` until the compact block is scanned.
         for (txid, agg) in &self.txs {
             if agg.mined_height.is_some() || agg.received_zat == 0 || self.expired_unmined(agg) {
                 continue;
+            }
+            // Builder receipt metadata exists before a transparent output has a
+            // UTXO row. Rows already present (including spent rows) account for
+            // their exact outpoints above and must not be counted again here.
+            for (index, value) in &agg.accounted_transparent_receipts {
+                if !represented_transparent.contains(&(txid.as_str(), *index)) {
+                    t_p = t_p.saturating_add(*value);
+                }
             }
             if self.notes.iter().any(|n| n.txid == *txid) {
                 continue;
