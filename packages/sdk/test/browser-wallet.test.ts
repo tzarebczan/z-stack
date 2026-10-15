@@ -28,6 +28,10 @@ function fixture(t: TestContext) {
   let onSnapshot: (() => void) | undefined;
   let onRevive: (() => void) | undefined;
   let onRescan: (() => void) | undefined;
+  let suppressPendingSubmissions = false;
+  let onApplyCompact: (() => void) | undefined;
+  let initialTransparentCoverage: number | undefined;
+  let onTransparentSupportRead: (() => void) | undefined;
   let onTransparentAddress: (() => string | undefined | Promise<string | undefined>) | undefined;
   let onApplyUtxos: ((json: string) => void) | undefined;
   let onPrivateTransparent: ((operation: string, input: Uint8Array) => Uint8Array | Promise<Uint8Array>) | undefined;
@@ -49,6 +53,7 @@ function fixture(t: TestContext) {
       rewindTo(height: number) { state.scanned = height; return height; },
       rewindToChecked(height: number) { if ((state.scanned ?? 10) - height > 2048) throw new Error("reorg checkpoint is outside retained history"); state.scanned = height; return height; },
       applyCompactBlocksSummary(bytes: Uint8Array) {
+        onApplyCompact?.();
         state.scanned = bytes[5];
         return JSON.stringify({ scanned: state.scanned, notesFound: 0, spendsFound: 0 });
       },
@@ -56,15 +61,18 @@ function fixture(t: TestContext) {
       birthday: () => state.birthday ?? 8,
       treesReady: () => false,
       pendingRawTxs: () => JSON.stringify(state.pending ? ["synthetic-transaction"] : []),
-      pendingSubmissions: () => JSON.stringify(state.pending ? [{ txid, hex: "synthetic-transaction" }] : []),
+      pendingSubmissions: () => JSON.stringify(state.pending && !suppressPendingSubmissions ? [{ txid, hex: "synthetic-transaction" }] : []),
       rescanFrom(height: number) {
         state.birthday = height; state.scanned = height - 1;
         state.transparentScanHeight = null; state.memoScanHeight = null;
         onRescan?.();
       },
-      applyTransparentBlocks(bytes: Uint8Array) {
-        if (bytes.length) state.transparentScanHeight = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0);
-        return 0;
+      get applyTransparentBlocks() {
+        onTransparentSupportRead?.();
+        return (bytes: Uint8Array) => {
+          if (bytes.length) state.transparentScanHeight = bytes.length > 4 ? bytes[5] : new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0);
+          return 0;
+        };
       },
       applySharedMemos(json: string) { state.memoScanHeight = JSON.parse(json).end; return 0; },
       memoEnhancementTxids: () => "[]",
@@ -84,7 +92,7 @@ function fixture(t: TestContext) {
     };
   };
   attachWasmBindings({ generateMnemonic: () => words, WasmWallet: {
-    create: () => make({ address: `fixture-${++serial}`, pending: false }),
+    create: () => make({ address: `fixture-${++serial}`, pending: false, transparentScanHeight: initialTransparentCoverage }),
     fromSnapshot: (bytes: Uint8Array) => { onRevive?.(); return make(decode(bytes)); },
     hardwareProve: (bytes: Uint8Array) => bytes,
     hardwareSignerCopy: (bytes: Uint8Array) => bytes,
@@ -98,6 +106,10 @@ function fixture(t: TestContext) {
     onSnapshot(callback: () => void) { onSnapshot = callback; },
     onRevive(callback?: () => void) { onRevive = callback; },
     onRescan(callback?: () => void) { onRescan = callback; },
+    suppressPendingSubmissions() { suppressPendingSubmissions = true; },
+    onApplyCompact(callback: NonNullable<typeof onApplyCompact>) { onApplyCompact = callback; },
+    transparentCoverage(height: number) { initialTransparentCoverage = height; },
+    onTransparentSupportRead(callback: NonNullable<typeof onTransparentSupportRead>) { onTransparentSupportRead = callback; },
     onTransparentAddress(callback: NonNullable<typeof onTransparentAddress>) { onTransparentAddress = callback; },
     onApplyUtxos(callback: NonNullable<typeof onApplyUtxos>) { onApplyUtxos = callback; },
     onPrivateTransparent(callback: NonNullable<typeof onPrivateTransparent>) { onPrivateTransparent = callback; },
@@ -2112,3 +2124,188 @@ for (const action of ["cancel", "lock"] as const) {
     await rejected; assert.equal(applies, 0);
   });
 }
+
+for (const changes of [["pir"], ["off"], ["pir", "compact"]] as const) {
+  test(`public forward compact scan refuses ${changes.join("/")} while provider capability is pending`, async t => {
+    const f = fixture(t), entered = deferred<void>(), info = deferred<{ chain: string; protocolVersion: string; transparentCompact: boolean }>();
+    f.transparentCoverage(10);
+    let transparentRequests = 0, ordinaryRequests = 0;
+    const wallet = await f.open({ transparentScan: "compact", server: {
+      kind: "fixture", label: "offline", tip: async () => 11,
+      blocks: async (_start, end) => { ordinaryRequests++; return probeBlock(end); },
+      info: async () => { entered.resolve(); return info.promise; },
+      transparentBlocks: async (_start, end) => { transparentRequests++; return probeBlock(end); },
+      transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+    } });
+    await wallet.create({ birthday: 8 });
+    const running = wallet.sync().then(() => undefined, (error: unknown) => error);
+    await entered.promise;
+    for (const mode of changes) wallet.setTransparentScan(mode);
+    info.resolve({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true });
+    const error = await running;
+    assert.equal(transparentRequests, 0, "changed privacy epoch must prevent the first all-pool request");
+    assert.equal(ordinaryRequests, 0, "obsolete combined phase must not select a fallback");
+    assert.ok(error instanceof Error && privacyChanged.test(error.message));
+    assert.equal((await wallet.getWallet()).scannedHeight, 10);
+  });
+}
+test("public forward compact scan rechecks privacy after engine capability resolution", async t => {
+  const f = fixture(t); f.transparentCoverage(10);
+  let transparentRequests = 0, changed = false;
+  const wallet = await f.open({ transparentScan: "compact", server: {
+    kind: "fixture", label: "offline", tip: async () => 11, blocks: async (_start, end) => probeBlock(end),
+    info: async () => ({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }),
+    transparentBlocks: async (_start, end) => { transparentRequests++; return probeBlock(end); },
+    transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+  } });
+  await wallet.create({ birthday: 8 });
+  f.onTransparentSupportRead(() => { if (!changed) { changed = true; queueMicrotask(() => wallet.setTransparentScan("pir")); } });
+  const error = await wallet.sync().then(() => undefined, (error: unknown) => error);
+  assert.equal(changed, true); assert.equal(transparentRequests, 0, "engine capability await cannot authorize a stale all-pool request");
+  assert.ok(error instanceof Error && privacyChanged.test(error.message));
+});
+test("public forward compact scan refuses a late all-pool response before apply", async t => {
+  const f = fixture(t), entered = deferred<void>(), response = deferred<Uint8Array>(); f.transparentCoverage(10);
+  let transparentRequests = 0;
+  const wallet = await f.open({ transparentScan: "compact", server: {
+    kind: "fixture", label: "offline", tip: async () => 11, blocks: async (_start, end) => probeBlock(end),
+    info: async () => ({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }),
+    transparentBlocks: async () => { transparentRequests++; entered.resolve(); return response.promise; },
+    transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+  } });
+  await wallet.create({ birthday: 8 });
+  const running = wallet.sync().then(() => undefined, (error: unknown) => error);
+  await entered.promise; wallet.setTransparentScan("pir"); response.resolve(probeBlock(11));
+  const error = await running;
+  assert.equal(transparentRequests, 1); assert.equal((await wallet.getWallet()).scannedHeight, 10, "late all-pool result must not mutate the scan");
+  assert.ok(error instanceof Error && privacyChanged.test(error.message));
+});
+test("public forward compact prefetch checks epoch on each subsequent dispatch", async t => {
+  const f = fixture(t), entered = deferred<void>(); f.transparentCoverage(10);
+  const pending: Array<{ end: number; resolve: (bytes: Uint8Array) => void }> = [];
+  let transparentRequests = 0, ordinaryRequests = 0, revoked = false;
+  const wallet = await f.open({ transparentScan: "compact", maxBlocksPerRequest: 1, server: {
+    kind: "fixture", label: "offline", tip: async () => 20, blocks: async (_start, end) => { ordinaryRequests++; return probeBlock(end); },
+    info: async () => ({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }),
+    transparentBlocks: async (_start, end) => { transparentRequests++; if (!revoked) return new Promise<Uint8Array>(resolve => { pending.push({end,resolve}); entered.resolve(); }); return probeBlock(end); },
+    transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+  } });
+  await wallet.create({ birthday: 8 });
+  const running = wallet.sync().then(() => undefined, (error: unknown) => error);
+  await entered.promise; await new Promise(resolve => setImmediate(resolve));
+  const authorizedRequests = transparentRequests; assert.ok(authorizedRequests > 0);
+  revoked = true; wallet.setTransparentScan("pir");
+  for (const item of pending) item.resolve(probeBlock(item.end));
+  const error = await running;
+  assert.equal(transparentRequests, authorizedRequests, "prefetch must not dispatch a new all-pool wave after a privacy change");
+  assert.equal(ordinaryRequests, 0, "stale combined prefetch must not downgrade to an ordinary fallback");
+  assert.equal((await wallet.getWallet()).scannedHeight, 10);
+  assert.ok(error instanceof Error && privacyChanged.test(error.message));
+});
+
+test("public forward compact scan rechecks epoch at deferred prefetch dispatch", async t => {
+  const f = fixture(t); f.transparentCoverage(10);
+  let requests = 0, changed = false, scheduled = false;
+  const wallet = await f.open({ transparentScan: "compact", server: {
+    kind: "fixture", label: "offline", tip: async () => 11, blocks: async (_start, end) => probeBlock(end),
+    info: async () => ({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }),
+    transparentBlocks: async (_start, end) => { requests++; return probeBlock(end); },
+    transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+  } });
+  await wallet.create({ birthday: 8 });
+  // The first microtask lets capability negotiation finish; the next runs
+  // before the prefetch microtask can invoke its transport callback.
+  f.onTransparentSupportRead(() => { if (!scheduled) { scheduled = true; queueMicrotask(() => queueMicrotask(() => { changed = true; wallet.setTransparentScan("pir"); })); } });
+  const error = await wallet.sync().then(() => undefined, (error: unknown) => error);
+  assert.equal(changed, true); assert.equal(requests, 0);
+  assert.ok(error instanceof Error && privacyChanged.test(error.message));
+});
+for (const changed of [false, true]) {
+  test(`public forward compact recovery ${changed ? "refuses obsolete" : "retains authorized"} retries`, async t => {
+    const f = fixture(t), entered = deferred<void>(), first = deferred<never>(); f.transparentCoverage(10);
+    let requests = 0, ordinary = 0;
+    const wallet = await f.open({ transparentScan: "compact", server: {
+      kind: "fixture", label: "offline", tip: async () => 11,
+      blocks: async (_start, end) => { ordinary++; return probeBlock(end); },
+      info: async () => ({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }),
+      transparentBlocks: async (_start, end) => { requests++; if (requests === 1) { entered.resolve(); return first.promise; } return probeBlock(end); },
+      transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+    } });
+    await wallet.create({ birthday: 8 });
+    const running = wallet.sync().then(() => undefined, (error: unknown) => error);
+    await entered.promise;
+    if (changed) { wallet.setTransparentScan("pir"); wallet.setTransparentScan("compact"); }
+    first.reject(new TypeError("fetch failed"));
+    const error = await running;
+    assert.equal(requests, changed ? 1 : 2); assert.equal(ordinary, 0);
+    if (changed) { assert.ok(error instanceof Error && privacyChanged.test(error.message)); assert.equal((await wallet.getWallet()).scannedHeight, 10); }
+    else { assert.equal(error, undefined); assert.equal((await wallet.getWallet()).scannedHeight, 11); }
+  });
+}
+test("public forward compact reorg restart refuses a changed privacy epoch", async t => {
+  const f = fixture(t); f.transparentCoverage(10);
+  let requests = 0, ordinary = 0, first = true;
+  const wallet = await f.open({ transparentScan: "compact", server: {
+    kind: "fixture", label: "offline", tip: async () => 11,
+    blocks: async (_start, end) => { ordinary++; return probeBlock(end); },
+    info: async () => ({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }),
+    transparentBlocks: async (_start, end) => { requests++; return probeBlock(end); },
+    transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+  } });
+  await wallet.create({ birthday: 8 });
+  f.onApplyCompact(() => { if (first) { first = false; wallet.setTransparentScan("pir"); throw new Error("reorg at height 11; rescan from 11"); } });
+  const error = await wallet.sync().then(() => undefined, (error: unknown) => error);
+  assert.equal(requests, 1); assert.equal(ordinary, 0); assert.equal((await wallet.getWallet()).scannedHeight, 10);
+  assert.ok(error instanceof Error && privacyChanged.test(error.message));
+});
+test("public forward compact whole-sync cancellation wins over privacy change", async t => {
+  const f = fixture(t), entered = deferred<void>(), info = deferred<{ chain: string; protocolVersion: string; transparentCompact: boolean }>(); f.transparentCoverage(10);
+  let requests = 0;
+  const wallet = await f.open({ transparentScan: "compact", server: {
+    kind: "fixture", label: "offline", tip: async () => 11, blocks: async (_start, end) => probeBlock(end),
+    info: async () => { entered.resolve(); return info.promise; },
+    transparentBlocks: async (_start, end) => { requests++; return probeBlock(end); },
+    transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+  } });
+  await wallet.create({ birthday: 8 });
+  const running = wallet.sync(); const rejected = assert.rejects(running, /cancelled|aborted|AbortError/i);
+  await entered.promise; wallet.setTransparentScan("pir"); wallet.cancelSync();
+  info.resolve({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true });
+  await rejected; assert.equal(requests, 0);
+});
+test("public pending-aware forget retains signed bytes when no submission is eligible", async t => {
+  const f = fixture(t), wallet = await f.open({ submissionPolicy: "explicit" });
+  await wallet.create({ birthday: 8 }); await wallet.unlock(words); await wallet.send("fixture", "0.00005");
+  f.suppressPendingSubmissions();
+  const saved = await readSavedSnapshotRecord(); assert.ok(saved);
+  await assert.rejects(wallet.retryPendingSubmission(txid), code("not_found"));
+  await assert.rejects(wallet.forget({ pending: "reject" }), code("forget_pending"));
+  assert.ok(JSON.stringify(await readSavedSnapshotRecord()) === JSON.stringify(saved), "refusal must preserve the exact saved wallet");
+  assert.equal((await wallet.pending()).length, 1);
+});
+
+test("public forward compact scan preserves same-epoch reorg restart", async t => {
+  const f = fixture(t); f.transparentCoverage(10);
+  let requests = 0, first = true;
+  const wallet = await f.open({ transparentScan: "compact", server: {
+    kind: "fixture", label: "offline", tip: async () => 11, blocks: async (_start, end) => probeBlock(end),
+    info: async () => ({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true }),
+    transparentBlocks: async (_start, end) => { requests++; return probeBlock(end); },
+  } });
+  await wallet.create({ birthday: 8 });
+  f.onApplyCompact(() => { if (first) { first = false; throw new Error("reorg at height 11; rescan from 11"); } });
+  await wallet.sync(); assert.equal(requests, 2); assert.equal((await wallet.getWallet()).scannedHeight, 11);
+});
+test("public forward compact scan preserves ordinary fallback for an unsupported current server", async t => {
+  const f = fixture(t); f.transparentCoverage(10);
+  let ordinary = 0, transparent = 0;
+  const wallet = await f.open({ transparentScan: "compact", server: {
+    kind: "fixture", label: "offline", tip: async () => 11,
+    blocks: async (_start, end) => { ordinary++; return probeBlock(end); },
+    info: async () => ({ chain: "regtest", protocolVersion: "v0.4.0", transparentCompact: false }),
+    transparentBlocks: async (_start, end) => { transparent++; return probeBlock(end); },
+  } });
+  await wallet.create({ birthday: 8 });
+  await wallet.sync(); assert.equal(ordinary, 1); assert.equal(transparent, 0);
+  assert.equal((await wallet.getWallet()).scannedHeight, 11);
+});

@@ -300,14 +300,21 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     // response. When coverage is aligned, scan both pools before checkpointing;
     // older snapshots with a deposit gap retain the independent backfill path.
     let combinedTransparent = false;
+    const combinedTransparentEpoch = ctx.transparentScanEpoch;
+    const assertCombinedTransparentCurrent = () => {
+      if (cancelled()) throw new Error("sync cancelled");
+      if (ctx.transparentScan !== "compact" || ctx.transparentScanEpoch !== combinedTransparentEpoch)
+        throw new Error("Privacy settings changed during retrieval");
+    };
     if (ctx.transparentScan === "compact" && ctx.transport.transparentBlocks && source.applyTransparentBlocks) {
       const state = await ctx.snap();
+      assertCombinedTransparentCurrent();
       if ((state.transparentScanHeight ?? birthday - 1) === start - 1) {
         const info = await abortable(signal, async () => ctx.transport.info?.(signal)).catch(() => undefined);
-        if (cancelled()) throw new Error("sync cancelled");
+        assertCombinedTransparentCurrent();
         combinedTransparent = !!info?.transparentCompact && supportsTransparentCompact(info.protocolVersion)
           && await source.supportsTransparentBlocks?.() === true;
-        if (cancelled()) throw new Error("sync cancelled");
+        assertCombinedTransparentCurrent();
       }
     }
     const tuned = syncTuning(ctx.localLight, ctx.syncOpts);
@@ -446,8 +453,8 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         throw new Error(`empty compact-block blob ending at ${end} (tip ${tip})`);
       }
       tick(Math.max(start, end - batch), end, fetching, "apply");
+      if (combinedTransparent) assertCombinedTransparentCurrent();
       try {
-        if (ctx.transparentScan !== "compact") combinedTransparent = false;
         const s = await source.applyBlob(blob, combinedTransparent);
         if (cancelled()) throw new Error("sync cancelled");
         notesFound += s.notesFound;
@@ -481,8 +488,13 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         batch,
         prefetch,
         buffer: prefetchBuffer(prefetch),
-        fetch: (h, end, signal) => combinedTransparent
-          ? ctx.transport.transparentBlocks!(h, end, signal) : ctx.transport.blocks(h, end, signal),
+        fetch: (h, end, signal) => {
+          if (combinedTransparent) {
+            assertCombinedTransparentCurrent();
+            return ctx.transport.transparentBlocks!(h, end, signal);
+          }
+          return ctx.transport.blocks(h, end, signal);
+        },
         signal,
         cancelled,
       });
