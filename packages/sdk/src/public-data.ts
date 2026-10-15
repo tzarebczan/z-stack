@@ -12,11 +12,13 @@ export function supportsTransparentCompact(version?: string): boolean {
 }
 
 /** One bounded pass. Ranges depend on coverage, never on wallet matches. */
-export async function syncPublicData({ source, transport, transparent, memos, signal, assertCurrent, checkpoint, maxBlocksPerRequest, maxSharedMemoBlocksPerRequest } : {
+export async function syncPublicData({ source, transport, transparent, memos, signal, assertCurrent, checkpoint, maxBlocksPerRequest, maxSharedMemoBlocksPerRequest, maxSharedMemoBlocksPerPass = 100 } : {
   source: ScanSession;
   transport: BlockTransport;
   maxBlocksPerRequest?: number;
   maxSharedMemoBlocksPerRequest?: number;
+  /** Fixed wallet-independent work budget. Manual callers retain the 100-block default. */
+  maxSharedMemoBlocksPerPass?: number;
   transparent: boolean;
   memos: boolean;
   signal: AbortSignal;
@@ -25,6 +27,9 @@ export async function syncPublicData({ source, transport, transparent, memos, si
 }): Promise<{ transparent?: PublicDataStatus; memos?: PublicDataStatus }> {
   const compactLimit = compactBlockRequestLimit(maxBlocksPerRequest);
   const memoLimit = sharedMemoBlockRequestLimit(maxSharedMemoBlocksPerRequest);
+  if (!Number.isSafeInteger(maxSharedMemoBlocksPerPass) || maxSharedMemoBlocksPerPass < 1 || maxSharedMemoBlocksPerPass > 100) {
+    throw new Error("maxSharedMemoBlocksPerPass must be an integer from 1 to 100");
+  }
   const status: { transparent?: PublicDataStatus; memos?: PublicDataStatus } = {};
   const current = () => { signal.throwIfAborted(); assertCurrent(); };
   const snapshot = async () => {
@@ -86,7 +91,7 @@ export async function syncPublicData({ source, transport, transparent, memos, si
         await checkpoint();
         current();
       }
-      const last = Math.min(tip, next + 99);
+      const last = Math.min(tip, next + maxSharedMemoBlocksPerPass - 1);
       while (next <= last) {
         // After the birthday range, boundaries are shared by every wallet.
         const end = Math.min(last, next + memoLimit - 1, Math.floor(next / 10) * 10 + 9);

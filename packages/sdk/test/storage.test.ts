@@ -302,7 +302,7 @@ class MemoWorker extends EventTarget {
   ops: string[] = [];
   activity = 0;
   scanPageHeight = false;
-  postMessage(msg: { id: number; op: string; hex?: string; snapshot?: ArrayBuffer; limit?: number; transparent?: boolean; blob?: ArrayBuffer }) {
+  postMessage(msg: { id: number; op: string; json?: string; hex?: string; snapshot?: ArrayBuffer; limit?: number; transparent?: boolean; blob?: ArrayBuffer }) {
     this.ops.push(msg.op);
     let data: Record<string, unknown> = {};
     const snapshot = () => new TextEncoder().encode(JSON.stringify([...this.completed]));
@@ -317,6 +317,7 @@ class MemoWorker extends EventTarget {
       case "pendingRawTxs": data = { json: JSON.stringify(this.pending) }; break;
       case "pendingSubmissions": data = { json: JSON.stringify(this.pending.map(hex => ({ txid: "ab".repeat(32), hex }))) }; break;
       case "memoEnhancementTxids": data = { json: this.legacyEnhancement ? null : JSON.stringify(this.candidates.filter((txid) => !this.completed.has(txid)).slice(0, msg.limit)) }; break;
+      case "applySharedMemos": this.memoHeight = JSON.parse(msg.json!).end; data = { n: 0 }; break;
       case "enhanceRawTx": this.enhanced.push(msg.hex!); this.completed.add(msg.hex!); data = { n: 0 }; break;
     }
     queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: { id: msg.id, ...data } })));
@@ -1749,5 +1750,59 @@ for (const state of ["quota-aborting", "unknown-aborting", "committed", "active"
     }, { signal: signal.signal, commitWinsCancellation: true });
     if (state === "committed") assert.equal(await running, 42, "the actual committed result still wins before delayed oncomplete");
     else await assert.rejects(running, error => state === "unknown-aborting" ? error !== ownedAbort && error instanceof DOMException && error.name === "AbortError" : error === (state === "active" ? ownedAbort : primary));
+  });
+}
+
+for (const compactAdvance of [false, true]) {
+  test(`automatic shared memo work is ten blocks while manual work stays one hundred (${compactAdvance ? "follow-on" : "cached"})`, async t => {
+    installDb(t); const worker = new MemoWorker(); worker.scanned = 200; worker.memoHeight = 0; worker.candidates = [];
+    attachWasmBindings({} as never);
+    await restartScanWorker(() => worker as unknown as Worker);
+    await attachScanWorker(worker as unknown as Worker, { threads: 1, preferMulticore: false });
+    let tip = 200; const ranges: number[][] = [];
+    const client = createWasmClient({ unlockPolicy: "session", network: "regtest", autoShield: false, memoFetch: "shared", transport: {
+      kind: "mock", label: "offline", maxSharedMemoBlocksPerRequest: 1, tip: async () => tip,
+      blocks: async () => new Uint8Array([1]), sharedMemos: async (start, end) => { ranges.push([start, end]); return JSON.stringify({ start, end }); },
+    } });
+    await client.restore("test-only worker fixture", "regtest", 1);
+    if (compactAdvance) tip++;
+    assert.equal((await client.sync()).sharedMemoStatus, "scanning");
+    assert.deepEqual(ranges, Array.from({ length: 10 }, (_, i) => [i + 1, i + 1]));
+    ranges.length = 0;
+    assert.equal((await client.sync()).sharedMemoStatus, "scanning");
+    assert.deepEqual(ranges, Array.from({ length: 10 }, (_, i) => [i + 11, i + 11]));
+    ranges.length = 0;
+    await client.fetchMemos();
+    assert.deepEqual(ranges, Array.from({ length: 100 }, (_, i) => [i + 21, i + 21]));
+    assert.equal((await client.getWallet()).sharedMemoStatus, "scanning");
+    await client.fetchMemos();
+    assert.equal((await client.getWallet()).sharedMemoStatus, "complete");
+    assert.equal(worker.memoHeight, tip);
+  });
+
+  test(`post-scan progress precedes optional memo work (${compactAdvance ? "follow-on" : "cached"})`, async t => {
+    installDb(t); const worker = new MemoWorker(); worker.scanned = 200; worker.memoHeight = 0; worker.candidates = [];
+    attachWasmBindings({} as never);
+    await restartScanWorker(() => worker as unknown as Worker);
+    await attachScanWorker(worker as unknown as Worker, { threads: 1, preferMulticore: false });
+    let tip = 200, release!: () => void, started!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const fetching = new Promise<void>(resolve => { started = resolve; });
+    const events: WasmProgress[] = [];
+    const client = createWasmClient({ unlockPolicy: "session", network: "regtest", autoShield: false, memoFetch: "shared", transport: {
+      kind: "mock", label: "offline", maxSharedMemoBlocksPerRequest: 1, tip: async () => tip,
+      blocks: async () => new Uint8Array([1]), sharedMemos: async (start, end) => { started(); await held; return JSON.stringify({ start, end }); },
+    } }, event => { events.push(event); });
+    await client.restore("test-only worker fixture", "regtest", 1);
+    if (compactAdvance) tip++;
+    const syncing = client.sync();
+    try {
+      await fetching;
+      assert.equal(events.at(-1)?.stage, "enhancing");
+      assert.equal(events.at(-1)?.heading, "Reading memos");
+      assert.equal(events.at(-1)?.scanned, tip);
+      assert.equal(events.some(event => event.stage === "synced"), false);
+    } finally { release(); await syncing; }
+    assert.equal(events.at(-1)?.stage, "synced");
   });
 }

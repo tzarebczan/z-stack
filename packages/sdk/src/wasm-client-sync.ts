@@ -257,8 +257,20 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
           ? `${tip - start} blocks behind tip ${tip}`
           : `tip ${tip}`,
     });
+    const publishPostScan = (scanned: number) => publish({
+      stage: "enhancing",
+      heading: ctx.memoFetch === "on-demand" ? "Updating wallet" : "Reading memos",
+      scanned,
+      downloaded: tip,
+      tip,
+      notesFound,
+      spendsFound,
+      percent: 99,
+      message: ctx.memoFetch === "on-demand" ? "updating pending transactions" : "decrypting mined transaction memos",
+    });
     if (start > tip) {
       await seedBirthdayTrees(undefined, recovery, signal);
+      publishPostScan(await source.scannedHeight());
       await refreshPrivateEnhance(signal);
       await refreshPublicData(signal);
       await refreshPostScanState(recovery, signal);
@@ -673,19 +685,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     }
     if (cancelled()) throw new Error("sync cancelled");
     const scannedFinal = await source.scannedHeight();
-    if (!followOn) {
-      publish({
-        stage: "enhancing",
-        heading: ctx.memoFetch === "on-demand" ? "Updating wallet" : "Reading memos",
-        scanned: scannedFinal,
-        downloaded: tip,
-        tip,
-        notesFound,
-        spendsFound,
-        percent: 99,
-        message: ctx.memoFetch === "on-demand" ? "updating pending transactions" : "decrypting mined transaction memos",
-      });
-    }
+    publishPostScan(scannedFinal);
     await refreshPrivateEnhance(signal);
     await refreshPublicData(signal);
     await refreshPostScanState(recovery, signal);
@@ -1052,6 +1052,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         const status = await syncPublicData({
           source, transport: ctx.transport, signal: wait, maxBlocksPerRequest: ctx.maxBlocksPerRequest,
           maxSharedMemoBlocksPerRequest: ctx.maxSharedMemoBlocksPerRequest,
+          maxSharedMemoBlocksPerPass: manual ? 100 : 10,
           transparent: kind === "transparent", memos: kind === "memos",
           assertCurrent: current, checkpoint: ctx.persist
         });
