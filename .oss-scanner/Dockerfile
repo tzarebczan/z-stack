@@ -29,7 +29,7 @@ RUN cargo build --locked -p z-engine --features native,cli,native-pir,private-en
 # Both production WASM variants: single-threaded (stable) and multicore (nightly + rust-src, atomics).
 ARG WASM_PACK_VERSION=0.15.0
 ARG WASM_MT_TOOLCHAIN=nightly-2026-09-22
-RUN curl -fsSL "https://github.com/drager/wasm-pack/releases/download/v${WASM_PACK_VERSION}/wasm-pack-v${WASM_PACK_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+RUN curl -fsSL "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${WASM_PACK_VERSION}/wasm-pack-v${WASM_PACK_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
       | tar -xz -C /usr/local/bin --strip-components=1 "wasm-pack-v${WASM_PACK_VERSION}-x86_64-unknown-linux-musl/wasm-pack" \
     && rustup toolchain install "${WASM_MT_TOOLCHAIN}" --profile minimal --component rust-src --target wasm32-unknown-unknown
 
