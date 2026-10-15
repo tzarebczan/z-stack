@@ -1906,14 +1906,15 @@ impl WebWallet {
     }
 
     fn restore_pending_transparent_claims(&mut self) {
-        // Rewinding a conflicting spend can make the exact saved transaction
-        // eligible again. Restore reservations, never funding rows or values.
+        // Retained signed intents keep their exact known input reservations
+        // even when submission or pending change is ineligible. Restore only
+        // existing claims, never funding rows or values.
         let claims: Vec<_> = self
-            .unmined_pending_txs()
+            .retained_signed_txs()
             .filter_map(|(id, _)| {
-                let id = to_hex(id.as_ref());
                 self.txs
                     .get(&id)
+                    .filter(|agg| agg.mined_height.is_none())
                     .map(|agg| (id, agg.accounted_transparent_spends.clone()))
             })
             .collect();

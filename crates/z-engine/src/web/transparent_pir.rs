@@ -3232,9 +3232,9 @@ mod tests {
                 .as_deref(),
             Some(super::super::super::to_hex(replacements[0].txid().as_ref()).as_str())
         );
-        // Only the second independent input was released by this rewind; the
-        // saved transaction's 27000 change remains ineligible.
-        assert_eq!(cold.balance().total_pending, 10000);
+        // The surviving conflict still blocks change, while both known inputs
+        // remain reserved by the retained signed intent until expiry/abandon.
+        assert_eq!(cold.balance().total_pending, 0);
         assert_eq!(cold.rewind_to_height(1).unwrap(), 1);
         let cold = WebWallet::from_snapshot(&cold.to_snapshot().unwrap()).unwrap();
         assert_eq!(cold.pending_submissions().len(), 1);
@@ -3479,6 +3479,129 @@ mod tests {
     #[test]
     fn retained_intent_guard_keeps_unknown_origin_bytes() {
         assert_retained_intent_guard(true);
+    }
+
+    fn clear_saved_shielded_origins(w: &WebWallet, id: &str) -> WebWallet {
+        let mut old: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+        old["txs"][id]
+            .as_object_mut()
+            .unwrap()
+            .remove("shieldedInputOrigins");
+        WebWallet::from_snapshot(&serde_json::to_vec(&old).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn reservation_restore_unknown_signed_intent_keeps_known_input_locked_after_cold_rewind() {
+        use zcash_client_backend::data_api::InputSource;
+        let (mut w, original, replacement) = confirmed_conflict_fixture();
+        let id = super::super::super::to_hex(original.txid().as_ref());
+        let saved = w.pending_txs[&original.txid()].clone();
+        include_conflicting_spender(&mut w, &replacement);
+        let mut cold = clear_saved_shielded_origins(&w, &id);
+        cold.rewind_to_height(2).unwrap();
+        assert_eq!(
+            cold.utxos[0].spent_in.as_deref(),
+            Some(super::super::super::to_hex(replacement.txid().as_ref()).as_str()),
+            "a different still-current owner must win"
+        );
+        cold.rewind_to_height(1).unwrap();
+        let mut cold = WebWallet::from_snapshot(&cold.to_snapshot().unwrap()).unwrap();
+        let input = transparent::bundle::OutPoint::new([9; 32], 0);
+        assert!(
+            cold.get_unspent_transparent_output(&input, 100.into())
+                .unwrap()
+                .is_none(),
+            "unknown lineage must not release its exact known transparent reservation"
+        );
+        assert_eq!(cold.utxos[0].spent_in.as_deref(), Some(id.as_str()));
+        assert!(cold.pending_submissions().is_empty());
+        assert_eq!(cold.pending_raw_txs().len(), 1);
+        assert!(cold.pending_txs[&original.txid()] == saved);
+        assert_eq!(cold.balance().total_pending, 0);
+        assert_eq!(cold.transparent_pir_status()["rescanRequired"], true);
+        let before = cold.to_snapshot().unwrap();
+        assert!(builder_accounting_store_result(&mut cold, &original, false).is_err());
+        assert!(cold.rescan_from(1).is_err());
+        assert!(cold.to_snapshot().unwrap() == before);
+        let mut abandoned = WebWallet::from_snapshot(&before).unwrap();
+        assert!(abandoned
+            .abandon_unmined(&original.txid().to_string())
+            .unwrap());
+        assert!(!abandoned.utxos[0].spent);
+        assert!(abandoned.utxos[0].spent_in.is_none());
+    }
+
+    #[test]
+    fn reservation_restore_unknown_ancestor_keeps_saved_child_claim_without_creating_funds() {
+        use zcash_primitives::transaction::{Authorized, TransactionData};
+        let (mut w, template, _) = confirmed_conflict_fixture();
+        w.abandon_unmined(&template.txid().to_string()).unwrap();
+        let parent = TransactionData::<Authorized>::from_parts_v6(
+            zcash_protocol::consensus::BranchId::Nu6_3,
+            0,
+            20.into(),
+            template.transparent_bundle().cloned(),
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        builder_accounting_store(&mut w, &parent, false);
+        let child = external_receipt_spender(&parent, 21);
+        let blocks = public_spender_blocks(&mut w, &[(1, &parent), (2, &child)]);
+        w.apply_transparent_blocks(&super::super::super::encode_delimited(blocks[..2].to_vec()))
+            .unwrap();
+        store_external_receipt_spender(&mut w, &child).unwrap();
+        w.apply_transparent_blocks(&super::super::super::encode_delimited(blocks[2..].to_vec()))
+            .unwrap();
+        // The parent remains mined while an independent spender replaces its child.
+        w.rewind_to_height(2).unwrap();
+        let other = external_receipt_spender(&parent, 22);
+        let new_chain = public_spender_blocks(&mut w, &[(1, &parent), (2, &other)]);
+        w.apply_compact_blocks_blob(&super::super::super::encode_delimited(
+            new_chain[2..]
+                .iter()
+                .map(|b| {
+                    let mut b = b.clone();
+                    b.vtx.clear();
+                    b
+                })
+                .collect::<Vec<_>>(),
+        ))
+        .unwrap();
+        w.apply_transparent_blocks(&super::super::super::encode_delimited(
+            new_chain[2..].to_vec(),
+        ))
+        .unwrap();
+        let parent_id = super::super::super::to_hex(parent.txid().as_ref());
+        let child_id = super::super::super::to_hex(child.txid().as_ref());
+        assert_eq!(w.txs()[&parent_id].mined_height, Some(2));
+        assert_eq!(
+            w.txs()[&parent_id].accounted_transparent_receipts[&0]
+                .spent_in
+                .as_ref()
+                .unwrap()
+                .txid,
+            super::super::super::to_hex(other.txid().as_ref())
+        );
+        let mut cold = clear_saved_shielded_origins(&w, &parent_id);
+        cold.rewind_to_height(1).unwrap();
+        let cold = WebWallet::from_snapshot(&cold.to_snapshot().unwrap()).unwrap();
+        let receipt = &cold.txs()[&parent_id].accounted_transparent_receipts[&0];
+        assert_eq!(
+            receipt.spent_in.as_ref().map(|spent| spent.txid.as_str()),
+            Some(child_id.as_str()),
+            "known child reservation survives unknown ancestor eligibility"
+        );
+        assert_eq!(cold.utxos[0].spent_in.as_deref(), Some(parent_id.as_str()));
+        assert!(cold.pending_submissions().is_empty());
+        assert_eq!(cold.pending_raw_txs().len(), 2);
+        assert_eq!(cold.balance().total_pending, 0);
+        assert!(
+            !cold.utxos.iter().any(|u| u.txid == parent_id),
+            "restoration never creates missing funding rows"
+        );
     }
 
     #[test]
