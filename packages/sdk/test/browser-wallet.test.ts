@@ -28,6 +28,8 @@ function fixture(t: TestContext) {
   let onSnapshot: (() => void) | undefined;
   let onRevive: (() => void) | undefined;
   let onRescan: (() => void) | undefined;
+  let onTransparentAddress: (() => string | undefined | Promise<string | undefined>) | undefined;
+  let onApplyUtxos: ((json: string) => void) | undefined;
   let onPrivateTransparent: ((operation: string, input: Uint8Array) => Uint8Array | Promise<Uint8Array>) | undefined;
   const make = (initial: { address: string; pending: boolean; reserved?: boolean; birthday?: number; scanned?: number; transparentScanHeight?: number | null; memoScanHeight?: number | null }) => {
     const state = { ...initial };
@@ -68,6 +70,8 @@ function fixture(t: TestContext) {
       memoEnhancementTxids: () => "[]",
       history: () => JSON.stringify(state.pending ? [{ txid, status: "pending" }] : []),
       historyQuery: (_limit: number, status: string, id: string) => JSON.stringify(state.pending && (!status || status === "pending") && (!id || id === txid) ? [{ txid, status: "pending" }] : []),
+      transparentAddress: () => onTransparentAddress?.(),
+      applyUtxos(json: string) { onApplyUtxos?.(json); },
       nextUnifiedAddress() {},
       attachSeed(secret: string) { if (secret === "not a phrase") throw new Error("invalid mnemonic: SYNTHETIC_PRIVATE_WORD"); if (secret !== words) throw new Error("seed fingerprint does not match"); },
       proveSend() { state.pending = true; return JSON.stringify({ hex: "synthetic-transaction", txid }); },
@@ -94,6 +98,8 @@ function fixture(t: TestContext) {
     onSnapshot(callback: () => void) { onSnapshot = callback; },
     onRevive(callback?: () => void) { onRevive = callback; },
     onRescan(callback?: () => void) { onRescan = callback; },
+    onTransparentAddress(callback: NonNullable<typeof onTransparentAddress>) { onTransparentAddress = callback; },
+    onApplyUtxos(callback: NonNullable<typeof onApplyUtxos>) { onApplyUtxos = callback; },
     onPrivateTransparent(callback: NonNullable<typeof onPrivateTransparent>) { onPrivateTransparent = callback; },
     async open(extra: Partial<Parameters<typeof createWallet>[0]> = {}) {
       wallet = await createWallet({ network: "regtest", storage, prewarmProvingKey: false,
@@ -1971,5 +1977,138 @@ for (const action of ["lock", "replace"] as const) {
     finish(encode({ kind: "stopped", status: { kind: "incomplete", reason: "history_metadata_limit" } }));
     await changed; await rejected;
     assert.equal((await wallet.getWallet()).transparentScanFailure, undefined);
+  });
+}
+
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const privacyChanged = /Privacy settings changed/;
+for (const changes of [["pir"], ["compact"], ["pir", "off"]] as const) {
+  test(`public address refresh refuses mode change ${changes.join("/")} while address is pending`, async t => {
+    const f = fixture(t), address = deferred<string>(), entered = deferred<void>();
+    let requests = 0, applies = 0;
+    f.onTransparentAddress(() => { entered.resolve(); return address.promise; });
+    f.onApplyUtxos(() => { applies++; });
+    const wallet = await f.open({ server: {
+      kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+      utxos: async () => { requests++; return []; },
+      transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+    } });
+    await wallet.create({ birthday: 8 });
+    const running = wallet.sync();
+    await entered.promise;
+    for (const mode of changes) wallet.setTransparentScan(mode);
+    address.resolve("disposable-fixture-address");
+    await assert.rejects(running, privacyChanged);
+    assert.equal(requests, 0, "obsolete address phase must stop before its first selective network request");
+    assert.equal(applies, 0);
+  });
+}
+test("public address refresh checks privacy epoch before each recovery retry", async t => {
+  const f = fixture(t), entered = deferred<void>(), first = deferred<never>();
+  let requests = 0, applies = 0;
+  f.onTransparentAddress(() => "disposable-fixture-address");
+  f.onApplyUtxos(() => { applies++; });
+  const wallet = await f.open({ server: {
+    kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+    utxos: async () => { requests++; if (requests === 1) { entered.resolve(); return first.promise; } throw new Error("unexpected_selective_retry"); },
+    transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+  } });
+  await wallet.create({ birthday: 8 });
+  const running = wallet.sync();
+  await entered.promise;
+  wallet.setTransparentScan("pir"); wallet.setTransparentScan("off");
+  first.reject(new TypeError("fetch failed"));
+  await assert.rejects(running, privacyChanged);
+  assert.equal(requests, 1, "only the request authorized before the privacy change may be dispatched");
+  assert.equal(applies, 0);
+});
+test("public address refresh refuses late results after privacy mode changes", async t => {
+  const f = fixture(t), entered = deferred<void>(), result = deferred<[]>();
+  let requests = 0, applies = 0;
+  f.onTransparentAddress(() => "disposable-fixture-address");
+  f.onApplyUtxos(() => { applies++; });
+  const wallet = await f.open({ server: {
+    kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+    utxos: async () => { requests++; entered.resolve(); return result.promise; },
+    transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+  } });
+  await wallet.create({ birthday: 8 });
+  const running = wallet.sync();
+  await entered.promise; wallet.setTransparentScan("pir"); result.resolve([]);
+  await assert.rejects(running, privacyChanged);
+  assert.equal(requests, 1); assert.equal(applies, 0);
+});
+test("public shielding address refresh refuses a privacy change before dispatch", async t => {
+  const f = fixture(t), entered = deferred<void>(), address = deferred<string>();
+  let requests = 0, applies = 0;
+  f.onTransparentAddress(() => { entered.resolve(); return address.promise; });
+  f.onApplyUtxos(() => { applies++; });
+  const wallet = await f.open({ unlockPolicy: "each-spend", server: {
+    kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+    utxos: async () => { requests++; return []; },
+    transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+  } });
+  await wallet.create({ birthday: 8 }); await wallet.unlock(words);
+  const running = wallet.shield();
+  await entered.promise; wallet.setTransparentScan("pir"); address.resolve("disposable-fixture-address");
+  await assert.rejects(running, privacyChanged);
+  assert.equal(requests, 0); assert.equal(applies, 0);
+});
+test("public compact scan rejects an ABA privacy change while its capability read is pending", async t => {
+  const f = fixture(t), entered = deferred<void>(), info = deferred<{ chain: string; protocolVersion: string; transparentCompact: boolean }>();
+  let requests = 0;
+  const wallet = await f.open({ transparentScan: "compact", server: {
+    kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+    info: async () => { entered.resolve(); return info.promise; },
+    transparentBlocks: async (_start, end) => { requests++; const bytes = new Uint8Array(4); new DataView(bytes.buffer).setUint32(0, end); return bytes; },
+    transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+  } });
+  await wallet.create({ birthday: 8 });
+  const running = wallet.sync();
+  await entered.promise; wallet.setTransparentScan("pir"); wallet.setTransparentScan("compact");
+  info.resolve({ chain: "regtest", protocolVersion: "v0.5.0", transparentCompact: true });
+  await assert.rejects(running, privacyChanged);
+  assert.equal(requests, 0, "a resumed public capability read must not dispatch after its consent epoch changed");
+});
+
+test("public address refresh retains authorized retries and ordinary application", async t => {
+  const f = fixture(t);
+  let requests = 0, applies = 0;
+  f.onTransparentAddress(() => "disposable-fixture-address");
+  f.onApplyUtxos(() => { applies++; });
+  const wallet = await f.open({ server: {
+    kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+    utxos: async function () { assert.equal(this.label, "offline"); if (++requests === 1) throw new TypeError("fetch failed"); return []; },
+  } });
+  await wallet.create({ birthday: 8 });
+  await wallet.sync();
+  assert.equal(requests, 2); assert.equal(applies, 1);
+});
+for (const action of ["cancel", "lock"] as const) {
+  test(`public address refresh ${action} wins before a stale privacy response`, async t => {
+    const f = fixture(t), entered = deferred<void>(), result = deferred<[]>();
+    let applies = 0;
+    f.onTransparentAddress(() => "disposable-fixture-address");
+    f.onApplyUtxos(() => { applies++; });
+    const wallet = await f.open({ server: {
+      kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+      utxos: async () => { entered.resolve(); return result.promise; },
+      transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_private_query"); } },
+    } });
+    await wallet.create({ birthday: 8 });
+    const running = wallet.sync();
+    const rejected = assert.rejects(running, /cancelled|aborted|AbortError/i);
+    await entered.promise;
+    wallet.setTransparentScan("pir");
+    wallet.cancelSync();
+    if (action === "lock") await wallet.lock();
+    result.resolve([]);
+    await rejected; assert.equal(applies, 0);
   });
 }

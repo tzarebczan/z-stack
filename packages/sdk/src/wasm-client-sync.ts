@@ -864,17 +864,26 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     if (!ctx.session || !ctx.transport.utxos) return;
     const source = ctx.session;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
-    const taddr = await source.transparentAddress();
-    ctx.assertSource(operation, source);
-    signal?.throwIfAborted();
-    if (!taddr) return;
+    const mode = ctx.transparentScan;
+    const epoch = ctx.transparentScanEpoch;
     const wait = signal ? AbortSignal.any([operation.signal, signal]) : operation.signal;
-    const rows = await abortable(wait, () => ctx.transport.utxos!([taddr], 0, wait));
-    ctx.assertSource(operation, source);
-    signal?.throwIfAborted();
+    const current = () => {
+      wait.throwIfAborted();
+      ctx.assertSource(operation, source);
+      if (mode !== "off" || ctx.transparentScan !== mode || ctx.transparentScanEpoch !== epoch)
+        throw new Error("Privacy settings changed during retrieval");
+    };
+    current();
+    const taddr = await source.transparentAddress();
+    current();
+    if (!taddr) return;
+    const rows = await abortable(wait, () => {
+      current();
+      return ctx.transport.utxos!([taddr], 0, wait);
+    });
+    current();
     await source.applyUtxos(JSON.stringify({ utxos: rows }));
-    ctx.assertSource(operation, source);
-    signal?.throwIfAborted();
+    current();
     if (doPersist) await ctx.persist();
   }
 
@@ -1006,6 +1015,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     const mode = ctx.memoFetch;
     const deposits = ctx.transparentScan;
+    const transparentEpoch = ctx.transparentScanEpoch;
     const run = async (kind: "transparent" | "memos") => {
       const controller = kind === "memos" ? new AbortController() : undefined;
       if (controller) ctx.memoAbort = controller;
@@ -1013,7 +1023,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       const current = () => {
         wait.throwIfAborted();
         ctx.assertSource(operation, source);
-        if (kind === "memos" ? mode !== ctx.memoFetch : deposits !== ctx.transparentScan) {
+        if (kind === "memos" ? mode !== ctx.memoFetch : deposits !== ctx.transparentScan || transparentEpoch !== ctx.transparentScanEpoch) {
           throw new Error("Privacy settings changed during retrieval");
         }
       };
@@ -1056,18 +1066,32 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const source = ctx.session;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     const wait = signal ? AbortSignal.any([operation.signal, signal]) : operation.signal;
-    wait.throwIfAborted();
-    const taddr = ctx.transparentScan === "off" && ctx.transport.utxos ? await source.transparentAddress() : undefined;
-    ctx.assertSource(operation, source);
-    wait.throwIfAborted();
+    const mode = ctx.transparentScan;
+    const epoch = ctx.transparentScanEpoch;
+    const addressLookup = mode === "off" ? ctx.transport.utxos?.bind(ctx.transport) : undefined;
+    const current = () => {
+      wait.throwIfAborted();
+      ctx.assertSource(operation, source);
+      if (addressLookup && (ctx.transparentScan !== mode || ctx.transparentScanEpoch !== epoch))
+        throw new Error("Privacy settings changed during retrieval");
+    };
+    current();
+    const taddr = addressLookup ? await source.transparentAddress() : undefined;
+    current();
+    // Recovery invokes this closure again after an outage. Check the original
+    // privacy epoch at the actual dispatch boundary on every attempt.
+    const readUtxos = taddr && addressLookup ? () => {
+      current();
+      return addressLookup([taddr], 0, wait);
+    } : undefined;
     // Network reads overlap, but wallet mutations retain the original UTXO →
     // mempool order. A failed UTXO query cannot leave a late mempool apply
     // running after sync has rejected.
     const [utxos, mempool] = await Promise.all([
-      taddr && ctx.transport.utxos
+      readUtxos
         ? recovery
-          ? abortable(wait, () => recovery.run(() => ctx.transport.utxos!([taddr], 0, wait)))
-          : abortable(wait, () => ctx.transport.utxos!([taddr], 0, wait))
+          ? abortable(wait, () => recovery.run(readUtxos))
+          : abortable(wait, readUtxos)
         : Promise.resolve(null),
       ctx.transport.mempool
         ? abortable(wait, () => ctx.transport.mempool!(wait)).catch((_e) => {
@@ -1076,14 +1100,11 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         })
         : Promise.resolve([]),
     ]);
-    ctx.assertSource(operation, source);
-    wait.throwIfAborted();
+    current();
     if (utxos) await source.applyUtxos(JSON.stringify({ utxos }));
-    ctx.assertSource(operation, source);
-    wait.throwIfAborted();
+    current();
     if (mempool.length) await source.applyMempool(JSON.stringify({ txs: mempool }));
-    ctx.assertSource(operation, source);
-    wait.throwIfAborted();
+    current();
   }
 
   async function enhanceMemos(automatic = false): Promise<void> {
