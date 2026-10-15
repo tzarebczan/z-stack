@@ -1011,17 +1011,26 @@ test("old local WASM rejects a combined apply before advancing shielded state", 
   assert.equal(applied, 1);
 });
 
-test("disabling deposits while a combined fetch is in flight leaves coverage unchanged", async (t) => {
+test("disabling deposits rejects stale combined apply and preserves fresh off-mode sync", async (t) => {
   installDb(t); const worker = new MemoWorker(); worker.transparentHeight = 10;
   await restartScanWorker(() => worker as unknown as Worker);
+  let ordinaryRequests = 0;
   const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transparentScan: "compact", transport: {
     kind: "mock", label: "mock", tip: async () => 11,
     info: async () => ({ chain: "regtest", transparentCompact: true, protocolVersion: "v0.5.0" }),
-    blocks: async () => { throw new Error("already fetched all pools"); },
+    blocks: async () => { ordinaryRequests++; return new Uint8Array([1]); },
     transparentBlocks: async () => { client.setTransparentScan("off"); return new Uint8Array([1]); },
   } });
   await client.restore("test-only worker fixture", "regtest", 1);
+  await assert.rejects(client.sync(), /Privacy settings changed/);
+  const stopped = await client.getWallet();
+  assert.equal(stopped.scannedHeight, 10);
+  assert.equal(stopped.transparentScanHeight, 10);
+  assert.equal(stopped.transparentScanStatus, "off");
+  assert.equal(ordinaryRequests, 0, "the stale combined phase must not select an ordinary fallback");
+  assert.deepEqual(worker.combinedApplies, []);
   const result = await client.sync();
+  assert.equal(ordinaryRequests, 1);
   assert.equal(result.scannedHeight, 11);
   assert.equal(result.transparentScanHeight, 10);
   assert.equal(result.transparentScanStatus, "off");
