@@ -730,3 +730,126 @@ fn trial_cache_refreshes_only_after_committed_receipts_and_spends() {
         "already-spawned jobs retain their immutable previous snapshot"
     );
 }
+
+// Real selective scan history: metadata-only public memo endpoints are legal
+// rewind requests. SQLite must resolve them to a compatible earlier checkpoint,
+// without the pipeline treating their missing exact checkpoint as corruption.
+#[tokio::test]
+async fn memo_metadata_endpoint_reorg_uses_real_compatible_checkpoint() {
+    use selective_scan::tests::{compact_at, empty_state, pay_orchard, test_ufvk};
+    use zcash_client_backend::data_api::{AccountBirthday, WalletWrite};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memo-rewind.sqlite");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    rusqlite::vtab::array::load_module(&conn).unwrap();
+    let mut db = zcash_client_sqlite::WalletDb::from_connection(
+        conn,
+        ZNetwork::Regtest,
+        zcash_client_sqlite::util::SystemClock,
+        rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+    );
+    zcash_client_sqlite::wallet::init::init_wallet_db(&mut db, None).unwrap();
+    db.create_account(
+        "memo rewind",
+        &secrecy::SecretVec::new(vec![7; 32]),
+        &AccountBirthday::from_parts(empty_state(0), None),
+        None,
+    )
+    .unwrap();
+    db.update_chain_tip(1003.into()).unwrap();
+    let mut blocks: Vec<_> = (1..=1003).map(compact_at).collect();
+    for height in [5, 950] {
+        pay_orchard(&mut blocks[height - 1], &test_ufvk(7));
+    }
+    crate::scan::ensure_compact_chain_metadata(&mut blocks, 0, 0, 0);
+    let mut off = NativeOffload::new(0, 0, 0);
+    let (_, first) = selective_scan::scan_batch(
+        ZNetwork::Regtest,
+        &mut db,
+        &empty_state(0),
+        1.into(),
+        &blocks[..910],
+        &mut off,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    selective_scan::flush_remaining(&mut db, &mut off).unwrap();
+    selective_scan::scan_batch(
+        ZNetwork::Regtest,
+        &mut db,
+        &first,
+        911.into(),
+        &blocks[910..],
+        &mut off,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    // A normal next-fetch continuity check can run after persisted scan work,
+    // while the newest checkpoint window is still buffered in the offloader.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert!(db.block_metadata(990.into()).unwrap().is_some());
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM orchard_tree_checkpoints WHERE checkpoint_id=990",
+            [],
+            |row| row.get::<_, u32>(0),
+        )
+        .unwrap(),
+        0
+    );
+    let expected: u32 = conn
+        .query_row(
+            "SELECT MAX(b.height) FROM blocks b
+         JOIN orchard_tree_checkpoints c ON c.checkpoint_id=b.height
+         WHERE b.height <= 990",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(expected == 910);
+    assert_eq!(
+        super::super::wallet::rewind_target(&path, 990).unwrap(),
+        Some(990)
+    );
+    let cache = FsBlockCache::open(dir.path().join("blocks")).unwrap();
+    cache.insert(blocks).await.unwrap();
+    let scanned = Arc::new(AtomicU32::new(1003));
+    let mut cached = Some(empty_state(1003));
+    apply_continuity_rewind(&cache, &mut db, &path, &scanned, &mut cached, 1004.into())
+        .await
+        .unwrap();
+    assert_eq!(scanned.load(Ordering::Relaxed), expected);
+    assert_eq!(cache.get_tip_height(None).unwrap(), Some(expected.into()));
+    assert!(db.block_metadata(990.into()).unwrap().is_none());
+    assert!(cached.is_none());
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM orchard_received_notes", [], |row| row
+            .get::<_, u32>(0),)
+            .unwrap(),
+        2
+    );
+    // Rewind keeps recoverable memo/intent rows but removes orphaned mining
+    // authority, as required by SQLite's existing truncation contract.
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM orchard_received_notes n JOIN transactions t
+         ON t.id_tx=n.transaction_id WHERE t.mined_height=5 AND t.block=5",
+            [],
+            |row| row.get::<_, u32>(0),
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM orchard_received_notes n JOIN transactions t
+         ON t.id_tx=n.transaction_id WHERE t.mined_height IS NULL AND t.block IS NULL",
+            [],
+            |row| row.get::<_, u32>(0),
+        )
+        .unwrap(),
+        1
+    );
+}

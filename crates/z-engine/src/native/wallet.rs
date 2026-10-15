@@ -22,12 +22,13 @@ mod transparent_pir;
 #[cfg(feature = "transparent-pir")]
 mod transparent_pir_funding;
 pub use shared_memos::NativeSharedMemosPass;
+pub(super) use shared_memos::SHARED_MEMO_BUCKET_WIDTH;
 #[cfg(feature = "transparent-pir")]
 pub use transparent_pir::NativeTransparentPirPass;
 #[cfg(feature = "private-enhance")]
 mod private_enhance;
 #[cfg(feature = "private-enhance")]
-pub use private_enhance::NativeEnhancePass;
+pub use private_enhance::{NativeEnhancePass, NativeEnhanceStart};
 #[cfg(feature = "native-pir")]
 mod pir;
 #[cfg(test)]

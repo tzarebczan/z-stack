@@ -8,11 +8,11 @@ This integration matches wallet-pir [`24f7694cd4f8274172a11cbff43c158bcab5d500`]
 
 Set `BlockTransport.enhance` to a `PrivateEnhanceTransport`. Its `exchange(request, signal)` method accepts only these requests:
 
-| Request | Host-visible fields | Maximum accepted response |
-| --- | --- | --- |
-| `init` | None | 1 MiB manifest |
-| `session` | Canonical 64-character lowercase hexadecimal `sessionId` | 256 KiB public material |
-| `query` | Rust query `body`, historical `anchor.height` and display-order `anchor.hash` | 30,836 bytes |
+| Request   | Host-visible fields                                                           | Maximum accepted response |
+| --------- | ----------------------------------------------------------------------------- | ------------------------- |
+| `init`    | None                                                                          | 1 MiB manifest            |
+| `session` | Canonical 64-character lowercase hexadecimal `sessionId`                      | 256 KiB public material   |
+| `query`   | Rust query `body`, historical `anchor.height` and display-order `anchor.hash` | 30,836 bytes              |
 
 The result contains `body: Uint8Array` and status `200`, `409`, `410`, `429` or `503`. A refresh status (`409` or `410`) retires the current pass. Other non-success statuses fail the pass. There is no automatic retry. The application supplies OHTTP, authenticated provider identity, consent, endpoint restrictions and response padding; the SDK does not infer these guarantees from a transport label.
 
@@ -24,11 +24,13 @@ The production WASM host exposes one closed `privateEnhance` operation: `pending
 
 Enable the `z-engine` feature `private-enhance`. Use an enrolled `NativeWalletSource` with the same exact source binding as the wallet:
 
-1. Fetch a manifest through the approved transport. Call `begin_private_enhance_with_source(source, manifest, now_seconds)`.
+1. Fetch a manifest through the approved transport. Call `begin_private_enhance_with_source(source, manifest, now_seconds)` and match `NativeEnhanceStart`. `Ready(pass)` follows the steps below. `DeferredUntilScanned { anchor_height }` means the valid manifest is ahead of the owned wallet scan: keep pending work and end this optional phase without fetching sessions or preparing queries. A later ordinary sync can make the anchor eligible.
 2. Fetch each public identifier from `NativeEnhancePass::session_ids()` and call `add_session(material, now_seconds)`.
 3. Call `prepare_private_enhance_with_source(source, pass, now_seconds)`. An empty vector ends the pass. Otherwise send its ciphertext with the public historical anchor returned by `pass.anchor()`.
 4. Call `apply_private_enhance_with_source(source, pass, reply, now_seconds)` and persist the application's normal checkpoint. Repeat within the 24-action bound.
 5. Drop the pass or call `cancel()` on cancellation, lock or failure.
+
+Deferral does not accept the manifest as wallet chain evidence, mutate queued work, retain a pass or reset the wallet. A scanned height whose hash or tree size disagrees still fails closed. Every prepare/apply operation requires an accepted anchor; it cannot defer an existing pass.
 
 The pass retains a shared database lease. Every preparation and application checks the wallet's current sticky source binding and independently scanned historical anchor. The lease prevents concurrent reset or source enrollment. The caller still owns operation cancellation and must prevent an obsolete wallet session from starting new work.
 
@@ -39,6 +41,10 @@ The pass retains a shared database lease. Every preparation and application chec
 `pass.ranges()` returns at most 20 one-block ranges, ordered across those buckets. Fetch every range through the closed public memo capability and call `apply_shared_memos_with_source(source, pass, bundle_bytes)`. Each strict JSON bundle contains `start`, `end`, hexadecimal original u32 big-endian framed `blocks`, and ordered hexadecimal `transactions` for every shielded transaction in that block. No selected transaction ID leaves Rust.
 
 The pass validates complete coverage, retained chain identities, links between blocks, transaction ordering, all raw transaction IDs and absence of trailing bytes. A bundle cannot omit a locally known shielded transaction from both its compact list and its raw list. Prefix blocks before the wallet birthday are permitted; the complete bucket must connect to its retained scanned anchors. The accepted JSON byte total is bounded to 64 MiB per pass.
+
+Native selective compact scanning retains metadata at every fixed ten-block bucket endpoint, as well as its final batch watermark and existing recent checkpoint window. These wallet-independent positions come from the authenticated compact span and are committed with the scan's existing database fences. Empty endpoints do not need a wallet note to remain usable as memo anchors.
+
+Older completed sparse histories may lack those endpoint rows. Opening a wallet or performing an incremental sync does not backfill them: memo recovery remains refused until an explicitly requested canonical rescan or replay supplies the missing anchors. Pending memo work is retained. This change does not delete or reset a wallet, trust publisher-only hashes, weaken bucket validation or add a selected-transaction fallback.
 
 Each attempted range is consumed. The wallet buffers validated records and atomically applies only currently `Public` matches after the whole bucket arrives. Partial buckets, cancellation and malformed responses do not update wallet memos. A complete public response can contain private Ironwood transactions, but this path does not decrypt, persist or reroute them. Dropping or cancelling the pass releases ownership. These methods perform no network requests.
 

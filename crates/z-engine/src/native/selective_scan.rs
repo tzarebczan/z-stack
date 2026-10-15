@@ -257,7 +257,8 @@ pub(super) struct TrialInput {
 type NativeScanned = ScannedBlock<AccountUuid>;
 
 /// Last compact block of a decrypt batch. Historic persist writes this row
-/// (plus note-bearing heights) instead of one sqlite row per empty block.
+/// (plus note-bearing heights and fixed public memo endpoints) instead of one
+/// sqlite row per empty block.
 #[derive(Clone)]
 pub(super) struct BlockWatermark {
     height: BlockHeight,
@@ -1169,7 +1170,7 @@ fn persist(
             info!("wallet write commitment rows");
 
             let mut note_positions = Vec::new();
-            // Empty persist: watermark + scan_queue only. Do not invent a
+            // Empty persist: public metadata anchors + scan_queue only. Do not invent a
             // `[birthday, birthday+7999]` put_blocks list with holes.
             if n_notes > 0 {
                 let mut blocks = scanned.into_iter().peekable();
@@ -1211,17 +1212,27 @@ fn persist(
                     ));
                 }
             }
-            wdb.put_block_meta(
-                watermark.height,
-                watermark.hash,
-                watermark.time,
-                watermark.sapling_tree_size,
-                watermark.sapling_output_count,
-                watermark.orchard_tree_size,
-                watermark.orchard_action_count,
-                watermark.ironwood_tree_size,
-                watermark.ironwood_action_count,
-            )?;
+            // Public memo recovery validates complete fixed buckets against the
+            // wallet chain. Retain their endpoints even when no wallet note was
+            // found there, alongside the existing final batch watermark.
+            for block in span.iter().filter(|block| {
+                block.height == watermark.height
+                    || (u32::from(block.height) > 0
+                        && u32::from(block.height)
+                            .is_multiple_of(super::wallet::SHARED_MEMO_BUCKET_WIDTH))
+            }) {
+                wdb.put_block_meta(
+                    block.height,
+                    block.hash,
+                    block.time,
+                    block.sapling_tree_size,
+                    block.sapling_output_count,
+                    block.orchard_tree_size,
+                    block.orchard_action_count,
+                    block.ironwood_tree_size,
+                    block.ironwood_action_count,
+                )?;
+            }
             wdb.notify_scan_complete(
                 span.first().expect("nonempty persist span").height..(last_height + 1),
                 &note_positions,

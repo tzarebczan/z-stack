@@ -527,3 +527,29 @@ fn dropped_birthday_shard_with_root_matches_the_full_tree() {
         .unwrap();
     }
 }
+
+#[test]
+fn fixed_public_memo_metadata_is_bounded_for_empty_native_scan() {
+    use zcash_client_backend::data_api::{AccountBirthday, WalletWrite};
+    let mut db = benchmark_empty_db();
+    db.create_account("fixed metadata", &secrecy::SecretVec::new(vec![7; 32]), &AccountBirthday::from_parts(empty_state(0), None), None).unwrap();
+    db.update_chain_tip(1003.into()).unwrap();
+    let blocks: Vec<_> = (1..=1003).map(compact_at).collect();
+    let context = TrialContext::new(load_ufvks(&db).unwrap(), load_nullifiers(&db).unwrap());
+    let batch = decrypt_owned(ZNetwork::Regtest, context.snapshot(&db, &blocks).unwrap(), empty_state(0), 1.into(), blocks, None).unwrap().unwrap();
+    let mut offload = NativeOffload::new(0, 0, 0);
+    persist_batch(&mut db, batch, &mut offload).unwrap();
+    let present: Vec<_> = (1..=1003).filter(|height| db.get_block_hash((*height).into()).unwrap().is_some()).collect();
+    let mut expected: Vec<_> = (10..=1000).step_by(10).collect();
+    expected.push(1003);
+    assert_eq!(present, expected);
+    assert_eq!(present.len(), 101, "100 fixed endpoints plus one final watermark, not 1003 rows");
+    flush_remaining(&mut db, &mut offload).unwrap();
+    let after_flush: Vec<_> = (1..=1003).filter(|height| db.get_block_hash((*height).into()).unwrap().is_some()).collect();
+    expected.extend(903..=1003);
+    expected.sort_unstable();
+    expected.dedup();
+    assert_eq!(after_flush, expected);
+    assert_eq!(after_flush.len(), 191, "fixed public endpoints union existing recent checkpoint window");
+    assert_eq!(db.block_fully_scanned().unwrap().unwrap().block_height(), 1003.into());
+}

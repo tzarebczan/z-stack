@@ -20,6 +20,13 @@ fn refused(code: &str) -> EngineError {
     EngineError::Message(code.into())
 }
 
+/// Result of validating a public Enhance snapshot against the owned wallet scan.
+/// Deferral retains all queued work and creates no query session or live pass.
+pub enum NativeEnhanceStart {
+    Ready(NativeEnhancePass),
+    DeferredUntilScanned { anchor_height: u32 },
+}
+
 /// Ephemeral pass with retained database ownership. Drop or cancel to retire private contexts.
 pub struct NativeEnhancePass {
     root: PathBuf,
@@ -65,7 +72,7 @@ impl NativeWallet {
         source: &NativeWalletSource,
         manifest: &[u8],
         now: u64,
-    ) -> Result<NativeEnhancePass> {
+    ) -> Result<NativeEnhanceStart> {
         let owner = Arc::new(database_lease::shared(&self.paths.data_db)?);
         self.require_wallet_source(source)?;
         if self.network != Network::Mainnet {
@@ -75,7 +82,16 @@ impl NativeWallet {
         let db = self
             .open_db()?
             .with_enhancement_mode(EnhancementMode::PrivateIronwood);
-        check_anchor(&db, anchor)?;
+        match anchor_status(&db, anchor)? {
+            EnhancePirSnapshotStatus::Accepted => (),
+            EnhancePirSnapshotStatus::NotYetScanned => {
+                return Ok(NativeEnhanceStart::DeferredUntilScanned {
+                    // manifest_anchor has already bounded the height to u32.
+                    anchor_height: anchor.height as u32,
+                });
+            }
+            EnhancePirSnapshotStatus::Mismatch => return Err(refused("enhance_anchor_mismatch")),
+        }
         let mut work = Vec::new();
         let mut eligible = BTreeMap::new();
         for item in db
@@ -93,13 +109,13 @@ impl NativeWallet {
             // Rediscover and suspended work stay durable. They never authorize selected fetches.
         }
         let batch = EnhanceBatch::open(manifest, &anchor, work, now).map_err(refused)?;
-        Ok(NativeEnhancePass {
+        Ok(NativeEnhanceStart::Ready(NativeEnhancePass {
             root: self.paths.root.clone(),
             binding: source.binding(),
             owner: Some(owner),
             batch,
             eligible,
-        })
+        }))
     }
     pub fn prepare_private_enhance_with_source(
         &self,
@@ -228,17 +244,21 @@ impl NativeWallet {
         self.require_wallet_source(source)
     }
 }
-fn check_anchor(db: &super::Db, anchor: z_enhance_pir::ChainAnchor) -> Result<()> {
+fn anchor_status(
+    db: &super::Db,
+    anchor: z_enhance_pir::ChainAnchor,
+) -> Result<EnhancePirSnapshotStatus> {
     let mut hash = anchor.hash;
     hash.reverse();
-    let status = db
-        .enhance_pir_snapshot_status(EnhancePirSnapshotAnchor {
-            height: BlockHeight::from_u32(anchor.height as u32),
-            block_hash: BlockHash(hash),
-            ironwood_tree_size: anchor.ironwood_tree_size,
-        })
-        .map_err(|_| refused("enhance_database_error"))?;
-    if status != EnhancePirSnapshotStatus::Accepted {
+    db.enhance_pir_snapshot_status(EnhancePirSnapshotAnchor {
+        height: BlockHeight::from_u32(anchor.height as u32),
+        block_hash: BlockHash(hash),
+        ironwood_tree_size: anchor.ironwood_tree_size,
+    })
+    .map_err(|_| refused("enhance_database_error"))
+}
+fn check_anchor(db: &super::Db, anchor: z_enhance_pir::ChainAnchor) -> Result<()> {
+    if anchor_status(db, anchor)? != EnhancePirSnapshotStatus::Accepted {
         return Err(refused("enhance_anchor_mismatch"));
     }
     Ok(())
@@ -269,6 +289,13 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../z-enhance-pir/tests/fixture.rs"
         ));
+    }
+
+    fn ready(start: NativeEnhanceStart) -> NativeEnhancePass {
+        match start {
+            NativeEnhanceStart::Ready(pass) => pass,
+            NativeEnhanceStart::DeferredUntilScanned { .. } => panic!("expected accepted anchor"),
+        }
     }
 
     fn incoming_fixture(
@@ -402,6 +429,7 @@ mod tests {
             server_fixture::Fixture::with_records(&profile, &[*record.as_bytes()], display_hash);
         let mut pass = wallet
             .begin_private_enhance_with_source(&source, &server.manifest, 100)
+            .map(ready)
             .unwrap();
         assert_eq!(pass.session_ids().len(), 1);
         assert!(database_lease::exclusive(&wallet.paths.data_db).is_err());
@@ -450,6 +478,7 @@ mod tests {
         );
         let mut incoming = wallet
             .begin_private_enhance_with_source(&source, &initial.manifest, 100)
+            .map(ready)
             .unwrap();
         incoming.add_session(&initial.material, 100).unwrap();
         let body = wallet
@@ -578,6 +607,7 @@ mod tests {
         let manifest = serde_json::to_vec(&manifest).unwrap();
         let mut pass = wallet
             .begin_private_enhance_with_source(&source, &manifest, 100)
+            .map(ready)
             .unwrap();
         assert!(
             pass.session_ids().is_empty(),
@@ -605,5 +635,174 @@ mod tests {
             )
             .unwrap();
         assert!(fee.is_none());
+    }
+
+    fn future_manifest(record: &EnhanceRecord) -> Vec<u8> {
+        let profile = server_fixture::profile();
+        let server =
+            server_fixture::Fixture::with_records(&profile, &[*record.as_bytes()], [9; 32]);
+        let mut value: serde_json::Value = serde_json::from_slice(&server.manifest).unwrap();
+        value["anchor_height"] = 3500001.into();
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn future_manifest_defers_without_work_or_source_mutation_then_becomes_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wallet, source, first, record) = incoming_fixture(dir.path());
+        let manifest = future_manifest(&record);
+        assert_eq!(
+            z_enhance_pir::manifest_anchor(&manifest).unwrap().height,
+            3500001
+        );
+        let mut db = wallet
+            .open_db()
+            .unwrap()
+            .with_enhancement_mode(EnhancementMode::PrivateIronwood);
+        let before = db.transaction_enhancement_work().unwrap();
+        assert!(!before.is_empty());
+        // prepare/apply share this strict check; only begin may defer.
+        assert_eq!(
+            check_anchor(&db, z_enhance_pir::manifest_anchor(&manifest).unwrap())
+                .err()
+                .unwrap()
+                .to_string(),
+            "enhance_anchor_mismatch"
+        );
+        let policy = crate::native::source::wallet_binding(dir.path()).unwrap();
+        let policy_file = std::fs::read(dir.path().join("native-wallet-source.json")).unwrap();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let version: u32 = conn
+            .pragma_query_value(None, "data_version", |r| r.get(0))
+            .unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                wallet
+                    .begin_private_enhance_with_source(&source, &manifest, 100)
+                    .unwrap(),
+                NativeEnhanceStart::DeferredUntilScanned {
+                    anchor_height: 3500001
+                }
+            ));
+            assert!(database_lease::exclusive(&wallet.paths.data_db).is_ok());
+        }
+        assert_eq!(
+            conn.pragma_query_value::<u32, _>(None, "data_version", |r| r.get(0))
+                .unwrap(),
+            version
+        );
+        assert!(db.transaction_enhancement_work().unwrap() == before);
+        assert!(crate::native::source::wallet_binding(dir.path()).unwrap() == policy);
+        assert_eq!(
+            std::fs::read(dir.path().join("native-wallet-source.json")).unwrap(),
+            policy_file
+        );
+        let mut invalid: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+        invalid["pool"] = "orchard".into();
+        let error = wallet
+            .begin_private_enhance_with_source(&source, &serde_json::to_vec(&invalid).unwrap(), 100)
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "enhance_manifest_invalid");
+        let other = NativeWalletSource::new(
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy(),
+            Network::Mainnet,
+            [0x72; 32],
+        );
+        assert!(wallet
+            .begin_private_enhance_with_source(&other, &manifest, 100)
+            .is_err());
+        // Authenticate the next block through the normal scan/write interface;
+        // deferral itself never writes a publisher-supplied anchor.
+        let next = CompactBlock {
+            height: 3500001,
+            hash: vec![9; 32],
+            prev_hash: first.hash.clone(),
+            time: 2,
+            chain_metadata: Some(ChainMetadata {
+                ironwood_commitment_tree_size: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let keys = ScanningKeys::from_account_ufvks(db.get_unified_full_viewing_keys().unwrap());
+        let nullifiers = Nullifiers::unspent(&db).unwrap();
+        let scanned = scan_block(
+            &Network::Mainnet,
+            next,
+            &keys,
+            &nullifiers,
+            db.block_max_scanned().unwrap().as_ref(),
+        )
+        .unwrap();
+        let rescanned =
+            scan_block(&Network::Mainnet, first, &keys, &Nullifiers::empty(), None).unwrap();
+        let state = zcash_client_backend::proto::service::TreeState {
+            height: 3499999,
+            hash: "00".repeat(32),
+            ..Default::default()
+        }
+        .to_chain_state()
+        .unwrap();
+        db.update_chain_tip(3500001.into()).unwrap();
+        db.put_blocks(&state, vec![rescanned, scanned]).unwrap();
+        drop(db);
+        let mut pass = ready(
+            wallet
+                .begin_private_enhance_with_source(&source, &manifest, 100)
+                .unwrap(),
+        );
+        assert_eq!(pass.session_ids().len(), 1);
+        pass.cancel();
+        let mut wrong: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+        wrong["anchor_block_hash"] = "aa".repeat(32).into();
+        let error = wallet
+            .begin_private_enhance_with_source(&source, &serde_json::to_vec(&wrong).unwrap(), 100)
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "enhance_anchor_mismatch");
+        assert!(database_lease::exclusive(&wallet.paths.data_db).is_ok());
+    }
+
+    #[tokio::test]
+    async fn future_manifest_defers_even_after_all_private_work_was_recovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wallet, source, _block, record) = incoming_fixture(dir.path());
+        let mut hash: [u8; 32] = std::array::from_fn(|i| i as u8);
+        hash.reverse();
+        let profile = server_fixture::profile();
+        let server = server_fixture::Fixture::with_records(&profile, &[*record.as_bytes()], hash);
+        let mut pass = ready(
+            wallet
+                .begin_private_enhance_with_source(&source, &server.manifest, 100)
+                .unwrap(),
+        );
+        pass.add_session(&server.material, 100).unwrap();
+        let body = wallet
+            .prepare_private_enhance_with_source(&source, &mut pass, 100)
+            .unwrap();
+        assert_eq!(
+            wallet
+                .apply_private_enhance_with_source(&source, &mut pass, &server.answer(&body), 100)
+                .unwrap(),
+            EnhancePirStoreResult::Stored
+        );
+        pass.cancel();
+        let db = wallet
+            .open_db()
+            .unwrap()
+            .with_enhancement_mode(EnhancementMode::PrivateIronwood);
+        let before = db.transaction_enhancement_work().unwrap();
+        assert!(before.is_empty());
+        assert!(matches!(
+            wallet
+                .begin_private_enhance_with_source(&source, &future_manifest(&record), 100)
+                .unwrap(),
+            NativeEnhanceStart::DeferredUntilScanned {
+                anchor_height: 3500001
+            }
+        ));
+        assert!(db.transaction_enhancement_work().unwrap() == before);
+        assert!(database_lease::exclusive(&wallet.paths.data_db).is_ok());
     }
 }
