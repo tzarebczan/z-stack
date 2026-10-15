@@ -1,3 +1,4 @@
+import { transparentScanMode } from "./private-transparent";
 import {
   filterHistory,
   parseZip321,
@@ -137,9 +138,12 @@ export function createWasmClient(
 
   let memoAbort: AbortController | null = null;
 
-  let transparentScan = opts.transparentScan ?? "off";
+  let transparentScan = transparentScanMode(opts.transparentScan);
 
-  let transparentScanStatus: PublicDataStatus = transparentScan === "compact" ? "scanning" : "off";
+  let transparentScanEpoch = 0;
+  let transparentScanAbort = new AbortController();
+  let transparentScanFailure: WalletSnapshot["transparentScanFailure"];
+  let transparentScanStatus: PublicDataStatus = transparentScan !== "off" ? "scanning" : "off";
 
   let sharedMemoStatus: PublicDataStatus = memoFetch === "shared" ? "scanning" : "off";
 
@@ -160,6 +164,7 @@ export function createWasmClient(
     operation.assertCurrent();
     if (next.kind === "worker" && next !== workerScanSession()) throw new Error("scan worker restarted");
     const previous = session;
+    if (previous !== next) transparentScanFailure = undefined;
     session = next;
     rootsChecked = null;
     sessionOperation = operation;
@@ -278,6 +283,8 @@ export function createWasmClient(
     if (w.hardware == null) delete w.hardware;
     w.unlockPolicy = unlockPolicy;
     w.transparentScanStatus = transparentScanStatus;
+    if (transparentScan === "pir" && transparentScanStatus === "unavailable" && transparentScanFailure) w.transparentScanFailure = transparentScanFailure;
+    else delete w.transparentScanFailure;
     w.sharedMemoStatus = memoFetch === "shared" ? sharedMemoStatus : "off";
     w.memoFetchStatus = memoFetch === "shared" ? sharedMemoStatus : selectiveMemoStatus;
     return w;
@@ -390,6 +397,10 @@ export function createWasmClient(
     get rootsChecked() { return rootsChecked; },
     set rootsChecked(value: WasmClientContext["rootsChecked"]) { rootsChecked = value; },
     get refreshIfStale() { return refreshIfStale; },
+    get transparentScanEpoch() { return transparentScanEpoch; },
+    get transparentScanSignal() { return transparentScanAbort.signal; },
+    get transparentScanFailure() { return transparentScanFailure; },
+    set transparentScanFailure(value: WasmClientContext["transparentScanFailure"]) { transparentScanFailure = value; },
     get transparentScanStatus() { return transparentScanStatus; },
     set transparentScanStatus(value: WasmClientContext["transparentScanStatus"]) { transparentScanStatus = value; },
     get sharedMemoStatus() { return sharedMemoStatus; },
@@ -568,6 +579,8 @@ export function createWasmClient(
           throw WalletError.fromUnknown(e);
         }),
     shield: async (threshold, options) => {
+      if (transparentScan === "pir") throw new Error("Transparent spending is not enabled for publisher-provided PIR history.");
+
       const beforeBroadcast = () => !options?.signal?.aborted && (options?.beforeBroadcast?.() ?? true);
       if (!beforeBroadcast()) throw new Error("cancelled before broadcast");
       assertReplacementSaved();
@@ -1000,8 +1013,17 @@ export function createWasmClient(
       }
       memoFetch = mode;
     },
-    setTransparentScan: (mode) => {
-      if (mode !== transparentScan) transparentScanStatus = mode === "compact" ? "scanning" : "off";
+    setTransparentScan: (value) => {
+      const mode = transparentScanMode(value);
+      if (mode === "pir" && opts.autoShield) throw new Error("Automatic shielding is not enabled for publisher-provided PIR history.");
+      if (mode === "pir" && !transport.transparentPir) throw new Error("Private transparent scanning requires a separately consented PIR transport.");
+      if (mode !== transparentScan) {
+        ++transparentScanEpoch;
+        transparentScanAbort.abort(new Error("Privacy settings changed during retrieval"));
+        transparentScanAbort = new AbortController();
+        transparentScanFailure = undefined;
+        transparentScanStatus = mode !== "off" ? "scanning" : "off";
+      }
       transparentScan = mode;
     },
     setPrewarmProvingKey: (enabled) => { prewarmProvingKey = enabled; },
@@ -1131,7 +1153,8 @@ export function createWasmClient(
             assertSource(operation, source);
             // Coverage was cleared by the committed reset. Failed saves keep
             // the previous session's completion statuses during rollback.
-            transparentScanStatus = transparentScan === "compact" ? "scanning" : "off";
+            transparentScanFailure = undefined;
+            transparentScanStatus = transparentScan !== "off" ? "scanning" : "off";
             sharedMemoStatus = memoFetch === "shared" ? "scanning" : "off";
             selectiveMemoStatus = memoFetch === "on-demand" ? "off" : "scanning";
           } catch (error) {

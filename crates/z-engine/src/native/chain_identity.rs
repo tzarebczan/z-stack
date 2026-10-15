@@ -6,11 +6,7 @@ use crate::{
 
 // Zakura chain parameters: checkpoint/list.rs and network/testnet.rs.
 pub(super) fn genesis(network: Network) -> &'static str {
-    match network {
-        Network::Mainnet => "00040fe8ec8471911baa1db1266ea15dd06b4a8a5c453883c000b031973dce08",
-        Network::Testnet => "05a60a92d99d85997cce3b87616c089f6124d7342af37106edc76126334a2c38",
-        Network::Regtest => "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327",
-    }
+    network.genesis_hash()
 }
 
 pub(super) fn validate(network: Network, chain: &str, hash: &str) -> Result<()> {

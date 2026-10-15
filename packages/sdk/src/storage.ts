@@ -68,7 +68,13 @@ export function indexedDbWalletStorage(options: { name?: string; factory?: IDBFa
             try { native.abort(); }
             catch { if (!commitWinsCancellation) { cleanup(); reject(failure); } }
           };
-          const cancel = () => fail(signal?.reason);
+          const cancel = () => {
+            if (!commitWinsCancellation) { fail(signal?.reason); return; }
+            // A late signal cannot certify why an already-ended transaction failed.
+            // Successful native abort is the boundary that owns this cancellation.
+            try { native.abort(); failure ??= signal?.reason; }
+            catch { failure ??= native.error ?? undefined; }
+          };
           const read = <V>(request: IDBRequest<V>, receive: (value: V) => void) => {
             request.onsuccess = () => {
               try { signal?.throwIfAborted(); receive(request.result); }

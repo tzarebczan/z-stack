@@ -1,36 +1,42 @@
-/** One active task and one replaceable pending task. No queued snapshots. */
-export function coalescedTask(): (task: () => Promise<void>) => Promise<void> {
+type Task = () => Promise<void>;
+
+/** One active task; adjacent ordinary saves coalesce around mandatory barriers. */
+export function coalescedTask(): {
+  (task: Task): Promise<void>;
+  mandatory: (task: Task) => Promise<void>;
+} {
   type Job = {
-    task: () => Promise<void>;
+    task: Task;
+    mandatory: boolean;
     promise: Promise<void>;
     resolve: () => void;
     reject: (error: unknown) => void;
   };
   let active = false;
-  let pending: Job | null = null;
+  const pending: Job[] = [];
   function run(job: Job): void {
     active = true;
     void Promise.resolve().then(() => job.task()).then(job.resolve, job.reject).finally(() => {
-      if (pending) {
-        const next = pending;
-        pending = null;
-        run(next);
-      } else {
-        active = false;
-      }
+      const next = pending.shift();
+      if (next) run(next);
+      else active = false;
     });
   }
-  return (task) => {
-    if (pending) {
-      pending.task = task;
-      return pending.promise;
+  function enqueue(task: Task, mandatory: boolean): Promise<void> {
+    const tail = pending.at(-1);
+    if (!mandatory && tail && !tail.mandatory) {
+      tail.task = task;
+      return tail.promise;
     }
     let resolve!: Job["resolve"];
     let reject!: Job["reject"];
     const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
-    const job = { task, promise, resolve, reject };
-    if (active) pending = job;
+    const job = { task, mandatory, promise, resolve, reject };
+    if (active) pending.push(job);
     else run(job);
     return promise;
-  };
+  }
+  return Object.assign((task: Task) => enqueue(task, false), {
+    mandatory: (task: Task) => enqueue(task, true),
+  });
 }

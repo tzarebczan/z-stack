@@ -118,9 +118,17 @@ jobs:
       # checks stay on.
       - name: Engine check + tests
         run: |
-          bash scripts/ci-time.sh "Engine library tests" cargo test --config .github/ci/native-profile.toml -p z-engine --features native,cli,native-pir,private-enhance --lib --timings
-          bash scripts/ci-time.sh "Native runtime configuration" cargo test --config .github/ci/native-profile.toml -p z-engine --features native,cli,native-pir,private-enhance --test native_runtime --timings
-          bash scripts/ci-time.sh "Engine binaries check" cargo check --config .github/ci/native-profile.toml -p z-engine --features native,cli,native-pir,private-enhance --bins --timings
+          bash scripts/ci-time.sh "Engine library tests" cargo test --config .github/ci/native-profile.toml -p z-engine --features native,cli,native-pir,private-enhance,transparent-pir --lib --timings
+          bash scripts/ci-time.sh "Native runtime configuration" cargo test --config .github/ci/native-profile.toml -p z-engine --features native,cli,native-pir,private-enhance,transparent-pir --test native_runtime --timings
+          bash scripts/ci-time.sh "Engine binaries check" cargo check --config .github/ci/native-profile.toml -p z-engine --features native,cli,native-pir,private-enhance,transparent-pir --bins --timings
+      - name: Yielding transparent PIR recovery tests
+        # Real-server fixtures run serially within the existing two-job budget.
+        # Their acknowledged cold-resume and fork cases are separate from the
+        # engine's canonical-wallet projection tests.
+        timeout-minutes: 20
+        env:
+          RAYON_NUM_THREADS: "2"
+        run: bash scripts/ci-time.sh "Transparent PIR recovery tests" cargo test --locked --config .github/ci/native-profile.toml -p z-transparent-pir-v2 --lib --test recovery --timings -- --test-threads=1
       - name: Desktop check
         run: bash scripts/ci-time.sh "Desktop check" cargo check --config .github/ci/native-profile.toml -p z-desktop --timings
       - name: Node launcher check

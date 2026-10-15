@@ -203,7 +203,7 @@ export function classifyWalletError(message: string): WalletErrorCode {
   if (lower.includes("proving parameters missing") || lower.includes("missing params")) {
     return "missing_params";
   }
-  if (lower.includes("rescan pending payment")) return "rescan_pending";
+  if (lower.includes("rescan pending payment") || lower.includes("rescan active output reservation")) return "rescan_pending";
   if (lower.includes("rescan later birthday")) return "rescan_later_birthday";
   if (lower.includes("invalid birthday")) return "invalid_birthday";
   if (lower.includes("chain mismatch")) return "chain_mismatch";

@@ -53,6 +53,7 @@ export function createStorageController(ctx: Pick<WasmClientContext, "savedRevis
     lineage?: { epoch: number; baseKey: string | null },
     replacement?: runtime.ClaimedGeneration & { unlockPolicy?: UnlockPolicy },
     background = false,
+    transparentCheckpoint?: Parameters<WasmClientContext["persist"]>[3],
   ): Promise<void> {
     // A background/pagehide save must not publish the new snapshot before its
     // requested policy, nor replace this mandatory save in the coalescing queue.
@@ -60,9 +61,9 @@ export function createStorageController(ctx: Pick<WasmClientContext, "savedRevis
       return background ? Promise.resolve() : Promise.reject(new WalletError("wallet_changed", "wallet restore is still in progress"));
     }
     if (!ctx.session || replacement && replacement.generation !== ctx.storageGeneration) {
-      return replacement || lineage ? Promise.reject(new DOMException("mandatory snapshot save cancelled", "AbortError")) : Promise.resolve();
+      return replacement || lineage || transparentCheckpoint ? Promise.reject(new DOMException("mandatory snapshot save cancelled", "AbortError")) : Promise.resolve();
     }
-    if (!walletStorageAvailable()) return background || !ctx.persistenceRequired ? Promise.resolve()
+    if (!walletStorageAvailable()) return !transparentCheckpoint && (background || !ctx.persistenceRequired) ? Promise.resolve()
       : Promise.reject(new WalletError("wallet_db", "Local wallet storage is unavailable. Nothing was saved."));
     const source = ctx.session;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
@@ -78,7 +79,7 @@ export function createStorageController(ctx: Pick<WasmClientContext, "savedRevis
     };
     const canSave = () => {
       if (current()) return true;
-      if (replacement || lineage) throw new DOMException("mandatory snapshot save cancelled", "AbortError");
+      if (replacement || lineage || transparentCheckpoint) throw new DOMException("mandatory snapshot save cancelled", "AbortError");
       return false;
     };
     const run = async () => {
@@ -91,6 +92,60 @@ export function createStorageController(ctx: Pick<WasmClientContext, "savedRevis
       }
       if (lineage && ctx.stateEpoch !== lineage.epoch) {
         throw new WalletError("wallet_changed", "the wallet was saved by another tab");
+      }
+      if (transparentCheckpoint) {
+        const commit = source.commitPrivateTransparentCheckpoint;
+        if (!commit) throw new Error("WASM needs a transactional transparent PIR upgrade");
+        const authorityFailures = new WeakMap<object, unknown>();
+        const markAuthority = (cause: unknown): unknown => {
+          const failure = new Error("checkpoint authority cancelled", { cause });
+          authorityFailures.set(failure, cause);
+          return failure;
+        };
+        const checkpointCurrent = () => {
+          try {
+            if (!canSave()) throw new DOMException("mandatory checkpoint cancelled", "AbortError");
+            transparentCheckpoint.assertCurrent();
+          } catch (error) { throw markAuthority(error); }
+        };
+        const knownAuthorityFailure = (error: unknown) => typeof error === "object" && error !== null && authorityFailures.has(error);
+        const ownsContext = () => source === ctx.session && epoch === ctx.walletEpoch
+          && (!ctx.sessionOperation || ctx.sessionOperation === operation);
+        const ownsRawLease = () => ownsContext() && !operation.signal.aborted && (source.kind !== "worker" || source === workerScanSession());
+        const retireOwned = () => { if (ownsContext()) ctx.retireFailedSession(source); };
+        let committed = false;
+        try {
+          await commit(transparentCheckpoint.checkpointId, async ({ bytes, previewJson }, acknowledge) => {
+            checkpointCurrent();
+            const key = await idbPut(bytes, JSON.parse(previewJson) as WalletSnapshot,
+              () => { checkpointCurrent(); return true; }, storedGeneration, baseKey,
+              allowLegacy, legacy, undefined, transparentCheckpoint.signal, true, undefined,
+              () => markAuthority(transparentCheckpoint.signal.reason));
+            if (!key) throw new WalletError("wallet_db", "Local wallet storage is unavailable. Nothing was saved.");
+            committed = true;
+            // Only privacy/budget cancellation may be ignored after the key.
+            if (!ownsSession()) throw new WalletError("wallet_changed", "wallet changed during checkpoint commit");
+            ctx.savedKeySeen = key;
+            ctx.savedRevision = undefined;
+            ctx.replaceLegacyOnSave = false;
+            ctx.legacyBytes = null;
+            await acknowledge();
+            if (!ownsSession()) throw new WalletError("wallet_changed", "wallet changed during checkpoint acknowledgment");
+          }, checkpointCurrent, async (error, discard) => {
+            if (!committed && knownAuthorityFailure(error)) {
+              if (!ownsRawLease()) return "retire";
+              try { await discard(); return "preserve"; }
+              catch { retireOwned(); return "retire"; }
+            }
+            // Called while the phase is held; retiring also rejects its old waiters.
+            retireOwned();
+            return "retire";
+          });
+        } catch (error) {
+          if (typeof error === "object" && error !== null && authorityFailures.has(error)) throw authorityFailures.get(error);
+          throw error;
+        }
+        return;
       }
       try {
         const revision = source.persistenceRevision?.();
@@ -143,7 +198,7 @@ export function createStorageController(ctx: Pick<WasmClientContext, "savedRevis
       }
     };
     // A spend or rollback save must not be replaced by a later background save.
-    if (lineage || replacement) return run();
+    if (lineage || replacement || transparentCheckpoint) return runtime.saveSnapshot.mandatory(run);
     return runtime.saveSnapshot(run);
   }
 

@@ -1,7 +1,7 @@
 //! Wallet-independent block-range data. Coverage is separate from shielded scan
 //! progress so an old snapshot never claims it has scanned transparent activity.
 
-use super::store::StoredUtxo;
+use super::store::{CoinbaseStatus, StoredUtxo};
 use super::{decode_delimited, to_hex, WebWallet};
 use crate::error::{EngineError, Result};
 use serde::{Deserialize, Serialize};
@@ -180,7 +180,7 @@ mod tests {
         scan(&mut w, vec![block(100)]);
         assert_eq!(w.balance().transparent_available, 80_000);
         let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
-        assert!(restored.utxos[0].coinbase);
+        assert_eq!(restored.utxos[0].coinbase, CoinbaseStatus::Coinbase);
         assert_eq!(restored.balance().transparent_available, 80_000);
     }
 }
@@ -379,6 +379,31 @@ impl WebWallet {
             ));
         }
         let scripts = self.public_transparent_scripts()?;
+        let mut receipts = Vec::new();
+        let mut spends = Vec::new();
+        for block in &blocks {
+            for tx in &block.vtx {
+                let id = to_hex(&tx.txid);
+                for (index, output) in tx.vout.iter().enumerate() {
+                    if scripts
+                        .iter()
+                        .any(|(script, _)| *script == output.script_pub_key)
+                    {
+                        receipts.push((id.clone(), index as u32, output.value));
+                    }
+                }
+                for input in &tx.vin {
+                    spends.push((
+                        to_hex(&input.prevout_txid),
+                        input.prevout_index,
+                        id.clone(),
+                        Some(block.height as u32),
+                    ));
+                }
+            }
+        }
+        self.preflight_transparent_receipts(&receipts)?;
+        self.preflight_transparent_spends(&spends)?;
         self.transparent_scan_required = true;
         let mut found = 0;
         for block in blocks {
@@ -395,6 +420,16 @@ impl WebWallet {
                             involved = true;
                         }
                     }
+                    involved |= self
+                        .record_transparent_receipt_spend(
+                            &prev,
+                            input.prevout_index,
+                            &txid,
+                            Some(height),
+                        )
+                        .is_some();
+                    #[cfg(feature = "transparent-pir")]
+                    self.record_public_transparent_spend(&txid, &prev, input.prevout_index);
                 }
                 for (index, output) in tx.vout.iter().enumerate() {
                     let Some((_, address)) = scripts
@@ -410,7 +445,7 @@ impl WebWallet {
                         .find(|u| u.txid == txid && u.index == index as u32)
                     {
                         u.height = height;
-                        u.coinbase = tx.index == 0;
+                        u.coinbase = CoinbaseStatus::from_transaction(tx.index == 0);
                         u.value_zat = output.value;
                         u.script = to_hex(&output.script_pub_key);
                     } else {
@@ -421,12 +456,21 @@ impl WebWallet {
                             value_zat: output.value,
                             height,
                             address: address.clone(),
-                            coinbase: tx.index == 0,
+                            coinbase: CoinbaseStatus::from_transaction(tx.index == 0),
                             spent: false,
                             spent_in: None,
                         });
                         found += 1;
                     }
+                    self.credit_transparent_receipt(
+                        &txid,
+                        index as u32,
+                        output.value,
+                        Some(height),
+                        false,
+                    );
+                    #[cfg(feature = "transparent-pir")]
+                    self.record_public_transparent_output(&txid, index as u32);
                 }
                 if involved {
                     let agg = self.txs_mut().entry(txid).or_default();
@@ -442,12 +486,14 @@ impl WebWallet {
                 hash: to_hex(&block.hash),
             });
         }
+        #[cfg(feature = "transparent-pir")]
+        self.confirm_complete_public_transparent_outputs();
         self.recompute_pool_fields();
         Ok(found)
     }
 
     #[cfg(feature = "transparent-inputs")]
-    fn public_transparent_scripts(&mut self) -> Result<Vec<(Vec<u8>, String)>> {
+    pub(crate) fn public_transparent_scripts(&mut self) -> Result<Vec<(Vec<u8>, String)>> {
         use transparent::{
             address::{Script, TransparentAddress},
             keys::{NonHardenedChildIndex, TransparentKeyScope},

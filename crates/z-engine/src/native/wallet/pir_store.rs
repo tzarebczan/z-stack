@@ -773,7 +773,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wallet = fixture_wallet(dir.path());
         let (key, birthday) = fixture_account();
-        wallet.replace_scan_db(&key, &birthday).unwrap();
+        // This isolated store fixture needs an initial account, not a rescan.
+        // Avoid the reset lease hand-off while parallel tests spawn processes.
+        let mut db = open_wallet_db(&wallet.paths.data_db, wallet.network).unwrap();
+        init_wallet_db(&mut db, None).unwrap();
+        db.import_account_ufvk(
+            "primary",
+            &key,
+            &birthday,
+            AccountPurpose::Spending { derivation: None },
+            Some("z-stack-reset"),
+        )
+        .unwrap();
+        drop(db);
         (dir, wallet)
     }
     fn commit() -> ShardCommit {

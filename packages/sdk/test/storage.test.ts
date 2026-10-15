@@ -1011,17 +1011,26 @@ test("old local WASM rejects a combined apply before advancing shielded state", 
   assert.equal(applied, 1);
 });
 
-test("disabling deposits while a combined fetch is in flight leaves coverage unchanged", async (t) => {
+test("disabling deposits rejects stale combined apply and preserves fresh off-mode sync", async (t) => {
   installDb(t); const worker = new MemoWorker(); worker.transparentHeight = 10;
   await restartScanWorker(() => worker as unknown as Worker);
+  let ordinaryRequests = 0;
   const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transparentScan: "compact", transport: {
     kind: "mock", label: "mock", tip: async () => 11,
     info: async () => ({ chain: "regtest", transparentCompact: true, protocolVersion: "v0.5.0" }),
-    blocks: async () => { throw new Error("already fetched all pools"); },
+    blocks: async () => { ordinaryRequests++; return new Uint8Array([1]); },
     transparentBlocks: async () => { client.setTransparentScan("off"); return new Uint8Array([1]); },
   } });
   await client.restore("test-only worker fixture", "regtest", 1);
+  await assert.rejects(client.sync(), /Privacy settings changed/);
+  const stopped = await client.getWallet();
+  assert.equal(stopped.scannedHeight, 10);
+  assert.equal(stopped.transparentScanHeight, 10);
+  assert.equal(stopped.transparentScanStatus, "off");
+  assert.equal(ordinaryRequests, 0, "the stale combined phase must not select an ordinary fallback");
+  assert.deepEqual(worker.combinedApplies, []);
   const result = await client.sync();
+  assert.equal(ordinaryRequests, 1);
   assert.equal(result.scannedHeight, 11);
   assert.equal(result.transparentScanHeight, 10);
   assert.equal(result.transparentScanStatus, "off");
@@ -1288,3 +1297,457 @@ test("on-demand reports a remaining 505-transaction queue without automatic requ
   client.setMemoFetch("auto"); client.setMemoFetch("on-demand");
   assert.equal((await client.getWallet()).memoFetchStatus,"off");
 });
+
+function checkpointDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+test("private checkpoint phase drains prior mutations and keeps reads on the committed base", async () => {
+  const prior = checkpointDeferred<void>(), prepared = checkpointDeferred<void>(), commit = checkpointDeferred<void>();
+  let state = "base", changes = 0;
+  const events: string[] = [];
+  const source = trackScanRevision({
+    history: async () => state,
+    enhanceRawTx: async () => { await prior.promise; events.push("prior"); changes++; return 0; },
+    privateTransparentSnapshot: async () => { events.push("candidate"); prepared.resolve(); return { bytes: new Uint8Array([changes]), previewJson: "{}" }; },
+    privateTransparent: async (operation: string) => { assert.equal(operation, "ack"); events.push("ack"); state = "committed"; return new Uint8Array(); },
+    nextUnifiedAddress: async () => { events.push("following"); },
+  } as never);
+  const mutating = source.enhanceRawTx("disposable");
+  const phase = source.commitPrivateTransparentCheckpoint!("checkpoint", async (candidate, acknowledge) => {
+    assert.equal(candidate.bytes[0], 1);
+    assert.equal(source.persistenceRevision!(), undefined);
+    assert.equal(await source.history(1), "base");
+    await commit.promise; await acknowledge();
+  }, () => {}, async () => "retire");
+  const following = source.nextUnifiedAddress();
+  await turn(); assert.deepEqual(events, []);
+  prior.resolve(); await mutating; await prepared.promise;
+  assert.deepEqual(events, ["prior", "candidate"]);
+  commit.resolve(); await phase; await following;
+  assert.deepEqual(events, ["prior", "candidate", "ack", "following"]);
+  assert.equal(await source.history(1), "committed");
+  assert.equal(typeof source.persistenceRevision!(), "number");
+});
+
+test("private checkpoint failure rejects old queued mutations and permits fresh hydration", async () => {
+  const prepared = checkpointDeferred<void>(), fail = checkpointDeferred<void>();
+  const events: string[] = [];
+  const source = trackScanRevision({
+    history: async () => "base",
+    privateTransparentSnapshot: async () => { prepared.resolve(); return { bytes: new Uint8Array([1]), previewJson: "{}" }; },
+    privateTransparent: async () => { events.push("ack"); return new Uint8Array(); },
+    nextUnifiedAddress: async () => { events.push("following"); },
+  } as never);
+  const revision = source.persistenceRevision!();
+  const phase = source.commitPrivateTransparentCheckpoint!("checkpoint", async () => {
+    await fail.promise; throw new Error("quota");
+  }, () => {}, async () => { events.push("retired"); return "retire"; });
+  const rejected = assert.rejects(phase, /quota/);
+  await prepared.promise;
+  const following = assert.rejects(source.nextUnifiedAddress(), /quota/);
+  assert.equal(source.persistenceRevision!(), undefined);
+  fail.resolve(); await rejected; await following;
+  assert.deepEqual(events, ["retired"]);
+  await source.nextUnifiedAddress();
+  assert.deepEqual(events, ["retired", "following"]);
+  assert.notEqual(source.persistenceRevision!(), revision);
+});
+
+class TransactionalPirWorker extends MemoWorker {
+  heldAdvance: (() => void) | undefined;
+  heldCandidate: (() => void) | undefined;
+  holdAdvance = false;
+  holdCandidate = true;
+  candidateRequests = 0;
+  acknowledgments = 0;
+  staged = false;
+  failAck = false;
+  failCandidate = false;
+  onEnhanceDispatch: ((hex: string) => void) | undefined;
+  readonly checkpointId = "33".repeat(32);
+  override postMessage(msg: Parameters<MemoWorker["postMessage"]>[0] & { transparentOperation?: string; checkpointId?: string }) {
+    const reply = (data: Record<string, unknown>) => queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: { id: msg.id, ...data } })));
+    const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+    const snapshot = (candidate: boolean) => encode([...this.completed, ...(candidate && !this.completed.has("pir") ? ["pir"] : [])]);
+    if (msg.op === "meta") {
+      this.ops.push(msg.op);
+      reply({ scanned: this.scanned, nextHeight: this.scanned + 1, birthday: this.birthday, treesReady: true, sinsemillaLive: true, transparentCompact: true, transparentPirCheckpoint: true }); return;
+    }
+    if (msg.op === "privateTransparentSnapshot") {
+      this.ops.push(msg.op); this.candidateRequests++;
+      assert.equal(msg.checkpointId, this.checkpointId); assert.equal(this.staged, true);
+      const respond = () => this.failCandidate ? reply({ error: "owned_candidate_failure" }) : reply({ snapshot: snapshot(true).buffer, json: JSON.stringify({ ...preview(this.scanned), balance: { totalAvailable: 17000, orchardAvailable: 17000 } }) });
+      if (this.holdCandidate) this.heldCandidate = respond; else respond();
+      return;
+    }
+    if (msg.op === "snapshotJson") {
+      const available = this.completed.has("pir") ? 17000 : 10;
+      reply({ json: JSON.stringify({ ...preview(this.scanned), balance: { totalAvailable: available, orchardAvailable: available } }) }); return;
+    }
+    if (msg.op === "history") {
+      reply({ json: JSON.stringify(this.completed.has("pir") ? [{ txid: "disposable-pir-row" }] : []) }); return;
+    }
+    if (msg.op === "privateTransparent") {
+      this.ops.push(msg.transparentOperation!);
+      let value: unknown;
+      switch (msg.transparentOperation) {
+        case "begin": value = { height: 10, hash: "22".repeat(32) }; break;
+        case "advance":
+          value = this.completed.has("pir") ? { kind: "stopped", status: { kind: "complete" } } : { kind: "checkpoint", checkpoint_id: this.checkpointId };
+          this.staged = !this.completed.has("pir");
+          if (this.holdAdvance) { this.heldAdvance = () => reply({ blob: encode(value).buffer }); return; }
+          break;
+        case "status": value = { completion: this.completed.has("pir") ? "complete-for-enrolled-scope" : "incomplete" }; break;
+        case "ack":
+          if (this.failAck) { reply({ error: "disposable_ack_failure" }); return; }
+          assert.equal(new TextDecoder().decode(msg.blob), this.checkpointId);
+          this.completed.add("pir"); this.acknowledgments++; this.staged = false; break;
+        case "cancel": this.staged = false; break;
+        default: throw new Error("unexpected_private_fixture_operation");
+      }
+      reply({ blob: value === undefined ? new ArrayBuffer(0) : encode(value).buffer }); return;
+    }
+    if (msg.op === "enhanceRawTx") this.onEnhanceDispatch?.(msg.hex!);
+    super.postMessage(msg);
+  }
+}
+
+async function transactionalPirClient(t: TestContext) {
+  const db = installDb(t), worker = new TransactionalPirWorker(); worker.candidates = [];
+  attachWasmBindings({} as never);
+  await restartScanWorker(() => worker as unknown as Worker);
+  await attachScanWorker(worker as unknown as Worker, { threads: 1, preferMulticore: false });
+  const client = createWasmClient({ unlockPolicy: "session", network: "regtest", autoShield: false, memoFetch: "on-demand", transparentScan: "pir", transport: {
+    kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+    transparentPir: { sourceId: "11".repeat(32), exchange: async () => { throw new Error("unexpected_network_request"); } },
+  } });
+  await client.restore("disposable worker adapter fixture", "regtest", 1);
+  t.after(async () => { await client.dispose(); });
+  return { db, worker, client };
+}
+async function checkpointWait(predicate: () => boolean) {
+  for (let i = 0; i < 500 && !predicate(); i++) await turn();
+  assert.equal(predicate(), true, "checkpoint fixture must reach its bounded barrier");
+}
+
+test("cancel after a worker checkpoint reply leaves both live and saved projection unchanged", async t => {
+  const { worker, client } = await transactionalPirClient(t); worker.holdAdvance = true;
+  const before = await readSavedSnapshotRecord();
+  const running = client.sync(); const rejected = assert.rejects(running, /Privacy settings changed/);
+  await checkpointWait(() => !!worker.heldAdvance);
+  client.setTransparentScan!("off"); worker.heldAdvance!();
+  await rejected;
+  assert.equal(worker.completed.has("pir"), false); assert.equal(worker.acknowledgments, 0);
+  assert.equal(worker.candidateRequests, 0);
+  const after = await readSavedSnapshotRecord(); assert.ok(before && after);
+  assert.deepEqual(after.bytes, before.bytes);
+});
+
+for (const afterKey of [false, true]) {
+  test(`private checkpoint mode change ${afterKey ? "after" : "before"} durable key has a single commit boundary`, async t => {
+    const { db, worker, client } = await transactionalPirClient(t);
+    const before = await readSavedSnapshotRecord();
+    const running = client.sync(); const rejected = assert.rejects(running, /Privacy settings changed/);
+    await checkpointWait(() => !!worker.heldCandidate);
+    if (afterKey) db.holdCompletionEvents = true; else db.holdCommits = true;
+    worker.heldCandidate!();
+    await checkpointWait(() => afterKey ? db.completions.length > 0 : db.commits.length > 0);
+    client.setTransparentScan!("off");
+    db.holdCommits = false; db.holdCompletionEvents = false;
+    for (const release of [...db.commits.splice(0), ...db.completions.splice(0)]) release();
+    await rejected;
+    const saved = await readSavedSnapshotRecord(); assert.ok(saved && before);
+    assert.equal(worker.completed.has("pir"), afterKey);
+    assert.equal(worker.acknowledgments, afterKey ? 1 : 0);
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(saved.bytes)), afterKey ? ["pir"] : []);
+  });
+}
+
+test("following pagehide save observes the acknowledged private checkpoint base", async t => {
+  const { worker, client } = await transactionalPirClient(t);
+  const running = client.sync(); await checkpointWait(() => !!worker.heldCandidate);
+  const { runtimeState } = await import("../src/wasm-client-runtime.ts");
+  const hide = runtimeState.persistOnHide!();
+  assert.equal(worker.completed.has("pir"), false);
+  worker.heldCandidate!(); await running; await hide;
+  assert.equal(worker.acknowledgments, 1);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode((await readSavedSnapshotRecord())!.bytes)), ["pir"]);
+});
+
+for (const failure of ["storage", "ack"] as const) {
+  test(`private checkpoint ${failure} failure never lets a following save overwrite the cold candidate`, async t => {
+    const { db, worker, client } = await transactionalPirClient(t);
+    const running = client.sync(); const rejected = assert.rejects(running, failure === "ack" ? /ack_failure/ : /quota/);
+    await checkpointWait(() => !!worker.heldCandidate);
+    if (failure === "storage") db.failPutKey = "default"; else worker.failAck = true;
+    const { runtimeState } = await import("../src/wasm-client-runtime.ts");
+    const hide = runtimeState.persistOnHide!(); worker.heldCandidate!();
+    await rejected; await hide;
+    const saved = await readSavedSnapshotRecord(); assert.ok(saved);
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(saved.bytes)), failure === "ack" ? ["pir"] : []);
+    assert.equal(worker.completed.has("pir"), false);
+  });
+}
+
+for (const afterKey of [false, true]) {
+  test(`revoking the owning operation ${afterKey ? "after" : "before"} the checkpoint key never acknowledges the old worker`, async t => {
+    const { db, worker, client } = await transactionalPirClient(t);
+    const running = client.sync(); const rejected = assert.rejects(running, /cancelled|abort|wallet changed/i);
+    await checkpointWait(() => !!worker.heldCandidate);
+    if (afterKey) db.holdCompletionEvents = true; else db.holdCommits = true;
+    worker.heldCandidate!();
+    await checkpointWait(() => afterKey ? db.completions.length > 0 : db.commits.length > 0);
+    const { runtimeState } = await import("../src/wasm-client-runtime.ts");
+    const { cancelWalletOperation } = await import("../src/wallet-lifecycle.ts");
+    assert.ok(runtimeState.liveWorkerWallet);
+    cancelWalletOperation(runtimeState.liveWorkerWallet.operation);
+    db.holdCommits = false; db.holdCompletionEvents = false;
+    for (const release of [...db.commits.splice(0), ...db.completions.splice(0)]) release();
+    await rejected;
+    assert.equal(worker.acknowledgments, 0); assert.equal(worker.completed.has("pir"), false);
+    assert.deepEqual(JSON.parse(new TextDecoder().decode((await readSavedSnapshotRecord())!.bytes)), afterKey ? ["pir"] : []);
+  });
+}
+
+test("a stale post-key checkpoint cannot acknowledge or replace a newer wallet owner", async t => {
+  const { db, worker, client } = await transactionalPirClient(t);
+  const running = client.sync(); const rejected = assert.rejects(running, /cancelled|abort|wallet changed/i);
+  await checkpointWait(() => !!worker.heldCandidate);
+  db.holdCompletionEvents = true; worker.heldCandidate!();
+  await checkpointWait(() => db.completions.length > 0);
+  const { beginWalletOperation } = await import("../src/wallet-lifecycle.ts");
+  const successor = beginWalletOperation();
+  db.holdCompletionEvents = false; db.completions.shift()!();
+  await rejected;
+  assert.equal(successor.signal.aborted, false, "retiring the old source must preserve its successor's authority");
+  assert.equal(worker.acknowledgments, 0);
+  const replacement = new Uint8Array([77]);
+  const saved = await readSavedSnapshotRecord(); assert.ok(saved);
+  await saveWalletSnapshot(replacement, preview(), () => !successor.signal.aborted, saved.generation, saved.key);
+  assert.deepEqual(await readSavedSnapshot(), replacement);
+});
+
+
+test("a preceding pagehide snapshot drains before the checkpoint phase and following saves use its committed base", async t => {
+  const { worker, client } = await transactionalPirClient(t);
+  worker.holdAdvance = true;
+  const running = client.sync();
+  await checkpointWait(() => !!worker.heldAdvance);
+  const { runtimeState } = await import("../src/wasm-client-runtime.ts");
+  const preceding = runtimeState.persistOnHide!();
+  await turn();
+  worker.holdAdvance = false; worker.heldAdvance!();
+  await checkpointWait(() => !!worker.heldCandidate);
+  await preceding;
+  const following = runtimeState.persistOnHide!();
+  worker.heldCandidate!();
+  await running; await following;
+  assert.equal(worker.acknowledgments, 1);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode((await readSavedSnapshotRecord())!.bytes)), ["pir"]);
+});
+
+test("forget retires a source immediately while its checkpoint mutation phase is held", async () => {
+  const prepared = checkpointDeferred<void>(), release = checkpointDeferred<void>();
+  let retired = false, acknowledged = false;
+  const source = trackScanRevision({
+    privateTransparentSnapshot: async () => { prepared.resolve(); return { bytes: new Uint8Array([1]), previewJson: "{}" }; },
+    privateTransparent: async () => { acknowledged = true; return new Uint8Array(); },
+    forget: async () => { retired = true; },
+  } as never);
+  const phase = source.commitPrivateTransparentCheckpoint!("checkpoint", async (_candidate, ack) => {
+    await release.promise;
+    if (retired) throw new Error("retired owner");
+    await ack();
+  }, () => { if (retired) throw new Error("retired owner"); }, async () => "retire");
+  const rejected = assert.rejects(phase, /retired owner/);
+  await prepared.promise;
+  await source.forget();
+  assert.equal(retired, true);
+  release.resolve(); await rejected;
+  assert.equal(acknowledged, false);
+});
+
+
+for (const cancel of [false, true]) {
+  test(`candidate preview stays private until durable acknowledgment${cancel ? " when cancelled" : " on success"}`, async t => {
+    const { db, worker, client } = await transactionalPirClient(t);
+    const balances: number[] = [];
+    client.on("balance", value => { balances.push(value.availableZat); });
+    const running = client.sync();
+    const outcome = cancel ? assert.rejects(running, /Privacy settings changed/) : running;
+    await checkpointWait(() => !!worker.heldCandidate);
+    const source = workerScanSession()!;
+    const before = db.records.get("default");
+    db.holdCommits = true; worker.heldCandidate!();
+    await checkpointWait(() => db.commits.length > 0);
+    assert.equal(JSON.parse(await source.snapshotJson()).balance.totalAvailable, 10);
+    assert.deepEqual(JSON.parse(await source.history(10)), []);
+    assert.equal(balances.includes(17000), false);
+    assert.deepEqual(db.records.get("default"), before);
+    if (cancel) client.setTransparentScan!("off");
+    db.holdCommits = false; db.commits.splice(0).forEach(release => release());
+    await outcome;
+    assert.equal(balances.includes(17000), !cancel);
+    assert.equal(worker.acknowledgments, cancel ? 0 : 1);
+    if (!cancel) {
+      assert.equal(JSON.parse(await source.snapshotJson()).balance.totalAvailable, 17000);
+      assert.equal(JSON.parse(await source.history(10)).length, 1);
+    }
+  });
+}
+
+test("a checkpoint candidate is mandatory even when the last ordinary save has an identical persistence revision", async t => {
+  const { worker, client } = await transactionalPirClient(t);
+  workerScanSession()!.persistenceRevision = () => 99;
+  const running = client.sync();
+  await checkpointWait(() => !!worker.heldCandidate);
+  worker.heldCandidate!(); await running;
+  assert.equal(worker.candidateRequests, 1);
+  assert.equal(worker.acknowledgments, 1);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode((await readSavedSnapshotRecord())!.bytes)), ["pir"]);
+});
+
+
+for (const cancel of ["mode", "sync"] as const) {
+  test(`known pre-key ${cancel} cancellation preserves independently computed unsaved wallet state`, async t => {
+    const { worker, client } = await transactionalPirClient(t);
+    const source = workerScanSession()!, entered = checkpointDeferred<void>(), release = checkpointDeferred<void>();
+    const original = source.privateTransparent!.bind(source);
+    source.privateTransparent = async (operation, bytes) => {
+      const reply = await original(operation, bytes);
+      if (operation === "advance") { entered.resolve();await release.promise; }
+      return reply;
+    };
+    const running = client.sync();const rejected = assert.rejects(running, cancel === "mode" ? /Privacy settings changed/ : /cancelled|abort/i);
+    await entered.promise;
+    await source.enhanceRawTx("independent-unsaved-fixture");
+    release.resolve();
+    await checkpointWait(() => !!worker.heldCandidate);
+    const following = source.enhanceRawTx("following-preserved-fixture");
+    if (cancel === "mode") client.setTransparentScan!("off"); else cancelWasmSync();
+    worker.heldCandidate!();await rejected;await following;
+    assert.equal(worker.completed.has("pir"), false);
+    await client.getWallet();client.setTransparentScan!("off");await client.sync();
+    assert.equal(worker.completed.has("independent-unsaved-fixture"), true, "authority cancellation must preserve the usable source and independent state");
+    assert.equal(worker.acknowledgments, 0);
+    assert.equal(worker.completed.has("following-preserved-fixture"), true);
+    const saved = (await readSavedSnapshotRecord())!;
+    assert.deepEqual(new Set(JSON.parse(new TextDecoder().decode(saved.bytes))), new Set(["independent-unsaved-fixture", "following-preserved-fixture"]));
+    await source.fromSnapshot(saved.bytes);
+    assert.equal(worker.completed.has("independent-unsaved-fixture"), true);
+    assert.equal(worker.completed.has("following-preserved-fixture"), true);
+  });
+}
+
+test("an unknown candidate snapshot failure retires its source before queued raw mutation enters", async t => {
+  const { worker, client } = await transactionalPirClient(t);
+  const running = client.sync();const rejected = assert.rejects(running, /owned_candidate_failure/);
+  await checkpointWait(() => !!worker.heldCandidate);
+  const source = workerScanSession()!;
+  const { runtimeState } = await import("../src/wasm-client-runtime.ts");
+  let dispatches = 0;
+  worker.onEnhanceDispatch = () => { dispatches++; };
+  const following = source.enhanceRawTx("following-fixture").then(() => true, () => false);
+  worker.failCandidate = true;worker.heldCandidate!();
+  await rejected;
+  assert.equal(await following, false, "a queued old-owner mutation must be refused after unknown failure");
+  assert.equal(dispatches, 0, "retirement metadata alone must not permit an old raw RPC");
+  assert.equal(worker.acknowledgments, 0);
+});
+
+test("a genuine failed IDB transaction retains its quota error when mode cancellation follows the failure", async t => {
+  const { db, worker, client } = await transactionalPirClient(t);
+  const { useWalletStorage } = await import("../src/wallet-storage.ts");
+  const { indexedDbWalletStorage } = await import("../src/storage.ts");
+  const base = indexedDbWalletStorage();
+  const storage: import("../src/storage").WalletStorage = {
+    get available() { return base.available; },
+    async transaction(mode, body, options) {
+      try { return await base.transaction(mode, body, options); }
+      catch (error) { if (error instanceof Error && /quota/.test(error.message)) client.setTransparentScan!("off"); throw error; }
+    },
+  };
+  useWalletStorage(storage); t.after(() => useWalletStorage());
+  const running = client.sync();const rejected = assert.rejects(running, /quota/);
+  await checkpointWait(() => !!worker.heldCandidate);
+  const source = workerScanSession()!;let dispatched = 0;
+  worker.onEnhanceDispatch = () => { dispatched++; };
+  const following = source.enhanceRawTx("old-queued").then(() => true, () => false);
+  db.failPutKey = "default";worker.heldCandidate!();await rejected;
+  assert.equal(await following, false);assert.equal(dispatched, 0);
+  assert.equal(worker.acknowledgments, 0);
+});
+
+for (const failureKind of ["primitive", "fake-abort", "cleanup", "successor"] as const) {
+  test(`checkpoint failure hook fences ${failureKind} without confusing owner cancellation`, async t => {
+    installDb(t);
+    const { createStorageController } = await import("../src/wasm-client-storage.ts");
+    const { captureWalletOperation } = await import("../src/wallet-lifecycle.ts");
+    const entered = checkpointDeferred<void>(), release = checkpointDeferred<void>();
+    const signal = new AbortController();
+    const error = failureKind === "primitive" ? "same-cancellation-value" : new DOMException("unrelated candidate error", "AbortError");
+    let rawCancels = 0, rawMutations = 0, retired = 0;
+    const source = trackScanRevision({
+      kind: "local",
+      privateTransparentSnapshot: async () => { entered.resolve(); await release.promise; if (failureKind !== "successor" && failureKind !== "cleanup") throw error; return { bytes: new Uint8Array([1]), previewJson: JSON.stringify(preview()) }; },
+      privateTransparent: async (op: string) => { assert.equal(op, "cancel");rawCancels++;if(failureKind === "cleanup") throw new Error("cleanup failed");return new Uint8Array(); },
+      enhanceRawTx: async () => { rawMutations++;return 0; },
+      fromSnapshot: async () => { rawMutations++; },
+    } as never);
+    const successor = trackScanRevision({ kind: "local" } as never);
+    const operation = captureWalletOperation();
+    const ctx: Parameters<typeof createStorageController>[0] = {
+      session: source, sessionOperation: operation, walletEpoch: 1, stateEpoch: 1,
+      savedRevision: undefined, savedKeySeen: null, legacyBytes: null, replaceLegacyOnSave: false,
+      storageGeneration: await readWalletGeneration(), persistenceRequired: true,
+      assertSource: () => {}, unlockPolicy: "session", spendingSeed: null, network: "regtest",
+      currentSession: () => ctx.session, loadLock: null, report: () => {}, publishSession: () => {},
+      paintNoteBalance: async () => {}, bindLocal: () => source, opts: {},
+      retireFailedSession: stale => { assert.equal(stale, source);retired++;ctx.session = null; },
+    };
+    const saving = createStorageController(ctx).persist(undefined, undefined, false, {
+      checkpointId: "fixture", signal: signal.signal, assertCurrent: () => { signal.signal.throwIfAborted(); },
+    });
+    const rejected = assert.rejects(saving, value => failureKind === "cleanup" ? value === "same-cancellation-value" : value === error || failureKind === "successor" && value instanceof DOMException && value.name === "AbortError");
+    await entered.promise;
+    const queued = source.enhanceRawTx("queued").then(() => true, () => false);
+    if (failureKind === "successor") ctx.session = successor;
+    signal.abort("same-cancellation-value");release.resolve();await rejected;
+    assert.equal(await queued, false);assert.equal(rawMutations, 0);
+    assert.equal(rawCancels, failureKind === "cleanup" ? 1 : 0);
+    assert.equal(retired, failureKind === "successor" ? 0 : 1);
+    if (failureKind === "successor") assert.equal(ctx.session, successor);
+    await source.fromSnapshot(new Uint8Array([9]));
+    assert.equal(rawMutations, 1, "fresh hydration must not remain stuck behind the retired phase");
+  });
+}
+
+for (const state of ["quota-aborting", "unknown-aborting", "committed", "active"] as const) {
+  test(`the default IDB adapter certifies cancellation only after a successful native abort (${state})`, async () => {
+    const { indexedDbWalletStorage } = await import("../src/storage.ts");
+    const signal = new AbortController(), ownedAbort = new Error("captured owned cancellation");
+    const primary = new DOMException("original transaction quota", "QuotaExceededError");
+    let native!: IDBTransaction;
+    const factory = {
+      open() {
+        const request = { result: { objectStoreNames: { contains: () => true }, close() {}, transaction() {
+          native = { error: state === "quota-aborting" ? primary : null, objectStore: () => ({}),
+            abort() { if (state !== "active") throw new DOMException("already ended", "InvalidStateError");queueMicrotask(() => native.onabort?.(new Event("abort"))); },
+          } as unknown as IDBTransaction;
+          return native;
+        } }, onsuccess: undefined as (() => void) | undefined };
+        queueMicrotask(() => request.onsuccess?.());return request;
+      },
+    };
+    const storage = indexedDbWalletStorage({ factory: factory as unknown as IDBFactory });
+    const running = storage.transaction<number>("readwrite", tx => {
+      tx.result(42);signal.abort(ownedAbort);
+      if (state !== "active") queueMicrotask(() => state === "committed" ? native.oncomplete?.(new Event("complete")) : native.onabort?.(new Event("abort")));
+    }, { signal: signal.signal, commitWinsCancellation: true });
+    if (state === "committed") assert.equal(await running, 42, "the actual committed result still wins before delayed oncomplete");
+    else await assert.rejects(running, error => state === "unknown-aborting" ? error !== ownedAbort && error instanceof DOMException && error.name === "AbortError" : error === (state === "active" ? ownedAbort : primary));
+  });
+}

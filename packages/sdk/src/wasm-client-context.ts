@@ -1,3 +1,4 @@
+import type { TransparentScanMode } from "./private-transparent";
 import {
   type UnlockPolicy,
   type WalletSnapshot
@@ -48,8 +49,8 @@ export interface WasmClientContext {
   readonly maxSharedMemoBlocksPerRequest: number;
   readonly submissionPolicy: SubmissionPolicy;
   memoFetch: "auto" | "on-demand" | "shared";
-  persist: (lineage?: { epoch: number; baseKey: string | null; }, replacement?: runtime.ClaimedGeneration & { unlockPolicy?: UnlockPolicy; }, background?: boolean) => Promise<void>;
-  transparentScan: "off" | "compact";
+  persist: (lineage?: { epoch: number; baseKey: string | null; }, replacement?: runtime.ClaimedGeneration & { unlockPolicy?: UnlockPolicy; }, background?: boolean, transparentCheckpoint?: { checkpointId: string; signal: AbortSignal; assertCurrent: () => void }) => Promise<void>;
+  transparentScan: TransparentScanMode;
   localLight: boolean;
   syncOpts: { grpcWeb: boolean; lwdPipe: boolean; };
   grpcWeb: boolean;
@@ -59,6 +60,9 @@ export interface WasmClientContext {
   rootsChecked: { source: ScanSession; at: number; } | null;
   refreshIfStale: (source: ScanSession, operation: WalletOperation) => Promise<void>;
   transparentScanStatus: PublicDataStatus;
+  transparentScanFailure: WalletSnapshot["transparentScanFailure"];
+  readonly transparentScanEpoch: number;
+  readonly transparentScanSignal: AbortSignal;
   sharedMemoStatus: PublicDataStatus;
   selectiveMemoStatus: PublicDataStatus;
   memoAbort: AbortController | null;

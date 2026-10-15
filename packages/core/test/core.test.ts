@@ -502,3 +502,12 @@ test("shared display copy does not prescribe native-only or destructive recovery
     assert.doesNotMatch(walletErrorMessage(code), /z-wallet|wipe|bridge token/);
   }
 });
+
+test("rescan refuses known pending-payment and active-reservation engine errors", () => {
+  for (const message of ["rescan pending payment", "rescan active output reservation"]) {
+    const error = WalletError.fromMessage(message);
+    assert.equal(error.code, "rescan_pending");
+    assert.equal(error.userMessage(), "Sync to confirm or expire your pending payment before rescanning.");
+  }
+  assert.equal(classifyWalletError("unrelated engine refusal"), "unknown");
+});

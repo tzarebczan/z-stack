@@ -17,6 +17,7 @@ security findings; the contact is documented there.
 | Storage and lifecycle | Transactional storage, quota/abort/CAS/forget and owner regressions; React teardown queue | Browser crash/eviction matrices remain incomplete |
 | Passkey vault | Crypto/PRF regressions; real server verification with Chromium virtual authenticator, encrypted readback, account isolation, lost receipt, unsupported PRF, storage-loss recovery and deletion | Physical provider/device and synced cross-device matrix incomplete |
 | Native engine | Rust checks/tests; separate loopback bridge client | No native executable release inventory or all-platform certification |
+| Transparent v12 PIR candidate | Real pinned shard-server and canonical native/WebWallet tests, receive-then-spend history, bounded resume, reorg and source ownership regressions | Installed browser-worker and final native-controller qualification are pending; no physical Safari, mobile, macOS or Windows result |
 | Ledger hardware | Transport/protocol regression tests | Physical device/firmware combinations remain unverified |
 | Funded native and browser engines | Disposable wallets, loopback regtest shielding, send, pending/mined, memo and restart/reload | Browser uses compact transparent scanning and local validator submission fallback; no live mainnet spend or physical hardware certification |
 | iOS / Android / constrained-memory devices | Not fully tested for this candidate | Background/resume, eviction, memory and proving limits need device testing |

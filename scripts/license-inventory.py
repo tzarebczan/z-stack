@@ -31,9 +31,27 @@ selected = set(re.findall(r"^(\S+) v(\S+)", tree, re.M))
 # `cargo metadata` can require irrelevant platform packages on a clean CI host.
 registry = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))) / "registry/src"
 paths = {(name, version): Path(path) for name, version, path in re.findall(r"^(\S+) v(\S+) \(([^)]+)\)", tree, re.M) if Path(path).is_absolute()}
+lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
+git_sources = {}
+for locked in lock["package"]:
+    source = locked.get("source", "")
+    if (locked["name"], locked["version"]) not in selected or not source.startswith("git+"):
+        continue
+    assert source.startswith("git+https://github.com/valargroup/wallet-pir?"), f"review new browser git source: {source}"
+    revision = source.rsplit("#", 1)[1]
+    assert re.fullmatch(r"[0-9a-f]{40}", revision)
+    checkouts = list((registry.parent.parent / "git/checkouts").glob(f"wallet-pir-*/{revision[:7]}"))
+    assert len(checkouts) == 1, f"missing exact git source: {source}"
+    actual = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkouts[0], text=True).strip()
+    assert actual == revision, "git source revision mismatch"
+    relative_source = "shared/pir-native" if locked["name"] == "pir-native" else "transparent/crates/" + locked["name"]
+    directory = checkouts[0] / relative_source
+    assert directory.is_dir(), f"review git crate layout: {locked['name']}"
+    paths[(locked["name"], locked["version"])] = directory
+    git_sources[locked["name"]] = f"https://github.com/valargroup/wallet-pir/tree/{revision}/{relative_source}"
 packages = []
 for name, version in sorted(selected):
-    if name in {"z-engine", "z-wasm", "z-enhance-pir"}:
+    if name in {"z-engine", "z-wasm", "z-enhance-pir", "z-transparent-pir-v2"}:
         continue
     candidates = [paths[(name, version)]] if (name, version) in paths else list(registry.glob(f"*/{name}-{version}"))
     assert len(candidates) == 1, f"ambiguous/missing source for {name} {version}: build the engine first"
@@ -45,6 +63,11 @@ supplemental = ROOT / "licenses/upstream"
 sources = {item["file"]: item["url"] for item in json.loads((supplemental / "sources.json").read_text())}
 fallbacks = {
     "bitcoin_hashes": "bitcoin_hashes-",
+    "base58ck": "bitcoin_hashes-",
+    "hex_lit": "hex_lit-",
+    "bitcoin": "bitcoin_hashes-",
+    "bitcoin-io": "bitcoin_hashes-",
+    "bitcoin-units": "bitcoin_hashes-",
     "ipir-sp": "ipir-standard-",
     "valar-spiral-rs": "ipir-standard-",
     "inspiring": "ipir-standard-",
@@ -57,6 +80,7 @@ fallbacks = {
     "zakura-pczt": "pczt-librustzcash-",
     "zakura-pir-enhance-types": "pir-enhance-types-",
     "zcash_script": "zcash_script-",
+    **{name: "transparent-wallet-pir-" for name in git_sources},
 }
 records = []
 text = ["z-stack browser engine and SDK: third-party license texts\n",
@@ -64,7 +88,7 @@ text = ["z-stack browser engine and SDK: third-party license texts\n",
         "Original project code: Apache-2.0. Third-party code retains the following licenses.\n"]
 for package in packages:
     name, version = package["name"], package["version"]
-    if (name, version) not in selected or name in {"z-engine", "z-wasm", "z-enhance-pir"}:
+    if (name, version) not in selected or name in {"z-engine", "z-wasm", "z-enhance-pir", "z-transparent-pir-v2"}:
         continue
     assert package["license"], f"missing license declaration: {name}"
     directory = Path(package["manifest_path"]).parent
@@ -78,12 +102,14 @@ for package in packages:
         assert files, f"missing retained upstream license: {name}"
     record = {"name": name, "version": version, "license": package["license"],
               "source": f"https://crates.io/crates/{name}/{version}", "repository": package.get("repository"), "texts": []}
+    if name in git_sources:
+        record["source"] = git_sources[name]
     if name == "enhance-pir":
         record["source"] = "https://github.com/valargroup/wallet-pir/tree/24f7694cd4f8274172a11cbff43c158bcab5d500/enhance/crates/enhance-pir"
     text.append(f"\n{'=' * 72}\n{name} {version} — {package['license']}\n{record['source']}\n")
     # Preserve the published declaration when its own legal files are absent.
     if upstream:
-        record["licenseTextOrigin"] = "retained upstream texts; published archive omits legal files"
+        record["licenseTextOrigin"] = "retained pinned repository license; crate directory omits legal files" if name in git_sources else "retained upstream texts; published archive omits legal files"
         if name in {"ipir-sp", "inspiring", "reinspiring", "simplepir-kernel", "valar-spiral-rs"}:
             record["note"] = "The published crate declares MIT OR Apache-2.0 and omits legal files. Retained standard Apache-2.0 text is used under that license option, without inventing a copyright notice."
             text.append(record["note"] + "\n")

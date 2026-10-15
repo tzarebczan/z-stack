@@ -9,6 +9,7 @@ are checked in; no separate fork checkout is needed.
 
 ```sh
 pnpm install --frozen-lockfile
+cargo fetch --locked
 pnpm check:patches
 cargo fmt --all -- --check
 cargo test -p z-engine --features native --lib

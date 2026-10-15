@@ -91,6 +91,9 @@ impl Drop for Fixture {
 }
 impl Fixture {
     async fn new(root: &Path) -> Self {
+        Self::new_with_tip(root, 2).await
+    }
+    async fn new_with_tip(root: &Path, tip: u64) -> Self {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let sent = Arc::new(Mutex::new(Vec::new()));
         let chain = Arc::new(Mutex::new("regtest".to_owned()));
@@ -143,11 +146,23 @@ impl Fixture {
                                 .unwrap()
                                 .to_bytes();
                             let payload = &raw[5..];
+                            // Mode 4 is an independently selected synthetic fork for host reorg tests.
+                            let compact = |height| {
+                                let mut result = block(height, &g.lock().unwrap());
+                                if m.load(Ordering::Acquire) == 4 && height >= 2 {
+                                    result.hash = vec![(height as u8).wrapping_add(0x80); 32];
+                                    if height > 2 {
+                                        result.prev_hash =
+                                            vec![(height as u8 - 1).wrapping_add(0x80); 32];
+                                    }
+                                }
+                                result
+                            };
                             let response = match method.as_str() {
                                 "GetLightdInfo" => reply(
                                     vec![LightdInfo {
                                         chain_name: n.lock().unwrap().clone(),
-                                        block_height: 2,
+                                        block_height: tip,
                                         ..Default::default()
                                     }
                                     .encode_to_vec()],
@@ -155,18 +170,15 @@ impl Fixture {
                                 ),
                                 "GetLatestBlock" => reply(
                                     vec![BlockId {
-                                        height: 2,
-                                        hash: vec![2; 32],
+                                        height: tip,
+                                        hash: compact(tip).hash,
                                     }
                                     .encode_to_vec()],
                                     "0",
                                 ),
                                 "GetBlock" => reply(
-                                    vec![block(
-                                        BlockId::decode(payload).unwrap().height,
-                                        &g.lock().unwrap(),
-                                    )
-                                    .encode_to_vec()],
+                                    vec![compact(BlockId::decode(payload).unwrap().height)
+                                        .encode_to_vec()],
                                     "0",
                                 ),
                                 "GetTreeState" => {
@@ -178,7 +190,18 @@ impl Fixture {
                                             hash: if id.height == 0 {
                                                 g.lock().unwrap().clone()
                                             } else {
-                                                format!("{:02x}", id.height as u8).repeat(32)
+                                                let height = id.height as u8;
+                                                format!(
+                                                    "{:02x}",
+                                                    if m.load(Ordering::Acquire) == 4
+                                                        && id.height >= 2
+                                                    {
+                                                        height.wrapping_add(0x80)
+                                                    } else {
+                                                        height
+                                                    }
+                                                )
+                                                .repeat(32)
                                             },
                                             time: 1,
                                             sapling_tree: "000000".into(),
@@ -193,7 +216,7 @@ impl Fixture {
                                     let range = BlockRange::decode(payload).unwrap();
                                     reply(
                                         (range.start.unwrap().height..=range.end.unwrap().height)
-                                            .map(|h| block(h, &g.lock().unwrap()).encode_to_vec())
+                                            .map(|h| compact(h).encode_to_vec())
                                             .collect(),
                                         "0",
                                     )
@@ -604,3 +627,11 @@ async fn source_rejection_keeps_saved_intent_and_exposes_only_safe_error_text() 
     assert_eq!(wallet.payment_receipt(&id).unwrap().phase, "unknown");
     assert_eq!(*fixture.sent.lock().unwrap(), vec![raw]);
 }
+
+#[cfg(feature = "transparent-pir")]
+#[path = "transparent_pir_source_tests.rs"]
+mod transparent_pir_projection_tests;
+
+#[cfg(feature = "transparent-pir")]
+#[path = "transparent_pir_integration_tests.rs"]
+mod transparent_pir_integration_tests;

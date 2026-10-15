@@ -5,19 +5,25 @@ mod database_lease;
 mod recovery_blocks;
 #[cfg(feature = "native-pir")]
 mod recovery_bootstrap;
-#[cfg(feature = "native-pir")]
+#[cfg(any(feature = "native-pir", feature = "transparent-pir"))]
 mod recovery_cancellation;
 #[cfg(feature = "native-pir")]
 mod recovery_effects;
 mod recovery_guard;
 #[cfg(feature = "native-pir")]
 pub use recovery_blocks::{verify_regtest_recovery_blocks, VerifiedRegtestRecoveryBlocks};
-#[cfg(feature = "native-pir")]
+#[cfg(any(feature = "native-pir", feature = "transparent-pir"))]
 pub use recovery_cancellation::RecoveryCancellation;
 mod memo_status;
 mod payments;
 mod shared_memos;
+#[cfg(feature = "transparent-pir")]
+mod transparent_pir;
+#[cfg(feature = "transparent-pir")]
+mod transparent_pir_funding;
 pub use shared_memos::NativeSharedMemosPass;
+#[cfg(feature = "transparent-pir")]
+pub use transparent_pir::NativeTransparentPirPass;
 #[cfg(feature = "private-enhance")]
 mod private_enhance;
 #[cfg(feature = "private-enhance")]
@@ -69,7 +75,7 @@ use zcash_client_backend::{
         wallet::{
             create_proposed_transactions,
             input_selection::{GreedyInputSelector, LockFilter, SpendPolicy},
-            propose_shielding, propose_transfer, ConfirmationsPolicy, SpendingKeys,
+            propose_transfer, ConfirmationsPolicy, SpendingKeys,
         },
         Account, AccountBirthday, AccountPurpose, CoinbaseFilter, InputSource, MaxSpendMode,
         TargetValue, TransactionStatus, WalletRead, WalletWrite,
@@ -3416,26 +3422,8 @@ impl NativeWallet {
         let (proposal, selected_generation) = db
             .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
                 let generation = recovery_guard::transaction_recovery_generation(wdb, ext)?;
-                let input_selector = GreedyInputSelector::new();
-                let change_strategy = SingleOutputChangeStrategy::new(
-                    StandardFeeRule::Zip317,
-                    None,
-                    ShieldedPool::Orchard,
-                    DustOutputPolicy::default(),
-                );
-                let proposal = propose_shielding::<_, _, _, _, Infallible>(
-                    wdb,
-                    &self.network,
-                    &input_selector,
-                    &change_strategy,
-                    threshold,
-                    &from_addrs,
-                    account,
-                    shield_confirmations(self.network),
-                    CoinbaseFilter::AllTransparentOutputs,
-                    None,
-                )
-                .map_err(|e| map_funds_err(format!("propose_shielding: {e}")))?;
+                let proposal =
+                    self.propose_shielding_in_snapshot(wdb, ext, &from_addrs, account, threshold)?;
                 Ok((proposal, generation))
             })
             .map_err(proposal_transaction_error)?;
@@ -3443,6 +3431,8 @@ impl NativeWallet {
         let txids = db
             .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
                 recovery_guard::transaction_proposal_binding(wdb, ext, selected_generation)?;
+                #[cfg(feature = "transparent-pir")]
+                transparent_pir_funding::check_proposal(ext, &proposal)?;
                 let prover = crate::params::local_tx_prover()?;
                 Ok(create_proposed_transactions::<
                     _,
@@ -3469,6 +3459,51 @@ impl NativeWallet {
             .await;
         info!("shield timings");
         out
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn propose_shielding_in_snapshot<D>(
+        &self,
+        db: &mut D,
+        ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
+        addresses: &[transparent::address::TransparentAddress],
+        account: AccountUuid,
+        threshold: Zatoshis,
+    ) -> Result<zcash_client_backend::proposal::Proposal<StandardFeeRule, Infallible>>
+    where
+        D: WalletWrite
+            + WalletRead<AccountId = AccountUuid>
+            + InputSource<AccountId = AccountUuid, Error = <D as WalletRead>::Error>,
+        <D as WalletRead>::Error: std::fmt::Display,
+    {
+        #[cfg(feature = "transparent-pir")]
+        {
+            transparent_pir_funding::propose(db, ext, self.network, addresses, account, threshold)
+        }
+        #[cfg(not(feature = "transparent-pir"))]
+        {
+            let _ = ext;
+            let input_selector = GreedyInputSelector::new();
+            let change_strategy = SingleOutputChangeStrategy::new(
+                StandardFeeRule::Zip317,
+                None,
+                ShieldedPool::Orchard,
+                DustOutputPolicy::default(),
+            );
+            zcash_client_backend::data_api::wallet::propose_shielding::<_, _, _, _, Infallible>(
+                db,
+                &self.network,
+                &input_selector,
+                &change_strategy,
+                threshold,
+                addresses,
+                account,
+                shield_confirmations(self.network),
+                CoinbaseFilter::AllTransparentOutputs,
+                None,
+            )
+            .map_err(|e| map_funds_err(format!("propose_shielding: {e}")))
+        }
     }
 
     /// After sync: auto-shield t→Orchard, then migrate Sapling→Orchard when funded.
@@ -3621,7 +3656,7 @@ impl NativeWallet {
         db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<u64> {
             recovery_guard::transaction_recovery_ready(wdb, ext)?;
             after_guard();
-            self.propose_fee_in_snapshot(wdb, request, policy)
+            self.propose_fee_in_snapshot(wdb, ext, request, policy)
                 .map_err(anyhow::Error::new)
         })
         .map_err(proposal_transaction_error)
@@ -3630,6 +3665,7 @@ impl NativeWallet {
     fn propose_fee_in_snapshot<D>(
         &self,
         db: &mut D,
+        ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
         request: TransactionRequest,
         policy: SpendPolicy,
     ) -> Result<u64>
@@ -3661,12 +3697,17 @@ impl NativeWallet {
             None,
         )
         .map_err(|e| map_funds_err(format!("propose_transfer: {e}")))?;
+        #[cfg(feature = "transparent-pir")]
+        transparent_pir_funding::check_proposal(ext, &proposal).map_err(EngineError::from)?;
+        #[cfg(not(feature = "transparent-pir"))]
+        let _ = ext;
         Ok(crate::proposal_fee_zat(&proposal))
     }
 
     fn propose_amount<D>(
         &self,
         db: &mut D,
+        ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
         dest: &str,
         amount_zat: u64,
         policy: SpendPolicy,
@@ -3681,7 +3722,7 @@ impl NativeWallet {
         let payment = zip_payment(dest, amount_zat, None)?;
         let request = TransactionRequest::new(vec![payment])
             .map_err(|e| EngineError::Message(format!("ZIP-321: {e}")))?;
-        self.propose_fee_in_snapshot(db, request, policy)
+        self.propose_fee_in_snapshot(db, ext, request, policy)
     }
 
     fn max_send_amount(
@@ -3734,12 +3775,12 @@ impl NativeWallet {
                     if amt == 0 {
                         return Ok((0, 0));
                     }
-                    match self.propose_amount(db, dest, amt, policy.clone()) {
+                    match self.propose_amount(db, ext, dest, amt, policy.clone()) {
                         Ok(fee) => {
                             let exact = available.saturating_sub(fee);
                             if exact > 0 && exact != amt {
                                 if let Ok(fee2) =
-                                    self.propose_amount(db, dest, exact, policy.clone())
+                                    self.propose_amount(db, ext, dest, exact, policy.clone())
                                 {
                                     return Ok((exact, fee2));
                                 }
@@ -3938,6 +3979,8 @@ impl NativeWallet {
                     None,
                 )
                 .map_err(|e| map_funds_err(format!("propose_transfer: {e}")))?;
+                #[cfg(feature = "transparent-pir")]
+                transparent_pir_funding::check_proposal(ext, &proposal)?;
                 Ok((proposal, generation))
             })
             .map_err(proposal_transaction_error)?;
@@ -3947,6 +3990,8 @@ impl NativeWallet {
         let txids = db
             .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
                 recovery_guard::transaction_proposal_binding(wdb, ext, selected_generation)?;
+                #[cfg(feature = "transparent-pir")]
+                transparent_pir_funding::check_proposal(ext, &proposal)?;
                 let prover = crate::params::local_tx_prover()?;
                 Ok(create_proposed_transactions::<
                     _,

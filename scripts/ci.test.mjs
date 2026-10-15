@@ -132,3 +132,17 @@ test("hosted native engine gates include private enhancement", () => {
     assert.ok(features.includes("private-enhance"), `${label}: native private enhancement coverage missing`);
   }
 });
+
+
+test("hosted native gate runs yielding PIR unit and real-server cold recovery", () => {
+  const workflow = readFileSync(resolve(import.meta.dirname, "../.github/workflows/ci.yml"), "utf8");
+  const commands = [...workflow.matchAll(/bash scripts\/ci-time\.sh "Transparent PIR recovery tests" (cargo [^\n]+)/g)];
+  assert.equal(commands.length, 1);
+  const args = commands[0][1].trim().split(/\s+/);
+  assert.equal(args[args.indexOf("-p") + 1], "z-transparent-pir-v2");
+  assert.ok(args.includes("--locked"));
+  assert.ok(args.includes("--lib"));
+  assert.equal(args[args.indexOf("--test") + 1], "recovery");
+  assert.ok(args.includes("--test-threads=1"));
+  assert.ok(args.includes("--timings"));
+});

@@ -1,0 +1,913 @@
+--- a/src/adapters.rs
++++ b/src/adapters.rs
+@@ -0,0 +1,2 @@
++// Adapted from valargroup/wallet-pir c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2.
++// Copyright (c) 2025-2026 Roman Akhtariev. MIT; see LICENSE-MIT and UPSTREAM.md.
+@@ -9 +10,0 @@
+-use std::collections::BTreeMap;
+@@ -54,41 +54,0 @@
+-
+-/// A chain view from a fixed height-to-hash table: accepted if it matches,
+-/// rejected if it differs, unknown if absent.
+-#[derive(Clone, Debug, Default)]
+-pub struct StaticChain {
+-    pub hashes: BTreeMap<u64, String>,
+-}
+-
+-impl StaticChain {
+-    /// Accepts every block the map names. For synthetic fixtures and benchmarks;
+-    /// a production wallet must construct its view from independently accepted headers.
+-    pub fn from_map(map: &transparent_filter::ShardMap) -> Self {
+-        let mut hashes = BTreeMap::new();
+-        for entry in &map.shards {
+-            hashes.insert(entry.end_height, entry.terminal_block_hash.clone());
+-            if entry.start_height > 0 {
+-                hashes.insert(entry.start_height - 1, entry.parent_block_hash.clone());
+-            }
+-        }
+-        Self { hashes }
+-    }
+-}
+-
+-impl ChainView for StaticChain {
+-    fn hash_at(&self, height: u64) -> Option<String> {
+-        self.hashes.get(&height).cloned()
+-    }
+-    fn is_accepted(&self, height: u64, hash: &str) -> Acceptance {
+-        match self.hashes.get(&height) {
+-            Some(known) if known == hash => Acceptance::Accepted,
+-            Some(_) => Acceptance::Rejected,
+-            None => Acceptance::Unknown,
+-        }
+-    }
+-    fn tip(&self) -> Option<Anchor> {
+-        self.hashes.iter().next_back().map(|(height, hash)| Anchor {
+-            height: *height,
+-            hash: hash.clone(),
+-        })
+-    }
+-}
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -0,0 +1,2 @@
++// Adapted from valargroup/wallet-pir c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2.
++// Copyright (c) 2025-2026 Roman Akhtariev. MIT; see LICENSE-MIT and UPSTREAM.md.
+@@ -72,38 +74 @@
+-/// Which table a query addresses.
+-///
+-/// A directory shard has one directory table and up to
+-/// [`MAX_PAGE_CHILDREN`](transparent_shard::MAX_PAGE_CHILDREN) page tables,
+-/// one per page shard, named `pages-<j>` on the wire. Native parameters are
+-/// per table *kind*: every `pages-<j>` of a geometry shares one scheme.
+-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+-pub enum Table {
+-    Directory,
+-    /// The pages table of page shard `j`.
+-    Pages(u32),
+-}
+-
+-impl Table {
+-    /// The table kind native parameters are derived for.
+-    pub fn kind(self) -> &'static str {
+-        match self {
+-            Table::Directory => "directory",
+-            Table::Pages(_) => "pages",
+-        }
+-    }
+-
+-    /// The table's name on the wire: `directory` or `pages-<j>`.
+-    pub fn name(self) -> String {
+-        match self {
+-            Table::Directory => "directory".to_string(),
+-            Table::Pages(child) => transparent_shard::manifest::pages_table(child),
+-        }
+-    }
+-
+-    /// The table a wire name addresses, or `None` for any other name.
+-    pub fn parse(name: &str) -> Option<Self> {
+-        if name == "directory" {
+-            return Some(Table::Directory);
+-        }
+-        transparent_shard::manifest::parse_pages_table(name).map(Table::Pages)
+-    }
+-}
++pub use transparent_wallet::client::Table;
+@@ -163,18 +127,0 @@
+-    pub fn new(
+-        table: Table,
+-        geometry: &str,
+-        rows: u64,
+-        row_bytes: u32,
+-        served: &NativeScheme,
+-        served_dithered: Option<&NativeScheme>,
+-    ) -> Result<Self, ClientError> {
+-        Self::new_with_schema(
+-            transparent_shard::SCHEMA,
+-            table,
+-            geometry,
+-            rows,
+-            row_bytes,
+-            served,
+-            served_dithered,
+-        )
+-    }
+@@ -438 +385 @@
+-    pub fn fetch_row(
++    pub async fn fetch_row(
+@@ -488,0 +436 @@
++            .await
+@@ -509 +456,0 @@
+-
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -0,0 +1,2 @@
++// Adapted from valargroup/wallet-pir c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2.
++// Copyright (c) 2025-2026 Roman Akhtariev. MIT; see LICENSE-MIT and UPSTREAM.md.
+@@ -62,4 +63,0 @@
+-    pub fn of(map: &ShardMap) -> Self {
+-        Self::of_schema(map, transparent_shard::SCHEMA)
+-    }
+-
+@@ -153 +151 @@
+-#[derive(Clone, Debug, PartialEq, Eq)]
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+@@ -155,0 +154 @@
++    #[serde(with = "crate::serialization::event")]
+@@ -162 +161 @@
+-#[derive(Clone, Debug, PartialEq, Eq)]
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+@@ -164,0 +164 @@
++    #[serde(with = "crate::serialization::event")]
+@@ -173 +173 @@
+-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+@@ -192 +192 @@
+-#[derive(Clone, Debug, PartialEq, Eq)]
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+@@ -205,0 +206 @@
++    #[serde(with = "crate::serialization::events")]
+@@ -209,0 +211,3 @@
++    /// Logical cover traffic owed after malformed content; never a PIR secret or query.
++    /// Bound to this pending script, revision and accepted target.
++    pub dummy_debt: Option<(u8, u32)>,
+@@ -226 +230 @@
+-#[derive(Clone, Debug, PartialEq, Eq)]
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+@@ -233,0 +238 @@
++    #[serde(with = "crate::serialization::events")]
+@@ -241 +246 @@
+-#[derive(Clone, Debug, Default)]
++#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+@@ -292 +297 @@
+-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
++#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+@@ -295,0 +301 @@
++    #[serde(with = "crate::serialization::table")]
+@@ -302,2 +308,3 @@
+-    #[error("store I/O: {0}")]
+-    Io(String),
++    /// Local supported-history policy; no part of the refused mutation is applied.
++    #[error("local history metadata limit")]
++    HistoryMetadataLimit,
+@@ -311,2 +317,0 @@
+-    #[error("the store's anchor is {stored}, which the offered map at {offered} does not reach")]
+-    AnchorRegressed { stored: u64, offered: u64 },
+@@ -557 +561,0 @@
+-
+--- a/src/memory_store.rs
++++ b/src/memory_store.rs
+@@ -0,0 +1,2 @@
++// Adapted from valargroup/wallet-pir c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2.
++// Copyright (c) 2025-2026 Roman Akhtariev. MIT; see LICENSE-MIT and UPSTREAM.md.
+@@ -9,0 +12 @@
++use serde::{Deserialize, Serialize};
+@@ -19 +22 @@
+-#[derive(Clone, Debug, Default)]
++#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+@@ -26,0 +30 @@
++    #[serde(with = "crate::serialization::receives")]
+@@ -27,0 +32 @@
++    #[serde(with = "crate::serialization::spends")]
+@@ -29,0 +35 @@
++    #[serde(skip)]
+@@ -42,2 +48,2 @@
+-/// An in-memory [`WalletStore`] with snapshot and restore for crash tests.
+-#[derive(Clone, Debug, Default)]
++/// Private source-evidence store with versioned logical continuation.
++#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+@@ -46,0 +53,3 @@
++    // Runtime profile policy; never changes the stored MemoryStore encoding.
++    #[serde(skip)]
++    event_limit: Option<usize>,
+@@ -53,15 +62,28 @@
+-
+-    pub fn with_pending_limit(limit: usize) -> Self {
+-        Self {
+-            state: State::default(),
+-            pending_limit: Some(limit),
+-        }
+-    }
+-
+-    /// A copy of the whole store, to restore after a simulated crash.
+-    pub fn snapshot(&self) -> Self {
+-        self.clone()
+-    }
+-
+-    pub fn restore(&mut self, snapshot: Self) {
+-        *self = snapshot;
++    pub(crate) fn set_event_limit(&mut self, limit: usize) {
++        self.event_limit = Some(limit);
++    }
++
++    pub(crate) fn retain_scope(&mut self, scripts: &std::collections::BTreeSet<Vec<u8>>) {
++        self.state.scripts.retain(|s, _| scripts.contains(s));
++        self.state.coverage.retain(|s, _| scripts.contains(s));
++        self.state
++            .receives
++            .retain(|_, e| scripts.contains(&e.script));
++        self.state.spends.retain(|_, e| scripts.contains(&e.script));
++        self.state
++            .pending
++            .retain(|_, p| scripts.contains(&p.script));
++        self.state.runs.retain(|(_, s), _| scripts.contains(s));
++        self.rebuild_indexes();
++    }
++
++    pub(crate) fn rebuild_indexes(&mut self) {
++        self.state.spent_by.clear();
++        for stored in self.state.spends.values() {
++            if let TransparentEvent::Spend(event) = stored.event {
++                self.state.spent_by.insert(
++                    (event.spent_txid, event.spent_output_index),
++                    spend_key(&event),
++                );
++            }
++        }
+@@ -232,0 +255,18 @@
++            }
++        }
++
++        if let Some(limit) = self.event_limit {
++            let receives: std::collections::BTreeSet<_> =
++                new_receives.iter().map(|(key, _)| *key).collect();
++            let spends: std::collections::BTreeSet<_> =
++                new_spends.iter().map(|(key, _)| *key).collect();
++            if self
++                .state
++                .receives
++                .len()
++                .saturating_add(self.state.spends.len())
++                .saturating_add(receives.len())
++                .saturating_add(spends.len())
++                > limit
++            {
++                return Err(StoreError::HistoryMetadataLimit);
+--- a/src/sync.rs
++++ b/src/sync.rs
+@@ -0,0 +1,2 @@
++// Adapted from valargroup/wallet-pir c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2.
++// Copyright (c) 2025-2026 Roman Akhtariev. MIT; see LICENSE-MIT and UPSTREAM.md.
+@@ -47 +49 @@
+-use crate::adapters::{Acceptance, ChainView, ScriptProvider, StaticScripts};
++use crate::adapters::{Acceptance, ChainView, ScriptProvider};
+@@ -50 +51,0 @@
+-use crate::memory_store::MemoryStore;
+@@ -53,2 +54 @@
+-    ScriptEntry, ScriptOrigin, SetIdentity, SetupBlob, SetupKey, ShardCommit, StoreError,
+-    StoredEvent, WalletStore,
++    SetIdentity, SetupBlob, SetupKey, ShardCommit, StoreError, StoredEvent, WalletStore,
+@@ -60 +59,0 @@
+-use std::time::Duration;
+@@ -147,3 +145,0 @@
+-    /// The service stayed at its capacity limit for the whole retry budget.
+-    #[error("shard {shard_id}: the service had no free cache capacity after {attempts} attempts")]
+-    Overloaded { shard_id: u64, attempts: u32 },
+@@ -213,11 +208,0 @@
+-/// Attempts one shard gets against a service that is out of cache capacity.
+-const MAX_OVERLOAD_ATTEMPTS: u32 = 4;
+-
+-/// Wait before a second attempt when the service names no delay, doubled per
+-/// attempt after that.
+-const OVERLOAD_BACKOFF: Duration = Duration::from_millis(250);
+-
+-/// Ceiling on any single wait before jitter, so a service asking for an
+-/// implausible delay cannot park a sync inside it.
+-const OVERLOAD_BACKOFF_CAP: Duration = Duration::from_secs(2);
+-
+@@ -242,0 +228 @@
++#[allow(dead_code)] // Published compatibility fields are retained for source parity.
+@@ -352,33 +337,0 @@
+-/// What one sync recovered.
+-pub struct SyncOutcome {
+-    pub ledger: Ledger,
+-    pub charges: ByteCharges,
+-    /// Shards where at least one script matched. Ascending.
+-    pub matched_shards: Vec<u64>,
+-    /// Matches that turned out to hold no directory entry: the filter's false
+-    /// positives, plus any script outside the private tables' coverage.
+-    pub unproductive_matches: u64,
+-    /// Height through which coverage is complete, including any provisional
+-    /// tail revision this sync used.
+-    pub covered_through: u64,
+-    /// Height through which coverage came from sealed shards alone.
+-    ///
+-    /// Equal to `covered_through` when the sync used no provisional revision.
+-    /// A balance beyond this height is current but not settled.
+-    pub settled_through: u64,
+-    /// The provisional revisions this sync took coverage from: shard id,
+-    /// revision number and the manifest digest that identifies the revision.
+-    ///
+-    /// A caller records these with the coverage. When a later revision or the
+-    /// sealed shard appears, the range they covered is re-derived rather than
+-    /// extended, because a revision replaces its predecessor.
+-    pub provisional: Vec<ProvisionalCoverage>,
+-    /// Times this sync refetched the map to recover a withdrawn revision.
+-    ///
+-    /// Non-zero means part of the range was re-derived under a later revision.
+-    /// The abandoned attempt's bytes are still counted in `charges`, so a
+-    /// recovered sync legitimately reports more filter and setup bytes than a
+-    /// clean one over the same range.
+-    pub map_refreshes: u32,
+-}
+-
+@@ -407,8 +359,0 @@
+-impl WorkLimits {
+-    pub const UNLIMITED: Self = Self {
+-        max_queries: None,
+-        max_private_bytes: None,
+-    };
+-}
+-
+-/// Why a sync stopped short.
+@@ -452,0 +398 @@
++#[allow(dead_code)] // Internal parity report, never a product balance API.
+@@ -492,75 +437,0 @@
+-/// Runs one sync from `birthday` to the explicit wallet-accepted target.
+-///
+-/// `scripts` is the wallet's derived script set. It never leaves the machine:
+-/// matching is local, and a private query names a row, not a script.
+-///
+-/// One-shot: a fresh in-memory store, every script required from `birthday`,
+-/// no work limits, using the caller's accepted chain view. A returning
+-/// wallet uses [`sync_into`] with its own store.
+-#[allow(clippy::too_many_arguments)]
+-pub fn sync(
+-    map: &ShardMap,
+-    map_bytes: u64,
+-    geometry: &ServiceGeometry,
+-    filters: &mut impl FilterSource,
+-    transport: &mut impl ShardTransport,
+-    scripts: &[ScriptBytes],
+-    birthday: u64,
+-    chain: &impl ChainView,
+-    target_anchor: &Anchor,
+-) -> Result<SyncOutcome, SyncError> {
+-    let mut store = MemoryStore::new();
+-    let mut provider = StaticScripts(
+-        scripts
+-            .iter()
+-            .map(|script| ScriptEntry {
+-                script: script.as_slice().to_vec(),
+-                origin: ScriptOrigin::Derived,
+-                required_from: birthday,
+-            })
+-            .collect(),
+-    );
+-    let report = sync_into(
+-        &mut store,
+-        map,
+-        map_bytes,
+-        geometry,
+-        chain,
+-        &mut provider,
+-        filters,
+-        transport,
+-        &WorkLimits::UNLIMITED,
+-        target_anchor,
+-    )?;
+-    match report.completion {
+-        Completion::Complete => Ok(SyncOutcome {
+-            ledger: report.ledger,
+-            charges: report.charges,
+-            matched_shards: report.matched_shards,
+-            unproductive_matches: report.unproductive_matches,
+-            covered_through: report.covered_through,
+-            settled_through: report.settled_through,
+-            provisional: report.provisional,
+-            map_refreshes: report.map_refreshes,
+-        }),
+-        // Without a store to keep it, incomplete work is a failure.
+-        Completion::Incomplete {
+-            reason: IncompleteReason::Overloaded { shard_id },
+-            ..
+-        } => Err(SyncError::Overloaded {
+-            shard_id,
+-            attempts: MAX_OVERLOAD_ATTEMPTS,
+-        }),
+-        Completion::Incomplete {
+-            reason: IncompleteReason::ContentFailed,
+-            ..
+-        } => Err(SyncError::Content(format!(
+-            "replies failed for {} directory entries",
+-            report.failed_entries.len()
+-        ))),
+-        Completion::Incomplete { reason, .. } => Err(SyncError::Invalid(format!(
+-            "the sync stopped short: {reason:?}"
+-        ))),
+-    }
+-}
+-
+@@ -574 +445 @@
+-pub fn sync_into<S: WalletStore>(
++pub async fn sync_into<S: WalletStore>(
+@@ -880 +751 @@
+-            p.target_anchor.as_ref() != Some(target_anchor)
++            (p.target_anchor.as_ref() != Some(target_anchor) && p.dummy_debt.is_none())
+@@ -915,0 +787,9 @@
++    // A cold pass must retain both the cover obligation and the failed-entry
++    // hold until the obligation is paid; otherwise it could query the real head.
++    for item in store
++        .pending()?
++        .iter()
++        .filter(|item| item.dummy_debt.is_some())
++    {
++        record_failure(store, &mut failures.entries, item.shard_id, &item.script)?;
++    }
+@@ -944 +824 @@
+-                    || failures.owes(shard_id, &item.script).is_some()
++                    || item.dummy_debt.is_some()
+@@ -973 +853 @@
+-                |store, prepared, transport, charges, manifest| {
++                async |store, prepared, transport, charges, manifest| {
+@@ -986,0 +867 @@
++                    .await
+@@ -988 +869,2 @@
+-            );
++            )
++            .await;
+@@ -1051,0 +934 @@
++                .await
+@@ -1073 +956,2 @@
+-            )?;
++            )
++            .await?;
+@@ -1099 +983,2 @@
+-            );
++            )
++            .await;
+@@ -1142 +1027,2 @@
+-                    let (fresh, digest) = refresh_map(&active, covered, filters, &mut charges)?;
++                    let (fresh, digest) =
++                        refresh_map(&active, covered, filters, &mut charges).await?;
+@@ -1530 +1416 @@
+-fn read_shard_into<S: WalletStore>(
++async fn read_shard_into<S: WalletStore>(
+@@ -1569,0 +1456 @@
++            .await
+@@ -1581 +1468 @@
+-                let (bytes, cost) = filters.filter(entry.shard_id).map_err(|error| {
++                let (bytes, cost) = filters.filter(entry.shard_id).await.map_err(|error| {
+@@ -1692 +1579 @@
+-        |store, prepared, transport, charges, manifest| {
++        async |store, prepared, transport, charges, manifest| {
+@@ -1712,0 +1600 @@
++            .await
+@@ -1714 +1602,2 @@
+-    )?;
++    )
++    .await?;
+@@ -1793,2 +1682 @@
+-/// refresh, an overload is retried with backoff and then reported as an
+-/// incomplete sync with the store consistent.
++/// refresh. An overload returns incomplete so the host can schedule a later pass.
+@@ -1796 +1684 @@
+-fn with_refusals<S: WalletStore, T: ShardTransport, F>(
++async fn with_refusals<S: WalletStore, T: ShardTransport, F>(
+@@ -1809 +1697 @@
+-    F: FnMut(
++    F: AsyncFnMut(
+@@ -1818 +1705,0 @@
+-    let mut attempt = 1u32;
+@@ -1823 +1710 @@
+-            None => match fetch_manifest(entry, previous_digest, map, transport, charges) {
++            None => match fetch_manifest(entry, previous_digest, map, transport, charges).await {
+@@ -1840,12 +1727,7 @@
+-                Err(SyncError::Client(ClientError::Overloaded(overloaded))) => {
+-                    if attempt >= MAX_OVERLOAD_ATTEMPTS {
+-                        return Ok(Some(Completion::Incomplete {
+-                            reason: IncompleteReason::Overloaded {
+-                                shard_id: entry.shard_id,
+-                            },
+-                            pending: store.pending()?.len(),
+-                        }));
+-                    }
+-                    std::thread::sleep(overload_backoff(attempt, overloaded.retry_after));
+-                    attempt += 1;
+-                    continue;
++                Err(SyncError::Client(ClientError::Overloaded(_overloaded))) => {
++                    return Ok(Some(Completion::Incomplete {
++                        reason: IncompleteReason::Overloaded {
++                            shard_id: entry.shard_id,
++                        },
++                        pending: store.pending()?.len(),
++                    }));
+@@ -1857 +1739 @@
+-        match work(store, prepared, transport, charges, verified) {
++        match work(store, prepared, transport, charges, verified).await {
+@@ -1866,9 +1748 @@
+-            Err(SyncError::Client(ClientError::Overloaded(overloaded))) => {
+-                if attempt >= MAX_OVERLOAD_ATTEMPTS {
+-                    return Ok(Some(Completion::Incomplete {
+-                        reason: IncompleteReason::Overloaded {
+-                            shard_id: entry.shard_id,
+-                        },
+-                        pending: store.pending()?.len(),
+-                    }));
+-                }
++            Err(SyncError::Client(ClientError::Overloaded(_overloaded))) => {
+@@ -1877,2 +1751,6 @@
+-                std::thread::sleep(overload_backoff(attempt, overloaded.retry_after));
+-                attempt += 1;
++                return Ok(Some(Completion::Incomplete {
++                    reason: IncompleteReason::Overloaded {
++                        shard_id: entry.shard_id,
++                    },
++                    pending: store.pending()?.len(),
++                }));
+@@ -1932 +1810 @@
+-fn fetch_manifest(
++async fn fetch_manifest(
+@@ -1940,0 +1819 @@
++        .await
+@@ -1969,0 +1849,9 @@
++    if manifest.directory_segments.len() > 64
++        || manifest.page_children.len() > 32
++        || manifest
++            .page_children
++            .iter()
++            .any(|c| c.page_segments.len() > 64)
++    {
++        return Err(mismatch("resource_bounds"));
++    }
+@@ -2078,4 +1965,0 @@
+-fn overload_backoff(attempt: u32, asked: Option<Duration>) -> Duration {
+-    let wait = asked.unwrap_or_else(|| OVERLOAD_BACKOFF * 2u32.saturating_pow(attempt - 1));
+-    crate::backoff::jittered(wait.min(OVERLOAD_BACKOFF_CAP))
+-}
+@@ -2089 +1973 @@
+-fn refresh_map(
++async fn refresh_map(
+@@ -2096,0 +1981 @@
++        .await
+@@ -2246 +2131 @@
+-fn retrieve_shard_into<S: WalletStore, T: ShardTransport>(
++async fn retrieve_shard_into<S: WalletStore, T: ShardTransport>(
+@@ -2277,3 +2162 @@
+-        if !held(store, &failures.entries, shard_id, &item.script)?
+-            || failures.owes(shard_id, &item.script).is_some()
+-        {
++        if !held(store, &failures.entries, shard_id, &item.script)? || item.dummy_debt.is_some() {
+@@ -2296 +2179,3 @@
+-        )? {
++        )
++        .await?
++        {
+@@ -2332 +2217,2 @@
+-    )?;
++    )
++    .await?;
+@@ -2365,10 +2251,13 @@
+-            let answer = clients.directory.fetch_row(
+-                transport,
+-                shard_id,
+-                revision,
+-                Table::Directory,
+-                entry.directory_segments,
+-                directory_rows,
+-                within as usize,
+-                charges,
+-            );
++            let answer = clients
++                .directory
++                .fetch_row(
++                    transport,
++                    shard_id,
++                    revision,
++                    Table::Directory,
++                    entry.directory_segments,
++                    directory_rows,
++                    within as usize,
++                    charges,
++                )
++                .await;
+@@ -2414,0 +2304 @@
++                        dummy_debt: None,
+@@ -2476,0 +2367 @@
++    .await
+@@ -2543 +2434 @@
+-fn finish_pages<S: WalletStore, T: ShardTransport>(
++async fn finish_pages<S: WalletStore, T: ShardTransport>(
+@@ -2590,0 +2482 @@
++    .await
+@@ -2616 +2508 @@
+-    fn fetch<S: WalletStore>(
++    async fn fetch<S: WalletStore>(
+@@ -2647 +2539 @@
+-    fn fetch<S: WalletStore>(
++    async fn fetch<S: WalletStore>(
+@@ -2687 +2579,2 @@
+-                )?;
++                )
++                .await?;
+@@ -2700,10 +2593,14 @@
+-                    answers.push(self.client.fetch_row(
+-                        self.transport,
+-                        shard_id,
+-                        revision,
+-                        table,
+-                        segments,
+-                        query_rows,
+-                        within,
+-                        self.charges,
+-                    )?);
++                    answers.push(
++                        self.client
++                            .fetch_row(
++                                self.transport,
++                                shard_id,
++                                revision,
++                                table,
++                                segments,
++                                query_rows,
++                                within,
++                                self.charges,
++                            )
++                            .await?,
++                    );
+@@ -2730 +2627 @@
+-            let replies = self.transport.batch(&batch);
++            let replies = self.transport.batch(&batch).await;
+@@ -2748,10 +2645,14 @@
+-                    None => answers.push(self.client.fetch_row(
+-                        self.transport,
+-                        shard_id,
+-                        revision,
+-                        table,
+-                        segments,
+-                        query_rows,
+-                        within,
+-                        self.charges,
+-                    )?),
++                    None => answers.push(
++                        self.client
++                            .fetch_row(
++                                self.transport,
++                                shard_id,
++                                revision,
++                                table,
++                                segments,
++                                query_rows,
++                                within,
++                                self.charges,
++                            )
++                            .await?,
++                    ),
+@@ -2786 +2687,3 @@
+-            )? {
++            )
++            .await?
++            {
+@@ -2793,10 +2696,14 @@
+-            answers.push(self.client.fetch_row(
+-                self.transport,
+-                shard_id,
+-                revision,
+-                table,
+-                segments,
+-                child.query_rows() as usize,
+-                within as usize,
+-                self.charges,
+-            )?);
++            answers.push(
++                self.client
++                    .fetch_row(
++                        self.transport,
++                        shard_id,
++                        revision,
++                        table,
++                        segments,
++                        child.query_rows() as usize,
++                        within as usize,
++                        self.charges,
++                    )
++                    .await?,
++            );
+@@ -2871 +2778 @@
+-fn walk_chains<S: WalletStore, R: RowSource>(
++async fn walk_chains<S: WalletStore, R: RowSource>(
+@@ -2914,4 +2821,8 @@
+-        if let Some(owed) = failures.owes(entry.shard_id, &item.script) {
+-            // Failed earlier in this sync, before a retry: it still sends
+-            // what it owed.
+-            walk.dummies = Some(owed);
++        if let Some((child, count)) = item.dummy_debt {
++            let page = walker.child(child)?;
++            let space = geometry.page_rows * page.page_segments.len() as u64;
++            if count == 0 || u64::from(count) > space.saturating_add(1) {
++                return Err(SyncError::Invalid("invalid pending dummy debt".into()));
++            }
++            walker.locate(child, 0)?;
++            walk.dummies = Some((child, count));
+@@ -3007 +2918 @@
+-        let answers = rows.fetch(store, &requests)?;
++        let answers = rows.fetch(store, &requests).await?;
+@@ -3017,5 +2928,23 @@
+-            // A failed walk's dummies were this round's; their replies are
+-            // not read, and the walk ends.
+-            if walk.dummies.take().is_some() {
+-                failures.settle(entry.shard_id, &walk.item.script);
+-                walk.done = true;
++            // Only the successfully returned prefix pays debt. A budget can
++            // split this round, and a checkpoint/cold resume must retain the rest.
++            // If fetch refuses the round, no prefix is committed, exactly as for
++            // an honest fragment round whose local replies are discarded.
++            if let Some((child, count)) = walk.dummies {
++                let paid = answers.len().saturating_sub(start).min(end - start) as u32;
++                if paid > 0 {
++                    let remaining = count.checked_sub(paid).ok_or_else(|| {
++                        SyncError::Invalid("a dummy round returned extra answers".into())
++                    })?;
++                    walk.item.dummy_debt = (remaining > 0).then_some((child, remaining));
++                    walk.item.target_anchor = Some(target_anchor.clone());
++                    walker.commit(
++                        store,
++                        &walk.item.script,
++                        Vec::new(),
++                        Some(walk.item.clone()),
++                        None,
++                        Vec::new(),
++                    )?;
++                    walk.dummies = walk.item.dummy_debt;
++                    walk.done = remaining == 0;
++                }
+@@ -3426 +3355,13 @@
+-                )?;
++                )
++                .map_err(|error| match (error, failure.take()) {
++                    (
++                        SyncError::Store(StoreError::HistoryMetadataLimit),
++                        Some(
++                            known @ Failure {
++                                error: SyncError::Content(_),
++                                ..
++                            },
++                        ),
++                    ) => known,
++                    (error, _) => error.into(),
++                })?;
+@@ -3465,0 +3407,19 @@
++        // A failed round must not save its uncommitted prefix: an honest
++        // refused round retries that prefix too. Attach debt to the last
++        // durable pending item, atomically with the failure count.
++        let id = walk
++            .item
++            .id
++            .ok_or_else(|| SyncError::Invalid("uncommitted failed walk".into()))?;
++        let mut durable = store
++            .pending()?
++            .into_iter()
++            .find(|held| {
++                held.id == Some(id)
++                    && held.shard_id == entry.shard_id
++                    && held.revision_digest == entry.manifest_digest
++                    && held.script == walk.item.script
++            })
++            .ok_or_else(|| SyncError::Invalid("missing failed walk".into()))?;
++        durable.dummy_debt = (dummies > 0).then_some((child, dummies));
++        walk.item = durable;
+@@ -3477,0 +3438 @@
++                pending_upsert: vec![walk.item.clone()],
+@@ -3489,3 +3449,0 @@
+-            failures
+-                .owed
+-                .push((entry.shard_id, walk.item.script.clone(), child, dummies));
+@@ -3696 +3654 @@
+-fn open_table<S: WalletStore>(
++async fn open_table<S: WalletStore>(
+@@ -3734,0 +3693 @@
++                    .await
+@@ -3829,18 +3787,0 @@
+-    /// Shard id, script, page shard and the number of dummies owed.
+-    owed: Vec<(u64, Vec<u8>, u8, u32)>,
+-}
+-
+-impl Failures {
+-    /// The dummies the walk of `script`'s entry in `shard_id` still owes.
+-    fn owes(&self, shard_id: u64, script: &[u8]) -> Option<(u8, u32)> {
+-        self.owed
+-            .iter()
+-            .find(|(shard, owner, ..)| *shard == shard_id && owner == script)
+-            .map(|&(_, _, child, count)| (child, count))
+-    }
+-
+-    /// Records that the dummies `owes` names were sent.
+-    fn settle(&mut self, shard_id: u64, script: &[u8]) {
+-        self.owed
+-            .retain(|(shard, owner, ..)| !(*shard == shard_id && owner == script));
+-    }
+@@ -4002,0 +3944,2 @@
++#[cfg(test)]
++mod cap_tests;
+--- a/src/sync_ahead.rs
++++ b/src/sync_ahead.rs
+@@ -0,0 +1,2 @@
++// Adapted from valargroup/wallet-pir c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2.
++// Copyright (c) 2025-2026 Roman Akhtariev. MIT; see LICENSE-MIT and UPSTREAM.md.
+@@ -99,5 +101,9 @@
+-    fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+-        self.inner.init()
+-    }
+-
+-    fn manifest(&mut self, shard_id: u64, revision: &str) -> Result<(Vec<u8>, u64), BoxError> {
++    async fn init(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
++        self.inner.init().await
++    }
++
++    async fn manifest(
++        &mut self,
++        shard_id: u64,
++        revision: &str,
++    ) -> Result<(Vec<u8>, u64), BoxError> {
+@@ -106,5 +112,5 @@
+-            None => self.inner.manifest(shard_id, revision),
+-        }
+-    }
+-
+-    fn setup(
++            None => self.inner.manifest(shard_id, revision).await,
++        }
++    }
++
++    async fn setup(
+@@ -122,5 +128,5 @@
+-            None => self.inner.setup(shard_id, revision, table, segment),
+-        }
+-    }
+-
+-    fn query(
++            None => self.inner.setup(shard_id, revision, table, segment).await,
++        }
++    }
++
++    async fn query(
+@@ -133 +139 @@
+-        self.inner.query(shard_id, revision, table, body)
++        self.inner.query(shard_id, revision, table, body).await
+@@ -140,2 +146,2 @@
+-    fn batch(&mut self, requests: &[ShardRequest<'_>]) -> Vec<Option<ShardReply>> {
+-        self.inner.batch(requests)
++    async fn batch(&mut self, requests: &[ShardRequest<'_>]) -> Vec<Option<ShardReply>> {
++        self.inner.batch(requests).await
+@@ -173,5 +179,5 @@
+-    fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+-        self.inner.shard_map()
+-    }
+-
+-    fn filter(&mut self, shard_id: u64) -> Result<(Vec<u8>, u64), BoxError> {
++    async fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
++        self.inner.shard_map().await
++    }
++
++    async fn filter(&mut self, shard_id: u64) -> Result<(Vec<u8>, u64), BoxError> {
+@@ -180 +186 @@
+-            None => self.inner.filter(shard_id),
++            None => self.inner.filter(shard_id).await,
+@@ -188 +194 @@
+-    fn prepare_parents(
++    async fn prepare_parents(
+@@ -194,4 +200,4 @@
+-        self.inner.prepare_parents(map, uncached, store)
+-    }
+-
+-    fn parent_negative(
++        self.inner.prepare_parents(map, uncached, store).await
++    }
++
++    async fn parent_negative(
+@@ -204 +210,3 @@
+-        self.inner.parent_negative(map, shard_id, scripts, store)
++        self.inner
++            .parent_negative(map, shard_id, scripts, store)
++            .await
+@@ -234 +242 @@
+-pub(super) fn look_ahead<S: WalletStore, F: FilterSource, T: ShardTransport>(
++pub(super) async fn look_ahead<S: WalletStore, F: FilterSource, T: ShardTransport>(
+@@ -268 +276 @@
+-                let reply = filters.inner.filter(entry.shard_id);
++                let reply = filters.inner.filter(entry.shard_id).await;
+@@ -357 +365 @@
+-    let replies = transport.inner.batch(&requests);
++    let replies = transport.inner.batch(&requests).await;
+@@ -459 +467 @@
+-    let replies = transport.inner.batch(&requests);
++    let replies = transport.inner.batch(&requests).await;

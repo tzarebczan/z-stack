@@ -14,6 +14,7 @@ use z_engine::{crypto_smoke, LightServer, Network};
 pub use wasm_bindgen_rayon::init_thread_pool;
 
 mod private_enhance;
+mod private_transparent;
 #[cfg_attr(
     not(all(target_arch = "wasm32", target_feature = "atomics")),
     allow(dead_code)
@@ -229,6 +230,7 @@ pub struct WasmWallet {
     inner: z_engine::web::WebWallet,
     private_enhance:
         Option<z_engine::enhancement::EnhanceBatch<z_engine::web::PrivateEnhanceRequest>>,
+    private_transparent: Option<private_transparent::PrivateTransparentPass>,
 }
 
 #[wasm_bindgen]
@@ -246,6 +248,7 @@ impl WasmWallet {
         Ok(Self {
             inner,
             private_enhance: None,
+            private_transparent: None,
         })
     }
 
@@ -254,6 +257,7 @@ impl WasmWallet {
         Ok(Self {
             inner: z_engine::web::WebWallet::from_snapshot(bytes).map_err(js_err)?,
             private_enhance: None,
+            private_transparent: None,
         })
     }
 
@@ -269,6 +273,7 @@ impl WasmWallet {
             inner: z_engine::web::WebWallet::from_ufvk(network, ufvk, birthday, account_index)
                 .map_err(js_err)?,
             private_enhance: None,
+            private_transparent: None,
         })
     }
 
@@ -293,6 +298,7 @@ impl WasmWallet {
             inner: z_engine::web::WebWallet::from_hardware(network, ufvk, birthday, hardware)
                 .map_err(js_err)?,
             private_enhance: None,
+            private_transparent: None,
         })
     }
 

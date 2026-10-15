@@ -59,6 +59,7 @@ lwd = [
 sync = ["lwd", "zcash_client_backend/sync"]
 transparent-inputs = ["zcash_client_backend/transparent-inputs", "dep:transparent"]
 private-enhance = ["dep:z-enhance-pir"]
+transparent-pir = ["transparent-inputs", "dep:z-transparent-pir-v2", "dep:transparent-events", "dep:sha2"]
 native-pir = ["native", "dep:transparent-wallet", "dep:transparent-events", "dep:transparent-filter", "dep:sha2", "dep:tempfile"]
 # WASM proving (Orchard/Ironwood in-process). Sapling params stay out of the blob.
 wasm-prove = ["orchard/circuit", "zcash_primitives/circuits"]
@@ -96,6 +97,7 @@ cli = [
 ]
 
 [dependencies]
+z-transparent-pir-v2 = { path = "../z-transparent-pir-v2", optional = true }
 z-enhance-pir = { path = "../z-enhance-pir", optional = true }
 anyhow.workspace = true
 thiserror.workspace = true
@@ -180,6 +182,10 @@ getrandom = { version = "0.2", features = ["js"] }
 time = { version = "0.3.22", default-features = false, features = ["std", "wasm-bindgen"] }
 
 [dev-dependencies]
+axum = "0.7"
+transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2" }
+transparent-shard-server = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2" }
+transparent-shard = { git = "https://github.com/valargroup/wallet-pir", rev = "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2" }
 rand_08 = { package = "rand", version = "0.8" }
 hex = "0.4"
 enhance-pir = { path = "../../vendor/pir/enhance-pir", default-features = false }

@@ -1,0 +1,11 @@
+{
+  "commit": "c9262e8431b4caa7cf2e2c55edbf0084c1f2ddb2",
+  "files": {
+    "adapters.rs": "562a11dfe628eb3fb610a9694708e9528775ae0591d2ddfaf1e9c06a83f4362b",
+    "client.rs": "ebd9916e108f4bddcb8abee1654d77a0fe574a2327677be47a8f04b3886677ec",
+    "store.rs": "93af05c81c639736bb72bffdbf22da6bb80e2cafc1a047ae3f3afed371c3f74e",
+    "memory_store.rs": "2592e1cee3df656c13b4847d0f752db763dd40f1379afc2ae765b93f1d998969",
+    "sync.rs": "549025d699c14cd9d745f947a67864c3133a67c45fd7307738e4f517c85d669d",
+    "sync_ahead.rs": "2c3fbca9f0a62e5bd43365122582c334cc6df1a80068a9805677e11f63c387bb"
+  }
+}

@@ -22,6 +22,8 @@ pub mod keys;
 pub mod ledger;
 pub(crate) mod offload;
 pub mod scan;
+#[cfg(feature = "transparent-pir")]
+pub mod transparent_pir;
 pub mod web;
 mod zip321;
 
@@ -56,6 +58,15 @@ pub enum Network {
 }
 
 impl Network {
+    /// Canonical chain identity, independent of configured endpoints.
+    pub fn genesis_hash(self) -> &'static str {
+        match self {
+            Self::Mainnet => "00040fe8ec8471911baa1db1266ea15dd06b4a8a5c453883c000b031973dce08",
+            Self::Testnet => "05a60a92d99d85997cce3b87616c089f6124d7342af37106edc76126334a2c38",
+            Self::Regtest => "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327",
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Mainnet => "mainnet",

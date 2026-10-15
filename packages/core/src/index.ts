@@ -122,10 +122,25 @@ export type WalletSnapshot = {
   transparentAddress: string | null;
   zip321: string;
   scannedHeight?: number;
+  /** Publisher-provided confirmed history, separate from spend readiness and mempool coverage. */
+  transparentPir?: {
+    trust: "publisher-provided-confirmed-history";
+    spendingEnabled: false;
+    /** Legacy private-history state requires an explicit, payment-safe wallet rescan. */
+    rescanRequired?: boolean;
+    completion: "complete-for-enrolled-scope" | "checkpoint-pending" | "incomplete";
+    confirmedZat: string;
+    coveredThrough: number;
+    pendingPages: number;
+    unresolvedSpends: number;
+    scope: { sourceId: string; scopeId: string; generation: number; anchor: { height: number; hash: string }; scriptCount: number } | null;
+  };
   transparentScanHeight?: number | null;
   transparentScanComplete?: boolean;
   memoScanHeight?: number | null;
   transparentScanStatus?: "off" | "unsupported" | "scanning" | "complete" | "unavailable";
+  /** This client cannot process the saved history metadata; retrying or rescanning does not lift the limit. */
+  transparentScanFailure?: "history-metadata-limit";
   /** Memo retrieval progress. On-demand starts off; after fetchMemos(), scanning means another batch remains. */
   memoFetchStatus?: "off" | "unsupported" | "scanning" | "complete" | "unavailable";
   sharedMemoStatus?: "off" | "unsupported" | "scanning" | "complete" | "unavailable";

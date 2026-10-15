@@ -1361,6 +1361,7 @@ fn first_receipt_after_note_free_finalize_can_spend() {
     source.apply_utxos_json(
         r#"{"utxos":[{"txid":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","index":0,"script":"76a914d3c0870e8e13a9ec320f1280889127aa15a4c0a188ac","valueZat":625000000,"height":1,"address":"tmV1zYhR2xisn6VWdCNKHpeD4S7L1U1nPH6"}]}"#,
     ).unwrap();
+    crate::web::scan_address_fixture_structure(&mut source);
     let unrelated = source.prove_shield(REGTEST_FAUCET_MNEMONIC, 1).unwrap();
     let parse = |raw: &[u8]| {
         Transaction::read(
@@ -1523,6 +1524,7 @@ fn check_mined_self_send_history(blob: bool) {
     w.apply_utxos_json(
         r#"{"utxos":[{"txid":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","index":0,"script":"76a914d3c0870e8e13a9ec320f1280889127aa15a4c0a188ac","valueZat":625000000,"height":1,"address":"tmV1zYhR2xisn6VWdCNKHpeD4S7L1U1nPH6"}]}"#,
     ).unwrap();
+    crate::web::scan_address_fixture_structure(&mut w);
     let shield = w.prove_shield(REGTEST_FAUCET_MNEMONIC, 1).unwrap();
     w.apply_mined_raw_tx(&shield, 1).unwrap();
     w.apply_utxos_json(r#"{"utxos":[]}"#).unwrap();
@@ -1593,6 +1595,7 @@ fn shield_history_keeps_its_transparent_input_through_refresh_and_mining() {
     w.apply_compact_blocks_blob(&super::super::encode_delimited([b1, b2]))
         .unwrap();
     w.apply_utxos_json(UTXOS).unwrap();
+    crate::web::scan_address_fixture_structure(&mut w);
     let shield = w.prove_shield(REGTEST_FAUCET_MNEMONIC, 1).unwrap();
     let txid = Transaction::read(
         shield.as_slice(),
@@ -1631,6 +1634,7 @@ fn inputs_of_an_expired_unmined_send_become_spendable_again() {
         r#"{"utxos":[{"txid":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","index":0,"script":"76a914d3c0870e8e13a9ec320f1280889127aa15a4c0a188ac","valueZat":625000000,"height":1,"address":"tmV1zYhR2xisn6VWdCNKHpeD4S7L1U1nPH6"}]}"#,
     )
     .unwrap();
+    crate::web::scan_address_fixture_structure(&mut w);
     let shield = w.prove_shield(REGTEST_FAUCET_MNEMONIC, 1).unwrap();
     w.apply_mined_raw_tx(&shield, 1).unwrap();
     let funded = w.balance().orchard_available;
@@ -1741,6 +1745,7 @@ fn post_nu6_3_payments_use_ironwood_and_ironwood_notes_can_be_spent() {
         ))
         .unwrap();
     // Funded before activation: an Orchard note and no Ironwood activity.
+    crate::web::scan_address_fixture_structure(&mut source);
     let shield = source.prove_shield(REGTEST_FAUCET_MNEMONIC, 1).unwrap();
     source.apply_mined_raw_tx(&shield, 1).unwrap();
     recipient.apply_mined_raw_tx(&shield, 1).unwrap();
@@ -1838,6 +1843,7 @@ fn future_subtree_roots_cannot_move_scanned_anchor() {
     w.apply_utxos_json(
         r#"{"utxos":[{"txid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","index":0,"script":"76a914d3c0870e8e13a9ec320f1280889127aa15a4c0a188ac","valueZat":625000000,"height":1,"address":"tmV1zYhR2xisn6VWdCNKHpeD4S7L1U1nPH6"}]}"#,
     ).unwrap();
+    crate::web::scan_address_fixture_structure(&mut w);
     let shielded = w.prove_shield(REGTEST_FAUCET_MNEMONIC, 1).unwrap();
     w.apply_mined_raw_tx(&shielded, 1).unwrap();
     w.finalize_scan_trees().unwrap();
@@ -2265,6 +2271,7 @@ fn funded_wallet() -> (WebWallet, u64) {
         r#"{"utxos":[{"txid":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","index":0,"script":"76a914d3c0870e8e13a9ec320f1280889127aa15a4c0a188ac","valueZat":625000000,"height":1,"address":"tmV1zYhR2xisn6VWdCNKHpeD4S7L1U1nPH6"}]}"#,
     )
     .unwrap();
+    crate::web::scan_address_fixture_structure(&mut w);
     let shield = w.prove_shield(REGTEST_FAUCET_MNEMONIC, 1).unwrap();
     w.apply_mined_raw_tx(&shield, 1).unwrap();
     let funded = w.balance().orchard_available;
@@ -2490,6 +2497,7 @@ fn zero_value_notes_do_not_block_spending() {
     w.apply_utxos_json(
         r#"{"utxos":[{"txid":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","index":0,"script":"76a914d3c0870e8e13a9ec320f1280889127aa15a4c0a188ac","valueZat":625000000,"height":1,"address":"tmV1zYhR2xisn6VWdCNKHpeD4S7L1U1nPH6"}]}"#,
     ).unwrap();
+    crate::web::scan_address_fixture_structure(&mut w);
     let shield = w.prove_shield(REGTEST_FAUCET_MNEMONIC, 1).unwrap();
     w.apply_mined_raw_tx(&shield, 1).unwrap();
     let own = w.unified_address().to_string();

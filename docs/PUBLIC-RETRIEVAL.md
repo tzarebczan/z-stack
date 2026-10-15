@@ -43,6 +43,16 @@ matches scripts derived from issued external/internal receivers plus a 32-index
 gap, records outputs and spends, and enforces coinbase maturity even on regtest.
 Missing coinbase data is rejected as incomplete coverage. Derivation is bounded
 at index 10,000; this is not an unbounded HD account discovery algorithm.
+The browser wallet keeps coinbase classification separately from proof that an
+output is unspent. Address-UTXO replies and mined-output writes do not establish
+that a transaction is non-coinbase. Outputs with unknown classification therefore
+require 100 confirmations, including when an older snapshot stored `coinbase: false`. A known coinbase restriction survives address refresh and wallet writes.
+Accepted compact transaction positions or parsed full transaction inputs can
+establish a non-coinbase classification and permit the configured ordinary
+confirmation policy. Explicit zero-confirmation shielding still requires that
+transaction-structure evidence. This conservative migration retains the wallet's
+outputs, history, pending payments and private recovery progress.
+
 The native loopback pipe forwards `allPools=1`; native wallet sync defaults are
 unchanged. The Node gateway supports both public ranges and gRPC-Web.
 

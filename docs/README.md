@@ -21,6 +21,7 @@ the SDK checkout. The [support matrix](SUPPORT.md) lists tested paths and limits
 - [Gift cards](GIFT-CARDS.md): optional bearer links, isolated wallets and encrypted recovery.
 - [Security and privacy](SECURITY.md): keys, metadata, locking and broadcasts.
 - [Public range retrieval](PUBLIC-RETRIEVAL.md): optional gateway extensions.
+- [Private transparent history](TRANSPARENT-PIR.md): separately consented v12 acquisition, confirmed history and canonical wallet storage.
 - [Private Ironwood enhancement](ENHANCE-PIR.md): Rust-owned Enhance v7 queries, wallet application and transport limits.
 
 ## Build and contribute
