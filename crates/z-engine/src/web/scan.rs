@@ -665,6 +665,8 @@ impl WebWallet {
         }
         if hit == 1 {
             self.mark_spend_nf(&nf_hex, Some(spent_in));
+            #[cfg(feature = "transparent-pir")]
+            self.transparent_pir.projected_transactions.remove(spent_in);
             let agg = self.txs_mut().entry(spent_in.to_string()).or_default();
             agg.mined_height = Some(height);
             if newly {
@@ -756,6 +758,10 @@ impl WebWallet {
     }
 
     fn push_note(&mut self, note: TrackedNote) {
+        #[cfg(feature = "transparent-pir")]
+        self.transparent_pir
+            .projected_transactions
+            .remove(&note.txid);
         if self.notes().iter().any(|n| {
             n.txid == note.txid && n.output_index == note.output_index && n.pool == note.pool
         }) {
@@ -765,11 +771,9 @@ impl WebWallet {
         }
         let agg = self.txs_mut().entry(note.txid.clone()).or_default();
         // A send/shield we constructed already filled spent/received; only stamp height.
-        let from_wallet_construct = agg.spent_notes > 0
-            || agg.is_shielding
-            || (agg.mined_height.is_none() && agg.received_notes > 0);
+        let preaccounted_receipt = agg.receipt_totals_recorded;
         agg.mined_height = Some(note.mined_height);
-        if !from_wallet_construct {
+        if !preaccounted_receipt {
             agg.received_zat = agg.received_zat.saturating_add(note.value_zat);
             agg.received_notes = agg.received_notes.saturating_add(1);
             agg.has_change = agg.has_change || note.is_change;
@@ -1025,6 +1029,7 @@ impl WebWallet {
         if agg.mined_height.is_none() && inbound_n > 0 && agg.received_notes == 0 {
             agg.received_zat = inbound_zat;
             agg.received_notes = inbound_n;
+            agg.receipt_totals_recorded = true;
             agg.sapling_received = sapling_received;
             agg.orchard_received = orchard_received;
             agg.ironwood_received = ironwood_received;

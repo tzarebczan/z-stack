@@ -246,6 +246,20 @@ pub struct TxAgg {
     pub spent_zat: u64,
     pub received_notes: u32,
     pub spent_notes: u32,
+    /// A complete WalletWrite or full-transaction receipt producer filled the
+    /// generic receipt totals. Passive spends are not receipt accounting.
+    #[serde(default)]
+    pub(crate) receipt_totals_recorded: bool,
+    /// Exact transparent receipts already credited by an independent source.
+    /// This is accounting ownership, not inclusion, deletion or funding authority.
+    #[serde(default)]
+    pub(crate) accounted_transparent_receipts: BTreeMap<u32, u64>,
+    #[cfg(feature = "transparent-pir")]
+    #[serde(default)]
+    pub(crate) pir_received_zat: Option<u64>,
+    #[cfg(feature = "transparent-pir")]
+    #[serde(default)]
+    pub(crate) pir_received_notes: u32,
     // The share of generic history totals contributed by PIR-owned spend marks.
     // Public observation transfers this accounting without removing its value.
     #[cfg(feature = "transparent-pir")]
@@ -311,6 +325,9 @@ pub struct TxAgg {
 impl TxAgg {
     pub(crate) fn has_shielded_activity(&self) -> bool {
         self.is_shielding
+            || self.outgoing_shielded_zat > 0
+            || !self.memos.is_empty()
+            || self.memo_recovered == Some(true)
             || self.sapling_received > 0
             || self.sapling_spent > 0
             || self.orchard_received > 0
@@ -831,17 +848,19 @@ impl WebWallet {
         let skip_pending: std::collections::HashSet<String> = self
             .txs
             .iter()
-            .filter(|(_, a)| a.mined_height.is_none() && (a.spent_notes > 0 || a.is_shielding))
+            .filter(|(_, a)| a.mined_height.is_none() && a.receipt_totals_recorded)
             .map(|(k, _)| k.clone())
             .collect();
         let note_txids: std::collections::HashSet<_> =
             self.notes.iter().map(|note| note.txid.as_str()).collect();
         for (txid, agg) in self.txs.iter_mut() {
+            // Transparent inputs/receipts are rebuilt once even for a pending
+            // construction; shielded change below can still await compact rows.
+            agg.transparent_received = 0;
+            agg.transparent_spent = 0;
             if skip_pending.contains(txid) {
                 continue;
             }
-            agg.transparent_received = 0;
-            agg.transparent_spent = 0;
             // A decrypted mempool receipt has no compact-note row yet. Its
             // pool totals are known from the full transaction and must survive
             // refresh/reload until mined notes become the source of truth.
@@ -903,28 +922,43 @@ impl WebWallet {
             }
         }
         let utxos = self.utxos.clone();
+        #[cfg(feature = "transparent-pir")]
+        let mut pir_receipts = BTreeMap::<&str, u64>::new();
+        #[cfg(feature = "transparent-pir")]
+        for u in &utxos {
+            if self.pir_receipt_unaccounted(&u.txid, u.index) {
+                let value = pir_receipts.entry(u.txid.as_str()).or_default();
+                *value = value.saturating_add(u.value_zat);
+            }
+        }
         for u in &utxos {
             let agg = self.txs.entry(u.txid.clone()).or_default();
             if agg.mined_height.is_none() && u.height > 0 {
                 agg.mined_height = Some(u.height);
             }
             bump_recv(agg, "transparent", u.value_zat);
-            agg.received_zat = agg.received_zat.max(
-                agg.transparent_received
-                    .saturating_add(agg.sapling_received)
-                    .saturating_add(agg.orchard_received)
-                    .saturating_add(agg.ironwood_received),
-            );
-            if agg.received_notes == 0 {
+            let received = agg
+                .transparent_received
+                .saturating_add(agg.sapling_received)
+                .saturating_add(agg.orchard_received)
+                .saturating_add(agg.ironwood_received);
+            #[cfg(feature = "transparent-pir")]
+            let received =
+                received.saturating_sub(pir_receipts.get(u.txid.as_str()).copied().unwrap_or(0));
+            agg.received_zat = agg.received_zat.max(received);
+            #[cfg(feature = "transparent-pir")]
+            let owned = self
+                .transparent_pir
+                .projected_outputs
+                .contains(&format!("r:{}:{}", u.txid, u.index))
+                && !agg.accounted_transparent_receipts.contains_key(&u.index);
+            #[cfg(not(feature = "transparent-pir"))]
+            let owned = false;
+            if !owned && agg.received_notes == 0 {
                 agg.received_notes = 1;
             }
             if u.spent {
                 if let Some(spent_in) = u.spent_in.as_ref() {
-                    // A pending spender keeps its totals from construction;
-                    // adding again on every recompute grew its "sent" amount.
-                    if skip_pending.contains(spent_in) {
-                        continue;
-                    }
                     let spent_txid = spent_in.clone();
                     let v = u.value_zat;
                     let s = self.txs.entry(spent_txid).or_default();
@@ -934,8 +968,18 @@ impl WebWallet {
                 }
             }
         }
+        // Independently credited receipt history is not an unspent-output list.
+        // An omitted address refresh can remove funding without erasing which
+        // pool received that earlier output. These facts create no funding rows.
+        for (id, agg) in &mut self.txs {
+            for (index, value) in &agg.accounted_transparent_receipts {
+                if !utxos.iter().any(|u| u.txid == *id && u.index == *index) {
+                    agg.transparent_received = agg.transparent_received.saturating_add(*value);
+                }
+            }
+        }
         #[cfg(feature = "transparent-pir")]
-        self.reconcile_transparent_pir_spend_history();
+        self.reconcile_transparent_pir_history();
     }
 
     pub fn record_recipient(&mut self, to: &str) {
@@ -1217,6 +1261,41 @@ impl WebWallet {
         }
         w.assert_consistent_leaf_hashes()?;
         w.repair_tree_cursors();
+        // Older pending receipts lack an explicit accounting marker. Restore it
+        // only from a completed full-transaction receipt or exact retained saved
+        // transaction bytes, never from a generic spend/receipt count alone.
+        let note_txids: std::collections::BTreeSet<_> =
+            w.notes.iter().map(|n| n.txid.as_str()).collect();
+        for (id, agg) in &mut w.txs {
+            if agg.mined_height.is_none()
+                && agg.history_metadata_complete
+                && agg.enhancement_complete
+                && agg.memo_recovered == Some(true)
+                && agg.received_notes > 0
+                && !note_txids.contains(id.as_str())
+            {
+                agg.receipt_totals_recorded = true;
+            }
+        }
+        let branch = zcash_protocol::consensus::BranchId::for_height(
+            &w.network,
+            BlockHeight::from_u32(w.scanned_height.saturating_add(1)),
+        );
+        for (id, raw) in &w.pending_txs {
+            let Some(agg) = w
+                .txs
+                .get_mut(&to_hex(id.as_ref()))
+                .filter(|agg| !agg.receipt_totals_recorded && agg.received_notes > 0)
+            else {
+                continue;
+            };
+            let mut bytes = raw.as_slice();
+            if Transaction::read(&mut bytes, branch)
+                .is_ok_and(|tx| tx.txid() == *id && bytes.is_empty())
+            {
+                agg.receipt_totals_recorded = true;
+            }
+        }
         w.reconcile_mined_spends();
         w.prune_settled_shards();
         w.next_note_id = w
@@ -1511,12 +1590,41 @@ impl WebWallet {
     }
 
     #[cfg(feature = "transparent-pir")]
+    pub(crate) fn pir_receipt_unaccounted(&self, txid: &str, index: u32) -> bool {
+        self.transparent_pir
+            .projected_outputs
+            .contains(&format!("r:{txid}:{index}"))
+            && !self
+                .txs
+                .get(txid)
+                .is_some_and(|agg| agg.accounted_transparent_receipts.contains_key(&index))
+    }
+
+    #[cfg(feature = "transparent-pir")]
     pub(crate) fn record_public_transparent_output(&mut self, txid: &str, index: u32) {
         // Publicly observed canonical rows no longer belong to PIR's deletion
         // ownership. This alone does not discharge their funding block.
-        self.transparent_pir
+        if self
+            .transparent_pir
             .projected_outputs
-            .remove(&format!("r:{txid}:{index}"));
+            .remove(&format!("r:{txid}:{index}"))
+        {
+            if let Some(output) = self
+                .utxos
+                .iter()
+                .find(|u| u.txid == txid && u.index == index)
+            {
+                let agg = self.txs.entry(txid.to_owned()).or_default();
+                if agg
+                    .accounted_transparent_receipts
+                    .insert(index, output.value_zat)
+                    .is_none()
+                {
+                    agg.received_zat = agg.received_zat.saturating_add(output.value_zat);
+                    agg.received_notes = agg.received_notes.saturating_add(1);
+                }
+            }
+        }
         self.transparent_pir.projected_transactions.remove(txid);
     }
 
@@ -3727,11 +3835,15 @@ impl WebWallet {
             .utxos
             .iter()
             .filter(|u| {
-                u.spent
+                let known_spent = u.spent
                     && u.spent_in
                         .as_ref()
-                        .is_some_and(|t| self.txs.contains_key(t))
-                    && !listed.contains(&(u.txid.clone(), u.index))
+                        .is_some_and(|t| self.txs.contains_key(t));
+                #[cfg(feature = "transparent-pir")]
+                let retained_pir = self.pir_funding_unverified(&u.txid, u.index);
+                #[cfg(not(feature = "transparent-pir"))]
+                let retained_pir = false;
+                (known_spent || retained_pir) && !listed.contains(&(u.txid.clone(), u.index))
             })
             .cloned()
             .collect();

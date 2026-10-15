@@ -5,7 +5,7 @@ use crate::transparent_pir::{
 use transparent_events::TransparentEvent;
 
 impl WebWallet {
-    pub(crate) fn reconcile_transparent_pir_spend_history(&mut self) {
+    pub(crate) fn reconcile_transparent_pir_history(&mut self) {
         let owned: std::collections::BTreeSet<_> = self
             .transparent_pir
             .projected_spends
@@ -31,10 +31,23 @@ impl WebWallet {
                 total.1 = total.1.saturating_add(1);
             }
         }
+        let mut receipts = std::collections::BTreeMap::<&str, (u64, u32)>::new();
+        for output in &self.utxos {
+            if self.pir_receipt_unaccounted(&output.txid, output.index) {
+                let total = receipts.entry(output.txid.as_str()).or_default();
+                total.0 = total.0.saturating_add(output.value_zat);
+                total.1 = total.1.saturating_add(1);
+            }
+        }
         for (txid, agg) in &mut self.txs {
             let (value, count) = totals.get(txid.as_str()).copied().unwrap_or_default();
             agg.pir_spent_zat = value;
             agg.pir_spent_notes = count;
+            let (value, count) = receipts.get(txid.as_str()).copied().unwrap_or_default();
+            if let Some(received) = &mut agg.pir_received_zat {
+                *received = value;
+                agg.pir_received_notes = count;
+            }
         }
     }
 
@@ -85,12 +98,19 @@ impl WebWallet {
     }
 
     fn transparent_pir_rescan_required(&self) -> bool {
-        self.transparent_pir.unverified_outputs.is_none()
-            && (self.transparent_pir.bound_source.is_some()
-                || self.transparent_pir.scope.is_some()
-                || self.transparent_pir.checkpoint_id.is_some()
-                || !self.transparent_pir.records.is_empty()
-                || !self.transparent_pir.projected_outputs.is_empty())
+        let legacy_receipts = self.transparent_pir.projected_outputs.iter().any(|key| {
+            key.split(':')
+                .nth(1)
+                .and_then(|id| self.txs.get(id))
+                .is_some_and(|agg| agg.pir_received_zat.is_none())
+        });
+        legacy_receipts
+            || self.transparent_pir.unverified_outputs.is_none()
+                && (self.transparent_pir.bound_source.is_some()
+                    || self.transparent_pir.scope.is_some()
+                    || self.transparent_pir.checkpoint_id.is_some()
+                    || !self.transparent_pir.records.is_empty()
+                    || !self.transparent_pir.projected_outputs.is_empty())
     }
 
     pub fn transparent_pir_status(&self) -> serde_json::Value {
@@ -270,26 +290,15 @@ impl WebWallet {
             for id in &state.projected_transactions {
                 if !self.pending_txs.contains_key(&Self::txid_from_hex(id)?) {
                     if let Some(agg) = txs.get_mut(id) {
-                        if agg.mined_height.is_some_and(|h| h > floor)
-                            && !agg.has_shielded_activity()
-                        {
+                        // Only PIR owns this inclusion stamp. Independent compact
+                        // observations transfer that ownership before retirement;
+                        // raw enhancement retains facts, but proves no inclusion.
+                        if agg.mined_height.is_some_and(|h| h > floor) {
                             agg.mined_height = None;
-                            agg.transparent_received = 0;
-                            agg.transparent_spent = 0;
-                            agg.received_zat = 0;
-                            agg.spent_zat = 0;
                         }
                     }
                 }
             }
-            txs.retain(|id, agg| {
-                !state.projected_transactions.contains(id)
-                    || agg.mined_height.is_some()
-                    || agg.has_shielded_activity()
-                    || Self::txid_from_hex(id)
-                        .ok()
-                        .is_some_and(|id| self.pending_txs.contains_key(&id))
-            });
         }
         for (script, event) in &records {
             let (position, (_, address)) = scripts
@@ -337,7 +346,13 @@ impl WebWallet {
                     if !txs.contains_key(&txid) {
                         state.projected_transactions.insert(txid.clone());
                     }
+                    let owned_receipt = state
+                        .projected_outputs
+                        .contains(&crate::transparent_pir::event_key(*event));
                     let agg = txs.entry(txid).or_default();
+                    if owned_receipt {
+                        agg.pir_received_zat.get_or_insert(0);
+                    }
                     if agg.mined_height.is_some_and(|h| h != e.height) {
                         return Err(refused("transparent_pir_transaction_conflict"));
                     }
@@ -410,6 +425,27 @@ impl WebWallet {
         self.next_diversifier = next_diversifier;
         self.transparent_pir = state;
         self.recompute_pool_fields();
+        if retirement_floor.is_some() {
+            self.txs.retain(|id, agg| {
+                !self.transparent_pir.projected_transactions.contains(id)
+                    || agg.mined_height.is_some()
+                    || agg.received_zat > 0
+                    || agg.spent_zat > 0
+                    || agg.received_notes > 0
+                    || agg.spent_notes > 0
+                    || agg.transparent_received > 0
+                    || agg.transparent_spent > 0
+                    || agg.has_shielded_activity()
+                    || agg.history_metadata_complete
+                    || agg.receipt_totals_recorded
+                    || Self::txid_from_hex(id)
+                        .ok()
+                        .is_some_and(|id| self.pending_txs.contains_key(&id))
+            });
+            self.transparent_pir
+                .projected_transactions
+                .retain(|id| self.txs.contains_key(id));
+        }
         serde_json::to_string(&self.transparent_pir_status())
             .map_err(|_| refused("transparent_pir_status_invalid"))
     }
@@ -444,6 +480,7 @@ mod tests {
         let scope: TransparentPirScope =
             serde_json::from_str(&w.begin_transparent_pir(&"ab".repeat(32)).unwrap()).unwrap();
         let script = super::super::super::to_hex(&w.public_transparent_scripts().unwrap()[0].0);
+        let through = u64::from(w.scanned_height);
         TransparentPirCheckpoint {
             source_id: scope.source_id,
             generation: scope.generation,
@@ -451,7 +488,7 @@ mod tests {
             anchor: scope.anchor,
             checkpoint_id: "cd".repeat(32),
             previous_checkpoint_id: None,
-            covered_through: 3,
+            covered_through: through,
             complete: true,
             pending_pages: 0,
             unresolved_spends: 0,
@@ -470,7 +507,7 @@ mod tests {
                 .map(|s| Coverage {
                     script: s.script,
                     required_from: s.required_from,
-                    through: 3,
+                    through,
                     revision: "ef".repeat(32),
                 })
                 .collect(),
@@ -834,7 +871,7 @@ mod tests {
         raw.extend(0u32.to_le_bytes());
         let tx = zcash_primitives::transaction::Transaction::read(
             &raw[..],
-            zcash_protocol::consensus::BranchId::for_height(&Network::Regtest, 4.into()),
+            zcash_protocol::consensus::BranchId::Nu6_3,
         )
         .unwrap();
         let txid = super::super::super::to_hex(tx.txid().as_ref());
@@ -1625,6 +1662,427 @@ mod tests {
             );
             assert_eq!(cold.pending_txs, pending);
         }
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn retirement_keeps_independent_enhancement_of_pir_created_transaction() {
+        use zcash_primitives::transaction::Transaction;
+        use zcash_protocol::consensus::BranchId;
+        let mut w = wallet();
+        w.scanned_height = 1_000_001;
+        w.block_hashes.insert(1_000_001, "03".repeat(32));
+        let recipient = WebWallet::from_account(
+            account_from_mnemonic(
+                "legal winner thank year wave sausage worth useful legal winner thank yellow",
+                Network::Regtest,
+                0,
+            )
+            .unwrap(),
+            1,
+        )
+        .unwrap();
+        let raw = crate::web::shielded_memo_transaction(
+            &w,
+            &recipient,
+            "independent outgoing",
+            50000,
+            true,
+        );
+        let tx =
+            Transaction::read(&raw[..], BranchId::for_height(&Network::Regtest, 4.into())).unwrap();
+        let id = super::super::super::to_hex(tx.txid().as_ref());
+        let mut event = spend();
+        if let TransparentEvent::Spend(e) = &mut event {
+            e.spending_txid = Txid(*tx.txid().as_ref());
+        }
+        let c = checkpoint(&mut w, vec![receive(), event]);
+        apply_pir(&mut w, &c);
+        assert!(w.transparent_pir.projected_transactions.contains(&id));
+        w.enhance_raw_tx(&raw).unwrap();
+        assert_eq!(w.txs[&id].outgoing_shielded_zat, 50000);
+        assert_eq!(w.txs[&id].memos, ["independent outgoing"]);
+        w.block_hashes.insert(1, "01".repeat(32));
+        replace_pir(&mut w, c.checkpoint_id, vec![receive()], 1);
+        let rows = w.history(20);
+        let row = rows
+            .iter()
+            .find(|row| row.txid == WebWallet::display_txid(&id))
+            .expect("independently recovered outgoing history survives PIR retirement");
+        assert_eq!(row.outgoing_shielded_zat, 50000);
+        assert_eq!(row.memos, ["independent outgoing"]);
+        assert_eq!(
+            row.mined_height, None,
+            "raw enhancement does not prove inclusion"
+        );
+        assert_eq!((row.spent_zat, row.sent_note_count), (0, 0));
+        let cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(cold.txs[&id].outgoing_shielded_zat, 50000);
+    }
+
+    #[test]
+    fn retirement_removes_pure_pir_receive_history_and_memo_work() {
+        let mut w = wallet();
+        let c = checkpoint(&mut w, vec![receive()]);
+        apply_pir(&mut w, &c);
+        assert_eq!(w.history(20)[0].received_zat, 150000);
+        assert_eq!(w.history(20)[0].received_note_count, 1);
+        replace_pir(&mut w, c.checkpoint_id, vec![], 0);
+        assert!(
+            w.history(20).is_empty(),
+            "retired publisher-only receive has no canonical history"
+        );
+        assert!(w.memo_enhancement_txids(20).is_empty());
+        let cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert!(cold.history(20).is_empty());
+        assert!(cold.memo_enhancement_txids(20).is_empty());
+    }
+
+    #[test]
+    fn retirement_keeps_independent_compact_spend_before_pool_rebuild() {
+        use prost::Message;
+        use zcash_client_backend::proto::compact_formats::{
+            ChainMetadata, CompactBlock, CompactSaplingSpend, CompactTx,
+        };
+        let mut w = wallet();
+        let c = checkpoint(&mut w, vec![receive(), spend()]);
+        apply_pir(&mut w, &c);
+        let spender = "02".repeat(32);
+        assert!(w.transparent_pir.projected_transactions.contains(&spender));
+        // A retained owned note is independently consumed by the actual compact scanner.
+        // This is scan/accounting coverage, not a transaction consensus fixture.
+        w.notes.push(crate::web::store::TrackedNote {
+            pool: "sapling".into(),
+            txid: "09".repeat(32),
+            output_index: 0,
+            value_zat: 700,
+            nf: "11".repeat(32),
+            is_change: false,
+            spent: false,
+            spent_in: None,
+            spent_height: None,
+            mined_height: 1,
+        });
+        let b = CompactBlock {
+            height: 4,
+            hash: vec![4; 32],
+            prev_hash: vec![3; 32],
+            chain_metadata: Some(ChainMetadata {
+                sapling_commitment_tree_size: 0,
+                orchard_commitment_tree_size: 0,
+                ironwood_commitment_tree_size: 0,
+            }),
+            vtx: vec![CompactTx {
+                txid: vec![2; 32],
+                spends: vec![CompactSaplingSpend { nf: vec![0x11; 32] }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        w.apply_compact_block(&b.encode_to_vec()).unwrap();
+        assert_eq!(
+            (w.txs[&spender].spent_zat, w.txs[&spender].spent_notes),
+            (700, 1)
+        );
+        assert_eq!(
+            w.txs[&spender].sapling_spent, 0,
+            "pool rebuild has not happened yet"
+        );
+        w.block_hashes.insert(1, "01".repeat(32));
+        replace_pir(&mut w, c.checkpoint_id, vec![receive()], 1);
+        let row = w
+            .history(20)
+            .into_iter()
+            .find(|r| r.txid == WebWallet::display_txid(&spender))
+            .unwrap();
+        assert_eq!(
+            (row.spent_zat, row.sent_note_count, row.sapling_spent),
+            (700, 1, 700)
+        );
+        assert_eq!(row.mined_height, Some(4));
+        let cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(cold.txs[&spender].spent_zat, 700);
+    }
+
+    #[test]
+    fn old_pir_receipt_accounting_requires_explicit_rescan_without_losing_acquisition() {
+        let mut w = wallet();
+        let mut c = checkpoint(&mut w, vec![receive(), spend()]);
+        c.continuation = "opaque-durable-acquisition-with-cover-debt".into();
+        apply_pir(&mut w, &c);
+        let saved = w.transparent_pir_checkpoint();
+        let scripts = w.public_transparent_scripts().unwrap();
+        let mut old: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+        let agg = old["txs"]["01".repeat(32)].as_object_mut().unwrap();
+        agg.remove("pirReceivedZat");
+        agg.remove("pirReceivedNotes");
+        agg.insert("receivedZat".into(), serde_json::json!(150000));
+        agg.insert("receivedNotes".into(), serde_json::json!(1));
+        let mut cold = WebWallet::from_snapshot(&serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(cold.transparent_pir_status()["rescanRequired"], true);
+        assert_eq!(cold.transparent_pir_checkpoint(), saved);
+        let before = cold.to_snapshot().unwrap();
+        assert!(cold
+            .begin_transparent_pir(&"ab".repeat(32))
+            .unwrap_err()
+            .to_string()
+            .contains("transparent_pir_rescan_required"));
+        assert!(cold
+            .apply_transparent_pir_checkpoint(&serde_json::to_string(&c).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("transparent_pir_rescan_required"));
+        assert_eq!(cold.to_snapshot().unwrap(), before);
+        cold.rescan_from(1).unwrap();
+        assert_eq!(cold.transparent_pir_checkpoint(), saved);
+        assert_eq!(cold.public_transparent_scripts().unwrap(), scripts);
+        assert_eq!(cold.transparent_pir_status()["rescanRequired"], false);
+        cold.scanned_height = 3;
+        cold.block_hashes.insert(3, "03".repeat(32));
+        apply_pir(&mut cold, &c);
+        apply_pir(&mut cold, &c);
+        let rows = cold.history(20);
+        assert_eq!(rows.len(), 2);
+        let receive = rows
+            .iter()
+            .find(|r| r.transparent_received == 150000)
+            .unwrap();
+        assert_eq!(
+            (receive.received_zat, receive.received_note_count),
+            (150000, 1)
+        );
+        assert_eq!(cold.transparent_pir_checkpoint(), saved);
+        assert_eq!(cold.transparent_pir_status()["rescanRequired"], false);
+    }
+
+    #[test]
+    fn constructed_transparent_receipt_transfers_only_its_accounting_once() {
+        use zcash_client_backend::data_api::{SentTransaction, SentTransactionOutput, WalletWrite};
+        use zcash_client_backend::wallet::Recipient;
+        use zcash_primitives::transaction::Transaction;
+        use zcash_protocol::{
+            consensus::{BlockHeight, BranchId},
+            value::Zatoshis,
+        };
+        let mut w = wallet();
+        let script = w.public_transparent_scripts().unwrap()[0].0.clone();
+        let address = w.public_transparent_scripts().unwrap()[0].1.clone();
+        w.apply_utxos_json(&serde_json::json!({"utxos":[{"txid":"09".repeat(32),"index":0,"script":super::super::super::to_hex(&script),"valueZat":27000,"height":1,"address":address}]}).to_string()).unwrap();
+        // Parsed legacy-format disposable transaction; inert script signatures.
+        let mut raw = 1u32.to_le_bytes().to_vec();
+        raw.push(1);
+        raw.extend([9; 32]);
+        raw.extend(0u32.to_le_bytes());
+        raw.push(0);
+        raw.extend(u32::MAX.to_le_bytes());
+        raw.push(1);
+        raw.extend(17000u64.to_le_bytes());
+        raw.push(script.len() as u8);
+        raw.extend(&script);
+        raw.extend(0u32.to_le_bytes());
+        let tx =
+            Transaction::read(&raw[..], BranchId::for_height(&Network::Regtest, 3.into())).unwrap();
+        let id = super::super::super::to_hex(tx.txid().as_ref());
+        let mut event = receive();
+        if let TransparentEvent::Receive(e) = &mut event {
+            e.txid = Txid(*tx.txid().as_ref());
+            e.height = 3;
+            e.value = 17000;
+        }
+        let c = checkpoint(&mut w, vec![event]);
+        apply_pir(&mut w, &c);
+        let output = SentTransactionOutput::from_parts(
+            0,
+            Recipient::InternalTransparent {
+                receiving_account: 0,
+                recipient_address: tx.transparent_bundle().unwrap().vout[0]
+                    .recipient_address()
+                    .unwrap(),
+            },
+            Zatoshis::from_u64(17000).unwrap(),
+            None,
+        );
+        let outputs = [output];
+        let sent = SentTransaction::new(
+            &tx,
+            std::time::UNIX_EPOCH.into(),
+            BlockHeight::from_u32(3).into(),
+            0,
+            &outputs,
+            Zatoshis::from_u64(10000).unwrap(),
+            &[],
+        );
+        w.store_transactions_to_be_sent(&[sent]).unwrap();
+        w.recompute_pool_fields();
+        let row = w
+            .history_matching(1, None, Some(&tx.txid().to_string()))
+            .remove(0);
+        assert_eq!((row.received_zat, row.received_note_count), (17000, 1));
+        assert!(
+            w.pir_funding_unverified(&id, 0),
+            "construction is not funding confirmation"
+        );
+        let listed = w.utxos.iter().find(|u| u.txid == id).unwrap();
+        let reply=serde_json::json!({"utxos":[{"txid":id,"index":0,"script":listed.script,"height":3,"valueZat":17000,"address":listed.address}]}).to_string();
+        w.apply_utxos_json(&reply).unwrap();
+        w.apply_utxos_json(&reply).unwrap();
+        let cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        let row = cold
+            .history_matching(1, None, Some(&tx.txid().to_string()))
+            .remove(0);
+        assert_eq!((row.received_zat, row.received_note_count), (17000, 1));
+    }
+
+    fn off_refresh_fixture() -> (WebWallet, TransparentPirCheckpoint) {
+        let mut w = wallet();
+        w.next_unified_address().unwrap();
+        let current = w.transparent_address().unwrap().to_owned();
+        let script = w
+            .public_transparent_scripts()
+            .unwrap()
+            .into_iter()
+            .find(|(_, address)| address == &current)
+            .unwrap()
+            .0;
+        let mut c = checkpoint(&mut w, vec![receive()]);
+        let mut current_receive = receive();
+        if let TransparentEvent::Receive(event) = &mut current_receive {
+            event.txid = Txid([3; 32]);
+            event.height = 3;
+            event.value = 17000;
+            event.coinbase = true;
+            event.transaction_index = 0;
+        }
+        c.records.push(TransparentPirRecord {
+            script: super::super::super::to_hex(&script),
+            event: super::super::super::to_hex(&current_receive.to_bytes()),
+            shard_id: 0,
+            revision: "ef".repeat(32),
+        });
+        c.continuation = "opaque-acquisition-with-logical-cover-debt".into();
+        apply_pir(&mut w, &c);
+        assert_ne!(
+            w.utxos
+                .iter()
+                .find(|u| u.txid == "01".repeat(32))
+                .unwrap()
+                .address,
+            current
+        );
+        (w, c)
+    }
+    fn off_refresh_listed(w: &WebWallet, byte: u8) -> serde_json::Value {
+        let id = format!("{byte:02x}").repeat(32);
+        let u = w.utxos.iter().find(|u| u.txid == id).unwrap();
+        serde_json::json!({"txid":u.txid,"index":u.index,"script":u.script,
+            "valueZat":u.value_zat,"height":u.height,"address":u.address,"coinbase":false})
+    }
+    #[test]
+    fn off_refresh_retains_unverified_pir_facts_on_all_issued_addresses_and_cold() {
+        let (mut w, _) = off_refresh_fixture();
+        let acquisition = w.transparent_pir_checkpoint();
+        assert_eq!(w.apply_utxos_json(r#"{"utxos":[]}"#).unwrap(), 0);
+        assert_eq!(w.utxos.len(), 2);
+        assert_eq!(w.transparent_pir_status()["confirmedZat"], "167000");
+        assert_eq!(w.balance().transparent_available, 0);
+        assert_eq!(w.balance().transparent_pending, 167000);
+        assert_eq!(w.transparent_pir_checkpoint(), acquisition);
+        let mut cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(cold.utxos.len(), 2);
+        assert_eq!(cold.balance().transparent_pending, 167000);
+        assert_eq!(cold.transparent_pir_checkpoint(), acquisition);
+        let before = cold.to_snapshot().unwrap();
+        assert!(cold
+            .begin_transparent_pir(&"ac".repeat(32))
+            .unwrap_err()
+            .to_string()
+            .contains("transparent_pir_source_changed"));
+        assert_eq!(cold.to_snapshot().unwrap(), before);
+    }
+    #[test]
+    fn off_refresh_preserves_pir_reservations_and_allows_only_authoritative_retirement() {
+        use zcash_client_backend::{
+            data_api::OutputLockStore,
+            wallet::{LockOwner, OutputRef},
+        };
+        let (mut w, c) = off_refresh_fixture();
+        let owner = LockOwner::new([9; 32]);
+        let output = OutputRef::new(
+            zcash_primitives::transaction::TxId::from_bytes([1; 32]),
+            zcash_protocol::PoolType::TRANSPARENT,
+            0,
+        );
+        w.lock_outputs(&[output.clone()], owner, 100.into())
+            .unwrap();
+        w.apply_utxos_json(r#"{"utxos":[]}"#).unwrap();
+        assert_eq!(w.utxos.len(), 2);
+        // OutputLockStore is intentionally session-local; the durable signed
+        // submission fixture separately covers cold unresolved-payment ownership.
+        assert_eq!(
+            w.active_lock_owner(&"01".repeat(32), "transparent", 0),
+            Some("09".repeat(32).as_str())
+        );
+        let mut retirement = checkpoint(&mut w, vec![]);
+        retirement.checkpoint_id = "de".repeat(32);
+        retirement.previous_checkpoint_id = Some(c.checkpoint_id);
+        retirement.rewind_to = Some(TransparentPirAnchor {
+            height: 0,
+            hash: Network::Regtest.genesis_hash().into(),
+        });
+        let before = w.to_snapshot().unwrap();
+        assert!(w
+            .apply_transparent_pir_checkpoint(&serde_json::to_string(&retirement).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("transparent_pir_pending_reconciliation_required"));
+        assert_eq!(w.to_snapshot().unwrap(), before);
+        assert!(w.unlock_output(&output, owner).unwrap());
+        let mut cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        apply_pir(&mut cold, &retirement);
+        assert!(cold.utxos.is_empty());
+        assert_eq!(cold.balance().transparent_pending, 0);
+        assert_eq!(cold.transparent_pir_status()["confirmedZat"], "0");
+    }
+    #[test]
+    fn off_refresh_preserves_ordinary_replacement_listed_pir_coinbase_and_atomic_errors() {
+        let (mut w, _) = off_refresh_fixture();
+        let mut ordinary = off_refresh_listed(&w, 3);
+        ordinary["txid"] = serde_json::json!("07".repeat(32));
+        ordinary["valueZat"] = serde_json::json!(700);
+        w.apply_utxos_json(&serde_json::json!({"utxos":[ordinary]}).to_string())
+            .unwrap();
+        assert_eq!(w.utxos.len(), 3);
+        w.apply_utxos_json(r#"{"utxos":[]}"#).unwrap();
+        assert_eq!(w.utxos.len(), 2);
+        assert!(!w.utxos.iter().any(|u| u.txid == "07".repeat(32)));
+        let row = off_refresh_listed(&w, 3);
+        let before = w.to_snapshot().unwrap();
+        assert!(w
+            .apply_utxos_json(&serde_json::json!({"utxos":[row.clone(),{"index":0}]}).to_string())
+            .is_err());
+        assert_eq!(w.to_snapshot().unwrap(), before);
+        w.apply_utxos_json(&serde_json::json!({"utxos":[row]}).to_string())
+            .unwrap();
+        assert_eq!(w.utxos.len(), 2);
+        assert!(!w.pir_funding_unverified(&"03".repeat(32), 0));
+        assert!(w.pir_funding_unverified(&"01".repeat(32), 0));
+        assert_eq!(
+            w.utxos
+                .iter()
+                .find(|u| u.txid == "03".repeat(32))
+                .unwrap()
+                .coinbase,
+            CoinbaseStatus::Coinbase
+        );
+        assert_eq!(w.balance().transparent_available, 0);
+        w.scanned_height = 105;
+        assert_eq!(w.balance().transparent_available, 17000);
+        assert_eq!(w.balance().transparent_pending, 150000);
+        // Independently promoted rows use ordinary replacement semantics thereafter.
+        w.apply_utxos_json(r#"{"utxos":[]}"#).unwrap();
+        assert_eq!(w.utxos.len(), 1);
+        assert_eq!(w.balance().transparent_available, 0);
+        assert_eq!(w.balance().transparent_pending, 150000);
     }
 
     #[test]

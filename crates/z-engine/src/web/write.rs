@@ -1402,6 +1402,14 @@ impl WalletWrite for WebWallet {
             }
             let mut received_zat = 0u64;
             let mut received_notes = 0u32;
+            #[cfg(feature = "transparent-inputs")]
+            let mut transparent_received = 0u64;
+            #[cfg(not(feature = "transparent-inputs"))]
+            let transparent_received = 0u64;
+            #[cfg(feature = "transparent-inputs")]
+            let mut transparent_receipts = std::collections::BTreeMap::<u32, u64>::new();
+            #[cfg(not(feature = "transparent-inputs"))]
+            let transparent_receipts = std::collections::BTreeMap::<u32, u64>::new();
             let mut ironwood_received = 0u64;
             let mut has_change = false;
             let mut memos = Vec::new();
@@ -1425,8 +1433,11 @@ impl WalletWrite for WebWallet {
                     #[cfg(feature = "transparent-inputs")]
                     Recipient::InternalTransparent { .. }
                     | Recipient::EphemeralTransparent { .. } => {
-                        received_zat = received_zat.saturating_add(u64::from(o.value()));
+                        let value = u64::from(o.value());
+                        received_zat = received_zat.saturating_add(value);
                         received_notes += 1;
+                        transparent_received = transparent_received.saturating_add(value);
+                        transparent_receipts.insert(o.output_index() as u32, value);
                     }
                     Recipient::External { .. } => {}
                 }
@@ -1438,6 +1449,9 @@ impl WalletWrite for WebWallet {
             }
             let agg = self.txs_mut().entry(txid.clone()).or_default();
             agg.mined_height = None;
+            agg.receipt_totals_recorded |= received_notes > 0;
+            agg.accounted_transparent_receipts
+                .extend(transparent_receipts);
             agg.spent_zat = agg.spent_zat.saturating_add(spent_zat);
             agg.spent_notes = agg.spent_notes.saturating_add(spent_notes);
             agg.received_zat = agg.received_zat.saturating_add(received_zat);
@@ -1458,15 +1472,14 @@ impl WalletWrite for WebWallet {
             agg.ironwood_received = agg.ironwood_received.saturating_add(ironwood_received);
             agg.orchard_received = agg
                 .orchard_received
-                .saturating_add(received_zat - ironwood_received);
+                .saturating_add(received_zat - ironwood_received - transparent_received);
             if !memos.is_empty() {
                 agg.memos.extend(memos);
             }
             #[cfg(feature = "private-enhance")]
             self.reconcile_private_enhancement(&txid);
         }
-        #[cfg(feature = "transparent-pir")]
-        self.reconcile_transparent_pir_spend_history();
+        self.recompute_pool_fields();
         // Unlock-on-store: the spend records now guard these notes.
         self.prune_locks();
         Ok(())
