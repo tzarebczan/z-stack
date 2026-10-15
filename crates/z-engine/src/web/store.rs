@@ -2999,9 +2999,15 @@ impl WebWallet {
         })
     }
 
-    /// Exact unmined, unexpired sends without a known canonical conflict.
+    /// Retained unmined bytes for deletion/rescan guards, including intents
+    /// that cannot currently be submitted. See `pending_submissions` for eligibility.
     pub fn pending_raw_txs(&self) -> Vec<String> {
-        self.unmined_pending_txs()
+        self.retained_signed_txs()
+            .filter(|(id, _)| {
+                self.txs
+                    .get(id)
+                    .is_some_and(|agg| agg.mined_height.is_none())
+            })
             .map(|(_, raw)| to_hex(raw))
             .collect()
     }

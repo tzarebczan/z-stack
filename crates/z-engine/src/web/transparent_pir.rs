@@ -3447,6 +3447,40 @@ mod tests {
         );
     }
 
+    fn assert_retained_intent_guard(unknown_origin: bool) {
+        let (mut w, original, replacement) = confirmed_conflict_fixture();
+        let saved = w.pending_txs[&original.txid()].clone();
+        if unknown_origin {
+            let mut old: serde_json::Value =
+                serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+            old["txs"][super::super::super::to_hex(original.txid().as_ref())]
+                .as_object_mut()
+                .unwrap()
+                .remove("shieldedInputOrigins");
+            w = WebWallet::from_snapshot(&serde_json::to_vec(&old).unwrap()).unwrap();
+        } else {
+            include_conflicting_spender(&mut w, &replacement);
+        }
+        let cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert!(cold.pending_submissions().is_empty());
+        assert!(cold.pending_txs[&original.txid()] == saved);
+        assert_eq!(
+            cold.pending_raw_txs().len(),
+            1,
+            "retained intent must remain visible to pending:'reject' deletion and rescan guards"
+        );
+    }
+
+    #[test]
+    fn retained_intent_guard_keeps_known_conflict_bytes() {
+        assert_retained_intent_guard(false);
+    }
+
+    #[test]
+    fn retained_intent_guard_keeps_unknown_origin_bytes() {
+        assert_retained_intent_guard(true);
+    }
+
     #[test]
     fn expired_debit_is_history_not_an_extra_current_balance() {
         use zcash_primitives::transaction::{Authorized, TransactionData};
@@ -3494,6 +3528,7 @@ mod tests {
         );
         assert!(cold.pending_submissions().is_empty());
         assert_eq!(cold.balance().total_pending, 27000);
+        assert!(cold.pending_raw_txs().is_empty());
     }
 
     fn external_receipt_spender(
