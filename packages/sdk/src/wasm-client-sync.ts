@@ -999,7 +999,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     if (!transport) { ctx.transparentScanFailure = undefined; ctx.transparentScanStatus = "unsupported"; return; }
     const epoch = ctx.transparentScanEpoch;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
-    const wait = AbortSignal.any([operation.signal, signal]);
+    const wait = AbortSignal.any([operation.signal, signal, ctx.transparentScanSignal]);
     const current = () => {
       wait.throwIfAborted(); ctx.assertSource(operation, source);
       if (ctx.transparentScan !== "pir" || ctx.transparentScanEpoch !== epoch || ctx.transport.transparentPir !== transport)

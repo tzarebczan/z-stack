@@ -2451,3 +2451,71 @@ for (const changes of [["pir"], ["off"], ["pir", "compact"]] as const) {
 }
 
 }
+
+function pendingPrivateExchangeFixture(t: TestContext) {
+  const f = fixture(t), entered = deferred<AbortSignal>();
+  let nextStep = 0, accepts = 0, requests = 0, retries = 0, pending = true;
+  let release!: () => void;
+  f.onPrivateTransparent(operation => {
+    if (operation === "begin") { nextStep = 0; return encode({ height: 10, hash: "22".repeat(32) }); }
+    if (operation === "advance") return encode(nextStep++ === 0
+      ? { kind: "exchange", request_id: 1, operation: { kind: "fixture" } }
+      : { kind: "stopped", status: { kind: "complete" } });
+    if (operation === "accept") accepts++;
+    if (operation === "status") return encode({ completion: "complete-for-enrolled-scope" });
+    return new Uint8Array();
+  });
+  const open = () => f.open({ transparentScan: "pir", server: {
+    kind: "fixture", label: "offline", tip: async () => 10, blocks: async () => new Uint8Array(),
+    transparentPir: { sourceId: "11".repeat(32), exchange: async (_request, signal) => {
+      requests++;
+      if (!pending) return encode({ kind: "fixture" });
+      entered.resolve(signal);
+      return new Promise<Uint8Array>((resolve, reject) => {
+        const timer = setTimeout(() => { retries++; cleanup(); reject(new Error("fixture_network_retry_after_mode_change")); }, 30);
+        const cleanup = () => { clearTimeout(timer); signal.removeEventListener("abort", aborted); };
+        const aborted = () => { cleanup(); reject(signal.reason); };
+        release = () => { cleanup(); resolve(encode({ kind: "fixture" })); };
+        signal.addEventListener("abort", aborted, { once: true });
+        if (signal.aborted) aborted();
+      });
+    } },
+  } });
+  return { open, entered: entered.promise, release: () => release(), readyNext: () => { pending = false; }, counts: () => ({ accepts, requests, retries }) };
+}
+for (const changes of [["off"], ["compact"], ["off", "pir"]] as const) {
+  test(`private mode signal aborts a pending network exchange for ${changes.join("/")} before its internal retry`, async t => {
+    const f = pendingPrivateExchangeFixture(t), wallet = await f.open();
+    await wallet.create({ birthday: 8 });
+    const old = wallet.sync(); const rejected = assert.rejects(old, /Privacy settings changed/);
+    const networkSignal = await f.entered;
+    for (const mode of changes) wallet.setTransparentScan(mode);
+    // Give an un-aborted transport its bounded retry opportunity to make the old bug observable.
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(networkSignal.aborted, true, "the active transport must receive this mode epoch's cancellation");
+    assert.deepEqual(f.counts(), { accepts: 0, requests: 1, retries: 0 });
+    await rejected;
+    wallet.setTransparentScan("pir"); f.readyNext();
+    assert.equal((await wallet.sync()).transparentScanStatus, "complete");
+    assert.deepEqual(f.counts(), { accepts: 1, requests: 2, retries: 0 });
+  });
+}
+for (const unchanged of ["same-mode", "memo-policy"] as const) {
+  test(`private pending exchange survives ${unchanged} changes`, async t => {
+    const f = pendingPrivateExchangeFixture(t), wallet = await f.open();
+    await wallet.create({ birthday: 8 });
+    const running = wallet.sync();const signal = await f.entered;
+    if (unchanged === "same-mode") wallet.setTransparentScan("pir"); else wallet.setMemoFetch("auto");
+    assert.equal(signal.aborted, false);f.release();
+    assert.equal((await running).transparentScanStatus, "complete");
+    assert.deepEqual(f.counts(), { accepts: 1, requests: 1, retries: 0 });
+  });
+}
+test("whole-sync cancellation wins over a simultaneous private mode change", async t => {
+  const f = pendingPrivateExchangeFixture(t), wallet = await f.open();
+  await wallet.create({ birthday: 8 });
+  const running = wallet.sync();const rejected = assert.rejects(running, /cancelled|abort/i);
+  const signal = await f.entered;wallet.cancelSync();wallet.setTransparentScan("off");
+  await rejected;assert.equal(signal.aborted, true);
+  assert.deepEqual(f.counts(), { accepts: 0, requests: 1, retries: 0 });
+});
