@@ -77,6 +77,8 @@ impl ProjectionState {
         anchor: TransparentPirAnchor,
         mut scripts: Vec<TransparentPirScript>,
     ) -> Result<TransparentPirScope> {
+        scripts.sort_by(|a, b| a.script.cmp(&b.script));
+        scripts.dedup();
         if !hash(source) || !hash(&anchor.hash) || scripts.is_empty() || scripts.len() > 4096 {
             return Err(refused("transparent_pir_scope_invalid"));
         }
@@ -88,8 +90,6 @@ impl ProjectionState {
         {
             return Err(refused("transparent_pir_source_changed"));
         }
-        scripts.sort_by(|a, b| a.script.cmp(&b.script));
-        scripts.dedup();
         if scripts.iter().any(|s| {
             s.required_from > anchor.height
                 || crate::web::from_hex(&s.script)
@@ -353,6 +353,83 @@ fn checkpoint_payload(checkpoint: &TransparentPirCheckpoint) -> Result<Vec<u8>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inventory(count: usize) -> Vec<TransparentPirScript> {
+        (0..count)
+            .map(|index| TransparentPirScript {
+                script: format!("76a914{index:040x}88ac"),
+                required_from: 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scope_cap_counts_canonical_inventory_before_rejecting_duplicates() {
+        let unique = inventory(2049);
+        let mut duplicates = unique.clone();
+        duplicates.extend(unique.clone());
+        let anchor = TransparentPirAnchor {
+            height: 3,
+            hash: "03".repeat(32),
+        };
+        let scope = ProjectionState::default()
+            .begin(&"ab".repeat(32), anchor.clone(), duplicates)
+            .unwrap();
+        let expected = ProjectionState::default()
+            .begin(&"ab".repeat(32), anchor, unique)
+            .unwrap();
+        assert_eq!(scope.scripts.len(), 2049);
+        assert_eq!(scope.scope_id, expected.scope_id);
+    }
+
+    #[test]
+    fn scope_unique_cap_remains_4096_and_refusal_preserves_state() {
+        let anchor = TransparentPirAnchor {
+            height: 3,
+            hash: "03".repeat(32),
+        };
+        assert_eq!(
+            ProjectionState::default()
+                .begin(&"ab".repeat(32), anchor.clone(), inventory(4096))
+                .unwrap()
+                .scripts
+                .len(),
+            4096
+        );
+        let mut state = enrolled();
+        let before = serde_json::to_vec(&state).unwrap();
+        assert!(state
+            .begin(&"ab".repeat(32), anchor, inventory(4097))
+            .is_err());
+        assert!(
+            serde_json::to_vec(&state).unwrap() == before,
+            "scope refusal must preserve private state"
+        );
+    }
+
+    #[test]
+    fn scope_canonicalization_does_not_merge_distinct_history_floors() {
+        let scripts = [0, 1, 1]
+            .into_iter()
+            .map(|required_from| TransparentPirScript {
+                script: "51".into(),
+                required_from,
+            })
+            .collect();
+        let scope = ProjectionState::default()
+            .begin(
+                &"ab".repeat(32),
+                TransparentPirAnchor {
+                    height: 3,
+                    hash: "03".repeat(32),
+                },
+                scripts,
+            )
+            .unwrap();
+        assert_eq!(scope.scripts.len(), 2);
+        assert_eq!(scope.scripts[0].required_from, 0);
+        assert_eq!(scope.scripts[1].required_from, 1);
+    }
 
     fn enrolled() -> ProjectionState {
         let mut state = ProjectionState::default();

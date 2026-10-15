@@ -1,15 +1,31 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
+import { fileURLToPath } from "node:url";
 import { verifyPatches } from "./check-patches.mjs";
 
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
 const original = "// original\npub const VALUE: u8 = 1;\n";
 const patched = "// original\npub const VALUE: u8 = 2;\n";
+
+test("transparent verifier gives an offline setup prerequisite for missing or empty Cargo cache", t => {
+  const cargo = mkdtempSync(join(tmpdir(), "z-stack-empty-cargo-"));
+  t.after(() => rmSync(cargo, { recursive: true, force: true }));
+  for (const populatedDirectory of [false, true]) {
+    if (populatedDirectory) mkdirSync(join(cargo, "git", "checkouts"), { recursive: true });
+    const result = spawnSync(process.execPath,
+      [fileURLToPath(new URL("../tools/check-transparent-pir-upstream.mjs", import.meta.url))],
+      { env: { ...process.env, CARGO_HOME: cargo }, encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Run cargo fetch --locked/);
+    assert.doesNotMatch(result.stderr, /ENOENT/);
+  }
+});
 
 function tarArchive(entries) {
   const blocks = [];

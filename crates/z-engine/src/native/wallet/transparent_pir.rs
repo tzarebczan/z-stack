@@ -22,6 +22,84 @@ pub struct NativeTransparentPirPass {
     cancel: Arc<RecoveryCancellation>,
     _owner: std::fs::File,
 }
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::*;
+    use zcash_client_backend::data_api::WalletWrite;
+
+    #[test]
+    fn native_exposed_ephemeral_overlap_counts_unique_scope_receivers() {
+        let root = tempfile::tempdir().unwrap();
+        let wallet = crate::native::wallet::tests::fixture_wallet(root.path());
+        let (key, birthday) = crate::native::wallet::tests::fixture_account();
+        wallet.replace_scan_db(&key, &birthday).unwrap();
+        let mut db = wallet.open_db().unwrap();
+        db.update_chain_tip(1.into()).unwrap();
+        drop(db);
+
+        // Retain actual Rust-derived public receivers in the pinned SQLite row
+        // shape. This fixture has no spends, network transport or user wallet.
+        let ivk = key.transparent().unwrap().derive_ephemeral_ivk().unwrap();
+        let mut conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        let (account, flags): (i64, i64) = conn
+            .query_row(
+                "SELECT account_id,receiver_flags FROM addresses WHERE key_scope=2 LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let tx = conn.transaction().unwrap();
+        for index in 0..2049u32 {
+            let child = transparent::keys::NonHardenedChildIndex::from_index(index).unwrap();
+            let address = ivk.derive_ephemeral_address(child).unwrap();
+            let encoded =
+                zcash_keys::address::Address::Transparent(address).encode(&ZNetwork::Regtest);
+            let mut diversifier = *zip32::DiversifierIndex::from(index).as_bytes();
+            diversifier.reverse();
+            tx.execute("INSERT OR IGNORE INTO addresses(account_id,diversifier_index_be,key_scope,address,transparent_child_index,cached_transparent_receiver_address,receiver_flags,exposed_at_height) VALUES(?1,?2,2,?3,?4,?3,?5,1)",
+                rusqlite::params![account,diversifier.as_slice(),encoded,index,flags]).unwrap();
+        }
+        tx.execute(
+            "UPDATE addresses SET exposed_at_height=1 WHERE key_scope=2",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        drop(conn);
+
+        let db = wallet.open_db().unwrap();
+        let account = db.get_account_ids().unwrap()[0];
+        assert_eq!(
+            db.get_ephemeral_transparent_receivers(account, u32::MAX, false)
+                .unwrap()
+                .len(),
+            2049
+        );
+        drop(db);
+        let inventory = wallet
+            .transparent_transaction(|db, tx| Ok(scripts(db, tx, ZNetwork::Regtest)?))
+            .unwrap();
+        let unique = inventory
+            .iter()
+            .map(|script| script.script.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert!(inventory.len() > 4096);
+        assert!((2049..=4096).contains(&unique));
+        let scope = ProjectionState::default()
+            .begin(
+                &"ab".repeat(32),
+                TransparentPirAnchor {
+                    height: 1,
+                    hash: "01".repeat(32),
+                },
+                inventory,
+            )
+            .unwrap();
+        assert_eq!(scope.scripts.len(), unique);
+    }
+}
 impl NativeTransparentPirPass {
     pub fn scope_json(&self) -> Result<String> {
         serde_json::to_string(&self.scope).map_err(|_| refused("transparent_pir_scope_invalid"))
