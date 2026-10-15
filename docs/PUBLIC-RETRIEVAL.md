@@ -69,10 +69,19 @@ Combined scans cap ranges at 500 blocks and four requests in flight; dense
 all-pool responses otherwise queue long enough to hit browser deadlines.
 Existing snapshots with a deposit gap backfill at most 20,000 transparent blocks
 per sync in 1,000-block pages, checkpointing every 5,000 blocks and at completion.
-Shared memo retrieval still backfills at most 100 memo blocks per sync. Auto-sync continues while coverage is catching up,
-even when no new chain block appears. Restoring a very old wallet may require
-many passes and substantial bandwidth. Shielded funds remain usable while
-memos backfill. Coverage/status fields on WalletSnapshot distinguish complete,
+Automatic shared memo retrieval backfills at most 10 memo blocks per sync.
+Explicit manual `wallet.fetchMemos()` calls retain the 100-block pass limit.
+These are fixed block budgets, not request-count or wall-clock guarantees.
+Requests retain the selected transport cap and common bucket boundaries; a
+resumed ten-block pass can span two buckets. Each range applies and checkpoints
+sequentially. Memo coverage remains scanning until it reaches the captured
+shielded scan height.
+
+Auto-sync continues while coverage is catching up, even when no new chain block
+appears. Its existing cadence and retry backoff still apply, so less work per
+automatic pass also lowers backfill throughput. Restoring a very old wallet may
+require many passes and substantial bandwidth. Shielded funds remain usable
+while memos backfill. Coverage/status fields on WalletSnapshot distinguish complete,
 scanning, unsupported and temporarily unavailable; an unsupported service never
 causes an automatic address/transaction-ID fallback.
 

@@ -243,3 +243,76 @@ test("memo caps preserve common boundaries when coverage resumes inside a bucket
   assert.deepEqual(await syncPublicData({ ...f.opts, transparent: false, maxSharedMemoBlocksPerRequest: 4 }), { memos: "complete" });
   assert.deepEqual(f.calls, [["memos", 8, 9], ["memos", 10, 13], ["memos", 14, 14]]);
 });
+
+for (const [budget, expected] of [[1, 1], [10, 10], [100, 100]] as const) {
+  test(`shared memo pass budget ${budget} checkpoints its exact prefix without claiming tip coverage`, async () => {
+    const f = fixture(200), checkpoints: Array<number | null> = [];
+    const result = await syncPublicData({ ...f.opts, transparent: false, maxSharedMemoBlocksPerRequest: 1,
+      ...{ maxSharedMemoBlocksPerPass: budget }, checkpoint: async () => { checkpoints.push(f.state.memoScanHeight); },
+    });
+    assert.equal(f.calls.length, expected);
+    assert.deepEqual(checkpoints, Array.from({ length: expected }, (_, i) => i + 1));
+    assert.equal(f.state.memoScanHeight, expected);
+    assert.deepEqual(result, { memos: "scanning" });
+  });
+}
+
+test("shared memo pass budget is validated before source or provider reads", async () => {
+  for (const value of [0, -1, 1.5, NaN, Infinity, 101, "10", null]) {
+    const f = fixture(); let reads = 0;
+    f.source.snapshotJson = async () => { reads++; return "{}"; };
+    await assert.rejects(syncPublicData(Object.assign({}, f.opts, { maxSharedMemoBlocksPerPass: value })), /maxSharedMemoBlocksPerPass/);
+    assert.equal(reads, 0);
+    assert.deepEqual(f.calls, []);
+  }
+});
+
+test("a ten-block pass resumes across common buckets and reports complete only at the actual tip", async () => {
+  const f = fixture(22), checkpoints: Array<number | null> = [];
+  f.state.birthdayHeight = 8;
+  const options = { ...f.opts, transparent: false, ...{ maxSharedMemoBlocksPerPass: 10 },
+    checkpoint: async () => { checkpoints.push(f.state.memoScanHeight); } };
+  assert.deepEqual(await syncPublicData(options), { memos: "scanning" });
+  assert.deepEqual(f.calls, [["memos", 8, 9], ["memos", 10, 17]]);
+  assert.deepEqual(checkpoints, [9, 17]);
+  f.calls.length = 0;
+  assert.deepEqual(await syncPublicData(options), { memos: "complete" });
+  assert.deepEqual(f.calls, [["memos", 18, 19], ["memos", 20, 22]]);
+  assert.equal(f.state.memoScanHeight, 22);
+});
+
+test("bounded memo passes preserve the durable prefix on cancellation and checkpoint failure", async () => {
+  for (const cancel of [true, false]) {
+    const f = fixture(200); let saved: number | null = null;
+    const options = { ...f.opts, transparent: false, maxSharedMemoBlocksPerRequest: 1,
+      ...{ maxSharedMemoBlocksPerPass: 10 }, checkpoint: async () => {
+        if (f.state.memoScanHeight === 4) {
+          if (cancel) f.controller.abort(new Error("fixture cancellation"));
+          else throw new Error("fixture checkpoint failure");
+        }
+        saved = f.state.memoScanHeight;
+      } };
+    await assert.rejects(syncPublicData(options), cancel ? /fixture cancellation/ : /fixture checkpoint failure/);
+    assert.equal(saved, cancel ? 4 : 3);
+    assert.equal(f.state.memoScanHeight, 4);
+    assert.equal(f.calls.length, 4);
+  }
+});
+
+test("a bounded memo pass rejects mismatched response before apply or checkpoint", async () => {
+  const f = fixture(200); let saves = 0;
+  f.transport.sharedMemos = async (start, end) => JSON.stringify({ start, end: end + 1 });
+  await assert.rejects(syncPublicData({ ...f.opts, transparent: false,
+    ...{ maxSharedMemoBlocksPerPass: 10 }, checkpoint: async () => { saves++; } }), /Wrong shared memo range/);
+  assert.equal(f.state.memoScanHeight, null);
+  assert.equal(saves, 0);
+});
+
+test("omitted shared memo pass budget retains the hundred-block default", async () => {
+  const f = fixture(200); let checkpoints = 0;
+  assert.deepEqual(await syncPublicData({ ...f.opts, transparent: false, maxSharedMemoBlocksPerRequest: 1,
+    checkpoint: async () => { checkpoints++; } }), { memos: "scanning" });
+  assert.equal(f.state.memoScanHeight, 100);
+  assert.equal(f.calls.length, 100);
+  assert.equal(checkpoints, 100);
+});
