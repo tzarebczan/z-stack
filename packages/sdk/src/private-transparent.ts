@@ -17,7 +17,11 @@ export type PrivateTransparentTransport = {
   }, signal: AbortSignal) => Promise<Uint8Array>;
 };
 export type PrivateTransparentOperation = "begin" | "advance" | "accept" | "chain" | "ack" | "cancel" | "status";
+export type PrivateTransparentCandidate = { bytes: Uint8Array; previewJson: string };
 export type PrivateTransparentHost = {
+  supportsPrivateTransparentCheckpoints?: () => Promise<boolean>;
+  privateTransparentSnapshot?: (checkpointId: string) => Promise<PrivateTransparentCandidate>;
+  commitPrivateTransparentCheckpoint?: (checkpointId: string, commit: (candidate: PrivateTransparentCandidate, acknowledge: () => Promise<void>) => Promise<void>, assertCurrent: () => void) => Promise<void>;
   privateTransparent?: (operation: PrivateTransparentOperation, bytes: Uint8Array) => Promise<Uint8Array>;
 };
 
@@ -42,13 +46,14 @@ async function syncPrivateTransparentPass({ source, transport, signal, assertCur
   transport: PrivateTransparentTransport;
   signal: AbortSignal;
   assertCurrent: () => void;
-  checkpoint: () => Promise<void>;
+  checkpoint: (checkpointId?: string) => Promise<void>;
   treeState: ((height: number, signal: AbortSignal) => Promise<{ height: number; hash: string }>) | undefined;
 }, budget: { signal: AbortSignal; deadline: AbortSignal; exceeded: Error }): Promise<"complete" | "scanning" | "history-metadata-limit" | "scope-growth"> {
   const engine = source.privateTransparent;
   if (!engine) throw new Error("WASM needs a transparent PIR upgrade");
   if (!/^[0-9a-f]{64}$/.test(transport.sourceId)) throw new Error("transparent_pir_source_invalid");
   const current = () => { signal.throwIfAborted(); assertCurrent(); };
+  let began = false;
   const invoke = async (operation: PrivateTransparentOperation, bytes = EMPTY) => {
     current();
     const result = await engine(operation, bytes);
@@ -56,6 +61,11 @@ async function syncPrivateTransparentPass({ source, transport, signal, assertCur
     return result;
   };
   try {
+    if (!source.privateTransparentSnapshot || !source.commitPrivateTransparentCheckpoint
+      || await source.supportsPrivateTransparentCheckpoints?.() !== true)
+      throw new Error("WASM needs a transactional transparent PIR upgrade");
+    current();
+    began = true;
     const anchor = point(json(await invoke("begin", encode({ source_id: transport.sourceId })), 1024));
     await checkpoint();
     current();
@@ -85,9 +95,8 @@ async function syncPrivateTransparentPass({ source, transport, signal, assertCur
         case "checkpoint": {
           if (!("checkpoint_id" in step) || typeof step.checkpoint_id !== "string"
             || !/^[0-9a-f]{64}$/.test(step.checkpoint_id)) throw new Error("transparent_pir_engine_invalid");
-          await checkpoint();
+          await checkpoint(step.checkpoint_id);
           current();
-          await invoke("ack", encoder.encode(step.checkpoint_id));
           await checkpoint();
           current();
           break;
@@ -122,9 +131,8 @@ async function syncPrivateTransparentPass({ source, transport, signal, assertCur
       if (step.kind === "checkpoint") {
         if (!("checkpoint_id" in step) || typeof step.checkpoint_id !== "string"
           || !/^[0-9a-f]{64}$/.test(step.checkpoint_id)) throw new Error("transparent_pir_engine_invalid");
-        await checkpoint();
+        await checkpoint(step.checkpoint_id);
         currentBudget();
-        await invokeBudget("ack", encoder.encode(step.checkpoint_id));
         await checkpoint();
         currentBudget();
       } else if (step.kind === "stopped") {
@@ -140,7 +148,7 @@ async function syncPrivateTransparentPass({ source, transport, signal, assertCur
     throw new Error("transparent_pir_budget_yield_limit");
   } finally {
     // Cancel only this engine session; obsolete worker RPC guards cannot reach a successor.
-    await engine("cancel", EMPTY).catch(() => {});
+    if (began) await engine("cancel", EMPTY).catch(() => {});
   }
 }
 

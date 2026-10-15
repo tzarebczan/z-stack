@@ -5,10 +5,31 @@ use z_transparent_pir_v2::{Anchor, Checkpoint, Limits, Pass, Reply, Scope, Step}
 
 pub(crate) struct PrivateTransparentPass {
     pass: Pass,
-    staged: Option<String>,
+    staged: Option<Checkpoint>,
 }
 #[wasm_bindgen]
 impl WasmWallet {
+    /// Exact checkpoint persistence candidate. Live canonical state is unchanged
+    /// until the host confirms the durable key with the owned `ack` operation.
+    #[wasm_bindgen(js_name = privateTransparentSnapshot)]
+    pub fn private_transparent_snapshot(&mut self, id: &str) -> Result<js_sys::Array, JsValue> {
+        let checkpoint = self
+            .private_transparent
+            .as_ref()
+            .and_then(|state| state.staged.as_ref())
+            .filter(|checkpoint| checkpoint.checkpoint_id == id)
+            .ok_or_else(|| js_err("transparent_pir_checkpoint_mismatch"))?;
+        let json = serde_json::to_string(checkpoint).map_err(js_err)?;
+        let (bytes, preview) = self
+            .inner
+            .transparent_pir_checkpoint_snapshot(&json)
+            .map_err(js_err)?;
+        let result = js_sys::Array::new();
+        result.push(&js_sys::Uint8Array::from(bytes.as_slice()));
+        result.push(&JsValue::from_str(&preview));
+        Ok(result)
+    }
+
     /// Closed worker operations. Only public selectors and ciphertext cross the host boundary.
     #[wasm_bindgen(js_name = privateTransparent)]
     pub fn private_transparent(
@@ -74,12 +95,7 @@ impl WasmWallet {
                 match state.pass.advance().map_err(js_err)? {
                     Step::Checkpoint { checkpoint } => {
                         let id = checkpoint.checkpoint_id.clone();
-                        self.inner
-                            .apply_transparent_pir_checkpoint(
-                                &serde_json::to_string(&checkpoint).map_err(js_err)?,
-                            )
-                            .map_err(js_err)?;
-                        state.staged = Some(id.clone());
+                        state.staged = Some(checkpoint);
                         serde_json::to_vec(
                             &serde_json::json!({"kind":"checkpoint","checkpoint_id":id}),
                         )
@@ -115,9 +131,16 @@ impl WasmWallet {
             "ack" => {
                 let id = std::str::from_utf8(bytes)
                     .map_err(|_| js_err("transparent_pir_input_invalid"))?;
-                if state.staged.as_deref() != Some(id) {
-                    return Err(js_err("transparent_pir_checkpoint_mismatch"));
-                }
+                let checkpoint = state
+                    .staged
+                    .as_ref()
+                    .filter(|checkpoint| checkpoint.checkpoint_id == id)
+                    .ok_or_else(|| js_err("transparent_pir_checkpoint_mismatch"))?;
+                self.inner
+                    .apply_transparent_pir_checkpoint(
+                        &serde_json::to_string(checkpoint).map_err(js_err)?,
+                    )
+                    .map_err(js_err)?;
                 self.inner
                     .acknowledge_transparent_pir_checkpoint(id)
                     .map_err(js_err)?;

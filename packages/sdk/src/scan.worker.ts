@@ -43,6 +43,7 @@ type Wallet = HardwareWalletHandle & {
   applyTransparentBlocks?: (blob: Uint8Array) => number;
   applySharedMemos?: (json: string) => number;
   privateTransparent?: (operation: PrivateTransparentOperation, bytes: Uint8Array) => Uint8Array;
+  privateTransparentSnapshot?: (checkpointId: string) => unknown;
   privateEnhance?: (operation: PrivateEnhanceOperation, bytes: Uint8Array, time: number) => Uint8Array;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
@@ -84,6 +85,7 @@ type Req = {
   op: string;
   operation?: PrivateEnhanceOperation;
   transparentOperation?: PrivateTransparentOperation;
+  checkpointId?: string;
   time?: number;
   preferMulticore?: boolean;
   wasmBasePath?: string;
@@ -323,6 +325,16 @@ async function handle(msg: Req): Promise<void> {
         post({ id: msg.id, n: w.applySharedMemos(msg.json ?? "") });
         return;
       }
+      case "privateTransparentSnapshot": {
+        const w = needWallet();
+        if (!w.privateTransparentSnapshot || !msg.checkpointId) throw new Error("WASM needs a transactional transparent PIR upgrade");
+        const candidate: unknown = w.privateTransparentSnapshot(msg.checkpointId);
+        if (!Array.isArray(candidate) || candidate.length !== 2 || !(candidate[0] instanceof Uint8Array) || typeof candidate[1] !== "string")
+          throw new Error("transparent_pir_engine_invalid");
+        const snapshot = candidate[0].slice().buffer;
+        post({ id: msg.id, snapshot, json: candidate[1] }, [snapshot]);
+        return;
+      }
       case "privateTransparent": {
         const w = needWallet();
         if (!w.privateTransparent || !msg.transparentOperation || !msg.blob) throw new Error("WASM needs a transparent PIR upgrade");
@@ -501,6 +513,7 @@ async function handle(msg: Req): Promise<void> {
           birthday: w.birthday(),
           nextHeight: w.nextHeight(),
           transparentCompact: typeof w.applyTransparentBlocks === "function",
+          transparentPirCheckpoint: typeof w.privateTransparentSnapshot === "function",
           treesReady: !!w.treesReady?.(),
           sinsemillaLive: !!w.sinsemillaLive?.(),
           hasIncrementalRoots: typeof w.subtreeRootCount === "function",

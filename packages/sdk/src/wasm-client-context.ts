@@ -49,7 +49,7 @@ export interface WasmClientContext {
   readonly maxSharedMemoBlocksPerRequest: number;
   readonly submissionPolicy: SubmissionPolicy;
   memoFetch: "auto" | "on-demand" | "shared";
-  persist: (lineage?: { epoch: number; baseKey: string | null; }, replacement?: runtime.ClaimedGeneration & { unlockPolicy?: UnlockPolicy; }, background?: boolean) => Promise<void>;
+  persist: (lineage?: { epoch: number; baseKey: string | null; }, replacement?: runtime.ClaimedGeneration & { unlockPolicy?: UnlockPolicy; }, background?: boolean, transparentCheckpoint?: { checkpointId: string; signal: AbortSignal; assertCurrent: () => void }) => Promise<void>;
   transparentScan: TransparentScanMode;
   localLight: boolean;
   syncOpts: { grpcWeb: boolean; lwdPipe: boolean; };

@@ -1005,18 +1005,24 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       if (ctx.transparentScan !== "pir" || ctx.transparentScanEpoch !== epoch || ctx.transport.transparentPir !== transport)
         throw new Error("Privacy settings changed during retrieval");
     };
+    let checkpointFailure: { error: unknown } | undefined;
     try {
       ctx.transparentScanFailure = undefined;
       ctx.transparentScanStatus = "scanning";
+      const checkpointSignal = AbortSignal.any([wait, ctx.transparentScanSignal]);
       const result = await syncPrivateTransparent({ source, transport, signal: wait,
-        assertCurrent: current, checkpoint: async () => {
-          try { await ctx.persist(); } catch (error) { ctx.retireFailedSession(source); throw error; }
+        assertCurrent: current, checkpoint: async (checkpointId) => {
+          try {
+            await ctx.persist(undefined, undefined, false, checkpointId
+              ? { checkpointId, signal: checkpointSignal, assertCurrent: current } : undefined);
+          } catch (error) { checkpointFailure = { error }; ctx.retireFailedSession(source); throw error; }
         }, treeState: ctx.transport.treeState });
       current();
       ctx.transparentScanFailure = result === "history-metadata-limit" ? result : undefined;
       ctx.transparentScanStatus = result === "history-metadata-limit" ? "unavailable" : result;
     } catch (error) {
       signal.throwIfAborted(); operation.signal.throwIfAborted();
+      if (checkpointFailure?.error === error) throw error;
       current();
       ctx.transparentScanStatus = "unavailable";
     }

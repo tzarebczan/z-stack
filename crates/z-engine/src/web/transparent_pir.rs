@@ -451,6 +451,25 @@ impl WebWallet {
             .map_err(|_| refused("transparent_pir_status_invalid"))
     }
 
+    /// Prepare the exact persistence candidate without publishing its canonical
+    /// projection. The synchronous preparation owns only the fields this
+    /// checkpoint can modify; unrelated wallet state is never rolled back.
+    pub fn transparent_pir_checkpoint_snapshot(&mut self, json: &str) -> Result<(Vec<u8>, String)> {
+        let utxos = self.utxos.clone();
+        let txs = self.txs.clone();
+        let next_diversifier = self.next_diversifier;
+        let state = self.transparent_pir.clone();
+        let result = (|| {
+            self.apply_transparent_pir_checkpoint(json)?;
+            Ok((self.to_snapshot()?, self.wallet_snapshot("").to_string()))
+        })();
+        self.utxos = utxos;
+        self.txs = txs;
+        self.next_diversifier = next_diversifier;
+        self.transparent_pir = state;
+        result
+    }
+
     pub fn acknowledge_transparent_pir_checkpoint(&mut self, id: &str) -> Result<()> {
         self.transparent_pir.acknowledge(id)
     }
@@ -606,6 +625,80 @@ mod tests {
         });
         apply_pir(w, &c);
     }
+    fn private_candidate_fixture() -> (WebWallet, TransparentPirCheckpoint) {
+        let mut w = wallet();
+        let mut last = receive();
+        if let TransparentEvent::Receive(event) = &mut last {
+            event.txid = Txid([3; 32]);
+            event.height = 3;
+            event.value = 17000;
+        }
+        let cp = checkpoint(&mut w, vec![receive(), spend(), last]);
+        (w, cp)
+    }
+
+    #[test]
+    fn checkpoint_candidate_keeps_live_projection_private_until_commit() {
+        let (mut w, cp) = private_candidate_fixture();
+        let before = w.to_snapshot().unwrap();
+        let input = serde_json::to_string(&cp).unwrap();
+        let (bytes, preview) = w.transparent_pir_checkpoint_snapshot(&input).unwrap();
+        assert!(w.to_snapshot().unwrap() == before);
+        assert!(w.history(20).is_empty());
+        assert_eq!(w.transparent_pir_status()["confirmedZat"], "0");
+        let cold = WebWallet::from_snapshot(&bytes).unwrap();
+        assert_eq!(cold.history(20).len(), 3);
+        assert_eq!(cold.transparent_pir_status()["confirmedZat"], "17000");
+        // Importing snapshot bytes is the existing durable-owner boundary,
+        // so a persisted-but-unacknowledged candidate remains recoverable.
+        assert_eq!(
+            cold.transparent_pir_status()["completion"],
+            "complete-for-enrolled-scope"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&preview).unwrap()["transactions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        apply_pir(&mut w, &cp);
+        assert_eq!(w.history(20).len(), 3);
+        assert_eq!(w.transparent_pir_status()["confirmedZat"], "17000");
+    }
+
+    #[test]
+    fn checkpoint_candidate_failure_preserves_exact_live_wallet() {
+        let (mut w, mut cp) = private_candidate_fixture();
+        let before = w.to_snapshot().unwrap();
+        cp.records[2].script = "ff".into();
+        assert!(w
+            .transparent_pir_checkpoint_snapshot(&serde_json::to_string(&cp).unwrap())
+            .is_err());
+        assert!(w.to_snapshot().unwrap() == before);
+    }
+
+    #[test]
+    fn checkpoint_commit_never_rolls_back_independent_writes_after_preparation() {
+        let (mut w, cp) = private_candidate_fixture();
+        w.transparent_pir_checkpoint_snapshot(&serde_json::to_string(&cp).unwrap())
+            .unwrap();
+        let (script, address) = w.public_transparent_scripts().unwrap()[0].clone();
+        w.apply_utxos_json(&serde_json::json!({"utxos":[{"txid":"08".repeat(32),"index":0,"valueZat":5000,"height":1,"script":super::super::super::to_hex(&script),"address":address}]}).to_string()).unwrap();
+        apply_pir(&mut w, &cp);
+        let cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(cold.history(20).len(), 4);
+        assert_eq!(cold.transparent_pir_status()["confirmedZat"], "17000");
+        assert_eq!(
+            cold.balance().transparent_available + cold.balance().transparent_pending,
+            22000
+        );
+        assert!(cold
+            .utxos
+            .iter()
+            .any(|u| u.txid == "08".repeat(32) && u.value_zat == 5000 && !u.spent));
+    }
+
     #[test]
     fn header_progress_checkpoint_preserves_projection_reservation_and_pending_marker() {
         use zcash_client_backend::data_api::OutputLockStore;

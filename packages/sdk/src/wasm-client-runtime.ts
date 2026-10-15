@@ -218,6 +218,7 @@ export type WasmWalletHandle = {
   proveShield: (mnemonic: string, thresholdZat: number) => string;
   enhanceRawTx?: (hex: string) => number;
   privateTransparent?: (operation: PrivateTransparentOperation, bytes: Uint8Array) => Uint8Array;
+  privateTransparentSnapshot?: (checkpointId: string) => unknown;
   privateEnhance?: (operation: PrivateEnhanceOperation, bytes: Uint8Array, time: number) => Uint8Array;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;

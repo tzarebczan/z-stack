@@ -5,6 +5,17 @@ const sourceId = "11".repeat(32);
 const hash = "22".repeat(32);
 const checkpointId = "33".repeat(32);
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+function transactionalFixture(source: PrivateTransparentHost): PrivateTransparentHost {
+  source.supportsPrivateTransparentCheckpoints = async () => true;
+  source.privateTransparentSnapshot = async () => ({ bytes: new Uint8Array(), previewJson: "{}" });
+  source.commitPrivateTransparentCheckpoint = async (id, commit, current) => {
+    current();
+    await commit(await source.privateTransparentSnapshot!(id), async () => {
+      await source.privateTransparent!("ack", new TextEncoder().encode(id));
+    });
+  };
+  return source;
+}
 function setup(steps: unknown[]) {
   const calls: string[] = [];
   const abort = new AbortController();
@@ -18,9 +29,15 @@ function setup(steps: unknown[]) {
       default: return new Uint8Array();
     }
   } };
-  return { calls, abort, source, input: {
+  transactionalFixture(source);
+  const acknowledge = async (id?: string) => {
+    if (id) await source.commitPrivateTransparentCheckpoint!(id, async (_candidate, ack) => {
+      abort.signal.throwIfAborted(); await ack();
+    }, () => abort.signal.throwIfAborted());
+  };
+  return { calls, abort, source, acknowledge, input: {
     source, signal: abort.signal, assertCurrent: () => {},
-    checkpoint: async () => { calls.push("persist"); },
+    checkpoint: async (id?: string) => { calls.push("persist"); await acknowledge(id); },
     transport: { sourceId, exchange: async (input: { operation: Uint8Array; anchor: { height: number; hash: string } }) => {
       calls.push("exchange"); assert.deepEqual(input.anchor, { height: 99, hash });
       assert.deepEqual(JSON.parse(new TextDecoder().decode(input.operation)), { kind: "map" });
@@ -103,8 +120,9 @@ test("confirmed activity repeats discovery for the expanded wallet scope before 
 test("an undurable acknowledged state cannot be published as complete", async () => {
   const f = setup([{ kind: "checkpoint", checkpoint_id: checkpointId }, { kind: "stopped", status: { kind: "complete" } }]);
   let writes = 0;
-  await assert.rejects(syncPrivateTransparent({ ...f.input, checkpoint: async () => {
+  await assert.rejects(syncPrivateTransparent({ ...f.input, checkpoint: async (id) => {
     f.calls.push("persist"); if (++writes === 3) throw new Error("cross_tab_conflict");
+    await f.acknowledge(id);
   } }), /cross_tab_conflict/);
   assert.deepEqual(f.calls, ["begin", "persist", "advance", "persist", "ack", "persist", "cancel"]);
 });
@@ -149,9 +167,10 @@ test("host resumes supplied durable chain checkpoints and honors core budget yie
           default: return new Uint8Array();
         }
       } };
+      transactionalFixture(engine);
       const result = await syncPrivateTransparent({
         source: engine, signal: new AbortController().signal, assertCurrent: () => {},
-        checkpoint: async () => { durableThrough = acceptedThrough; },
+        checkpoint: async (id) => { durableThrough = acceptedThrough; if (id) await engine.commitPrivateTransparentCheckpoint!(id, async (_candidate, ack) => { await ack(); }, () => {}); },
         treeState: async height => { reads.push(height); return { height, hash }; },
         transport: { sourceId, exchange: async () => { throw new Error("unexpected_private_exchange"); } },
       });
@@ -249,12 +268,13 @@ test("deadline after a completed checkpoint preserves durable completion", async
   t.mock.method(AbortSignal, "timeout", () => deadline.signal);
   const f = setup([
     { kind: "checkpoint", checkpoint_id: checkpointId },
-    { kind: "checkpoint", checkpoint_id: checkpointId }, { kind: "stopped", status: { kind: "complete" } },
+    { kind: "stopped", status: { kind: "complete" } },
   ]);
   let writes = 0;
-  const result = await syncPrivateTransparent({ ...f.input, checkpoint: async () => {
+  const result = await syncPrivateTransparent({ ...f.input, checkpoint: async (id) => {
     f.calls.push("persist");
     if (++writes === 2) deadline.abort(new DOMException("owned deadline", "TimeoutError"));
+    await f.acknowledge(id);
   } });
   assert.equal(result, "complete");
   assert.equal(f.calls.filter(op => op === "ack").length, 1);
@@ -309,8 +329,9 @@ test("elapsed deadline after durable completion does not downgrade or acknowledg
     return original(op, input);
   };
   let writes = 0;
-  assert.equal(await syncPrivateTransparent({ ...f.input, checkpoint: async () => {
+  assert.equal(await syncPrivateTransparent({ ...f.input, checkpoint: async (id) => {
     if (++writes === 3) deadline.abort(new DOMException("owned deadline", "TimeoutError"));
+    await f.acknowledge(id);
   } }), "complete");
   assert.equal(writes, 3);
   assert.equal(f.calls.filter(op => op === "ack").length, 1);
@@ -341,3 +362,14 @@ test("only the exact incomplete metadata limit is terminal", async () => {
     assert.equal(await syncPrivateTransparent(f.input), "scanning");
   }
 });
+
+for (const missing of ["capability", "candidate", "phase"] as const) {
+  test(`unsupported transactional ${missing} fails before creating a live pass`, async () => {
+    const f = setup([]);
+    if (missing === "capability") f.source.supportsPrivateTransparentCheckpoints = async () => false;
+    if (missing === "candidate") f.source.privateTransparentSnapshot = undefined;
+    if (missing === "phase") f.source.commitPrivateTransparentCheckpoint = undefined;
+    await assert.rejects(syncPrivateTransparent(f.input), /transactional transparent PIR upgrade/);
+    assert.deepEqual(f.calls, [], "an unsupported engine must not begin, query, persist or cancel another pass");
+  });
+}

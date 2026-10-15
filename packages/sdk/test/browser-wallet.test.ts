@@ -39,6 +39,10 @@ function fixture(t: TestContext) {
     const state = { ...initial };
     return {
       free() { frees++; },
+      get privateTransparentSnapshot() {
+        if (!onPrivateTransparent) return undefined;
+        return (_id: string) => [encode(state), this.snapshotJson()];
+      },
       privateTransparent: (operation: string, input: Uint8Array) => {
         if (!onPrivateTransparent) throw new Error("unexpected_private_scan");
         return onPrivateTransparent(operation, input);

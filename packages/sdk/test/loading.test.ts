@@ -37,6 +37,31 @@ test("failed snapshot writes do not poison the next save", async () => {
   assert.equal(saved, true);
 });
 
+test("mandatory checkpoint saves preserve FIFO barriers between coalesced pagehide saves", async () => {
+  const save = coalescedTask(), writes: string[] = [];
+  let release!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  const first = save(async () => { writes.push("active"); await hold; });
+  await turn();
+  const prior = save(async () => { writes.push("preceding"); });
+  const checkpoint = save.mandatory(async () => { writes.push("candidate"); await turn(); writes.push("ack"); });
+  const pagehide = save(async () => { writes.push("old-pagehide"); });
+  const latest = save(async () => { writes.push("latest-pagehide"); });
+  const spend = save.mandatory(async () => { writes.push("spend"); });
+  const following = save(async () => { writes.push("following"); });
+  release();
+  await Promise.all([first, prior, checkpoint, pagehide, latest, spend, following]);
+  assert.deepEqual(writes, ["active", "preceding", "candidate", "ack", "latest-pagehide", "spend", "following"]);
+});
+
+test("failed mandatory checkpoint releases the actor without dropping a following save", async () => {
+  const save = coalescedTask(), writes: string[] = [];
+  const failed = save.mandatory(async () => { writes.push("candidate"); throw new Error("quota"); });
+  const following = save(async () => { writes.push("following"); });
+  await assert.rejects(failed, /quota/); await following;
+  assert.deepEqual(writes, ["candidate", "following"]);
+});
+
 test("initialize instantiates verified bytes once across concurrent and repeated calls", async (t) => {
   const artifact = new URL("../src/generated/z_wasm_bg.wasm", import.meta.url);
   if (!existsSync(artifact)) { t.skip("run pnpm build:wasm first"); return; }

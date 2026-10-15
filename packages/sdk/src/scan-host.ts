@@ -122,6 +122,7 @@ type WalletHandle = HardwareWalletHandle & {
   applyTransparentBlocks?: (blob: Uint8Array) => number;
   applySharedMemos?: (json: string) => number;
   privateTransparent?: (operation: PrivateTransparentOperation, bytes: Uint8Array) => Uint8Array;
+  privateTransparentSnapshot?: (checkpointId: string) => unknown;
   privateEnhance?: (operation: PrivateEnhanceOperation, bytes: Uint8Array, time: number) => Uint8Array;
   memoEnhancementTxids?: (limit: number) => string;
   rewindTo?: (height: number) => number;
@@ -265,6 +266,15 @@ export function localScanSession(
       const wallet = w();
       if (!wallet.applySharedMemos) throw new Error("WASM needs a public-data upgrade");
       return wallet.applySharedMemos(json);
+    },
+    supportsPrivateTransparentCheckpoints: async () => typeof w().privateTransparentSnapshot === "function",
+    privateTransparentSnapshot: async (checkpointId) => {
+      const wallet = w();
+      if (!wallet.privateTransparentSnapshot) throw new Error("WASM needs a transactional transparent PIR upgrade");
+      const candidate: unknown = wallet.privateTransparentSnapshot(checkpointId);
+      if (!Array.isArray(candidate) || candidate.length !== 2 || !(candidate[0] instanceof Uint8Array) || typeof candidate[1] !== "string")
+        throw new Error("transparent_pir_engine_invalid");
+      return { bytes: candidate[0].slice(), previewJson: candidate[1] };
     },
     privateTransparent: async (operation, bytes) => {
       const wallet = w();
@@ -835,6 +845,12 @@ export function workerScanSession(): ScanSession | null {
     },
     applySharedMemos: async (json) => {
       return Number((await sessionRpc("applySharedMemos", { json }, undefined, 180_000)).n) || 0;
+    },
+    supportsPrivateTransparentCheckpoints: async () => (await sessionRpc("meta")).transparentPirCheckpoint === true,
+    privateTransparentSnapshot: async (checkpointId) => {
+      const data = await sessionRpc("privateTransparentSnapshot", { checkpointId }, undefined, 180_000);
+      if (!(data.snapshot instanceof ArrayBuffer) || typeof data.json !== "string") throw new Error("transparent_pir_engine_invalid");
+      return { bytes: new Uint8Array(data.snapshot), previewJson: data.json };
     },
     privateTransparent: async (operation, bytes) => {
       const buf = bytes.slice().buffer;
