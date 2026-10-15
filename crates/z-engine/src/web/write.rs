@@ -1268,6 +1268,19 @@ impl WalletWrite for WebWallet {
         let funding_unverified = self.pir_funding_unverified(&txid, index);
         #[cfg(not(feature = "transparent-pir"))]
         let funding_unverified = false;
+        let accepts = self
+            .utxos
+            .iter()
+            .find(|u| u.txid == txid && u.index == index)
+            .is_none_or(|u| !u.spent && (!funding_unverified || output.mined_height().is_some()));
+        if accepts {
+            self.preflight_transparent_receipts(&[(
+                txid.clone(),
+                index,
+                u64::from(output.txout().value()),
+            )])
+            .map_err(|error| error.to_string())?;
+        }
         if let Some((i, existing)) = self
             .utxos
             .iter_mut()
@@ -1283,6 +1296,13 @@ impl WalletWrite for WebWallet {
                     .unwrap_or(existing.height);
                 existing.value_zat = u64::from(output.txout().value());
                 existing.script = super::to_hex(&output.txout().script_pubkey().0 .0);
+                self.credit_transparent_receipt(
+                    &txid,
+                    index,
+                    u64::from(output.txout().value()),
+                    output.mined_height().map(u32::from),
+                    false,
+                );
                 #[cfg(feature = "transparent-pir")]
                 if output.mined_height().is_some() {
                     self.confirm_public_transparent_output(&txid, index);
@@ -1304,7 +1324,7 @@ impl WalletWrite for WebWallet {
         }
         self.utxos.push(super::store::StoredUtxo {
             coinbase: super::store::CoinbaseStatus::Unknown,
-            txid,
+            txid: txid.clone(),
             index,
             script: super::to_hex(&output.txout().script_pubkey().0 .0),
             value_zat: u64::from(output.txout().value()),
@@ -1313,6 +1333,13 @@ impl WalletWrite for WebWallet {
             spent: false,
             spent_in: None,
         });
+        self.credit_transparent_receipt(
+            &txid,
+            index,
+            u64::from(output.txout().value()),
+            output.mined_height().map(u32::from),
+            false,
+        );
         self.recompute_pool_fields();
         Ok(self.utxos.len() as u32 - 1)
     }
@@ -1333,6 +1360,45 @@ impl WalletWrite for WebWallet {
         transactions: &[SentTransaction<u32>],
     ) -> Result<(), String> {
         use zcash_client_backend::wallet::Recipient;
+        #[cfg(feature = "transparent-inputs")]
+        let mut receipts = Vec::new();
+        #[cfg(not(feature = "transparent-inputs"))]
+        let receipts = Vec::new();
+        #[cfg(feature = "transparent-inputs")]
+        for sent in transactions {
+            for output in sent.outputs() {
+                if matches!(
+                    output.recipient(),
+                    Recipient::InternalTransparent { .. } | Recipient::EphemeralTransparent { .. }
+                ) {
+                    receipts.push((
+                        super::to_hex(sent.tx().txid().as_ref()),
+                        output.output_index() as u32,
+                        u64::from(output.value()),
+                    ));
+                }
+            }
+        }
+        self.preflight_transparent_receipts(&receipts)
+            .map_err(|error| error.to_string())?;
+        let owns_transparent_input = transactions.iter().any(|sent| {
+            sent.tx().transparent_bundle().is_some_and(|bundle| {
+                bundle.vin.iter().any(|input| {
+                    let previous = super::to_hex(input.prevout().hash());
+                    self.utxos
+                        .iter()
+                        .any(|u| u.txid == previous && u.index == input.prevout().n())
+                        || self.txs().get(&previous).is_some_and(|agg| {
+                            agg.accounted_transparent_receipts
+                                .contains_key(&input.prevout().n())
+                        })
+                })
+            })
+        });
+        if owns_transparent_input {
+            self.ensure_current_transparent_receipts()
+                .map_err(|error| error.to_string())?;
+        }
         for sent in transactions {
             self.store_pending_tx(sent.tx())
                 .map_err(|e| e.to_string())?;
@@ -1400,8 +1466,19 @@ impl WalletWrite for WebWallet {
                     } else {
                         self.record_public_transparent_spend(&txid, &hx, idx);
                     }
+                    self.record_transparent_receipt_spend(&hx, idx, &txid, None);
                 }
             }
+            let complete_receipts = self
+                .txs()
+                .get(&txid)
+                .is_some_and(|agg| agg.receipt_totals_recorded);
+            let known_notes: HashSet<_> = self
+                .notes()
+                .iter()
+                .filter(|note| note.txid == txid)
+                .map(|note| (note.pool.clone(), note.output_index))
+                .collect();
             let mut received_zat = 0u64;
             let mut received_notes = 0u32;
             #[cfg(feature = "transparent-inputs")]
@@ -1414,18 +1491,24 @@ impl WalletWrite for WebWallet {
             for o in sent.outputs() {
                 match o.recipient() {
                     Recipient::InternalShielded { note, .. } => {
-                        received_zat = received_zat.saturating_add(u64::from(o.value()));
-                        received_notes += 1;
                         has_change = true;
-                        if matches!(
-                            note.as_ref(),
-                            zcash_client_backend::wallet::Note::Orchard {
+                        let pool = match note.as_ref() {
+                            Note::Sapling(_) => "sapling",
+                            Note::Orchard {
                                 pool: orchard::ValuePool::Ironwood,
                                 ..
+                            } => "ironwood",
+                            Note::Orchard { .. } => "orchard",
+                        };
+                        if !complete_receipts
+                            && !known_notes.contains(&(pool.to_string(), o.output_index() as u32))
+                        {
+                            received_zat = received_zat.saturating_add(u64::from(o.value()));
+                            received_notes += 1;
+                            if pool == "ironwood" {
+                                ironwood_received =
+                                    ironwood_received.saturating_add(u64::from(o.value()));
                             }
-                        ) {
-                            ironwood_received =
-                                ironwood_received.saturating_add(u64::from(o.value()));
                         }
                     }
                     #[cfg(feature = "transparent-inputs")]
@@ -1443,37 +1526,18 @@ impl WalletWrite for WebWallet {
                 }
             }
             let orchard_received = received_zat.saturating_sub(ironwood_received);
-            let receipt_totals_recorded = received_notes > 0 || !transparent_receipts.is_empty();
-            // Ordinary public output writes have already contributed their
-            // canonical rows to base history, even when they predate this map.
-            let mut observed_transparent_receipts = HashSet::new();
-            for output in self.utxos.iter().filter(|output| output.txid == txid) {
-                #[cfg(feature = "transparent-pir")]
-                if self.pir_receipt_unaccounted(&txid, output.index) {
-                    continue;
-                }
-                observed_transparent_receipts.insert(output.index);
+            let receipt_totals_recorded = has_change || !transparent_receipts.is_empty();
+            for (index, value) in transparent_receipts {
+                self.credit_transparent_receipt(&txid, index, value, None, true);
             }
             let agg = self.txs_mut().entry(txid.clone()).or_default();
-            agg.mined_height = None;
             agg.receipt_totals_recorded |= receipt_totals_recorded;
-            for (index, value) in transparent_receipts {
-                if let std::collections::btree_map::Entry::Vacant(entry) =
-                    agg.accounted_transparent_receipts.entry(index)
-                {
-                    entry.insert(value);
-                    if !observed_transparent_receipts.contains(&index) {
-                        received_zat = received_zat.saturating_add(value);
-                        received_notes = received_notes.saturating_add(1);
-                    }
-                }
-            }
             agg.spent_zat = agg.spent_zat.saturating_add(spent_zat);
             agg.spent_notes = agg.spent_notes.saturating_add(spent_notes);
             agg.received_zat = agg.received_zat.saturating_add(received_zat);
             agg.received_notes = agg.received_notes.saturating_add(received_notes);
             agg.has_change = agg.has_change || has_change;
-            agg.is_shielding = agg.is_shielding || (spent_t > 0 && received_zat > 0);
+            agg.is_shielding = agg.is_shielding || (spent_t > 0 && receipt_totals_recorded);
             let builder_fee = u64::from(sent.fee_amount());
             // The total builder fee is useful history metadata, but a pool-local balance
             // identity additionally requires pure-Ironwood bytes and exact agreement.
@@ -1488,7 +1552,11 @@ impl WalletWrite for WebWallet {
             agg.ironwood_received = agg.ironwood_received.saturating_add(ironwood_received);
             agg.orchard_received = agg.orchard_received.saturating_add(orchard_received);
             if !memos.is_empty() {
-                agg.memos.extend(memos);
+                for memo in memos {
+                    if !agg.memos.contains(&memo) {
+                        agg.memos.push(memo);
+                    }
+                }
             }
             #[cfg(feature = "private-enhance")]
             self.reconcile_private_enhancement(&txid);

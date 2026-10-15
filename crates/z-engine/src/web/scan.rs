@@ -799,6 +799,25 @@ impl WebWallet {
         if let Some(tb) = tx.transparent_bundle() {
             use zcash_keys::encoding::AddressCodec;
             let ours = self.transparent_address().map(str::to_string);
+            let mut receipts = Vec::new();
+            for (index, output) in tb.vout.iter().enumerate() {
+                if let Some(address) = output.recipient_address() {
+                    let encoded = address.encode(&self.network);
+                    if ours.as_deref() == Some(encoded.as_str())
+                        || self.utxos.iter().any(|u| u.address == encoded)
+                    {
+                        receipts.push((txid.clone(), index as u32, u64::from(output.value())));
+                    }
+                }
+            }
+            self.preflight_transparent_receipts(&receipts)?;
+            if receipts.iter().any(|(id, index, value)| {
+                self.utxos
+                    .iter()
+                    .any(|u| u.txid == *id && u.index == *index && u.value_zat != *value)
+            }) {
+                return Err(EngineError::Message("transparent_receipt_conflict".into()));
+            }
             for (i, out) in tb.vout.iter().enumerate() {
                 let Some(addr) = out.recipient_address() else {
                     continue;
@@ -819,6 +838,13 @@ impl WebWallet {
                         u.coinbase =
                             super::store::CoinbaseStatus::from_transaction(tb.is_coinbase());
                     }
+                    self.credit_transparent_receipt(
+                        &txid,
+                        idx,
+                        u64::from(out.value()),
+                        Some(0),
+                        false,
+                    );
                     found += 1;
                     continue;
                 }
@@ -833,6 +859,7 @@ impl WebWallet {
                     spent: false,
                     spent_in: None,
                 });
+                self.credit_transparent_receipt(&txid, idx, u64::from(out.value()), Some(0), false);
                 found += 1;
             }
         }
@@ -904,7 +931,14 @@ impl WebWallet {
             .map(BlockHeight::from_u32);
         let decrypted = decrypt_transaction(&self.network(), mined, Some(tip), tx, &keys);
         let mut memos = Vec::new();
-        let mut inbound_zat = 0u64;
+        let known_receipts: std::collections::HashSet<_> = self
+            .notes()
+            .iter()
+            .filter(|note| note.txid == txid)
+            .map(|note| (note.pool.clone(), note.output_index))
+            .collect();
+        let mut unaccounted_zat = 0u64;
+        let mut unaccounted_n = 0u32;
         let mut inbound_n = 0u32;
         let mut sapling_received = 0u64;
         let mut orchard_received = 0u64;
@@ -931,7 +965,14 @@ impl WebWallet {
                 TransferType::Incoming | TransferType::AccountInternal
             ) {
                 let value = o.note().0.value().inner();
-                inbound_zat = inbound_zat.saturating_add(value);
+                let pool = match o.note().1 {
+                    orchard::ValuePool::Orchard => "orchard",
+                    orchard::ValuePool::Ironwood => "ironwood",
+                };
+                if !known_receipts.contains(&(pool.to_string(), o.index() as u32)) {
+                    unaccounted_zat = unaccounted_zat.saturating_add(value);
+                    unaccounted_n += 1;
+                }
                 let pool_received = match o.note().1 {
                     orchard::ValuePool::Orchard => &mut orchard_received,
                     orchard::ValuePool::Ironwood => &mut ironwood_received,
@@ -955,8 +996,11 @@ impl WebWallet {
                 TransferType::Incoming | TransferType::AccountInternal
             ) {
                 let value = o.note().value().inner();
+                if !known_receipts.contains(&("sapling".to_string(), o.index() as u32)) {
+                    unaccounted_zat = unaccounted_zat.saturating_add(value);
+                    unaccounted_n += 1;
+                }
                 sapling_received = sapling_received.saturating_add(value);
-                inbound_zat = inbound_zat.saturating_add(value);
                 inbound_n += 1;
             } else if matches!(o.transfer_type(), TransferType::Outgoing) {
                 outgoing_shielded_zat =
@@ -1026,9 +1070,9 @@ impl WebWallet {
         };
         let expected_incoming = self.notes().iter().any(|note| note.txid == txid);
         let agg = self.txs_mut().entry(txid.clone()).or_default();
-        if agg.mined_height.is_none() && inbound_n > 0 && agg.received_notes == 0 {
-            agg.received_zat = inbound_zat;
-            agg.received_notes = inbound_n;
+        if inbound_n > 0 && !agg.receipt_totals_recorded {
+            agg.received_zat = agg.received_zat.saturating_add(unaccounted_zat);
+            agg.received_notes = agg.received_notes.saturating_add(unaccounted_n);
             agg.receipt_totals_recorded = true;
             agg.sapling_received = sapling_received;
             agg.orchard_received = orchard_received;

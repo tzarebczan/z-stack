@@ -97,14 +97,15 @@ impl WebWallet {
             .and_then(|c| serde_json::to_string(c).ok())
     }
 
-    fn transparent_pir_rescan_required(&self) -> bool {
+    pub(crate) fn transparent_pir_rescan_required(&self) -> bool {
         let legacy_receipts = self.transparent_pir.projected_outputs.iter().any(|key| {
             key.split(':')
                 .nth(1)
                 .and_then(|id| self.txs.get(id))
                 .is_some_and(|agg| agg.pir_received_zat.is_none())
         });
-        legacy_receipts
+        self.legacy_transparent_receipt_accounting()
+            || legacy_receipts
             || self.transparent_pir.unverified_outputs.is_none()
                 && (self.transparent_pir.bound_source.is_some()
                     || self.transparent_pir.scope.is_some()
@@ -1252,11 +1253,16 @@ mod tests {
             .apply_utxos_json(&serde_json::json!({"utxos":[row.clone(),{}]}).to_string())
             .is_err());
         assert_eq!(restored.to_snapshot().unwrap(), before);
+        assert!(restored
+            .apply_utxos_json(&serde_json::json!({"utxos":[row]}).to_string())
+            .is_err());
+        assert!(restored.to_snapshot().unwrap() == before);
+        let row = serde_json::json!({"txid":u.txid,"index":u.index,"script":u.script,"valueZat":150000,"height":1});
         restored
             .apply_utxos_json(&serde_json::json!({"utxos":[row]}).to_string())
             .unwrap();
-        assert_eq!(restored.balance().transparent_available, 40000);
-        assert_eq!(restored.utxos[0].value_zat, 40000);
+        assert_eq!(restored.balance().transparent_available, 150000);
+        assert_eq!(restored.utxos[0].value_zat, 150000);
     }
 
     #[test]
@@ -1958,11 +1964,11 @@ mod tests {
         (w, tx)
     }
 
-    fn builder_accounting_store(
+    fn builder_accounting_store_result(
         w: &mut WebWallet,
         tx: &zcash_primitives::transaction::Transaction,
         ephemeral: bool,
-    ) {
+    ) -> std::result::Result<(), String> {
         use zcash_client_backend::data_api::{SentTransaction, SentTransactionOutput, WalletWrite};
         use zcash_client_backend::wallet::Recipient;
         use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
@@ -1996,7 +2002,15 @@ mod tests {
             Zatoshis::from_u64(10000).unwrap(),
             &[],
         );
-        w.store_transactions_to_be_sent(&[sent]).unwrap();
+        w.store_transactions_to_be_sent(&[sent])
+    }
+
+    fn builder_accounting_store(
+        w: &mut WebWallet,
+        tx: &zcash_primitives::transaction::Transaction,
+        ephemeral: bool,
+    ) {
+        builder_accounting_store_result(w, tx, ephemeral).unwrap();
     }
 
     #[test]
@@ -2190,9 +2204,64 @@ mod tests {
             .iter()
             .any(|u| u.txid == super::super::super::to_hex(tx.txid().as_ref()) && u.spent));
         w.apply_utxos_json(r#"{"utxos":[]}"#).unwrap();
-        let cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        let mut cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
         assert_eq!(cold.balance().transparent_pending, 7000);
         assert_eq!(cold.pending_raw_txs().len(), 2);
+        use zcash_client_backend::proto::compact_formats::{CompactTx, CompactTxIn, TxOut};
+        let mut blocks = public_range(&mut cold, false);
+        blocks[0].vtx.push(CompactTx {
+            index: 2,
+            txid: tx.txid().as_ref().to_vec(),
+            vout: vec![TxOut {
+                value: 17000,
+                script_pub_key: tx.transparent_bundle().unwrap().vout[0]
+                    .script_pubkey()
+                    .0
+                     .0
+                    .clone(),
+            }],
+            ..Default::default()
+        });
+        blocks[1].vtx.push(CompactTx {
+            index: 2,
+            txid: child.txid().as_ref().to_vec(),
+            vin: vec![CompactTxIn {
+                prevout_txid: tx.txid().as_ref().to_vec(),
+                prevout_index: 0,
+            }],
+            vout: vec![TxOut {
+                value: 7000,
+                script_pub_key: child.transparent_bundle().unwrap().vout[0]
+                    .script_pubkey()
+                    .0
+                     .0
+                    .clone(),
+            }],
+            ..Default::default()
+        });
+        cold.apply_transparent_blocks(&super::super::super::encode_delimited(blocks))
+            .unwrap();
+        builder_accounting_store(&mut cold, &child, false);
+        let parent_id = super::super::super::to_hex(tx.txid().as_ref());
+        assert_eq!(
+            cold.txs()
+                .get(&parent_id)
+                .unwrap()
+                .accounted_transparent_receipts[&0]
+                .spent_in
+                .as_ref()
+                .unwrap()
+                .height,
+            Some(2)
+        );
+        cold.apply_utxos_json(r#"{"utxos":[]}"#).unwrap();
+        let cold = WebWallet::from_snapshot(&cold.to_snapshot().unwrap()).unwrap();
+        // The independently observed child receipt was omitted, and the spent
+        // parent stays represented. Neither historical receipt becomes pending.
+        assert_eq!(
+            cold.balance().transparent_pending + cold.balance().transparent_available,
+            0
+        );
     }
 
     #[test]
@@ -2230,15 +2299,11 @@ mod tests {
     }
 
     #[cfg(feature = "native")]
-    #[test]
-    fn builder_accounting_mixed_pending_receipts_stay_in_their_pools() {
-        use zcash_client_backend::data_api::{SentTransaction, SentTransactionOutput, WalletWrite};
-        use zcash_client_backend::wallet::{Note as WalletNote, Recipient};
+    fn builder_mixed_fixture(
+        store: bool,
+    ) -> (WebWallet, zcash_primitives::transaction::Transaction) {
         use zcash_primitives::transaction::{Authorized, Transaction, TransactionData};
-        use zcash_protocol::{
-            consensus::{BlockHeight, BranchId},
-            value::Zatoshis,
-        };
+        use zcash_protocol::consensus::BranchId;
         let (mut w, transparent) = builder_accounting_fixture();
         let raw = crate::web::shielded_memo_transaction(&w, &w, "mixed receipt", 30000, true);
         let shielded = Transaction::read(&raw[..], BranchId::Nu6_3).unwrap();
@@ -2253,6 +2318,20 @@ mod tests {
         )
         .freeze()
         .unwrap();
+        if store {
+            store_mixed_builder_receipt(&mut w, &tx);
+        }
+        (w, tx)
+    }
+
+    #[cfg(feature = "native")]
+    fn store_mixed_builder_receipt(
+        w: &mut WebWallet,
+        tx: &zcash_primitives::transaction::Transaction,
+    ) {
+        use zcash_client_backend::data_api::{SentTransaction, SentTransactionOutput, WalletWrite};
+        use zcash_client_backend::wallet::{Note as WalletNote, Recipient};
+        use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
         let keys = std::collections::HashMap::from([(0u32, w.decode_ufvk().unwrap())]);
         let decrypted = zcash_client_backend::decrypt_transaction(
             &Network::Regtest,
@@ -2298,6 +2377,12 @@ mod tests {
             &[],
         );
         w.store_transactions_to_be_sent(&[sent]).unwrap();
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn builder_accounting_mixed_pending_receipts_stay_in_their_pools() {
+        let (mut w, tx) = builder_mixed_fixture(true);
         for wallet in [
             &w,
             &WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap(),
@@ -2313,6 +2398,457 @@ mod tests {
                 (17000, 30000, 0, 47000)
             );
         }
+        let mut raw = Vec::new();
+        tx.write(&mut raw).unwrap();
+        let mut block = w.mined_raw_tx_block(&raw, 1).unwrap();
+        block.prev_hash = vec![3; 32];
+        w.apply_compact_blocks_blob(&super::super::super::encode_delimited([block]))
+            .unwrap();
+        assert_eq!(
+            w.balance().transparent_pending,
+            17000,
+            "shielded inclusion is not transparent outpoint materialization"
+        );
+        let cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(cold.balance().transparent_pending, 17000);
+        store_mixed_builder_receipt(&mut w, &tx);
+        let row = w
+            .history_matching(1, None, Some(&tx.txid().to_string()))
+            .remove(0);
+        assert_eq!(
+            (row.received_zat, row.received_note_count, row.mined_height),
+            (47000, 2, Some(4))
+        );
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn durable_receipt_raw_mixed_credit_then_callback_is_single() {
+        let (mut w, tx) = builder_mixed_fixture(false);
+        let mut raw = Vec::new();
+        tx.write(&mut raw).unwrap();
+        w.apply_raw_tx(&raw).unwrap();
+        w.apply_raw_tx(&raw).unwrap();
+        let row = w
+            .history_matching(1, None, Some(&tx.txid().to_string()))
+            .remove(0);
+        assert_eq!(
+            (
+                row.received_zat,
+                row.received_note_count,
+                row.transparent_received,
+                row.ironwood_received
+            ),
+            (47000, 2, 17000, 30000)
+        );
+        w.apply_utxos_json(r#"{"utxos":[]}"#).unwrap();
+        assert_eq!(
+            w.balance().transparent_pending + w.balance().transparent_available,
+            0
+        );
+        let mut cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        store_mixed_builder_receipt(&mut cold, &tx);
+        store_mixed_builder_receipt(&mut cold, &tx);
+        let row = cold
+            .history_matching(1, None, Some(&tx.txid().to_string()))
+            .remove(0);
+        assert_eq!(
+            (
+                row.received_zat,
+                row.received_note_count,
+                row.transparent_received,
+                row.ironwood_received
+            ),
+            (47000, 2, 17000, 30000)
+        );
+    }
+
+    #[test]
+    fn durable_receipt_ordinary_credit_survives_omission_before_callback() {
+        use zcash_client_backend::{data_api::WalletWrite, wallet::WalletTransparentOutput};
+        let (mut w, tx) = builder_accounting_fixture();
+        let output = WalletTransparentOutput::from_parts(
+            transparent::bundle::OutPoint::new(*tx.txid().as_ref(), 0),
+            tx.transparent_bundle().unwrap().vout[0].clone(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        w.put_received_transparent_utxo(&output).unwrap();
+        w.apply_utxos_json(r#"{"utxos":[]}"#).unwrap();
+        let mut cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        builder_accounting_store(&mut cold, &tx, false);
+        builder_accounting_store(&mut cold, &tx, false);
+        let row = cold
+            .history_matching(1, None, Some(&tx.txid().to_string()))
+            .remove(0);
+        assert_eq!((row.received_zat, row.received_note_count), (17000, 1));
+    }
+
+    #[test]
+    fn durable_receipt_legacy_pir_ambiguity_refuses_callback_before_mutation() {
+        let (mut w, tx) = builder_accounting_fixture();
+        let mut event = receive();
+        if let TransparentEvent::Receive(e) = &mut event {
+            e.txid = Txid(*tx.txid().as_ref());
+            e.height = 3;
+            e.value = 17000;
+        }
+        let c = checkpoint(&mut w, vec![event]);
+        apply_pir(&mut w, &c);
+        let id = super::super::super::to_hex(tx.txid().as_ref());
+        let mut old: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+        old["txs"][&id]["receivedZat"] = 17000.into();
+        old["txs"][&id]["receivedNotes"] = 1.into();
+        old["txs"][&id]
+            .as_object_mut()
+            .unwrap()
+            .remove("pirReceivedZat");
+        let mut cold = WebWallet::from_snapshot(&serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(cold.transparent_pir_status()["rescanRequired"], true);
+        let before = cold.to_snapshot().unwrap();
+        assert!(
+            builder_accounting_store_result(&mut cold, &tx, false).is_err(),
+            "ambiguous legacy credit must refuse atomically"
+        );
+        assert!(
+            cold.to_snapshot().unwrap() == before,
+            "legacy refusal must preserve the entire wallet"
+        );
+    }
+
+    #[test]
+    fn durable_receipt_two_indices_and_late_batch_conflict_are_atomic() {
+        use zcash_client_backend::data_api::{SentTransaction, SentTransactionOutput, WalletWrite};
+        use zcash_client_backend::wallet::{Recipient, WalletTransparentOutput};
+        use zcash_primitives::transaction::{Authorized, TransactionData};
+        use zcash_protocol::{consensus::BranchId, value::Zatoshis};
+        let (mut w, template) = builder_accounting_fixture();
+        let output = template.transparent_bundle().unwrap().vout[0].clone();
+        let mut bundle = template.transparent_bundle().unwrap().clone();
+        bundle.vout.push(transparent::bundle::TxOut::new(
+            Zatoshis::from_u64(3000).unwrap(),
+            output.script_pubkey().clone(),
+        ));
+        let tx = TransactionData::<Authorized>::from_parts_v6(
+            BranchId::Nu6_3,
+            0,
+            20.into(),
+            Some(bundle),
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        for index in 0..2 {
+            let output = WalletTransparentOutput::from_parts(
+                transparent::bundle::OutPoint::new(*tx.txid().as_ref(), index),
+                tx.transparent_bundle().unwrap().vout[index as usize].clone(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            w.put_received_transparent_utxo(&output).unwrap();
+        }
+        w.apply_utxos_json(r#"{"utxos":[]}"#).unwrap();
+        let mut cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        let recipient = output.recipient_address().unwrap();
+        let make = |index, value| {
+            SentTransactionOutput::from_parts(
+                index,
+                Recipient::InternalTransparent {
+                    receiving_account: 0,
+                    recipient_address: recipient,
+                },
+                Zatoshis::from_u64(value).unwrap(),
+                None,
+            )
+        };
+        let outputs = [make(0, 17000), make(1, 3000)];
+        fn callback<'a>(
+            tx: &'a zcash_primitives::transaction::Transaction,
+            outputs: &'a [SentTransactionOutput<u32>],
+        ) -> SentTransaction<'a, u32> {
+            SentTransaction::new(
+                tx,
+                std::time::UNIX_EPOCH.into(),
+                3.into(),
+                0,
+                outputs,
+                Zatoshis::from_u64(7000).unwrap(),
+                &[],
+            )
+        }
+        let good = callback(&tx, &outputs);
+        let bad_outputs = [make(1, 4000)];
+        let bad = callback(&tx, &bad_outputs);
+        let before = cold.to_snapshot().unwrap();
+        assert!(cold.store_transactions_to_be_sent(&[good, bad]).is_err());
+        assert!(
+            cold.to_snapshot().unwrap() == before,
+            "batch must preflight before saving pending bytes or spending inputs"
+        );
+        for _ in 0..2 {
+            cold.store_transactions_to_be_sent(&[callback(&tx, &outputs)])
+                .unwrap();
+        }
+        let row = cold
+            .history_matching(1, None, Some(&tx.txid().to_string()))
+            .remove(0);
+        assert_eq!(
+            (
+                row.received_zat,
+                row.received_note_count,
+                row.transparent_received
+            ),
+            (20000, 2, 20000)
+        );
+        let before = cold.to_snapshot().unwrap();
+        let id = super::super::super::to_hex(tx.txid().as_ref());
+        assert!(cold
+            .apply_utxos_json(
+                &serde_json::json!({"utxos":[{"txid":id,"index":1,"valueZat":4000,"height":1}]})
+                    .to_string()
+            )
+            .is_err());
+        assert!(cold.to_snapshot().unwrap() == before);
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn durable_receipt_builder_inclusion_rewind_and_expiry_keep_claim_pending_only() {
+        let (mut w, tx) = builder_mixed_fixture(true);
+        let mut raw = Vec::new();
+        tx.write(&mut raw).unwrap();
+        let mut block = w.mined_raw_tx_block(&raw, 0).unwrap();
+        block.prev_hash = vec![3; 32];
+        w.apply_compact_blocks_blob(&super::super::super::encode_delimited([block]))
+            .unwrap();
+        assert_eq!(w.balance().transparent_pending, 17000);
+        w.rewind_to_height(3).unwrap();
+        let mut cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(cold.balance().transparent_pending, 17000);
+        store_mixed_builder_receipt(&mut cold, &tx);
+        assert_eq!(cold.balance().transparent_pending, 17000);
+        assert_eq!(
+            cold.txs()
+                .get(&super::super::super::to_hex(tx.txid().as_ref()))
+                .unwrap()
+                .mined_height,
+            None
+        );
+        assert!(cold.abandon_unmined(&tx.txid().to_string()).unwrap());
+        assert_eq!(cold.balance().transparent_pending, 27000);
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn durable_receipt_clean_legacy_shielded_callback_still_works() {
+        use zcash_client_backend::data_api::{SentTransaction, SentTransactionOutput, WalletWrite};
+        use zcash_client_backend::wallet::{Note, Recipient};
+        use zcash_protocol::value::Zatoshis;
+        let mut w = wallet();
+        let raw = crate::web::shielded_memo_transaction(&w, &w, "legacy control", 30000, true);
+        let tx = zcash_primitives::transaction::Transaction::read(
+            &raw[..],
+            zcash_protocol::consensus::BranchId::Nu6_3,
+        )
+        .unwrap();
+        let key = w.decode_ufvk().unwrap();
+        let mut keys = std::collections::HashMap::new();
+        keys.insert(0, key);
+        let decrypted = zcash_client_backend::decrypt_transaction(
+            &w.network(),
+            None,
+            Some(3.into()),
+            &tx,
+            &keys,
+        );
+        let note = decrypted
+            .ironwood_outputs()
+            .iter()
+            .find(|o| {
+                matches!(
+                    o.transfer_type(),
+                    zcash_client_backend::TransferType::Incoming
+                        | zcash_client_backend::TransferType::AccountInternal
+                )
+            })
+            .unwrap();
+        let outputs = [SentTransactionOutput::from_parts(
+            note.index(),
+            Recipient::InternalShielded {
+                receiving_account: 0,
+                external_address: None,
+                note: Box::new(Note::Orchard {
+                    note: note.note().0.clone(),
+                    pool: orchard::ValuePool::Ironwood,
+                }),
+            },
+            Zatoshis::from_u64(30000).unwrap(),
+            None,
+        )];
+        let id = super::super::super::to_hex(tx.txid().as_ref());
+        w.txs_mut().entry(id.clone()).or_default();
+        let mut old: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+        old["txs"][&id]
+            .as_object_mut()
+            .unwrap()
+            .remove("receiptAccountingLegacy");
+        let mut cold = WebWallet::from_snapshot(&serde_json::to_vec(&old).unwrap()).unwrap();
+        let callback = || {
+            SentTransaction::new(
+                &tx,
+                std::time::UNIX_EPOCH.into(),
+                3.into(),
+                0,
+                &outputs,
+                Zatoshis::from_u64(10000).unwrap(),
+                &[],
+            )
+        };
+        cold.store_transactions_to_be_sent(&[callback()]).unwrap();
+        cold.store_transactions_to_be_sent(&[callback()]).unwrap();
+        let row = cold
+            .history_matching(1, None, Some(&tx.txid().to_string()))
+            .remove(0);
+        assert_eq!(
+            (
+                row.received_zat,
+                row.received_note_count,
+                row.ironwood_received
+            ),
+            (30000, 1, 30000)
+        );
+    }
+
+    #[test]
+    fn durable_receipt_confirmed_materialization_does_not_revive_after_omission() {
+        use zcash_client_backend::{data_api::WalletWrite, wallet::WalletTransparentOutput};
+        let (mut w, tx) = builder_accounting_fixture();
+        builder_accounting_store(&mut w, &tx, true);
+        let output = WalletTransparentOutput::from_parts(
+            transparent::bundle::OutPoint::new(*tx.txid().as_ref(), 0),
+            tx.transparent_bundle().unwrap().vout[0].clone(),
+            Some(1.into()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        w.put_received_transparent_utxo(&output).unwrap();
+        w.apply_utxos_json(r#"{"utxos":[]}"#).unwrap();
+        let mut cold = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
+        assert_eq!(
+            cold.balance().transparent_pending + cold.balance().transparent_available,
+            0
+        );
+        builder_accounting_store(&mut cold, &tx, true);
+        assert_eq!(
+            cold.balance().transparent_pending + cold.balance().transparent_available,
+            0
+        );
+        let row = cold
+            .history_matching(1, None, Some(&tx.txid().to_string()))
+            .remove(0);
+        assert_eq!(
+            (
+                row.received_zat,
+                row.received_note_count,
+                row.transparent_received
+            ),
+            (17000, 1, 17000)
+        );
+        assert!(cold
+            .txs()
+            .get(&super::super::super::to_hex(tx.txid().as_ref()))
+            .unwrap()
+            .mined_height
+            .is_some());
+    }
+
+    #[test]
+    fn durable_receipt_mapless_legacy_batch_refusal_preserves_all_intent() {
+        use zcash_client_backend::data_api::{SentTransaction, SentTransactionOutput, WalletWrite};
+        use zcash_client_backend::wallet::Recipient;
+        use zcash_protocol::value::Zatoshis;
+        let (w, tx) = builder_accounting_fixture();
+        let id = super::super::super::to_hex(tx.txid().as_ref());
+        let mut old: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+        // Genuine old schema shape: historical independent receipt totals, without
+        // a per-index receipt ledger or a current accounting marker.
+        old["txs"][&id] = serde_json::to_value(TxAgg {
+            received_zat: 17000,
+            received_notes: 1,
+            transparent_received: 17000,
+            ..Default::default()
+        })
+        .unwrap();
+        old["txs"][&id]
+            .as_object_mut()
+            .unwrap()
+            .remove("accountedTransparentReceipts");
+        old["txs"][&id]
+            .as_object_mut()
+            .unwrap()
+            .remove("receiptAccountingLegacy");
+        let mut cold = WebWallet::from_snapshot(&serde_json::to_vec(&old).unwrap()).unwrap();
+        let goodtx = zcash_primitives::transaction::TransactionData::<
+            zcash_primitives::transaction::Authorized,
+        >::from_parts_v6(
+            zcash_protocol::consensus::BranchId::Nu6_3,
+            0,
+            21.into(),
+            tx.transparent_bundle().cloned(),
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        assert_ne!(goodtx.txid(), tx.txid());
+        let output = |transaction: &zcash_primitives::transaction::Transaction| {
+            SentTransactionOutput::from_parts(
+                0,
+                Recipient::InternalTransparent {
+                    receiving_account: 0,
+                    recipient_address: transaction.transparent_bundle().unwrap().vout[0]
+                        .recipient_address()
+                        .unwrap(),
+                },
+                Zatoshis::from_u64(17000).unwrap(),
+                None,
+            )
+        };
+        let good_outputs = [output(&goodtx)];
+        let bad_outputs = [output(&tx)];
+        let good = SentTransaction::new(
+            &goodtx,
+            std::time::UNIX_EPOCH.into(),
+            3.into(),
+            0,
+            &good_outputs,
+            Zatoshis::from_u64(10000).unwrap(),
+            &[],
+        );
+        let bad = SentTransaction::new(
+            &tx,
+            std::time::UNIX_EPOCH.into(),
+            3.into(),
+            0,
+            &bad_outputs,
+            Zatoshis::from_u64(10000).unwrap(),
+            &[],
+        );
+        let before = cold.to_snapshot().unwrap();
+        assert!(cold.store_transactions_to_be_sent(&[good, bad]).is_err());
+        assert!(cold.to_snapshot().unwrap() == before);
+        assert!(cold.pending_raw_txs().is_empty());
     }
 
     fn off_refresh_fixture() -> (WebWallet, TransparentPirCheckpoint) {

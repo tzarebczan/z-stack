@@ -240,6 +240,56 @@ pub(crate) struct StoredUtxo {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct TransparentReceipt {
+    pub value_zat: u64,
+    #[serde(default)]
+    pub builder: bool,
+    #[serde(default)]
+    pub observed_height: Option<u32>,
+    #[serde(default)]
+    pub spent_in: Option<TransparentReceiptSpend>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransparentReceiptSpend {
+    pub txid: String,
+    pub height: Option<u32>,
+}
+
+fn legacy_receipt_accounting() -> bool {
+    true
+}
+
+fn read_transparent_receipts<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<u32, TransparentReceipt>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Saved {
+        Receipt(TransparentReceipt),
+        Legacy(u64),
+    }
+    Ok(BTreeMap::<u32, Saved>::deserialize(deserializer)?
+        .into_iter()
+        .map(|(index, saved)| {
+            let receipt = match saved {
+                Saved::Receipt(receipt) => receipt,
+                Saved::Legacy(value_zat) => TransparentReceipt {
+                    value_zat,
+                    ..Default::default()
+                },
+            };
+            (index, receipt)
+        })
+        .collect())
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TxAgg {
     pub mined_height: Option<u32>,
     pub received_zat: u64,
@@ -252,8 +302,12 @@ pub struct TxAgg {
     pub(crate) receipt_totals_recorded: bool,
     /// Exact transparent receipts already credited by an independent source.
     /// This is accounting ownership, not inclusion, deletion or funding authority.
-    #[serde(default)]
-    pub(crate) accounted_transparent_receipts: BTreeMap<u32, u64>,
+    #[serde(default, deserialize_with = "read_transparent_receipts")]
+    pub(crate) accounted_transparent_receipts: BTreeMap<u32, TransparentReceipt>,
+    // Fresh aggregates default to current accounting; absent serialized markers
+    // identify old aggregates whose generic transparent share is ambiguous.
+    #[serde(default = "legacy_receipt_accounting")]
+    pub(crate) receipt_accounting_legacy: bool,
     #[cfg(feature = "transparent-pir")]
     #[serde(default)]
     pub(crate) pir_received_zat: Option<u64>,
@@ -971,10 +1025,13 @@ impl WebWallet {
         // Independently credited receipt history is not an unspent-output list.
         // An omitted address refresh can remove funding without erasing which
         // pool received that earlier output. These facts create no funding rows.
+        let represented: std::collections::HashSet<_> =
+            utxos.iter().map(|u| (u.txid.as_str(), u.index)).collect();
         for (id, agg) in &mut self.txs {
-            for (index, value) in &agg.accounted_transparent_receipts {
-                if !utxos.iter().any(|u| u.txid == *id && u.index == *index) {
-                    agg.transparent_received = agg.transparent_received.saturating_add(*value);
+            for (index, receipt) in &agg.accounted_transparent_receipts {
+                if !represented.contains(&(id.as_str(), *index)) {
+                    agg.transparent_received =
+                        agg.transparent_received.saturating_add(receipt.value_zat);
                 }
             }
         }
@@ -1439,6 +1496,158 @@ impl WebWallet {
         self.balance_for_policy(&crate::confirmations_policy(self.network))
     }
 
+    pub(crate) fn legacy_transparent_receipt_accounting(&self) -> bool {
+        self.txs.values().any(|agg| {
+            agg.receipt_accounting_legacy
+                && (agg.transparent_received > 0
+                    || !agg.accounted_transparent_receipts.is_empty()
+                    || agg.received_zat
+                        > agg
+                            .sapling_received
+                            .saturating_add(agg.orchard_received)
+                            .saturating_add(agg.ironwood_received))
+        })
+    }
+
+    pub(crate) fn preflight_transparent_receipts(
+        &self,
+        receipts: &[(String, u32, u64)],
+    ) -> Result<()> {
+        if receipts.is_empty() {
+            return Ok(());
+        }
+        self.ensure_current_transparent_receipts()?;
+        let mut seen = std::collections::HashMap::new();
+        for (txid, index, value) in receipts {
+            if let Some(agg) = self.txs.get(txid) {
+                if agg.receipt_accounting_legacy
+                    && (agg.received_zat > 0 || !agg.accounted_transparent_receipts.is_empty())
+                {
+                    return Err(EngineError::Message(
+                        "transparent_pir_rescan_required".into(),
+                    ));
+                }
+                if agg
+                    .accounted_transparent_receipts
+                    .get(index)
+                    .is_some_and(|receipt| receipt.value_zat != *value)
+                {
+                    return Err(EngineError::Message("transparent_receipt_conflict".into()));
+                }
+            }
+            if seen
+                .insert((txid.as_str(), *index), *value)
+                .is_some_and(|prior| prior != *value)
+            {
+                return Err(EngineError::Message("transparent_receipt_conflict".into()));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_current_transparent_receipts(&self) -> Result<()> {
+        if self.legacy_transparent_receipt_accounting() {
+            return Err(EngineError::Message(
+                "transparent_pir_rescan_required".into(),
+            ));
+        }
+        #[cfg(feature = "transparent-pir")]
+        if self.transparent_pir_rescan_required() {
+            return Err(EngineError::Message(
+                "transparent_pir_rescan_required".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn credit_transparent_receipt(
+        &mut self,
+        txid: &str,
+        index: u32,
+        value: u64,
+        observed_height: Option<u32>,
+        builder: bool,
+    ) {
+        // All producers preflight their complete batch before any wallet writes.
+        let spent_in = self
+            .utxos
+            .iter()
+            .find(|u| u.txid == txid && u.index == index && u.spent)
+            .and_then(|u| u.spent_in.clone())
+            .filter(|spender| {
+                #[cfg(feature = "transparent-pir")]
+                {
+                    let prefix = format!("s:{spender}:");
+                    let suffix = format!(":{txid}:{index}");
+                    return !self
+                        .transparent_pir
+                        .projected_spends
+                        .iter()
+                        .any(|claim| claim.starts_with(&prefix) && claim.ends_with(&suffix));
+                }
+                #[cfg(not(feature = "transparent-pir"))]
+                {
+                    let _ = spender;
+                    true
+                }
+            })
+            .map(|txid| TransparentReceiptSpend {
+                height: self.txs.get(&txid).and_then(|agg| agg.mined_height),
+                txid,
+            });
+        let agg = self.txs.entry(txid.to_owned()).or_default();
+        agg.receipt_accounting_legacy = false;
+        let receipt = agg
+            .accounted_transparent_receipts
+            .entry(index)
+            .or_insert_with(|| {
+                agg.received_zat = agg.received_zat.saturating_add(value);
+                agg.received_notes = agg.received_notes.saturating_add(1);
+                TransparentReceipt {
+                    value_zat: value,
+                    ..Default::default()
+                }
+            });
+        receipt.builder |= builder;
+        if let Some(height) = observed_height {
+            receipt.observed_height = Some(receipt.observed_height.unwrap_or(0).max(height));
+        }
+        if let Some(spent) = spent_in {
+            if receipt.spent_in.is_none() || spent.height.is_some() {
+                receipt.spent_in = Some(spent);
+            }
+        }
+    }
+
+    pub(crate) fn record_transparent_receipt_spend(
+        &mut self,
+        previous: &str,
+        index: u32,
+        spender: &str,
+        height: Option<u32>,
+    ) {
+        if let Some(receipt) = self
+            .txs
+            .get_mut(previous)
+            .and_then(|agg| agg.accounted_transparent_receipts.get_mut(&index))
+        {
+            // Repeated construction callbacks do not replace independent mined
+            // spend evidence with an unmined claim, even for the same spender.
+            if height.is_none()
+                && receipt
+                    .spent_in
+                    .as_ref()
+                    .is_some_and(|spent| spent.height.is_some_and(|height| height > 0))
+            {
+                return;
+            }
+            receipt.spent_in = Some(TransparentReceiptSpend {
+                txid: spender.to_owned(),
+                height,
+            });
+        }
+    }
+
     /// Current unspent balance under an explicit minimum for both change and received notes.
     pub fn balance_with_confirmations(&self, confirmations: u32) -> Result<Balance> {
         Ok(self.balance_for_policy(&super::explicit_confirmations_policy(confirmations)?))
@@ -1494,16 +1703,19 @@ impl WebWallet {
             .collect();
         // Unmined sends/shields: change isn't in `notes` until the compact block is scanned.
         for (txid, agg) in &self.txs {
+            if !self.expired_unmined(agg) {
+                for (index, receipt) in &agg.accounted_transparent_receipts {
+                    if receipt.builder
+                        && receipt.observed_height.is_none_or(|height| height == 0)
+                        && receipt.spent_in.is_none()
+                        && !represented_transparent.contains(&(txid.as_str(), *index))
+                    {
+                        t_p = t_p.saturating_add(receipt.value_zat);
+                    }
+                }
+            }
             if agg.mined_height.is_some() || agg.received_zat == 0 || self.expired_unmined(agg) {
                 continue;
-            }
-            // Builder receipt metadata exists before a transparent output has a
-            // UTXO row. Rows already present (including spent rows) account for
-            // their exact outpoints above and must not be counted again here.
-            for (index, value) in &agg.accounted_transparent_receipts {
-                if !represented_transparent.contains(&(txid.as_str(), *index)) {
-                    t_p = t_p.saturating_add(*value);
-                }
             }
             if self.notes.iter().any(|n| n.txid == *txid) {
                 continue;
@@ -1617,27 +1829,9 @@ impl WebWallet {
     pub(crate) fn record_public_transparent_output(&mut self, txid: &str, index: u32) {
         // Publicly observed canonical rows no longer belong to PIR's deletion
         // ownership. This alone does not discharge their funding block.
-        if self
-            .transparent_pir
+        self.transparent_pir
             .projected_outputs
-            .remove(&format!("r:{txid}:{index}"))
-        {
-            if let Some(output) = self
-                .utxos
-                .iter()
-                .find(|u| u.txid == txid && u.index == index)
-            {
-                let agg = self.txs.entry(txid.to_owned()).or_default();
-                if agg
-                    .accounted_transparent_receipts
-                    .insert(index, output.value_zat)
-                    .is_none()
-                {
-                    agg.received_zat = agg.received_zat.saturating_add(output.value_zat);
-                    agg.received_notes = agg.received_notes.saturating_add(1);
-                }
-            }
-        }
+            .remove(&format!("r:{txid}:{index}"));
         self.transparent_pir.projected_transactions.remove(txid);
     }
 
@@ -2280,6 +2474,22 @@ impl WebWallet {
             .collect();
         let stays_pending =
             |txid: &Option<String>| txid.as_ref().is_some_and(|t| unmined_sends.contains(t));
+        for agg in self.txs.values_mut() {
+            for receipt in agg.accounted_transparent_receipts.values_mut() {
+                if receipt.observed_height.is_some_and(|height| height > keep) {
+                    receipt.observed_height = None;
+                }
+                if let Some(spent) = &mut receipt.spent_in {
+                    if spent.height.is_some_and(|height| height > keep) {
+                        if unmined_sends.contains(&spent.txid) {
+                            spent.height = None;
+                        } else {
+                            receipt.spent_in = None;
+                        }
+                    }
+                }
+            }
+        }
         self.notes.retain(|n| n.mined_height <= keep);
         for n in &mut self.notes {
             if n.spent_height.is_some_and(|h| h > keep) {
@@ -2521,6 +2731,13 @@ impl WebWallet {
             .collect();
         for txid in expired {
             let id = Some(txid.as_str());
+            for agg in self.txs.values_mut() {
+                for receipt in agg.accounted_transparent_receipts.values_mut() {
+                    if receipt.spent_in.as_ref().map(|spent| spent.txid.as_str()) == id {
+                        receipt.spent_in = None;
+                    }
+                }
+            }
             for n in &mut self.notes {
                 if n.spent_in.as_deref() == id && n.spent_height.is_none() {
                     n.spent = false;
@@ -2578,6 +2795,13 @@ impl WebWallet {
             if u.spent_in.as_deref() == Some(txid) {
                 u.spent = false;
                 u.spent_in = None;
+            }
+        }
+        for agg in self.txs.values_mut() {
+            for receipt in agg.accounted_transparent_receipts.values_mut() {
+                if receipt.spent_in.as_ref().map(|spent| spent.txid.as_str()) == Some(txid) {
+                    receipt.spent_in = None;
+                }
             }
         }
         if let Ok(id) = Self::txid_from_hex(txid) {
@@ -3838,6 +4062,26 @@ impl WebWallet {
                 spent_in,
             });
         }
+        let incoming: Vec<_> = next
+            .iter()
+            .map(|u| (u.txid.clone(), u.index, u.value_zat))
+            .collect();
+        self.preflight_transparent_receipts(&incoming)?;
+        let credited: Vec<_> = next
+            .iter()
+            .filter(|u| {
+                #[cfg(feature = "transparent-pir")]
+                {
+                    return u.height > 0 || !self.pir_funding_unverified(&u.txid, u.index);
+                }
+                #[cfg(not(feature = "transparent-pir"))]
+                {
+                    let _ = u;
+                    true
+                }
+            })
+            .map(|u| (u.txid.clone(), u.index, u.value_zat, u.height))
+            .collect();
         let n = next.len() as u32;
         // The server lists only unspent outputs. Keep ours that a known wallet
         // transaction spent, so its history still shows the transparent input
@@ -3868,6 +4112,9 @@ impl WebWallet {
             .collect();
         next.extend(kept);
         self.utxos = next;
+        for (txid, index, value, height) in credited {
+            self.credit_transparent_receipt(&txid, index, value, Some(height), false);
+        }
         #[cfg(feature = "transparent-pir")]
         for (txid, index) in confirmed {
             self.confirm_public_transparent_output(&txid, index);

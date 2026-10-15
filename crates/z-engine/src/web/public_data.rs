@@ -379,6 +379,35 @@ impl WebWallet {
             ));
         }
         let scripts = self.public_transparent_scripts()?;
+        let mut receipts = Vec::new();
+        let mut owns_input = false;
+        for block in &blocks {
+            for tx in &block.vtx {
+                let id = to_hex(&tx.txid);
+                for (index, output) in tx.vout.iter().enumerate() {
+                    if scripts
+                        .iter()
+                        .any(|(script, _)| *script == output.script_pub_key)
+                    {
+                        receipts.push((id.clone(), index as u32, output.value));
+                    }
+                }
+                owns_input |= tx.vin.iter().any(|input| {
+                    let previous = to_hex(&input.prevout_txid);
+                    self.utxos
+                        .iter()
+                        .any(|u| u.txid == previous && u.index == input.prevout_index)
+                        || self.txs().get(&previous).is_some_and(|agg| {
+                            agg.accounted_transparent_receipts
+                                .contains_key(&input.prevout_index)
+                        })
+                });
+            }
+        }
+        self.preflight_transparent_receipts(&receipts)?;
+        if owns_input {
+            self.ensure_current_transparent_receipts()?;
+        }
         self.transparent_scan_required = true;
         let mut found = 0;
         for block in blocks {
@@ -397,6 +426,12 @@ impl WebWallet {
                     }
                     #[cfg(feature = "transparent-pir")]
                     self.record_public_transparent_spend(&txid, &prev, input.prevout_index);
+                    self.record_transparent_receipt_spend(
+                        &prev,
+                        input.prevout_index,
+                        &txid,
+                        Some(height),
+                    );
                 }
                 for (index, output) in tx.vout.iter().enumerate() {
                     let Some((_, address)) = scripts
@@ -429,6 +464,13 @@ impl WebWallet {
                         });
                         found += 1;
                     }
+                    self.credit_transparent_receipt(
+                        &txid,
+                        index as u32,
+                        output.value,
+                        Some(height),
+                        false,
+                    );
                     #[cfg(feature = "transparent-pir")]
                     self.record_public_transparent_output(&txid, index as u32);
                 }
