@@ -91,6 +91,9 @@ impl Drop for Fixture {
 }
 impl Fixture {
     async fn new(root: &Path) -> Self {
+        Self::new_with_tip(root, 2).await
+    }
+    async fn new_with_tip(root: &Path, tip: u64) -> Self {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let sent = Arc::new(Mutex::new(Vec::new()));
         let chain = Arc::new(Mutex::new("regtest".to_owned()));
@@ -159,7 +162,7 @@ impl Fixture {
                                 "GetLightdInfo" => reply(
                                     vec![LightdInfo {
                                         chain_name: n.lock().unwrap().clone(),
-                                        block_height: 2,
+                                        block_height: tip,
                                         ..Default::default()
                                     }
                                     .encode_to_vec()],
@@ -167,8 +170,8 @@ impl Fixture {
                                 ),
                                 "GetLatestBlock" => reply(
                                     vec![BlockId {
-                                        height: 2,
-                                        hash: compact(2).hash,
+                                        height: tip,
+                                        hash: compact(tip).hash,
                                     }
                                     .encode_to_vec()],
                                     "0",

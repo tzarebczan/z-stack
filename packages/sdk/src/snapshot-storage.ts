@@ -250,10 +250,12 @@ export async function saveWalletSnapshot(
   commitWinsCancellation = false,
   /** Publish this prepared identity and snapshot in the same transaction. */
   replacement?: SnapshotReplacement,
+  /** Internal checkpoint phase: identify its own abort and preserve unrelated failures. */
+  checkpointAbort?: () => unknown,
 ): Promise<string | undefined> {
   if (!walletStorageAvailable()) return undefined;
   const controller = new AbortController();
-  const abort = () => controller.abort(aborted("snapshot save cancelled"));
+  const abort = () => controller.abort(checkpointAbort ? checkpointAbort() : aborted("snapshot save cancelled"));
   signal?.addEventListener("abort", abort, { once: true });
   if (signal?.aborted) abort();
   pendingWrites.add(abort);
@@ -330,6 +332,7 @@ export async function saveWalletSnapshot(
     // Each save has its own key: callers use it as the save's revision.
     return savedKey;
   } catch (error) {
+    if (checkpointAbort) throw error;
     if (current()) {
       if (error && typeof error === "object" && "name" in error && error.name === "QuotaExceededError") {
         throw WalletError.fromUnknown(error);

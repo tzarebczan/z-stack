@@ -376,6 +376,43 @@ impl ChainView for Chain {
     }
 }
 
+/// Exact held-checkpoint evidence from this pass's independently observed chain.
+/// The owner must still validate its durable prior checkpoint lineage. This is
+/// not a signature for arbitrary imported snapshots or caller-supplied headers.
+///
+/// Holding the evidence prevents advancing, acknowledging or cancelling its pass.
+/// ```compile_fail
+/// use z_transparent_pir_v2::Pass;
+/// fn cancel_while_held(pass: &mut Pass) {
+///     let evidence = pass.accepted_rewind().unwrap();
+///     pass.cancel();
+///     drop(evidence);
+/// }
+/// ```
+/// ```compile_fail
+/// use z_transparent_pir_v2::Pass;
+/// fn acknowledge_while_held(pass: &mut Pass, id: &str) {
+///     let evidence = pass.accepted_rewind().unwrap();
+///     pass.acknowledge(id).unwrap();
+///     drop(evidence);
+/// }
+/// ```
+/// ```compile_fail
+/// use z_transparent_pir_v2::{AcceptedRewind, Scope, Checkpoint};
+/// fn forge<'a>(scope: &'a Scope, checkpoint: &'a Checkpoint) -> AcceptedRewind<'a> {
+///     AcceptedRewind { scope, checkpoint }
+/// }
+/// ```
+pub struct AcceptedRewind<'pass> {
+    scope: &'pass Scope,
+    checkpoint: &'pass Checkpoint,
+}
+impl AcceptedRewind<'_> {
+    pub fn matches(&self, scope: &Scope, checkpoint: &Checkpoint) -> bool {
+        self.scope == scope && self.checkpoint == checkpoint
+    }
+}
+
 pub struct Pass {
     scope: Scope,
     store: SharedStore,
@@ -447,6 +484,27 @@ fn checkpoint_id(
     hex::encode(digest.finalize())
 }
 impl Pass {
+    /// Borrow only the current held checkpoint's exact accepted rewind. No I/O.
+    pub fn accepted_rewind(&self) -> Result<Option<AcceptedRewind<'_>>> {
+        if self.cancelled {
+            return Err(Error("cancelled"));
+        }
+        if self.lineage_pending.get() {
+            return Err(Error("lineage_pending"));
+        }
+        let checkpoint = self.held.as_ref().ok_or(Error("checkpoint_missing"))?;
+        let Some(ancestor) = &checkpoint.rewind_to else {
+            return Ok(None);
+        };
+        if self.driver.chain.borrow().get(&ancestor.height) != Some(&ancestor.hash) {
+            return Err(Error("rewind_not_observed"));
+        }
+        Ok(Some(AcceptedRewind {
+            scope: &self.scope,
+            checkpoint,
+        }))
+    }
+
     #[cfg(test)]
     pub(crate) fn fixture_store(&self) -> SharedStore {
         self.store.clone()
@@ -1170,3 +1228,6 @@ mod tests;
 
 #[cfg(test)]
 mod long_fork_tests;
+
+#[cfg(test)]
+mod accepted_rewind_tests;

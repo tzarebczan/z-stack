@@ -96,42 +96,53 @@ export function createStorageController(ctx: Pick<WasmClientContext, "savedRevis
       if (transparentCheckpoint) {
         const commit = source.commitPrivateTransparentCheckpoint;
         if (!commit) throw new Error("WASM needs a transactional transparent PIR upgrade");
-        const checkpointCurrent = () => {
-          if (!canSave()) throw new DOMException("mandatory checkpoint cancelled", "AbortError");
-          transparentCheckpoint.assertCurrent();
+        const authorityFailures = new WeakMap<object, unknown>();
+        const markAuthority = (cause: unknown): unknown => {
+          const failure = new Error("checkpoint authority cancelled", { cause });
+          authorityFailures.set(failure, cause);
+          return failure;
         };
+        const checkpointCurrent = () => {
+          try {
+            if (!canSave()) throw new DOMException("mandatory checkpoint cancelled", "AbortError");
+            transparentCheckpoint.assertCurrent();
+          } catch (error) { throw markAuthority(error); }
+        };
+        const knownAuthorityFailure = (error: unknown) => typeof error === "object" && error !== null && authorityFailures.has(error);
+        const ownsContext = () => source === ctx.session && epoch === ctx.walletEpoch
+          && (!ctx.sessionOperation || ctx.sessionOperation === operation);
+        const ownsRawLease = () => ownsContext() && !operation.signal.aborted && (source.kind !== "worker" || source === workerScanSession());
+        const retireOwned = () => { if (ownsContext()) ctx.retireFailedSession(source); };
+        let committed = false;
         try {
           await commit(transparentCheckpoint.checkpointId, async ({ bytes, previewJson }, acknowledge) => {
-            let committed = false;
-            try {
-              checkpointCurrent();
-              const key = await idbPut(bytes, JSON.parse(previewJson) as WalletSnapshot,
-                () => { checkpointCurrent(); return true; }, storedGeneration, baseKey,
-                allowLegacy, legacy, undefined, transparentCheckpoint.signal, true);
-              if (!key) throw new WalletError("wallet_db", "Local wallet storage is unavailable. Nothing was saved.");
-              committed = true;
-              // The key committed. Privacy cancellation cannot undo this save,
-              // but a locked/replaced source must never receive a late local ack.
-              if (!ownsSession()) throw new WalletError("wallet_changed", "wallet changed during checkpoint commit");
-              ctx.savedKeySeen = key;
-              ctx.savedRevision = undefined;
-              ctx.replaceLegacyOnSave = false;
-              ctx.legacyBytes = null;
-              await acknowledge();
-              if (!ownsSession()) throw new WalletError("wallet_changed", "wallet changed during checkpoint acknowledgment");
-            } catch (error) {
-              // Keep the source mutation gate until this owner is retired.
-              // A cold load can recover a committed candidate after ack uncertainty.
-              let failure = error;
-              if (!committed && transparentCheckpoint.signal.aborted) {
-                try { transparentCheckpoint.assertCurrent(); } catch (cancelled) { failure = cancelled; }
-              }
-              ctx.retireFailedSession(source);
-              throw failure;
+            checkpointCurrent();
+            const key = await idbPut(bytes, JSON.parse(previewJson) as WalletSnapshot,
+              () => { checkpointCurrent(); return true; }, storedGeneration, baseKey,
+              allowLegacy, legacy, undefined, transparentCheckpoint.signal, true, undefined,
+              () => markAuthority(transparentCheckpoint.signal.reason));
+            if (!key) throw new WalletError("wallet_db", "Local wallet storage is unavailable. Nothing was saved.");
+            committed = true;
+            // Only privacy/budget cancellation may be ignored after the key.
+            if (!ownsSession()) throw new WalletError("wallet_changed", "wallet changed during checkpoint commit");
+            ctx.savedKeySeen = key;
+            ctx.savedRevision = undefined;
+            ctx.replaceLegacyOnSave = false;
+            ctx.legacyBytes = null;
+            await acknowledge();
+            if (!ownsSession()) throw new WalletError("wallet_changed", "wallet changed during checkpoint acknowledgment");
+          }, checkpointCurrent, async (error, discard) => {
+            if (!committed && knownAuthorityFailure(error)) {
+              if (!ownsRawLease()) return "retire";
+              try { await discard(); return "preserve"; }
+              catch { retireOwned(); return "retire"; }
             }
-          }, checkpointCurrent);
+            // Called while the phase is held; retiring also rejects its old waiters.
+            retireOwned();
+            return "retire";
+          });
         } catch (error) {
-          ctx.retireFailedSession(source);
+          if (typeof error === "object" && error !== null && authorityFailures.has(error)) throw authorityFailures.get(error);
           throw error;
         }
         return;

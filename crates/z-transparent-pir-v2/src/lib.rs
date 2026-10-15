@@ -10,7 +10,7 @@ mod serialization;
 mod store;
 mod sync;
 mod transport;
-pub use pass::{Error, Pass};
+pub use pass::{AcceptedRewind, Error, Pass};
 mod ledger {
     pub use transparent_wallet::ledger::*;
 }

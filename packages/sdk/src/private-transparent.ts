@@ -21,7 +21,7 @@ export type PrivateTransparentCandidate = { bytes: Uint8Array; previewJson: stri
 export type PrivateTransparentHost = {
   supportsPrivateTransparentCheckpoints?: () => Promise<boolean>;
   privateTransparentSnapshot?: (checkpointId: string) => Promise<PrivateTransparentCandidate>;
-  commitPrivateTransparentCheckpoint?: (checkpointId: string, commit: (candidate: PrivateTransparentCandidate, acknowledge: () => Promise<void>) => Promise<void>, assertCurrent: () => void) => Promise<void>;
+  commitPrivateTransparentCheckpoint?: (checkpointId: string, commit: (candidate: PrivateTransparentCandidate, acknowledge: () => Promise<void>) => Promise<void>, assertCurrent: () => void, failed: (error: unknown, discard: () => Promise<void>) => Promise<"preserve" | "retire">) => Promise<void>;
   privateTransparent?: (operation: PrivateTransparentOperation, bytes: Uint8Array) => Promise<Uint8Array>;
 };
 

@@ -162,11 +162,36 @@ impl WebWallet {
     }
 
     pub fn apply_transparent_pir_checkpoint(&mut self, json: &str) -> Result<String> {
+        self.apply_transparent_pir_checkpoint_inner(json, None)
+    }
+
+    pub fn apply_transparent_pir_checkpoint_with_rewind(
+        &mut self,
+        json: &str,
+        rewind: z_transparent_pir_v2::AcceptedRewind<'_>,
+    ) -> Result<String> {
+        self.apply_transparent_pir_checkpoint_inner(json, Some(rewind))
+    }
+
+    fn apply_transparent_pir_checkpoint_inner(
+        &mut self,
+        json: &str,
+        rewind: Option<z_transparent_pir_v2::AcceptedRewind<'_>>,
+    ) -> Result<String> {
         if self.transparent_pir_rescan_required() {
             return Err(refused("transparent_pir_rescan_required"));
         }
         let checkpoint: TransparentPirCheckpoint = parse(json)?;
         let mut state = self.transparent_pir.clone();
+        let witnessed = rewind.as_ref().is_some_and(|witness| {
+            state
+                .scope
+                .as_ref()
+                .is_some_and(|scope| witness.matches(scope, &checkpoint))
+        });
+        if rewind.is_some() && !witnessed {
+            return Err(refused("transparent_pir_rewind_evidence_invalid"));
+        }
         let old_records = state.records.clone();
         let retirement_floor = state
             .rewind_floor
@@ -183,13 +208,15 @@ impl WebWallet {
                 Some(self.network.genesis_hash().to_string())
             } else {
                 self.hash_at(height)
-                    .and_then(|h| super::super::from_hex(h).ok())
-                    .map(|mut h| {
+                    .map(|h| -> Result<String> {
+                        let mut h = super::super::from_hex(h)
+                            .map_err(|_| refused("transparent_pir_rewind_anchor_unknown"))?;
                         h.reverse();
-                        super::super::to_hex(&h)
+                        Ok(super::super::to_hex(&h))
                     })
+                    .transpose()?
             };
-            if known.as_deref() != Some(&ancestor.hash) {
+            if known.as_deref() != Some(&ancestor.hash) && !(known.is_none() && witnessed) {
                 return Err(refused("transparent_pir_rewind_anchor_unknown"));
             }
             state.prepare_rewind(height);
@@ -455,12 +482,33 @@ impl WebWallet {
     /// projection. The synchronous preparation owns only the fields this
     /// checkpoint can modify; unrelated wallet state is never rolled back.
     pub fn transparent_pir_checkpoint_snapshot(&mut self, json: &str) -> Result<(Vec<u8>, String)> {
+        self.transparent_pir_checkpoint_snapshot_inner(json, None)
+    }
+
+    pub fn transparent_pir_checkpoint_snapshot_with_rewind(
+        &mut self,
+        json: &str,
+        rewind: z_transparent_pir_v2::AcceptedRewind<'_>,
+    ) -> Result<(Vec<u8>, String)> {
+        self.transparent_pir_checkpoint_snapshot_inner(json, Some(rewind))
+    }
+
+    fn transparent_pir_checkpoint_snapshot_inner(
+        &mut self,
+        json: &str,
+        rewind: Option<z_transparent_pir_v2::AcceptedRewind<'_>>,
+    ) -> Result<(Vec<u8>, String)> {
         let utxos = self.utxos.clone();
         let txs = self.txs.clone();
         let next_diversifier = self.next_diversifier;
         let state = self.transparent_pir.clone();
         let result = (|| {
-            self.apply_transparent_pir_checkpoint(json)?;
+            match rewind {
+                Some(witness) => {
+                    self.apply_transparent_pir_checkpoint_with_rewind(json, witness)?
+                }
+                None => self.apply_transparent_pir_checkpoint(json)?,
+            };
             Ok((self.to_snapshot()?, self.wallet_snapshot("").to_string()))
         })();
         self.utxos = utxos;

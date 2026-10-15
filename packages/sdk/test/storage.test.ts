@@ -1321,7 +1321,7 @@ test("private checkpoint phase drains prior mutations and keeps reads on the com
     assert.equal(source.persistenceRevision!(), undefined);
     assert.equal(await source.history(1), "base");
     await commit.promise; await acknowledge();
-  }, () => {});
+  }, () => {}, async () => "retire");
   const following = source.nextUnifiedAddress();
   await turn(); assert.deepEqual(events, []);
   prior.resolve(); await mutating; await prepared.promise;
@@ -1332,7 +1332,7 @@ test("private checkpoint phase drains prior mutations and keeps reads on the com
   assert.equal(typeof source.persistenceRevision!(), "number");
 });
 
-test("private checkpoint phase releases after a storage failure without acknowledging", async () => {
+test("private checkpoint failure rejects old queued mutations and permits fresh hydration", async () => {
   const prepared = checkpointDeferred<void>(), fail = checkpointDeferred<void>();
   const events: string[] = [];
   const source = trackScanRevision({
@@ -1343,13 +1343,15 @@ test("private checkpoint phase releases after a storage failure without acknowle
   } as never);
   const revision = source.persistenceRevision!();
   const phase = source.commitPrivateTransparentCheckpoint!("checkpoint", async () => {
-    await fail.promise; events.push("retired"); throw new Error("quota");
-  }, () => {});
+    await fail.promise; throw new Error("quota");
+  }, () => {}, async () => { events.push("retired"); return "retire"; });
   const rejected = assert.rejects(phase, /quota/);
   await prepared.promise;
-  const following = source.nextUnifiedAddress();
+  const following = assert.rejects(source.nextUnifiedAddress(), /quota/);
   assert.equal(source.persistenceRevision!(), undefined);
   fail.resolve(); await rejected; await following;
+  assert.deepEqual(events, ["retired"]);
+  await source.nextUnifiedAddress();
   assert.deepEqual(events, ["retired", "following"]);
   assert.notEqual(source.persistenceRevision!(), revision);
 });
@@ -1363,6 +1365,8 @@ class TransactionalPirWorker extends MemoWorker {
   acknowledgments = 0;
   staged = false;
   failAck = false;
+  failCandidate = false;
+  onEnhanceDispatch: ((hex: string) => void) | undefined;
   readonly checkpointId = "33".repeat(32);
   override postMessage(msg: Parameters<MemoWorker["postMessage"]>[0] & { transparentOperation?: string; checkpointId?: string }) {
     const reply = (data: Record<string, unknown>) => queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: { id: msg.id, ...data } })));
@@ -1375,7 +1379,7 @@ class TransactionalPirWorker extends MemoWorker {
     if (msg.op === "privateTransparentSnapshot") {
       this.ops.push(msg.op); this.candidateRequests++;
       assert.equal(msg.checkpointId, this.checkpointId); assert.equal(this.staged, true);
-      const respond = () => reply({ snapshot: snapshot(true).buffer, json: JSON.stringify({ ...preview(this.scanned), balance: { totalAvailable: 17000, orchardAvailable: 17000 } }) });
+      const respond = () => this.failCandidate ? reply({ error: "owned_candidate_failure" }) : reply({ snapshot: snapshot(true).buffer, json: JSON.stringify({ ...preview(this.scanned), balance: { totalAvailable: 17000, orchardAvailable: 17000 } }) });
       if (this.holdCandidate) this.heldCandidate = respond; else respond();
       return;
     }
@@ -1406,6 +1410,7 @@ class TransactionalPirWorker extends MemoWorker {
       }
       reply({ blob: value === undefined ? new ArrayBuffer(0) : encode(value).buffer }); return;
     }
+    if (msg.op === "enhanceRawTx") this.onEnhanceDispatch?.(msg.hex!);
     super.postMessage(msg);
   }
 }
@@ -1556,7 +1561,7 @@ test("forget retires a source immediately while its checkpoint mutation phase is
     await release.promise;
     if (retired) throw new Error("retired owner");
     await ack();
-  }, () => { if (retired) throw new Error("retired owner"); });
+  }, () => { if (retired) throw new Error("retired owner"); }, async () => "retire");
   const rejected = assert.rejects(phase, /retired owner/);
   await prepared.promise;
   await source.forget();
@@ -1604,3 +1609,145 @@ test("a checkpoint candidate is mandatory even when the last ordinary save has a
   assert.equal(worker.acknowledgments, 1);
   assert.deepEqual(JSON.parse(new TextDecoder().decode((await readSavedSnapshotRecord())!.bytes)), ["pir"]);
 });
+
+
+for (const cancel of ["mode", "sync"] as const) {
+  test(`known pre-key ${cancel} cancellation preserves independently computed unsaved wallet state`, async t => {
+    const { worker, client } = await transactionalPirClient(t);
+    const source = workerScanSession()!, entered = checkpointDeferred<void>(), release = checkpointDeferred<void>();
+    const original = source.privateTransparent!.bind(source);
+    source.privateTransparent = async (operation, bytes) => {
+      const reply = await original(operation, bytes);
+      if (operation === "advance") { entered.resolve();await release.promise; }
+      return reply;
+    };
+    const running = client.sync();const rejected = assert.rejects(running, cancel === "mode" ? /Privacy settings changed/ : /cancelled|abort/i);
+    await entered.promise;
+    await source.enhanceRawTx("independent-unsaved-fixture");
+    release.resolve();
+    await checkpointWait(() => !!worker.heldCandidate);
+    const following = source.enhanceRawTx("following-preserved-fixture");
+    if (cancel === "mode") client.setTransparentScan!("off"); else cancelWasmSync();
+    worker.heldCandidate!();await rejected;await following;
+    assert.equal(worker.completed.has("pir"), false);
+    await client.getWallet();client.setTransparentScan!("off");await client.sync();
+    assert.equal(worker.completed.has("independent-unsaved-fixture"), true, "authority cancellation must preserve the usable source and independent state");
+    assert.equal(worker.acknowledgments, 0);
+    assert.equal(worker.completed.has("following-preserved-fixture"), true);
+    const saved = (await readSavedSnapshotRecord())!;
+    assert.deepEqual(new Set(JSON.parse(new TextDecoder().decode(saved.bytes))), new Set(["independent-unsaved-fixture", "following-preserved-fixture"]));
+    await source.fromSnapshot(saved.bytes);
+    assert.equal(worker.completed.has("independent-unsaved-fixture"), true);
+    assert.equal(worker.completed.has("following-preserved-fixture"), true);
+  });
+}
+
+test("an unknown candidate snapshot failure retires its source before queued raw mutation enters", async t => {
+  const { worker, client } = await transactionalPirClient(t);
+  const running = client.sync();const rejected = assert.rejects(running, /owned_candidate_failure/);
+  await checkpointWait(() => !!worker.heldCandidate);
+  const source = workerScanSession()!;
+  const { runtimeState } = await import("../src/wasm-client-runtime.ts");
+  let dispatches = 0;
+  worker.onEnhanceDispatch = () => { dispatches++; };
+  const following = source.enhanceRawTx("following-fixture").then(() => true, () => false);
+  worker.failCandidate = true;worker.heldCandidate!();
+  await rejected;
+  assert.equal(await following, false, "a queued old-owner mutation must be refused after unknown failure");
+  assert.equal(dispatches, 0, "retirement metadata alone must not permit an old raw RPC");
+  assert.equal(worker.acknowledgments, 0);
+});
+
+test("a genuine failed IDB transaction retains its quota error when mode cancellation follows the failure", async t => {
+  const { db, worker, client } = await transactionalPirClient(t);
+  const { useWalletStorage } = await import("../src/wallet-storage.ts");
+  const { indexedDbWalletStorage } = await import("../src/storage.ts");
+  const base = indexedDbWalletStorage();
+  const storage: import("../src/storage").WalletStorage = {
+    get available() { return base.available; },
+    async transaction(mode, body, options) {
+      try { return await base.transaction(mode, body, options); }
+      catch (error) { if (error instanceof Error && /quota/.test(error.message)) client.setTransparentScan!("off"); throw error; }
+    },
+  };
+  useWalletStorage(storage); t.after(() => useWalletStorage());
+  const running = client.sync();const rejected = assert.rejects(running, /quota/);
+  await checkpointWait(() => !!worker.heldCandidate);
+  const source = workerScanSession()!;let dispatched = 0;
+  worker.onEnhanceDispatch = () => { dispatched++; };
+  const following = source.enhanceRawTx("old-queued").then(() => true, () => false);
+  db.failPutKey = "default";worker.heldCandidate!();await rejected;
+  assert.equal(await following, false);assert.equal(dispatched, 0);
+  assert.equal(worker.acknowledgments, 0);
+});
+
+for (const failureKind of ["primitive", "fake-abort", "cleanup", "successor"] as const) {
+  test(`checkpoint failure hook fences ${failureKind} without confusing owner cancellation`, async t => {
+    installDb(t);
+    const { createStorageController } = await import("../src/wasm-client-storage.ts");
+    const { captureWalletOperation } = await import("../src/wallet-lifecycle.ts");
+    const entered = checkpointDeferred<void>(), release = checkpointDeferred<void>();
+    const signal = new AbortController();
+    const error = failureKind === "primitive" ? "same-cancellation-value" : new DOMException("unrelated candidate error", "AbortError");
+    let rawCancels = 0, rawMutations = 0, retired = 0;
+    const source = trackScanRevision({
+      kind: "local",
+      privateTransparentSnapshot: async () => { entered.resolve(); await release.promise; if (failureKind !== "successor" && failureKind !== "cleanup") throw error; return { bytes: new Uint8Array([1]), previewJson: JSON.stringify(preview()) }; },
+      privateTransparent: async (op: string) => { assert.equal(op, "cancel");rawCancels++;if(failureKind === "cleanup") throw new Error("cleanup failed");return new Uint8Array(); },
+      enhanceRawTx: async () => { rawMutations++;return 0; },
+      fromSnapshot: async () => { rawMutations++; },
+    } as never);
+    const successor = trackScanRevision({ kind: "local" } as never);
+    const operation = captureWalletOperation();
+    const ctx: Parameters<typeof createStorageController>[0] = {
+      session: source, sessionOperation: operation, walletEpoch: 1, stateEpoch: 1,
+      savedRevision: undefined, savedKeySeen: null, legacyBytes: null, replaceLegacyOnSave: false,
+      storageGeneration: await readWalletGeneration(), persistenceRequired: true,
+      assertSource: () => {}, unlockPolicy: "session", spendingSeed: null, network: "regtest",
+      currentSession: () => ctx.session, loadLock: null, report: () => {}, publishSession: () => {},
+      paintNoteBalance: async () => {}, bindLocal: () => source, opts: {},
+      retireFailedSession: stale => { assert.equal(stale, source);retired++;ctx.session = null; },
+    };
+    const saving = createStorageController(ctx).persist(undefined, undefined, false, {
+      checkpointId: "fixture", signal: signal.signal, assertCurrent: () => { signal.signal.throwIfAborted(); },
+    });
+    const rejected = assert.rejects(saving, value => failureKind === "cleanup" ? value === "same-cancellation-value" : value === error || failureKind === "successor" && value instanceof DOMException && value.name === "AbortError");
+    await entered.promise;
+    const queued = source.enhanceRawTx("queued").then(() => true, () => false);
+    if (failureKind === "successor") ctx.session = successor;
+    signal.abort("same-cancellation-value");release.resolve();await rejected;
+    assert.equal(await queued, false);assert.equal(rawMutations, 0);
+    assert.equal(rawCancels, failureKind === "cleanup" ? 1 : 0);
+    assert.equal(retired, failureKind === "successor" ? 0 : 1);
+    if (failureKind === "successor") assert.equal(ctx.session, successor);
+    await source.fromSnapshot(new Uint8Array([9]));
+    assert.equal(rawMutations, 1, "fresh hydration must not remain stuck behind the retired phase");
+  });
+}
+
+for (const state of ["quota-aborting", "unknown-aborting", "committed", "active"] as const) {
+  test(`the default IDB adapter certifies cancellation only after a successful native abort (${state})`, async () => {
+    const { indexedDbWalletStorage } = await import("../src/storage.ts");
+    const signal = new AbortController(), ownedAbort = new Error("captured owned cancellation");
+    const primary = new DOMException("original transaction quota", "QuotaExceededError");
+    let native!: IDBTransaction;
+    const factory = {
+      open() {
+        const request = { result: { objectStoreNames: { contains: () => true }, close() {}, transaction() {
+          native = { error: state === "quota-aborting" ? primary : null, objectStore: () => ({}),
+            abort() { if (state !== "active") throw new DOMException("already ended", "InvalidStateError");queueMicrotask(() => native.onabort?.(new Event("abort"))); },
+          } as unknown as IDBTransaction;
+          return native;
+        } }, onsuccess: undefined as (() => void) | undefined };
+        queueMicrotask(() => request.onsuccess?.());return request;
+      },
+    };
+    const storage = indexedDbWalletStorage({ factory: factory as unknown as IDBFactory });
+    const running = storage.transaction<number>("readwrite", tx => {
+      tx.result(42);signal.abort(ownedAbort);
+      if (state !== "active") queueMicrotask(() => state === "committed" ? native.oncomplete?.(new Event("complete")) : native.onabort?.(new Event("abort")));
+    }, { signal: signal.signal, commitWinsCancellation: true });
+    if (state === "committed") assert.equal(await running, 42, "the actual committed result still wins before delayed oncomplete");
+    else await assert.rejects(running, error => state === "unknown-aborting" ? error !== ownedAbort && error instanceof DOMException && error.name === "AbortError" : error === (state === "active" ? ownedAbort : primary));
+  });
+}

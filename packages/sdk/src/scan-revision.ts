@@ -14,7 +14,7 @@ export function trackScanRevision(session: ScanSession): ScanSession {
   let revision = 0;
   let pending = 0;
   const idle = new Set<() => void>();
-  let phaseGate: { promise: Promise<void>; release: () => void } | null = null;
+  let phaseGate: { promise: Promise<void>; release: () => void; reject: (error: unknown) => void } | null = null;
   let phaseTail = Promise.resolve();
   let phases = 0;
   const settled = () => { if (!pending) { for (const resolve of idle) resolve(); idle.clear(); } };
@@ -39,13 +39,14 @@ export function trackScanRevision(session: ScanSession): ScanSession {
     } });
   }
   if (engine && candidateSnapshot) {
-    session.commitPrivateTransparentCheckpoint = async (id, commit, assertCurrent) => {
+    session.commitPrivateTransparentCheckpoint = async (id, commit, assertCurrent, failed) => {
       assertCurrent();
       phases++;
       if (!phaseGate) {
-        let release!: () => void;
-        const promise = new Promise<void>(resolve => { release = resolve; });
-        phaseGate = { promise, release };
+        let release!: () => void, reject!: (error: unknown) => void;
+        const promise = new Promise<void>((resolve, fail) => { release = resolve; reject = fail; });
+        void promise.catch(() => {});
+        phaseGate = { promise, release, reject };
       }
       const preceding = phaseTail;
       let releasePhase!: () => void;
@@ -68,6 +69,12 @@ export function trackScanRevision(session: ScanSession): ScanSession {
         } finally {
           revision++; pending--; settled();
         }
+      } catch (error) {
+        let disposition: "preserve" | "retire" = "retire";
+        try { disposition = await failed(error, async () => { await engine.call(session, "cancel", new Uint8Array()); }); }
+        catch { /* Keep the original failure if owner cleanup also fails. */ }
+        if (disposition === "retire") phaseGate?.reject(error);
+        throw error;
       } finally {
         phases--;
         if (!phases) { const gate = phaseGate; phaseGate = null; gate?.release(); }

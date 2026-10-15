@@ -605,6 +605,26 @@ impl NativeWallet {
         pass: &mut NativeTransparentPirPass,
         json: &str,
     ) -> Result<serde_json::Value> {
+        self.apply_transparent_pir_checkpoint_inner(source, pass, json, None)
+    }
+
+    pub fn apply_transparent_pir_checkpoint_with_source_and_rewind(
+        &self,
+        source: &super::super::NativeWalletSource,
+        pass: &mut NativeTransparentPirPass,
+        json: &str,
+        rewind: z_transparent_pir_v2::AcceptedRewind<'_>,
+    ) -> Result<serde_json::Value> {
+        self.apply_transparent_pir_checkpoint_inner(source, pass, json, Some(rewind))
+    }
+
+    fn apply_transparent_pir_checkpoint_inner(
+        &self,
+        source: &super::super::NativeWalletSource,
+        pass: &mut NativeTransparentPirPass,
+        json: &str,
+        rewind: Option<z_transparent_pir_v2::AcceptedRewind<'_>>,
+    ) -> Result<serde_json::Value> {
         self.require_wallet_source(source)?;
         if pass.root != self.paths.root || pass.binding != source.binding() {
             return Err(refused("transparent_pir_context_changed"));
@@ -617,6 +637,11 @@ impl NativeWallet {
         }
         pass.cancel.transaction(|| self.transparent_transaction(|wdb,ext| -> anyhow::Result<_> {
             let mut state = load(ext)?;
+            let witnessed = rewind.as_ref().is_some_and(|witness| {
+                witness.matches(&pass.scope, &checkpoint)
+                    && state.scope.as_ref().is_some_and(|scope| witness.matches(scope, &checkpoint))
+            });
+            if rewind.is_some() && !witnessed { anyhow::bail!("transparent_pir_rewind_evidence_invalid"); }
             let old_records = state.records.clone();
             let missing = missing_projection(ext,&state)?;
             invalidate_missing(&mut state,&missing);
@@ -627,7 +652,7 @@ impl NativeWallet {
             if let Some(ancestor)=&checkpoint.rewind_to {
                 let height=u32::try_from(ancestor.height)?;
                 let known=if height==0 {Some(self.network.genesis_hash().to_string())} else {wdb.get_block_hash(height.into())?.map(|h|h.to_string())};
-                if known.as_deref()!=Some(&ancestor.hash) {anyhow::bail!("transparent_pir_rewind_anchor_unknown");}
+                if known.as_deref()!=Some(&ancestor.hash) && !(known.is_none() && witnessed) {anyhow::bail!("transparent_pir_rewind_anchor_unknown");}
                 if !repair { state.prepare_rewind(height); }
             }
             let mut records = state.validate(&checkpoint)?;

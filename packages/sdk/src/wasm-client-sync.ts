@@ -1015,7 +1015,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
           try {
             await ctx.persist(undefined, undefined, false, checkpointId
               ? { checkpointId, signal: checkpointSignal, assertCurrent: current } : undefined);
-          } catch (error) { checkpointFailure = { error }; ctx.retireFailedSession(source); throw error; }
+          } catch (error) { checkpointFailure = { error }; throw error; }
         }, treeState: ctx.transport.treeState });
       current();
       ctx.transparentScanFailure = result === "history-metadata-limit" ? result : undefined;

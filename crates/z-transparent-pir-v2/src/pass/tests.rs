@@ -1,6 +1,6 @@
 use super::*;
 use futures::Future;
-fn scope() -> Scope {
+pub(super) fn scope() -> Scope {
     Scope {
         source_id: "1".repeat(64),
         generation: 1,
@@ -25,7 +25,7 @@ fn scope() -> Scope {
         ],
     }
 }
-fn snapshot(p: &Pass) -> Checkpoint {
+pub(super) fn snapshot(p: &Pass) -> Checkpoint {
     let bytes = durable(
         &p.scope,
         &p.store.inner.borrow(),
