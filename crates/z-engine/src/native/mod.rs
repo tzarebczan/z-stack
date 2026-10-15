@@ -152,7 +152,7 @@ mod replacement_tests {
 }
 
 #[cfg(feature = "private-enhance")]
-pub use wallet::NativeEnhancePass;
+pub use wallet::{NativeEnhancePass, NativeEnhanceStart};
 
 #[cfg(feature = "transparent-pir")]
 pub use wallet::NativeTransparentPirPass;

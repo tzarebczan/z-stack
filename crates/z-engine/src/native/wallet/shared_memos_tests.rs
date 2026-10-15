@@ -31,6 +31,10 @@ fn fixture(private_only: bool) -> Fixture {
     fixture_with_memo(private_only, "complete public memo")
 }
 fn fixture_with_memo(private_only: bool, public_memo: &str) -> Fixture {
+    fixture_with_scan(private_only, public_memo, false)
+}
+fn fixture_with_scan(private_only: bool, public_memo: &str, sparse: bool) -> Fixture {
+    let tip = if sparse { END + 101 } else { END };
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let source = NativeWalletSource::new(
@@ -94,7 +98,7 @@ fn fixture_with_memo(private_only: bool, public_memo: &str) -> Fixture {
     let mut blocks = Vec::new();
     let mut orchard_size = 0;
     let mut ironwood_size = 0;
-    for height in START..=END {
+    for height in START..=tip {
         let mut block = CompactBlock {
             height: height.into(),
             hash: vec![(height - START + 1) as u8; 32],
@@ -176,8 +180,37 @@ fn fixture_with_memo(private_only: bool, public_memo: &str) -> Fixture {
             .unwrap()
         })
         .collect();
-    db.update_chain_tip(END.into()).unwrap();
-    db.put_blocks(&state, scanned).unwrap();
+    db.update_chain_tip(tip.into()).unwrap();
+    if sparse {
+        use crate::native::selective_scan::{
+            complete_decrypted, decrypt_owned, flush_remaining, load_nullifiers, load_ufvks,
+            persist_batch, NativeOffload, TrialContext,
+        };
+        let context = TrialContext::new(load_ufvks(&db).unwrap(), load_nullifiers(&db).unwrap());
+        let selected: Vec<_> = blocks
+            .iter()
+            .filter(|b| b.height >= u64::from(BIRTHDAY))
+            .cloned()
+            .collect();
+        let batch = decrypt_owned(
+            Network::Regtest,
+            context.snapshot(&db, &selected).unwrap(),
+            state.clone(),
+            BIRTHDAY.into(),
+            selected,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let batch = complete_decrypted(Network::Regtest, &mut db, &context, batch, None)
+            .unwrap()
+            .unwrap();
+        let mut offload = NativeOffload::new(0, 0, 0);
+        persist_batch(&mut db, batch, &mut offload).unwrap();
+        flush_remaining(&mut db, &mut offload).unwrap();
+    } else {
+        db.put_blocks(&state, scanned).unwrap();
+    }
     drop(db);
     crate::native::source::enroll_wallet(root, &source).unwrap();
     let wallet = NativeWallet {
@@ -199,7 +232,7 @@ fn fixture_with_memo(private_only: bool, public_memo: &str) -> Fixture {
         },
     };
     wallet.save_meta().unwrap();
-    let bundles=blocks.iter().map(|block|serde_json::to_vec(&serde_json::json!({"start":block.height,"end":block.height,"blocks":crate::web::to_hex(&crate::web::encode_one(block)),"transactions":if block.height==u64::from(BIRTHDAY){raws.iter().enumerate().filter(|(i,_)|!private_only||*i==1).map(|(_,raw)|crate::web::to_hex(raw)).collect::<Vec<_>>()}else{vec![]}})).unwrap()).collect();
+    let bundles=blocks.iter().filter(|block| block.height <= u64::from(END)).map(|block|serde_json::to_vec(&serde_json::json!({"start":block.height,"end":block.height,"blocks":crate::web::to_hex(&crate::web::encode_one(block)),"transactions":if block.height==u64::from(BIRTHDAY){raws.iter().enumerate().filter(|(i,_)|!private_only||*i==1).map(|(_,raw)|crate::web::to_hex(raw)).collect::<Vec<_>>()}else{vec![]}})).unwrap()).collect();
     Fixture {
         _dir: dir,
         wallet,
@@ -519,5 +552,103 @@ async fn rediscovery_row_decode_error_keeps_authenticated_empty_memo_unknown() {
         conn.total_changes(),
         changes,
         "status lookup must remain query-only"
+    );
+}
+
+#[tokio::test]
+async fn sparse_native_scan_retains_fixed_public_bucket_anchor() {
+    let f = fixture_with_scan(false, "sparse public memo", true);
+    assert_eq!(
+        f.wallet
+            .open_db()
+            .unwrap()
+            .block_fully_scanned()
+            .unwrap()
+            .unwrap()
+            .block_height(),
+        (END + 101).into()
+    );
+    assert!(raw(&f.wallet, f.public).is_none());
+    let mut rejected = match f.wallet.begin_shared_memos_with_source(&f.source) {
+        Ok(pass) => pass,
+        Err(EngineError::Message(message)) if message == "shared_memos_anchor_unavailable" => {
+            panic!("shared_memos_anchor_unavailable")
+        }
+        Err(_) => panic!("unexpected_static_fixture_error"),
+    };
+    assert!(f
+        .wallet
+        .open_db()
+        .unwrap()
+        .get_block_hash(END.into())
+        .unwrap()
+        .is_some());
+    for bundle in &f.bundles[..9] {
+        assert_eq!(
+            f.wallet
+                .apply_shared_memos_with_source(&f.source, &mut rejected, bundle)
+                .unwrap(),
+            0
+        );
+    }
+    let mut corrupt: serde_json::Value = serde_json::from_slice(&f.bundles[9]).unwrap();
+    let frames = crate::web::from_hex(corrupt["blocks"].as_str().unwrap()).unwrap();
+    let mut block = crate::web::decode_delimited(&frames)
+        .unwrap()
+        .pop()
+        .unwrap();
+    block.hash = vec![0xee; 32];
+    corrupt["blocks"] = crate::web::to_hex(&crate::web::encode_one(&block)).into();
+    let error = f
+        .wallet
+        .apply_shared_memos_with_source(
+            &f.source,
+            &mut rejected,
+            &serde_json::to_vec(&corrupt).unwrap(),
+        )
+        .err()
+        .unwrap();
+    assert!(
+        matches!(error, EngineError::Message(message) if message == "shared_memos_chain_mismatch")
+    );
+    assert!(
+        raw(&f.wallet, f.public).is_none(),
+        "wrong-fork bucket cannot partially recover a memo"
+    );
+    let mut pass = f.wallet.begin_shared_memos_with_source(&f.source).unwrap();
+    assert_eq!(apply_all(&f, &mut pass).unwrap(), 1);
+    assert!(raw(&f.wallet, f.public).is_some());
+    assert!(raw(&f.wallet, f.private).is_none());
+    let db = f
+        .wallet
+        .open_db()
+        .unwrap()
+        .with_enhancement_mode(EnhancementMode::PrivateIronwood);
+    assert!(db
+        .transaction_enhancement_work()
+        .unwrap()
+        .iter()
+        .any(|work| matches!(work, TransactionEnhancementWork::Private(_))));
+    drop(db);
+    let reopened = NativeWallet::open_with_wallet_source(&f.wallet.paths.root, &f.source).unwrap();
+    assert!(reopened
+        .open_db()
+        .unwrap()
+        .get_block_hash(END.into())
+        .unwrap()
+        .is_some());
+    assert!(reopened
+        .history(10)
+        .unwrap()
+        .iter()
+        .any(|tx| tx.memo_status == crate::MemoStatus::Available
+            && tx.memos.iter().any(|memo| memo == "sparse public memo")));
+    assert!(
+        reopened
+            .history(10)
+            .unwrap()
+            .iter()
+            .any(|tx| tx.txid == f.private.to_string()
+                && tx.memo_status == crate::MemoStatus::Pending)
     );
 }

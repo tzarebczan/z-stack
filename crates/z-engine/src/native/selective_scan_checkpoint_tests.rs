@@ -542,6 +542,9 @@ fn persisted_recovery_ignores_ancient_pruned_positions() {
     .unwrap();
     let path = dir.path().join("wallet.sqlite");
     let conn = rusqlite::Connection::open(&path).unwrap();
+    // Fixed public endpoints now include 5000. Replace that fixture row so the
+    // original deliberately unavailable ancient interior position is preserved.
+    conn.execute("DELETE FROM blocks WHERE height = 5000", []).unwrap();
     conn.execute("INSERT INTO blocks (height,hash,time,sapling_tree,sapling_commitment_tree_size,orchard_commitment_tree_size,ironwood_commitment_tree_size) VALUES(5000,zeroblob(32),0,X'00',0,3,0)", []).unwrap();
     // Model the old sparse layout, retaining only historical watermarks and tip.
     conn.execute(

@@ -22,6 +22,9 @@ use zcash_protocol::{
     TxId,
 };
 
+// Fixed public positions shared with native compact metadata retention.
+pub(in crate::native) const SHARED_MEMO_BUCKET_WIDTH: u32 = 10;
+
 fn refused(code: &str) -> EngineError {
     EngineError::Message(code.into())
 }
@@ -85,7 +88,10 @@ impl NativeWallet {
                 if let Some(height) = db.get_tx_height(request.txid()).map_err(database_error)? {
                     let height = u32::from(height);
                     if height > 0 && height <= tip {
-                        starts.insert(((height - 1) / 10) * 10 + 1);
+                        starts.insert(
+                            ((height - 1) / SHARED_MEMO_BUCKET_WIDTH) * SHARED_MEMO_BUCKET_WIDTH
+                                + 1,
+                        );
                     }
                 }
             }
@@ -93,7 +99,12 @@ impl NativeWallet {
         let buckets: Vec<_> = starts
             .into_iter()
             .take(2)
-            .map(|start| (start, start.saturating_add(9).min(tip)))
+            .map(|start| {
+                (
+                    start,
+                    start.saturating_add(SHARED_MEMO_BUCKET_WIDTH - 1).min(tip),
+                )
+            })
             .collect();
         let mut anchors = BTreeMap::new();
         for &(start, end) in &buckets {
