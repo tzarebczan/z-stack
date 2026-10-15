@@ -1381,24 +1381,26 @@ impl WalletWrite for WebWallet {
         }
         self.preflight_transparent_receipts(&receipts)
             .map_err(|error| error.to_string())?;
-        let owns_transparent_input = transactions.iter().any(|sent| {
-            sent.tx().transparent_bundle().is_some_and(|bundle| {
-                bundle.vin.iter().any(|input| {
-                    let previous = super::to_hex(input.prevout().hash());
-                    self.utxos
-                        .iter()
-                        .any(|u| u.txid == previous && u.index == input.prevout().n())
-                        || self.txs().get(&previous).is_some_and(|agg| {
-                            agg.accounted_transparent_receipts
-                                .contains_key(&input.prevout().n())
+        let spends: Vec<_> = transactions
+            .iter()
+            .flat_map(|sent| {
+                sent.tx()
+                    .transparent_bundle()
+                    .into_iter()
+                    .flat_map(move |bundle| {
+                        bundle.vin.iter().map(move |input| {
+                            (
+                                super::to_hex(input.prevout().hash()),
+                                input.prevout().n(),
+                                super::to_hex(sent.tx().txid().as_ref()),
+                                None,
+                            )
                         })
-                })
+                    })
             })
-        });
-        if owns_transparent_input {
-            self.ensure_current_transparent_receipts()
-                .map_err(|error| error.to_string())?;
-        }
+            .collect();
+        self.preflight_transparent_spends(&spends)
+            .map_err(|error| error.to_string())?;
         for sent in transactions {
             self.store_pending_tx(sent.tx())
                 .map_err(|e| e.to_string())?;
@@ -1444,29 +1446,27 @@ impl WalletWrite for WebWallet {
                     let prev = vin.prevout();
                     let hx = super::to_hex(prev.hash());
                     let idx = prev.n();
-                    #[cfg(feature = "transparent-pir")]
-                    let mut newly_credited = false;
+                    let mut new_input = None;
                     for u in &mut self.utxos {
                         if !u.spent && u.txid == hx && u.index == idx {
                             u.spent = true;
                             u.spent_in = Some(txid.clone());
-                            spent_t = spent_t.saturating_add(u.value_zat);
-                            spent_zat = spent_zat.saturating_add(u.value_zat);
-                            spent_notes += 1;
-                            #[cfg(feature = "transparent-pir")]
-                            {
-                                newly_credited = true;
-                            }
+                            new_input = Some(u.value_zat);
+                        }
+                    }
+                    if let Some(value) = new_input {
+                        self.credit_transparent_debit(&txid, &hx, idx, value);
+                        spent_t = spent_t.saturating_add(value);
+                    }
+                    if let Some(value) =
+                        self.record_transparent_receipt_spend(&hx, idx, &txid, None)
+                    {
+                        if new_input.is_none() {
+                            spent_t = spent_t.saturating_add(value);
                         }
                     }
                     #[cfg(feature = "transparent-pir")]
-                    if newly_credited {
-                        // The normal WalletWrite totals below already credit this input.
-                        self.release_pir_spend_ownership(&txid, &hx, idx);
-                    } else {
-                        self.record_public_transparent_spend(&txid, &hx, idx);
-                    }
-                    self.record_transparent_receipt_spend(&hx, idx, &txid, None);
+                    self.record_public_transparent_spend(&txid, &hx, idx);
                 }
             }
             let complete_receipts = self

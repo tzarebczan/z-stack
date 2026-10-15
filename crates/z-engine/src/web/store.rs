@@ -255,6 +255,8 @@ pub(crate) struct TransparentReceipt {
 pub(crate) struct TransparentReceiptSpend {
     pub txid: String,
     pub height: Option<u32>,
+    #[serde(default)]
+    pub accounted: bool,
 }
 
 fn legacy_receipt_accounting() -> bool {
@@ -308,6 +310,9 @@ pub struct TxAgg {
     // identify old aggregates whose generic transparent share is ambiguous.
     #[serde(default = "legacy_receipt_accounting")]
     pub(crate) receipt_accounting_legacy: bool,
+    /// Exact independent transparent debit credits owned by this spender.
+    #[serde(default)]
+    pub(crate) accounted_transparent_spends: BTreeMap<String, BTreeMap<u32, u64>>,
     #[cfg(feature = "transparent-pir")]
     #[serde(default)]
     pub(crate) pir_received_zat: Option<u64>,
@@ -1035,6 +1040,25 @@ impl WebWallet {
                 }
             }
         }
+        let represented_spends: std::collections::HashSet<_> = utxos
+            .iter()
+            .filter_map(|u| {
+                u.spent_in
+                    .as_ref()
+                    .filter(|_| u.spent)
+                    .map(|spender| (spender.as_str(), u.txid.as_str(), u.index))
+            })
+            .collect();
+        for (spender, agg) in &mut self.txs {
+            for (previous, outputs) in &agg.accounted_transparent_spends {
+                for (index, value) in outputs {
+                    if !represented_spends.contains(&(spender.as_str(), previous.as_str(), *index))
+                    {
+                        agg.transparent_spent = agg.transparent_spent.saturating_add(*value);
+                    }
+                }
+            }
+        }
         #[cfg(feature = "transparent-pir")]
         self.reconcile_transparent_pir_history();
     }
@@ -1498,7 +1522,12 @@ impl WebWallet {
 
     pub(crate) fn legacy_transparent_receipt_accounting(&self) -> bool {
         self.txs.values().any(|agg| {
-            agg.receipt_accounting_legacy
+            agg.accounted_transparent_receipts.values().any(|receipt| {
+                receipt
+                    .spent_in
+                    .as_ref()
+                    .is_some_and(|spent| !spent.accounted)
+            }) || agg.receipt_accounting_legacy
                 && (agg.transparent_received > 0
                     || !agg.accounted_transparent_receipts.is_empty()
                     || agg.received_zat
@@ -1594,7 +1623,17 @@ impl WebWallet {
             .map(|txid| TransparentReceiptSpend {
                 height: self.txs.get(&txid).and_then(|agg| agg.mined_height),
                 txid,
+                accounted: true,
             });
+        if let Some(spent) = &spent_in {
+            self.txs
+                .entry(spent.txid.clone())
+                .or_default()
+                .accounted_transparent_spends
+                .entry(txid.to_owned())
+                .or_default()
+                .insert(index, value);
+        }
         let agg = self.txs.entry(txid.to_owned()).or_default();
         agg.receipt_accounting_legacy = false;
         let receipt = agg
@@ -1619,33 +1658,108 @@ impl WebWallet {
         }
     }
 
+    pub(crate) fn preflight_transparent_spends(
+        &self,
+        spends: &[(String, u32, String, Option<u32>)],
+    ) -> Result<()> {
+        let mut seen = std::collections::HashMap::new();
+        let mut checked_current = false;
+        for (previous, index, spender, height) in spends {
+            let receipt = self
+                .txs
+                .get(previous)
+                .and_then(|agg| agg.accounted_transparent_receipts.get(index));
+            if receipt.is_none()
+                && !self
+                    .utxos
+                    .iter()
+                    .any(|u| u.txid == *previous && u.index == *index)
+            {
+                continue;
+            }
+            if !checked_current {
+                self.ensure_current_transparent_receipts()?;
+                checked_current = true;
+            }
+            let prior = seen.entry((previous.as_str(), *index)).or_insert_with(|| {
+                receipt.and_then(|receipt| {
+                    receipt
+                        .spent_in
+                        .as_ref()
+                        .map(|spent| (spent.txid.as_str(), spent.height))
+                })
+            });
+            if prior.is_some_and(|(prior, old_height)| {
+                prior != spender
+                    && (height.is_none() || old_height.is_some_and(|height| height > 0))
+            }) {
+                return Err(EngineError::Message("transparent_receipt_conflict".into()));
+            }
+            if prior.is_none_or(|(_, old_height)| height.is_some() || old_height.is_none()) {
+                *prior = Some((spender.as_str(), *height));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn credit_transparent_debit(
+        &mut self,
+        spender: &str,
+        previous: &str,
+        index: u32,
+        value: u64,
+    ) {
+        #[cfg(feature = "transparent-pir")]
+        self.release_pir_spend_ownership(spender, previous, index);
+        let agg = self.txs.entry(spender.to_owned()).or_default();
+        if let std::collections::btree_map::Entry::Vacant(entry) = agg
+            .accounted_transparent_spends
+            .entry(previous.to_owned())
+            .or_default()
+            .entry(index)
+        {
+            entry.insert(value);
+            agg.spent_zat = agg.spent_zat.saturating_add(value);
+            agg.spent_notes = agg.spent_notes.saturating_add(1);
+        }
+    }
+
     pub(crate) fn record_transparent_receipt_spend(
         &mut self,
         previous: &str,
         index: u32,
         spender: &str,
         height: Option<u32>,
-    ) {
-        if let Some(receipt) = self
+    ) -> Option<u64> {
+        let receipt = self
             .txs
-            .get_mut(previous)
-            .and_then(|agg| agg.accounted_transparent_receipts.get_mut(&index))
+            .get_mut(previous)?
+            .accounted_transparent_receipts
+            .get_mut(&index)?;
+        let value = receipt.value_zat;
+        // The complete operation was preflighted before any wallet writes.
+        if height.is_some()
+            || receipt
+                .spent_in
+                .as_ref()
+                .is_none_or(|spent| spent.height.is_none_or(|height| height == 0))
         {
-            // Repeated construction callbacks do not replace independent mined
-            // spend evidence with an unmined claim, even for the same spender.
-            if height.is_none()
-                && receipt
-                    .spent_in
-                    .as_ref()
-                    .is_some_and(|spent| spent.height.is_some_and(|height| height > 0))
-            {
-                return;
-            }
             receipt.spent_in = Some(TransparentReceiptSpend {
                 txid: spender.to_owned(),
                 height,
+                accounted: true,
             });
         }
+        let included_height = receipt
+            .spent_in
+            .as_ref()
+            .and_then(|spent| spent.height)
+            .filter(|height| *height > 0);
+        self.credit_transparent_debit(spender, previous, index, value);
+        if let Some(height) = included_height {
+            self.txs.entry(spender.to_owned()).or_default().mined_height = Some(height);
+        }
+        Some(value)
     }
 
     /// Current unspent balance under an explicit minimum for both change and received notes.
@@ -1886,11 +2000,7 @@ impl WebWallet {
             return;
         };
         if self.release_pir_spend_ownership(txid, previous, index) {
-            let agg = self.txs.entry(txid.to_owned()).or_default();
-            // This canonical input was previously accounted only by PIR's
-            // history share. The independent source now owns that contribution.
-            agg.spent_zat = agg.spent_zat.saturating_add(value);
-            agg.spent_notes = agg.spent_notes.saturating_add(1);
+            self.credit_transparent_debit(txid, previous, index, value);
         }
     }
 
@@ -2733,7 +2843,10 @@ impl WebWallet {
             let id = Some(txid.as_str());
             for agg in self.txs.values_mut() {
                 for receipt in agg.accounted_transparent_receipts.values_mut() {
-                    if receipt.spent_in.as_ref().map(|spent| spent.txid.as_str()) == id {
+                    if receipt.spent_in.as_ref().is_some_and(|spent| {
+                        Some(spent.txid.as_str()) == id
+                            && spent.height.is_none_or(|height| height == 0)
+                    }) {
                         receipt.spent_in = None;
                     }
                 }
@@ -2773,7 +2886,15 @@ impl WebWallet {
         let Some(agg) = self.txs.get(txid) else {
             return Ok(false);
         };
-        if agg.mined_height.is_some() {
+        if agg.mined_height.is_some()
+            || self.txs.values().any(|agg| {
+                agg.accounted_transparent_receipts.values().any(|receipt| {
+                    receipt.spent_in.as_ref().is_some_and(|spent| {
+                        spent.txid == txid && spent.height.is_some_and(|height| height > 0)
+                    })
+                })
+            })
+        {
             return Err(EngineError::Message(
                 "cannot abandon a mined transaction".into(),
             ));
