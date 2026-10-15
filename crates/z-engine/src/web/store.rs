@@ -263,6 +263,20 @@ fn legacy_receipt_accounting() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct ShieldedInputOrigins(pub(crate) Option<BTreeSet<String>>);
+
+impl Default for ShieldedInputOrigins {
+    fn default() -> Self {
+        Self(Some(BTreeSet::new()))
+    }
+}
+
+fn unknown_shielded_input_origins() -> ShieldedInputOrigins {
+    ShieldedInputOrigins(None)
+}
+
 fn read_transparent_receipts<'de, D>(
     deserializer: D,
 ) -> std::result::Result<BTreeMap<u32, TransparentReceipt>, D::Error>
@@ -313,6 +327,10 @@ pub struct TxAgg {
     /// Exact independent transparent debit credits owned by this spender.
     #[serde(default)]
     pub(crate) accounted_transparent_spends: BTreeMap<String, BTreeMap<u32, u64>>,
+    /// Exact owned shielded receiving transactions consumed by our saved intent.
+    /// This survives origin-note truncation and grants no funding authority.
+    #[serde(default = "unknown_shielded_input_origins")]
+    pub(crate) shielded_input_origins: ShieldedInputOrigins,
     #[cfg(feature = "transparent-pir")]
     #[serde(default)]
     pub(crate) pir_received_zat: Option<u64>,
@@ -1521,7 +1539,11 @@ impl WebWallet {
     }
 
     pub(crate) fn legacy_transparent_receipt_accounting(&self) -> bool {
-        self.txs.values().any(|agg| {
+        self.pending_txs.keys().any(|id| {
+            self.txs
+                .get(&to_hex(id.as_ref()))
+                .is_some_and(|agg| agg.shielded_input_origins.0.is_none())
+        }) || self.txs.values().any(|agg| {
             agg.accounted_transparent_receipts.values().any(|receipt| {
                 receipt
                     .spent_in
@@ -1762,6 +1784,182 @@ impl WebWallet {
         Some(value)
     }
 
+    pub(crate) fn ineligible_pending_transactions(&self) -> std::collections::HashSet<String> {
+        // Debit keys preserve intent history. Only current independently mined
+        // input ownership can disqualify that intent from submission or change.
+        let mut included = std::collections::HashMap::new();
+        for (previous, agg) in &self.txs {
+            for (index, receipt) in &agg.accounted_transparent_receipts {
+                if let Some(spent) = receipt
+                    .spent_in
+                    .as_ref()
+                    .filter(|spent| spent.height.is_some_and(|height| height > 0))
+                {
+                    included.insert((previous.as_str(), *index), spent.txid.as_str());
+                }
+            }
+        }
+        for output in &self.utxos {
+            let Some(spender) = output.spent_in.as_ref().filter(|spender| {
+                output.spent
+                    && self
+                        .txs
+                        .get(*spender)
+                        .is_some_and(|agg| agg.mined_height.is_some_and(|height| height > 0))
+            }) else {
+                continue;
+            };
+            #[cfg(feature = "transparent-pir")]
+            {
+                let prefix = format!("s:{spender}:");
+                let suffix = format!(":{}:{}", output.txid, output.index);
+                if self
+                    .transparent_pir
+                    .projected_spends
+                    .range(prefix.clone()..)
+                    .take_while(|claim| claim.starts_with(&prefix))
+                    .any(|claim| claim.ends_with(&suffix))
+                {
+                    continue;
+                }
+            }
+            included
+                .entry((output.txid.as_str(), output.index))
+                .or_insert(spender.as_str());
+        }
+        let mut conflicts: std::collections::HashSet<_> = self
+            .txs
+            .iter()
+            .filter(|(id, agg)| {
+                agg.mined_height.is_none()
+                    && agg
+                        .accounted_transparent_spends
+                        .iter()
+                        .any(|(previous, outputs)| {
+                            outputs.keys().any(|index| {
+                                included
+                                    .get(&(previous.as_str(), *index))
+                                    .is_some_and(|spender| *spender != id.as_str())
+                            })
+                        })
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut children = std::collections::HashMap::<&str, Vec<&str>>::new();
+        for id in self.pending_txs.keys() {
+            let id = to_hex(id.as_ref());
+            if self.txs.get(&id).is_some_and(|agg| {
+                agg.mined_height.is_none() && agg.shielded_input_origins.0.is_none()
+            }) {
+                conflicts.insert(id);
+            }
+        }
+        for (child, agg) in &self.txs {
+            if agg.mined_height.is_none() {
+                for parent in agg.accounted_transparent_spends.keys() {
+                    children
+                        .entry(parent.as_str())
+                        .or_default()
+                        .push(child.as_str());
+                }
+                if let Some(parents) = &agg.shielded_input_origins.0 {
+                    for parent in parents {
+                        children
+                            .entry(parent.as_str())
+                            .or_default()
+                            .push(child.as_str());
+                    }
+                }
+            }
+        }
+        for (parent, child) in self
+            .notes
+            .iter()
+            .filter_map(|note| {
+                note.spent_in
+                    .as_deref()
+                    .map(|child| (note.txid.as_str(), child))
+            })
+            .chain(self.spend_notes.iter().filter_map(|note| {
+                note.spent_in
+                    .as_deref()
+                    .map(|child| (note.txid.as_str(), child))
+            }))
+        {
+            if self
+                .txs
+                .get(child)
+                .is_some_and(|agg| agg.mined_height.is_none())
+            {
+                children.entry(parent).or_default().push(child);
+            }
+        }
+        let mut queue: std::collections::VecDeque<_> = conflicts.iter().cloned().collect();
+        while let Some(parent) = queue.pop_front() {
+            for child in children.get(parent.as_str()).into_iter().flatten() {
+                if conflicts.insert((*child).to_owned()) {
+                    queue.push_back((*child).to_owned());
+                }
+            }
+        }
+        conflicts
+    }
+
+    fn restore_pending_transparent_claims(&mut self) {
+        // Rewinding a conflicting spend can make the exact saved transaction
+        // eligible again. Restore reservations, never funding rows or values.
+        let claims: Vec<_> = self
+            .unmined_pending_txs()
+            .filter_map(|(id, _)| {
+                let id = to_hex(id.as_ref());
+                self.txs
+                    .get(&id)
+                    .map(|agg| (id, agg.accounted_transparent_spends.clone()))
+            })
+            .collect();
+        for (spender, inputs) in claims {
+            for (previous, outputs) in inputs {
+                for index in outputs.keys() {
+                    let receipt = self
+                        .txs
+                        .get(&previous)
+                        .and_then(|agg| agg.accounted_transparent_receipts.get(index));
+                    if receipt
+                        .and_then(|receipt| receipt.spent_in.as_ref())
+                        .is_some_and(|spent| spent.txid != spender)
+                        || self.utxos.iter().any(|output| {
+                            output.txid == previous
+                                && output.index == *index
+                                && output.spent
+                                && output.spent_in.as_deref() != Some(spender.as_str())
+                        })
+                    {
+                        continue;
+                    }
+                    if let Some(receipt) = self
+                        .txs
+                        .get_mut(&previous)
+                        .and_then(|agg| agg.accounted_transparent_receipts.get_mut(index))
+                    {
+                        receipt
+                            .spent_in
+                            .get_or_insert_with(|| TransparentReceiptSpend {
+                                txid: spender.clone(),
+                                height: None,
+                                accounted: true,
+                            });
+                    }
+                    for output in &mut self.utxos {
+                        if output.txid == previous && output.index == *index {
+                            output.spent = true;
+                            output.spent_in = Some(spender.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Current unspent balance under an explicit minimum for both change and received notes.
     pub fn balance_with_confirmations(&self, confirmations: u32) -> Result<Balance> {
         Ok(self.balance_for_policy(&super::explicit_confirmations_policy(confirmations)?))
@@ -1781,6 +1979,7 @@ impl WebWallet {
         let mut orchard_p = 0u64;
         let mut ironwood_p = 0u64;
         let mut t_p = 0u64;
+        let conflicts = self.ineligible_pending_transactions();
         let add = |avail: &mut u64, pend: &mut u64, v: u64, ready: bool| {
             if ready {
                 *avail = avail.saturating_add(v);
@@ -1789,18 +1988,18 @@ impl WebWallet {
             }
         };
         for u in &self.utxos {
-            if u.spent {
+            if u.spent || conflicts.contains(&u.txid) {
                 continue;
             }
             add(
                 &mut t,
                 &mut t_p,
                 u.value_zat,
-                self.utxo_ready(u, target, policy),
+                self.utxo_ready(u, target, policy, &conflicts),
             );
         }
         for n in &self.notes {
-            if n.spent {
+            if n.spent || conflicts.contains(&n.txid) {
                 continue;
             }
             let ready = self.note_ready(n, target, policy);
@@ -1817,6 +2016,9 @@ impl WebWallet {
             .collect();
         // Unmined sends/shields: change isn't in `notes` until the compact block is scanned.
         for (txid, agg) in &self.txs {
+            if conflicts.contains(txid) {
+                continue;
+            }
             if !self.expired_unmined(agg) {
                 for (index, receipt) in &agg.accounted_transparent_receipts {
                     if receipt.builder
@@ -1888,7 +2090,11 @@ impl WebWallet {
         u: &StoredUtxo,
         target: zcash_client_backend::data_api::wallet::TargetHeight,
         policy: &zcash_client_backend::data_api::wallet::ConfirmationsPolicy,
+        conflicts: &std::collections::HashSet<String>,
     ) -> bool {
+        if conflicts.contains(&u.txid) {
+            return false;
+        }
         #[cfg(feature = "transparent-pir")]
         if self.pir_funding_unverified(&u.txid, u.index) {
             return false;
@@ -2681,6 +2887,7 @@ impl WebWallet {
         self.rewind_public_coverage();
         #[cfg(feature = "transparent-pir")]
         self.transparent_pir.rewind(keep);
+        self.restore_pending_transparent_claims();
         self.rebuild_trees()?;
         Ok(self.scanned_height)
     }
@@ -2694,7 +2901,11 @@ impl WebWallet {
         if birthday > self.birthday {
             return Err(EngineError::Message("rescan later birthday".into()));
         }
-        if self.unmined_pending_txs().next().is_some() {
+        if self.pending_txs.keys().any(|id| {
+            self.txs
+                .get(&to_hex(id.as_ref()))
+                .is_some_and(|agg| agg.mined_height.is_none() && !self.expired_unmined(agg))
+        }) {
             return Err(EngineError::Message("rescan pending payment".into()));
         }
         if self
@@ -2764,10 +2975,12 @@ impl WebWallet {
     /// can no longer be mined (zero never expires).
     /// Raw bytes of our sends still waiting to be mined, keyed like `txs`.
     fn unmined_pending_txs(&self) -> impl Iterator<Item = (TxId, &Vec<u8>)> + '_ {
-        self.pending_txs.iter().filter_map(|(id, raw)| {
+        let conflicts = self.ineligible_pending_transactions();
+        self.pending_txs.iter().filter_map(move |(id, raw)| {
             let key = to_hex(id.as_ref());
             let agg = self.txs.get(&key)?;
-            (agg.mined_height.is_none() && !self.expired_unmined(agg)).then_some((*id, raw))
+            (agg.mined_height.is_none() && !self.expired_unmined(agg) && !conflicts.contains(&key))
+                .then_some((*id, raw))
         })
     }
 
@@ -2786,7 +2999,7 @@ impl WebWallet {
         })
     }
 
-    /// Hex of every unmined, unexpired send, for an idempotent rebroadcast.
+    /// Exact unmined, unexpired sends without a known canonical conflict.
     pub fn pending_raw_txs(&self) -> Vec<String> {
         self.unmined_pending_txs()
             .map(|(_, raw)| to_hex(raw))

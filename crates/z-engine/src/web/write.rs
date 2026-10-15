@@ -406,12 +406,18 @@ impl InputSource for WebWallet {
         target_height: TargetHeight,
     ) -> Result<Option<WalletTransparentOutput<u32>>, Self::Error> {
         let hx = super::to_hex(outpoint.hash());
+        let conflicts = self.ineligible_pending_transactions();
         Ok(self
             .utxos
             .iter()
             .find(|u| !u.spent && u.txid == hx && u.index == outpoint.n())
             .filter(|u| {
-                self.utxo_confirms(u, target_height, crate::confirmations_policy(self.network))
+                self.utxo_confirms(
+                    u,
+                    target_height,
+                    crate::confirmations_policy(self.network),
+                    &conflicts,
+                )
             })
             .and_then(|u| self.stored_to_wto(u)))
     }
@@ -427,13 +433,14 @@ impl InputSource for WebWallet {
     ) -> Result<Vec<WalletTransparentOutput<u32>>, Self::Error> {
         use zcash_keys::encoding::AddressCodec;
         let want = address.encode(&self.network);
+        let conflicts = self.ineligible_pending_transactions();
         Ok(self
             .utxos
             .iter()
             .filter(|u| {
                 !u.spent
                     && (u.address.is_empty() || u.address == want)
-                    && self.utxo_confirms(u, target_height, confirmations_policy)
+                    && self.utxo_confirms(u, target_height, confirmations_policy, &conflicts)
             })
             .filter_map(|u| self.stored_to_wto(u))
             .collect())
@@ -498,11 +505,12 @@ impl WebWallet {
         u: &super::store::StoredUtxo,
         target: TargetHeight,
         policy: ConfirmationsPolicy,
+        conflicts: &std::collections::HashSet<String>,
     ) -> bool {
         if u.spent {
             return false;
         }
-        self.utxo_ready(u, target, &policy)
+        self.utxo_ready(u, target, &policy, conflicts)
     }
 
     #[cfg(feature = "transparent-inputs")]
@@ -934,11 +942,12 @@ impl WalletRead for WebWallet {
             return Ok(HashMap::new());
         }
         let mut map = HashMap::new();
+        let conflicts = self.ineligible_pending_transactions();
         for addr in self.known_taddrs() {
             let want = addr.encode(&self.network);
             let mut bal = zcash_client_backend::data_api::Balance::ZERO;
             for u in &self.utxos {
-                if u.spent {
+                if u.spent || conflicts.contains(&u.txid) {
                     continue;
                 }
                 if !u.address.is_empty() && u.address != want {
@@ -948,7 +957,7 @@ impl WalletRead for WebWallet {
                     continue;
                 }
                 let v = Zatoshis::from_u64(u.value_zat).unwrap_or(Zatoshis::ZERO);
-                if self.utxo_confirms(u, target_height, confirmations_policy) {
+                if self.utxo_confirms(u, target_height, confirmations_policy, &conflicts) {
                     let _ = bal.add_spendable_value(v);
                 } else {
                     let _ = bal.add_pending_spendable_value(v);
@@ -1401,7 +1410,77 @@ impl WalletWrite for WebWallet {
             .collect();
         self.preflight_transparent_spends(&spends)
             .map_err(|error| error.to_string())?;
-        for sent in transactions {
+        let ineligible = self.ineligible_pending_transactions();
+        let origins: Result<Vec<_>, String> = transactions
+            .iter()
+            .map(|sent| {
+                let mut nullifiers = HashMap::<&str, HashSet<String>>::new();
+                for (pool, bundle) in [
+                    ("orchard", sent.tx().orchard_bundle()),
+                    ("ironwood", sent.tx().ironwood_bundle()),
+                ] {
+                    if let Some(bundle) = bundle {
+                        nullifiers.entry(pool).or_default().extend(
+                            bundle
+                                .actions()
+                                .iter()
+                                .map(|action| super::to_hex(&action.nullifier().to_bytes())),
+                        );
+                    }
+                }
+                if let Some(bundle) = sent.tx().sapling_bundle() {
+                    nullifiers.entry("sapling").or_default().extend(
+                        bundle
+                            .shielded_spends()
+                            .iter()
+                            .map(|spend| super::to_hex(&spend.nullifier().0)),
+                    );
+                }
+                let owned_input = |pool: &str, nf: &str| {
+                    nullifiers.get(pool).is_some_and(|known| known.contains(nf))
+                };
+                let observed: std::collections::BTreeSet<_> = self
+                    .notes()
+                    .iter()
+                    .filter(|note| owned_input(&note.pool, &note.nf))
+                    .map(|note| note.txid.clone())
+                    .chain(
+                        self.spend_notes
+                            .iter()
+                            .filter(|note| owned_input(&note.pool, &note.nf))
+                            .map(|note| note.txid.clone()),
+                    )
+                    .collect();
+                if self.pending_txs.contains_key(&sent.tx().txid())
+                    && self
+                        .txs()
+                        .get(&super::to_hex(sent.tx().txid().as_ref()))
+                        .is_none_or(|agg| agg.shielded_input_origins.0.is_none())
+                {
+                    return Err("transparent_pir_rescan_required".into());
+                }
+                if ineligible.contains(&super::to_hex(sent.tx().txid().as_ref()))
+                    || observed.iter().any(|parent| ineligible.contains(parent))
+                {
+                    return Err("transparent_receipt_conflict".into());
+                }
+                if self.pending_txs.contains_key(&sent.tx().txid()) {
+                    let known = self
+                        .txs()
+                        .get(&super::to_hex(sent.tx().txid().as_ref()))
+                        .and_then(|agg| agg.shielded_input_origins.0.as_ref())
+                        .ok_or_else(|| "transparent_pir_rescan_required".to_owned())?;
+                    if !observed.is_subset(known) {
+                        return Err("transparent_receipt_conflict".into());
+                    }
+                    Ok(known.clone())
+                } else {
+                    Ok(observed)
+                }
+            })
+            .collect();
+        let origins = origins?;
+        for (sent, origins) in transactions.iter().zip(origins) {
             self.store_pending_tx(sent.tx())
                 .map_err(|e| e.to_string())?;
             let txid = super::to_hex(sent.tx().txid().as_ref());
@@ -1531,6 +1610,7 @@ impl WalletWrite for WebWallet {
                 self.credit_transparent_receipt(&txid, index, value, None, true);
             }
             let agg = self.txs_mut().entry(txid.clone()).or_default();
+            agg.shielded_input_origins.0 = Some(origins);
             agg.receipt_totals_recorded |= receipt_totals_recorded;
             agg.spent_zat = agg.spent_zat.saturating_add(spent_zat);
             agg.spent_notes = agg.spent_notes.saturating_add(spent_notes);
