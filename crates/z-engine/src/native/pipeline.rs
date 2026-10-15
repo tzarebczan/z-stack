@@ -43,6 +43,26 @@ use zcash_primitives::block::BlockHash;
 use zcash_primitives::merkle_tree::HashSer;
 use zcash_protocol::consensus::BlockHeight;
 
+/// Supplied channels do not carry a dedicated-node throughput guarantee.
+/// Their display label must not select local-node batching or prefetch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeSyncProfile {
+    Dedicated,
+    ConservativeRemote,
+}
+impl NativeSyncProfile {
+    fn for_source(provided: bool, light_url: &str) -> Self {
+        if provided || !crate::uses_fast_sync(light_url) {
+            Self::ConservativeRemote
+        } else {
+            Self::Dedicated
+        }
+    }
+    fn local_tuning(self) -> bool {
+        matches!(self, Self::Dedicated)
+    }
+}
+
 pub(super) async fn run(
     client: &mut LwdClient,
     network: ZNetwork,
@@ -60,7 +80,8 @@ pub(super) async fn run(
     // the finished sync as "incomplete".
     tip: u32,
 ) -> Result<()> {
-    let tuning = sync_tuning(crate::uses_fast_sync(light_url));
+    let local = NativeSyncProfile::for_source(provided, light_url).local_tuning();
+    let tuning = sync_tuning(local);
     let skip_ironwood =
         !provided && super::wallet::NativeWallet::skip_ironwood_subtrees(network, light_url);
     super::wallet::validate_empty_walk_scan(db_path)?;
@@ -99,7 +120,6 @@ pub(super) async fn run(
         SyncStage::Downloading,
         format!("downloading compact blocks from {light_url}"),
     );
-    let local = crate::uses_fast_sync(light_url);
     let chunk = apply_chunk_width(local);
     let prefetch_n = initial_prefetch(local).max(tuning.prefetch as usize);
     // First fetch chunk must start on the client that already did GetLatestBlock.
@@ -3370,3 +3390,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "pipeline_source_profile_tests.rs"]
+mod source_profile_tests;
