@@ -67,6 +67,16 @@ test("light-server recovery does not retry malformed or authorization failures",
   assert.equal(isTransientLightServerError(new TransientLightServerError("503")), true);
   assert.equal(isTransientLightServerError(new Error("grpc-status: 14")), true);
   assert.equal(isTransientLightServerError(new Error("grpc-web GetBlockRange: HTTP 503")), true);
+  assert.equal(isTransientLightServerError(new Error("HTTP 502 Bad Gateway")), true);
+  const cloudTimeout = new Error("Private Cloud operation was cancelled.");
+  cloudTimeout.name = "CloudConnectionError";
+  assert.equal(isTransientLightServerError(cloudTimeout), true);
+  const cloud503 = new Error("Private Cloud server error (HTTP 503).");
+  cloud503.name = "CloudConnectionError";
+  assert.equal(isTransientLightServerError(cloud503), true);
+  const cloudInvalid = new Error("Private Cloud returned an invalid response.");
+  cloudInvalid.name = "CloudConnectionError";
+  assert.equal(isTransientLightServerError(cloudInvalid), false);
   assert.equal(isTransientLightServerError(new Error("grpc-web GetBlockRange: HTTP 401")), false);
   assert.equal(isTransientLightServerError(new SyntaxError("invalid compact block")), false);
   const recovery = createLightServerRecovery({ signal: new AbortController().signal, retryBaseMs: 1 });

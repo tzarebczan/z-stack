@@ -3891,12 +3891,13 @@ fn shards_to_hash_retained(
     if used {
         // A complete seeded root supplies a whole-shard boundary directly.
         // Interior boundaries require the actual retained leaves, when present.
+        // If completed <= shard, no seeded root exists for this whole-shard boundary either.
         for leaf in leaves {
-            if !leaf.hash.is_empty()
-                && boundaries.contains_key(&leaf.position)
-                && (leaf.position + 1) % offload::SHARD_SIZE != 0
-            {
-                shards.insert(offload::shard_of(leaf.position));
+            if !leaf.hash.is_empty() && boundaries.contains_key(&leaf.position) {
+                let shard = offload::shard_of(leaf.position);
+                if (leaf.position + 1) % offload::SHARD_SIZE != 0 || completed <= shard {
+                    shards.insert(shard);
+                }
             }
         }
     }

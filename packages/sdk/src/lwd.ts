@@ -537,7 +537,15 @@ export function isTransientLightServerError(error: unknown): boolean {
   if (error instanceof TypeError) return true; // fetch or body-stream network failure
   if (!(error instanceof Error)) return false;
   if (error.name === "NetworkError" || error.name === "TimeoutError") return true;
-  return /grpc-status:\s*(?:4|14)\b|grpc-web status (?:4|14)\b|grpc-web \w+: HTTP 50[234]\b/i.test(error.message);
+  if (
+    error.name === "CloudConnectionError" &&
+    /timed? ?out|timeout|50[234]|unavailable|reset|network|cancelled/i.test(error.message)
+  ) {
+    return true;
+  }
+  return /grpc-status:\s*(?:4|14)\b|grpc-web status (?:4|14)\b|grpc-web \w+: HTTP 50[234]\b|HTTP 50[234]\b/i.test(
+    error.message,
+  );
 }
 
 function isRequestCancellation(error: unknown): boolean {

@@ -777,12 +777,6 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     }
     let rootsApplied = false;
     if (ctx.transport.subtreeRoots) {
-      // Optional pruning must not stall an otherwise caught-up wallet for the
-      // transport's full RPC timeout. Keep any completed prefix on a deadline;
-      // user cancellation still rejects the whole operation via `signal`.
-      const rootsSignal = AbortSignal.any([
-        ...(signal ? [signal] : []), AbortSignal.timeout(treesReady ? 15_000 : 30_000),
-      ]);
       const protos =
         ctx.network === "regtest" ? (["sapling", "orchard"] as const) : (["sapling", "orchard", "ironwood"] as const);
       // Older wasm cannot report the birthday shard; resume from the stored count.
@@ -791,11 +785,16 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         protos.map(async (proto) => {
           const startIndex = starts?.[proto] ?? 0;
           onProto?.(proto);
+          // Keep each protocol on its own deadline so serial transports (e.g. Private Cloud OHTTP)
+          // do not starve later pools.
+          const rootsSignal = AbortSignal.any([
+            ...(signal ? [signal] : []),
+            AbortSignal.timeout(treesReady ? 45_000 : 60_000),
+          ]);
           try {
             const page = (at: number) => ctx.transport.subtreeRoots!(proto, at, rootsSignal, SUBTREE_ROOTS_PAGE);
             return { proto, startIndex, roots: await fetchSubtreeRoots(page, startIndex, signal) };
           } catch {
-            // Roots only let the scan skip hashing note-free shards.
             signal?.throwIfAborted();
             return { proto, startIndex, roots: [] };
           }

@@ -33,15 +33,17 @@ export function createGrpcWebProxy({ upstream, origins = [], allowTransparent,
   const sharedMemos = sharedMemoHandler(client, timeoutMs);
   const server = http.createServer(async (req, res) => {
     const origin = req.headers.origin;
-    const cors = origin && origins.includes(origin) ? {
+    const allowed = origin && (origins.includes("*") || origins.includes(origin));
+    const cors = allowed ? {
       "access-control-allow-origin": origin,
       vary: "Origin",
       "access-control-allow-methods": "GET, POST, OPTIONS",
       "access-control-allow-headers": "content-type, x-grpc-web, x-user-agent, grpc-timeout",
       "access-control-expose-headers": "grpc-status, grpc-message",
       "access-control-max-age": "600",
+      "access-control-allow-private-network": "true",
     } : {};
-    if (origin && !origins.includes(origin)) return res.writeHead(403).end();
+    if (origin && !allowed) return res.writeHead(403).end();
     if (await sharedMemos(req, res, cors)) return;
     if (!policy.allows(req.url)) return res.writeHead(403, cors).end("method not allowed");
     if (req.method === "OPTIONS") return res.writeHead(204, cors).end();
@@ -139,10 +141,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const i = process.argv.indexOf(name);
     return i > 0 ? process.argv[i + 1] : fallback;
   };
-  const upstream = arg("--upstream", process.env.GRPC_UPSTREAM ?? "http://127.0.0.1:28137");
+  const upstream = arg("--upstream", process.env.GRPC_UPSTREAM ?? "http://127.0.0.1:8138");
   const port = Number(arg("--port", process.env.GRPC_WEB_PORT ?? "28138"));
   const origins = arg("--origins", process.env.GRPC_WEB_ORIGINS ??
-    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174")
+    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,https://nwallet.jiggytom.com,https://sdk-coffer-preview.zwallet-next.pages.dev,https://wallet.cofferwallet.com")
     .split(",").map((value) => value.trim()).filter(Boolean);
   createGrpcWebProxy({ upstream, origins,
     allowTransparent: process.argv.includes("--allow-transparent") ? true : undefined,

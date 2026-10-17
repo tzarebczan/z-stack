@@ -1,8 +1,8 @@
 /** One `GetSubtreeRoots` page: at most {@link SUBTREE_ROOTS_PAGE} roots from shard `at`. */
 export type SubtreeRootPage = (at: number) => Promise<Array<{ completingHeight: number; rootHash: string }>>;
 
-/** Zaino spends up to a second per subtree root; small pages keep each request short. */
-export const SUBTREE_ROOTS_PAGE = 8;
+/** Zaino spends up to a second per subtree root; 32 keeps roundtrips low on OHTTP while avoiding timeout. */
+export const SUBTREE_ROOTS_PAGE = 32;
 const SUBTREE_ROOTS_AHEAD = 4;
 const RETRY_MS = 500;
 
