@@ -49,12 +49,12 @@ test("a pipe that ignores maxEntries is asked once", async () => {
 });
 
 test("a transient failure is retried; a persistent one keeps the prefix", async () => {
-  const retried = server(20, { failAt: new Map([[8, 1]]) });
-  assert.equal((await fetchSubtreeRoots(retried.page, 0)).length, 20);
+  const retried = server(80, { failAt: new Map([[32, 1]]) });
+  assert.equal((await fetchSubtreeRoots(retried.page, 0)).length, 80);
 
-  const broken = server(40, { failAt: new Map([[16, 2]]) });
+  const broken = server(80, { failAt: new Map([[32, 2]]) });
   const roots = await fetchSubtreeRoots(broken.page, 0);
-  assert.deepEqual(roots, Array.from({ length: 16 }, (_, k) => root(k)), "contiguous prefix only");
+  assert.deepEqual(roots, Array.from({ length: 32 }, (_, k) => root(k)), "contiguous prefix only");
 });
 
 test("cancellation propagates instead of returning a partial list", async () => {
