@@ -79,10 +79,11 @@ export async function syncPublicData({ source, transport, transparent, memos, si
         await checkpoint();
         current();
       }
+      const maxBlocks = Math.max(1, Math.min(10, transport.maxSharedMemoBlocksPerRequest ?? 10));
       const last = Math.min(tip, next + 99);
       while (next <= last) {
         // After the birthday range, boundaries are shared by every wallet.
-        const end = Math.min(last, Math.floor(next / 10) * 10 + 9);
+        const end = Math.min(last, next + maxBlocks - 1, Math.floor(next / 10) * 10 + 9);
         const json = await transport.sharedMemos(next, end, signal);
         current();
         if (json === null) { status.memos = "unsupported"; break; }

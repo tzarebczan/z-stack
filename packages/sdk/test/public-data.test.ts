@@ -137,3 +137,10 @@ test("an overlong public compact response cannot apply deposits or advance cover
   assert.equal(f.state.transparentScanHeight, null);
   assert.deepEqual(checkpoints, [null], "only the existing pre-download incomplete-coverage barrier is checkpointed");
 });
+
+test("maxSharedMemoBlocksPerRequest limits shared memo request span", async () => {
+  const f = fixture(3);
+  f.transport.maxSharedMemoBlocksPerRequest = 1;
+  assert.deepEqual(await syncPublicData({ ...f.opts, transparent: false }), { memos: "complete" });
+  assert.deepEqual(f.calls, [["memos", 1, 1], ["memos", 2, 2], ["memos", 3, 3]]);
+});
