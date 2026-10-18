@@ -333,3 +333,41 @@ test("cdnSegmentTransport delegates all metadata and spending methods to live tr
   assert.equal(info?.chain, "main");
   assert.ok(infoCalled);
 });
+
+test("cdnSegmentTransport retries on transient 503 and succeeds without live fallback", async () => {
+  const segment1000 = makeFramedBlocks(1000, 1000);
+  let fetchAttempts = 0;
+
+  const mockFetch: typeof fetch = async () => {
+    fetchAttempts++;
+    if (fetchAttempts === 1) {
+      return new Response(null, { status: 503 });
+    }
+    return new Response(segment1000, { status: 200 });
+  };
+
+  let liveCalled = false;
+  const mockLive: BlockTransport = {
+    kind: "mock-live",
+    label: "Mock Live",
+    tip: async () => 5000,
+    blocks: async () => {
+      liveCalled = true;
+      return new Uint8Array(0);
+    },
+  };
+
+  const transport = cdnSegmentTransport({
+    cdnUrl: "https://cdn.example.com",
+    network: "mainnet",
+    live: mockLive,
+    fetch: mockFetch,
+    segmentBlocks: 1000,
+    reorgDepth: 100,
+  });
+
+  const res = await transport.blocks(1000, 1999);
+  assert.equal(fetchAttempts, 2);
+  assert.equal(liveCalled, false);
+  assert.deepEqual(res, segment1000);
+});

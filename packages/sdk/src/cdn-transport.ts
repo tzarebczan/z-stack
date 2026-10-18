@@ -139,29 +139,44 @@ export function cdnSegmentTransport(options: CdnTransportOptions): BlockTranspor
   ): Promise<Uint8Array> {
     const url = `${cdnBase}/compact-blocks/${network}/${segStart}.bin`;
 
-    try {
-      signal?.throwIfAborted();
-      const res = await fetcher(url, {
-        ...transportFetchOptions,
-        signal,
-        headers: { Accept: "application/octet-stream" },
-      });
-
-      if (res.ok) {
-        const buf = await res.arrayBuffer();
+    const MAX_CDN_RETRIES = 2;
+    for (let attempt = 0; attempt <= MAX_CDN_RETRIES; attempt++) {
+      try {
         signal?.throwIfAborted();
-        const bytes = new Uint8Array(buf);
-        if (bytes.byteLength > 0) {
-          const segEnd = segStart + segmentBlocks - 1;
-          const needSlice = subStart > segStart || subEnd < segEnd;
-          return needSlice
-            ? sliceSegmentFrames(bytes, segStart, subStart, subEnd)
-            : bytes;
+        const res = await fetcher(url, {
+          ...transportFetchOptions,
+          signal,
+          headers: { Accept: "application/octet-stream" },
+        });
+
+        if (res.ok) {
+          const buf = await res.arrayBuffer();
+          signal?.throwIfAborted();
+          const bytes = new Uint8Array(buf);
+          if (bytes.byteLength > 0) {
+            const segEnd = segStart + segmentBlocks - 1;
+            const needSlice = subStart > segStart || subEnd < segEnd;
+            return needSlice
+              ? sliceSegmentFrames(bytes, segStart, subStart, subEnd)
+              : bytes;
+          }
+        } else if (res.status === 404) {
+          // 404 means segment is not on CDN; fall back directly without retry
+          break;
+        } else if (res.status >= 500 && attempt < MAX_CDN_RETRIES) {
+          // Transient server/edge error (502, 503, 504); backoff and retry
+          signal?.throwIfAborted();
+          await new Promise((r) => setTimeout(r, 300 * Math.pow(2, attempt)));
+          continue;
         }
+      } catch {
+        signal?.throwIfAborted();
+        if (attempt < MAX_CDN_RETRIES) {
+          await new Promise((r) => setTimeout(r, 300 * Math.pow(2, attempt)));
+          continue;
+        }
+        break;
       }
-    } catch {
-      signal?.throwIfAborted();
-      // On CDN fetch error (404, network error, etc.), proceed to fallback
     }
 
     // Fallback to live transport for the exact requested sub-range
