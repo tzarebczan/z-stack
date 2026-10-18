@@ -182,6 +182,13 @@ test("cdnSegmentTransport falls back to live transport on CDN 404 or network err
   assert.equal(liveCalls.length, 1);
   assert.deepEqual(liveCalls[0], { start: 1000, end: 1999 });
   assert.deepEqual(result, makeFramedBlocks(1000, 1000, 0x33));
+
+  // Query partial sub-range on 404: only the sub-range should be requested from live transport
+  liveCalls.length = 0;
+  const partialResult = await transport.blocks(1050, 1070);
+  assert.equal(liveCalls.length, 1);
+  assert.deepEqual(liveCalls[0], { start: 1050, end: 1070 });
+  assert.deepEqual(partialResult, makeFramedBlocks(1050, 21, 0x33));
 });
 
 test("cdnSegmentTransport routes live tip blocks directly to live transport without CDN calls", async () => {
