@@ -28,6 +28,7 @@ export type { EngineLoadProgress } from "./engine-progress";
 
 export {
   SDK_VERSION,
+  SDK_TRANSPORT_CAPABILITIES,
   wasmRuntime,
   deriveAccount,
   seedFingerprint,
@@ -55,10 +56,15 @@ export type {
 export {
   grpcWebTransport,
   httpLwdTransport,
+  cdnSegmentTransport,
+  sliceSegmentFrames,
   // A custom transport's `submit` throws this for the node's explicit refusal.
   BroadcastRejection,
   type BlockTransport,
+  type CdnTransportOptions,
   type GrpcWebTransportOpts,
+  type PrivateTransparentTransport,
+  type EnhanceExchangeRequest,
   type TransparentUtxo,
 } from "./lwd";
 

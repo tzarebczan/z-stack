@@ -393,7 +393,7 @@ export type WasmClientOpts = {
   /** Shared public ranges, or selective transaction lookups (auto/on-demand). Default on-demand. */
   memoFetch?: "auto" | "on-demand" | "shared";
   /** Scan transparent inputs/outputs locally; requires protocol >= 0.5. Default off. */
-  transparentScan?: "compact" | "off";
+  transparentScan?: "compact" | "off" | "pir";
   shieldThresholdZat?: number;
   unlockPolicy?: UnlockPolicy;
 };
@@ -421,7 +421,7 @@ export type WasmClient = EngineClient & {
   fetchMemos(): Promise<WalletSnapshot>;
   /** Change automatic memo fetching for this client; already-sent requests cannot be undone. */
   setMemoFetch(mode: "auto" | "on-demand" | "shared"): void;
-  setTransparentScan(mode: "compact" | "off"): void;
+  setTransparentScan(mode: "compact" | "off" | "pir"): void;
   /** Changes future background key builds; an already-running WASM build is not interruptible. */
   setPrewarmProvingKey(enabled: boolean): void;
 };

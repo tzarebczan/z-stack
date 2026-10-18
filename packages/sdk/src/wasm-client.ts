@@ -132,7 +132,7 @@ export function createWasmClient(
 
   let transparentScan = opts.transparentScan ?? "off";
 
-  let transparentScanStatus: PublicDataStatus = transparentScan === "compact" ? "scanning" : "off";
+  let transparentScanStatus: PublicDataStatus = (transparentScan === "compact" || transparentScan === "pir") ? "scanning" : "off";
 
   let sharedMemoStatus: PublicDataStatus = memoFetch === "shared" ? "scanning" : "off";
 
@@ -989,7 +989,7 @@ export function createWasmClient(
       memoFetch = mode;
     },
     setTransparentScan: (mode) => {
-      if (mode !== transparentScan) transparentScanStatus = mode === "compact" ? "scanning" : "off";
+      if (mode !== transparentScan) transparentScanStatus = (mode === "compact" || mode === "pir") ? "scanning" : "off";
       transparentScan = mode;
     },
     setPrewarmProvingKey: (enabled) => { prewarmProvingKey = enabled; },
@@ -1115,7 +1115,7 @@ export function createWasmClient(
             assertSource(operation, source);
             // Coverage was cleared by the committed reset. Failed saves keep
             // the previous session's completion statuses during rollback.
-            transparentScanStatus = transparentScan === "compact" ? "scanning" : "off";
+            transparentScanStatus = (transparentScan === "compact" || transparentScan === "pir") ? "scanning" : "off";
             sharedMemoStatus = memoFetch === "shared" ? "scanning" : "off";
             selectiveMemoStatus = memoFetch === "on-demand" ? "off" : "scanning";
           } catch (error) {

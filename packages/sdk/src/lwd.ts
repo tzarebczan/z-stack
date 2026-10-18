@@ -37,7 +37,7 @@ export type BlockTransport = {
    * The node's explicit refusal throws a {@link BroadcastRejection}; any
    * other error is an unknown outcome.
    */
-  submit?: (rawHex: string) => Promise<string>;
+  submit?: (rawHex: string, signal?: AbortSignal, context?: { txid?: string }) => Promise<string>;
   /** Loopback-only. Leaks t-addrs to local Zaino; never call against public LWD. */
   utxos?: (addresses: string[], startHeight?: number, signal?: AbortSignal) => Promise<TransparentUtxo[]>;
   /** Loopback-only regtest mine via Zebra `generate`. */
@@ -62,7 +62,7 @@ export type BlockTransport = {
     time?: number;
   }>;
   /** CompactTxStreamer `GetLightdInfo` (chain name / vendor). */
-  info?: () => Promise<{ chain: string; blockHeight?: number; vendor?: string; version?: string; consensusBranchId?: string; protocolVersion?: string; transparentCompact?: boolean }>;
+  info?: (signal?: AbortSignal) => Promise<{ chain: string; blockHeight?: number; vendor?: string; version?: string; consensusBranchId?: string; protocolVersion?: string; transparentCompact?: boolean }>;
   /**
    * Complete shard roots (`GetSubtreeRoots`) from shard `startIndex`, at most
    * `maxEntries` of them (0 = all). A pipe older than `maxEntries` returns
@@ -88,7 +88,22 @@ export type BlockTransport = {
     page: number,
     onPage: (blob: Uint8Array, blocks: number) => Promise<void>,
   ) => Promise<void>;
+  transparentPir?: PrivateTransparentTransport;
+  enhance?: { exchange: (request: EnhanceExchangeRequest, signal?: AbortSignal) => Promise<any> };
+  maxBlocksPerRequest?: number;
+  maxSharedMemoBlocksPerRequest?: number;
 };
+
+export type EnhanceExchangeRequest =
+  | { kind: "init" }
+  | { kind: "session"; sessionId: string }
+  | { kind: "query"; body: Uint8Array; anchor?: { height: number; hash: string } };
+
+export type PrivateTransparentTransport = {
+  sourceId: string;
+  exchange: (request: any, signal?: AbortSignal) => Promise<any>;
+};
+
 
 export function isLoopbackUrl(url: string): boolean {
   try {
@@ -1346,3 +1361,12 @@ function decodeBlockIdHeight(buf: Uint8Array): number {
   }
   throw new Error("GetLatestBlock missing height");
 }
+
+export {
+  cdnSegmentTransport,
+  sliceSegmentFrames,
+  DEFAULT_SEGMENT_BLOCKS,
+  DEFAULT_REORG_DEPTH,
+  DEFAULT_CDN_CONCURRENCY,
+  type CdnTransportOptions,
+} from "./cdn-transport";

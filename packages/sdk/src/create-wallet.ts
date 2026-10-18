@@ -73,7 +73,7 @@ export type WalletOptions = {
    */
   sharedMemos?: boolean;
   /** Scan transparent inputs/outputs locally; requires protocol >= 0.5. Default off. */
-  transparentScan?: "compact" | "off";
+  transparentScan?: "compact" | "off" | "pir";
   /**
    * Allow a scan of more than 150,000 blocks in one go (an old birthday, or a
    * wallet reopened after months). It downloads every compact block in the
@@ -83,6 +83,7 @@ export type WalletOptions = {
   deepSync?: boolean;
   /** Compare the last scanned compact block with the server on every sync, including unchanged or shorter tips. Adds one public block request. Default false. */
   verifyChainTip?: boolean;
+  submissionPolicy?: "explicit" | "auto";
   /** Retry transient sync outages for this many milliseconds after the first failure. Default 90,000; zero disables retry. Transport request timeouts are separate. */
   lightServerGraceMs?: number;
   /**
@@ -139,6 +140,7 @@ export type Wallet = Omit<WasmClient, "baseUrl" | "health" | "probeSetup" | "sav
   /** Follow new blocks (see the `autoSync` option in {@link WalletOptions}). Idempotent. */
   startAutoSync(intervalMs?: number): void;
   stopAutoSync(): void;
+  retryPendingSubmission?(txid: string, opts?: { signal?: AbortSignal }): Promise<{ txid: string }>;
   /**
    * Lock, cancel work and release the owner. Saved data stays. Await before
    * opening another client. A rollback storage error rejects after cleanup;

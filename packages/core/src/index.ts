@@ -126,6 +126,8 @@ export type WalletSnapshot = {
   transparentScanComplete?: boolean;
   memoScanHeight?: number | null;
   transparentScanStatus?: "off" | "unsupported" | "scanning" | "complete" | "unavailable";
+  transparentPir?: TransparentPirSnapshot;
+  transparentScanFailure?: string | null;
   /** Memo retrieval progress. On-demand starts off; after fetchMemos(), scanning means another batch remains. */
   memoFetchStatus?: "off" | "unsupported" | "scanning" | "complete" | "unavailable";
   sharedMemoStatus?: "off" | "unsupported" | "scanning" | "complete" | "unavailable";
@@ -171,6 +173,26 @@ export type WalletSnapshot = {
   unlockPolicy?: UnlockPolicy;
   /** Recent history (same `HistoryEntry` rows as `EngineClient.history`). */
   transactions?: HistoryEntry[];
+};
+
+export type TransparentPirSnapshot = {
+  trust: string;
+  spendingEnabled: boolean;
+  rescanRequired?: boolean;
+  completion: string;
+  confirmedZat: string;
+  coveredThrough: number;
+  pendingPages: number;
+  unresolvedSpends: number;
+  scope?: {
+    sourceId?: string;
+    scopeId?: string;
+    generation?: number;
+    anchor?: { height: number; hash: string };
+    scriptCount?: number;
+    [key: string]: any;
+  };
+  [key: string]: any;
 };
 
 /** When the spending seed is requested. Keep lockstep with `z_engine::native::UnlockPolicy`. */

@@ -46,7 +46,7 @@ export interface WasmClientContext {
   transport: BlockTransport;
   memoFetch: "auto" | "on-demand" | "shared";
   persist: (lineage?: { epoch: number; baseKey: string | null; }, replacement?: runtime.ClaimedGeneration & { unlockPolicy?: UnlockPolicy; }, background?: boolean) => Promise<void>;
-  transparentScan: "off" | "compact";
+  transparentScan: "off" | "compact" | "pir";
   localLight: boolean;
   syncOpts: { grpcWeb: boolean; lwdPipe: boolean; };
   grpcWeb: boolean;

@@ -10,6 +10,18 @@ import { reportEngineProgress } from "./engine-progress";
 /** Keep lockstep with `packages/sdk/package.json`. */
 export const SDK_VERSION = "0.1.0-alpha.11";
 
+export const SDK_TRANSPORT_CAPABILITIES = Object.freeze({
+  requiredBirthdayTreeState: true,
+  cancellation: true,
+  maxBlocksPerRequest: true,
+  maxSharedMemoBlocksPerRequest: true,
+  submissionPolicy: true,
+  submitContext: true,
+  pendingSubmissionRetry: true,
+  enhanceV7: true,
+  transparentPirV12: true,
+} as const);
+
 export const LOCAL_ZAINO_GRPC = "http://127.0.0.1:8137";
 /** Development mainnet Zaino convention; configure your own endpoint explicitly. */
 export const LOCAL_ZAINO_GRPC_MAINNET = "http://127.0.0.1:8138";
