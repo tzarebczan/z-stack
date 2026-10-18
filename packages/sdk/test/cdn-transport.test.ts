@@ -371,3 +371,39 @@ test("cdnSegmentTransport retries on transient 503 and succeeds without live fal
   assert.equal(liveCalled, false);
   assert.deepEqual(res, segment1000);
 });
+
+test("cdnSegmentTransport does not query CDN for segments extending beyond chain tip", async () => {
+  const requestedCdnUrls: string[] = [];
+  const mockFetch: typeof fetch = async (input) => {
+    requestedCdnUrls.push(String(input));
+    return new Response(null, { status: 503 });
+  };
+
+  const liveCalls: Array<{ start: number; end: number }> = [];
+  const mockLive: BlockTransport = {
+    kind: "mock-live",
+    label: "Mock Live",
+    tip: async () => 3522050,
+    blocks: async (start, end) => {
+      liveCalls.push({ start, end });
+      return makeFramedBlocks(start, end - start + 1);
+    },
+  };
+
+  const transport = cdnSegmentTransport({
+    cdnUrl: "https://cloud.cofferwallet.com",
+    network: "mainnet",
+    live: mockLive,
+    fetch: mockFetch,
+    segmentBlocks: 1000,
+    reorgDepth: 100,
+  });
+
+  // Query 3522000..3522020 (belongs to segment 3522000 which ends at 3522999 > tip 3522050)
+  await transport.blocks(3522000, 3522020);
+
+  assert.equal(requestedCdnUrls.length, 0, "Must not query CDN for segments extending beyond tip");
+  assert.equal(liveCalls.length, 1);
+  assert.deepEqual(liveCalls[0], { start: 3522000, end: 3522020 });
+});
+

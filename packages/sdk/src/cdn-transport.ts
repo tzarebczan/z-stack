@@ -135,8 +135,15 @@ export function cdnSegmentTransport(options: CdnTransportOptions): BlockTranspor
     segStart: number,
     subStart: number,
     subEnd: number,
+    currentTip?: number,
     signal?: AbortSignal,
   ): Promise<Uint8Array> {
+    // If the segment ends beyond the current known chain tip, the 1,000-block file
+    // cannot be fully mined yet and won't exist on CDN. Route live directly.
+    if (typeof currentTip === "number" && segStart + segmentBlocks - 1 > currentTip) {
+      return live.blocks(subStart, subEnd, signal);
+    }
+
     const url = `${cdnBase}/compact-blocks/${network}/${segStart}.bin`;
 
     const MAX_CDN_RETRIES = 2;
@@ -187,6 +194,7 @@ export function cdnSegmentTransport(options: CdnTransportOptions): BlockTranspor
   async function fetchHistoricalRange(
     start: number,
     end: number,
+    currentTip?: number,
     signal?: AbortSignal,
   ): Promise<Uint8Array> {
     const startSeg = Math.floor(start / segmentBlocks) * segmentBlocks;
@@ -204,7 +212,7 @@ export function cdnSegmentTransport(options: CdnTransportOptions): BlockTranspor
 
     // Fetch required segments with bounded concurrency
     const parts = await mapConcurrent(items, concurrency, (item) =>
-      fetchSegmentRange(item.segStart, item.subStart, item.subEnd, signal),
+      fetchSegmentRange(item.segStart, item.subStart, item.subEnd, currentTip, signal),
     );
 
     return concatBytes(parts);
@@ -231,14 +239,14 @@ export function cdnSegmentTransport(options: CdnTransportOptions): BlockTranspor
       if (end > safeTip) {
         // Range spans both historical CDN segments and the dynamic live tip
         const [historicalBytes, liveBytes] = await Promise.all([
-          fetchHistoricalRange(start, safeTip, signal),
+          fetchHistoricalRange(start, safeTip, currentTip, signal),
           live.blocks(safeTip + 1, end, signal),
         ]);
         return concatBytes([historicalBytes, liveBytes]);
       }
 
       // Entirely within the historical CDN segment zone
-      return fetchHistoricalRange(start, end, signal);
+      return fetchHistoricalRange(start, end, currentTip, signal);
     },
   };
 }
