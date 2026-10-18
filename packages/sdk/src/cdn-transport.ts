@@ -130,9 +130,13 @@ export function cdnSegmentTransport(options: CdnTransportOptions): BlockTranspor
   const concurrency = Math.max(1, Math.floor(options.concurrency ?? DEFAULT_CDN_CONCURRENCY));
   const fetcher = options.fetch ?? globalThis.fetch;
 
-  /** Fetch a single segment from CDN, falling back to live transport if unavailable */
-  async function fetchSegment(segStart: number, signal?: AbortSignal): Promise<Uint8Array> {
-    const segEnd = segStart + segmentBlocks - 1;
+  /** Fetch a segment range from CDN, falling back to live transport for [subStart..subEnd] if unavailable */
+  async function fetchSegmentRange(
+    segStart: number,
+    subStart: number,
+    subEnd: number,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
     const url = `${cdnBase}/compact-blocks/${network}/${segStart}.bin`;
 
     try {
@@ -148,16 +152,20 @@ export function cdnSegmentTransport(options: CdnTransportOptions): BlockTranspor
         signal?.throwIfAborted();
         const bytes = new Uint8Array(buf);
         if (bytes.byteLength > 0) {
-          return bytes;
+          const segEnd = segStart + segmentBlocks - 1;
+          const needSlice = subStart > segStart || subEnd < segEnd;
+          return needSlice
+            ? sliceSegmentFrames(bytes, segStart, subStart, subEnd)
+            : bytes;
         }
       }
-    } catch (err) {
+    } catch {
       signal?.throwIfAborted();
       // On CDN fetch error (404, network error, etc.), proceed to fallback
     }
 
-    // Fallback to live transport for this segment
-    return live.blocks(segStart, segEnd, signal);
+    // Fallback to live transport for the exact requested sub-range
+    return live.blocks(subStart, subEnd, signal);
   }
 
   /** Fetch a historical range [start..end] via CDN segments */
@@ -169,32 +177,20 @@ export function cdnSegmentTransport(options: CdnTransportOptions): BlockTranspor
     const startSeg = Math.floor(start / segmentBlocks) * segmentBlocks;
     const endSeg = Math.floor(end / segmentBlocks) * segmentBlocks;
 
-    const segStarts: number[] = [];
+    type RangeItem = { segStart: number; subStart: number; subEnd: number };
+    const items: RangeItem[] = [];
     for (let s = startSeg; s <= endSeg; s += segmentBlocks) {
-      segStarts.push(s);
+      items.push({
+        segStart: s,
+        subStart: Math.max(start, s),
+        subEnd: Math.min(end, s + segmentBlocks - 1),
+      });
     }
 
     // Fetch required segments with bounded concurrency
-    const segments = await mapConcurrent(segStarts, concurrency, (segStart) =>
-      fetchSegment(segStart, signal),
+    const parts = await mapConcurrent(items, concurrency, (item) =>
+      fetchSegmentRange(item.segStart, item.subStart, item.subEnd, signal),
     );
-
-    const parts: Uint8Array[] = [];
-    for (let i = 0; i < segStarts.length; i++) {
-      const segStart = segStarts[i];
-      const segEnd = segStart + segmentBlocks - 1;
-      const rawSeg = segments[i];
-
-      const needSlice = start > segStart || end < segEnd;
-      if (!needSlice) {
-        parts.push(rawSeg);
-      } else {
-        const subStart = Math.max(start, segStart);
-        const subEnd = Math.min(end, segEnd);
-        const sliced = sliceSegmentFrames(rawSeg, segStart, subStart, subEnd);
-        parts.push(sliced);
-      }
-    }
 
     return concatBytes(parts);
   }
