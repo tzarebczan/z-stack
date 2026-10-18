@@ -1,0 +1,328 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  cdnSegmentTransport,
+  sliceSegmentFrames,
+} from "../src/cdn-transport.ts";
+import type { BlockTransport } from "../src/lwd.ts";
+
+/** Helper to create synthetic length-delimited compact-block frames for testing */
+function makeFramedBlocks(startHeight: number, count: number, payloadByte = 0xaa): Uint8Array {
+  // Each block will have a payload of 10 bytes: [0x08, height_varint, ...]
+  const frames: Uint8Array[] = [];
+  for (let i = 0; i < count; i++) {
+    const height = startHeight + i;
+    const payload = new Uint8Array(8);
+    payload[0] = 0x08; // field 1 varint
+    payload[1] = height & 0x7f;
+    payload.fill(payloadByte, 2);
+
+    const frame = new Uint8Array(4 + payload.length);
+    new DataView(frame.buffer).setUint32(0, payload.length, false);
+    frame.set(payload, 4);
+    frames.push(frame);
+  }
+
+  const totalLen = frames.reduce((acc, f) => acc + f.length, 0);
+  const out = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const f of frames) {
+    out.set(f, offset);
+    offset += f.length;
+  }
+  return out;
+}
+
+test("sliceSegmentFrames extracts the exact sub-range of delimited frames", () => {
+  const segStart = 1000;
+  const count = 10;
+  const segment = makeFramedBlocks(segStart, count);
+
+  // Extract heights 1002..1004 (3 blocks)
+  const sliced = sliceSegmentFrames(segment, segStart, 1002, 1004);
+  const expected = makeFramedBlocks(1002, 3);
+  assert.deepEqual(sliced, expected);
+});
+
+test("sliceSegmentFrames returns empty when sub-range is outside the segment", () => {
+  const segStart = 1000;
+  const count = 10;
+  const segment = makeFramedBlocks(segStart, count);
+
+  assert.equal(sliceSegmentFrames(segment, segStart, 1020, 1030).length, 0);
+  assert.equal(sliceSegmentFrames(segment, segStart, 900, 950).length, 0);
+  assert.equal(sliceSegmentFrames(segment, segStart, 1005, 1002).length, 0);
+});
+
+test("sliceSegmentFrames rejects corrupted or truncated segment data", () => {
+  const segStart = 1000;
+  const segment = makeFramedBlocks(segStart, 5);
+
+  // Truncate length header
+  const truncatedHeader = segment.subarray(0, 2);
+  assert.throws(() => sliceSegmentFrames(truncatedHeader, segStart, 1000, 1001), /truncated length header/);
+
+  // Truncate frame data (declare 100 bytes, provide only 10)
+  const truncatedData = new Uint8Array(10);
+  new DataView(truncatedData.buffer).setUint32(0, 100, false);
+  assert.throws(() => sliceSegmentFrames(truncatedData, segStart, 1000, 1001), /truncated frame data/);
+});
+
+test("cdnSegmentTransport fetches historical blocks from CDN when available", async () => {
+  const segment1000 = makeFramedBlocks(1000, 1000);
+  const requestedUrls: string[] = [];
+
+  const mockFetch: typeof fetch = async (input) => {
+    const url = String(input);
+    requestedUrls.push(url);
+    if (url.includes("/compact-blocks/mainnet/1000.bin")) {
+      return new Response(segment1000, { status: 200 });
+    }
+    return new Response(null, { status: 404 });
+  };
+
+  const liveBlocksCalls: Array<{ start: number; end: number }> = [];
+  const mockLive: BlockTransport = {
+    kind: "mock-live",
+    label: "Mock Live",
+    tip: async () => 5000,
+    blocks: async (start, end) => {
+      liveBlocksCalls.push({ start, end });
+      return makeFramedBlocks(start, end - start + 1);
+    },
+  };
+
+  const transport = cdnSegmentTransport({
+    cdnUrl: "https://cdn.example.com",
+    network: "mainnet",
+    live: mockLive,
+    segmentBlocks: 1000,
+    reorgDepth: 100,
+    fetch: mockFetch,
+  });
+
+  // Query 1000..1999 (full segment)
+  const result = await transport.blocks(1000, 1999);
+  assert.equal(requestedUrls.length, 1);
+  assert.equal(requestedUrls[0], "https://cdn.example.com/compact-blocks/mainnet/1000.bin");
+  assert.equal(liveBlocksCalls.length, 0, "No live blocks calls should occur on CDN hit");
+  assert.deepEqual(result, segment1000);
+});
+
+test("cdnSegmentTransport correctly slices and stitches partial ranges across segments", async () => {
+  const segment1000 = makeFramedBlocks(1000, 1000, 0x11);
+  const segment2000 = makeFramedBlocks(2000, 1000, 0x22);
+
+  const mockFetch: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("/compact-blocks/mainnet/1000.bin")) {
+      return new Response(segment1000, { status: 200 });
+    }
+    if (url.includes("/compact-blocks/mainnet/2000.bin")) {
+      return new Response(segment2000, { status: 200 });
+    }
+    return new Response(null, { status: 404 });
+  };
+
+  const mockLive: BlockTransport = {
+    kind: "mock-live",
+    label: "Mock Live",
+    tip: async () => 5000,
+    blocks: async (start, end) => makeFramedBlocks(start, end - start + 1),
+  };
+
+  const transport = cdnSegmentTransport({
+    cdnUrl: "https://cdn.example.com",
+    network: "mainnet",
+    live: mockLive,
+    segmentBlocks: 1000,
+    reorgDepth: 100,
+    fetch: mockFetch,
+  });
+
+  // Query 1500..2050 (spans segment 1000 and 2000 with partial slices)
+  const result = await transport.blocks(1500, 2050);
+
+  const expectedHead = makeFramedBlocks(1500, 500, 0x11);
+  const expectedTail = makeFramedBlocks(2000, 51, 0x22);
+  const expectedCombined = new Uint8Array(expectedHead.length + expectedTail.length);
+  expectedCombined.set(expectedHead, 0);
+  expectedCombined.set(expectedTail, expectedHead.length);
+
+  assert.deepEqual(result, expectedCombined);
+});
+
+test("cdnSegmentTransport falls back to live transport on CDN 404 or network error", async () => {
+  const liveCalls: Array<{ start: number; end: number }> = [];
+
+  const mockFetch: typeof fetch = async () => {
+    return new Response(null, { status: 404 });
+  };
+
+  const mockLive: BlockTransport = {
+    kind: "mock-live",
+    label: "Mock Live",
+    tip: async () => 5000,
+    blocks: async (start, end) => {
+      liveCalls.push({ start, end });
+      return makeFramedBlocks(start, end - start + 1, 0x33);
+    },
+  };
+
+  const transport = cdnSegmentTransport({
+    cdnUrl: "https://cdn.example.com",
+    network: "mainnet",
+    live: mockLive,
+    segmentBlocks: 1000,
+    reorgDepth: 100,
+    fetch: mockFetch,
+  });
+
+  const result = await transport.blocks(1000, 1999);
+  assert.equal(liveCalls.length, 1);
+  assert.deepEqual(liveCalls[0], { start: 1000, end: 1999 });
+  assert.deepEqual(result, makeFramedBlocks(1000, 1000, 0x33));
+});
+
+test("cdnSegmentTransport routes live tip blocks directly to live transport without CDN calls", async () => {
+  const requestedCdnUrls: string[] = [];
+  const liveCalls: Array<{ start: number; end: number }> = [];
+
+  const mockFetch: typeof fetch = async (input) => {
+    requestedCdnUrls.push(String(input));
+    return new Response(null, { status: 200 });
+  };
+
+  const mockLive: BlockTransport = {
+    kind: "mock-live",
+    label: "Mock Live",
+    tip: async () => 5000,
+    blocks: async (start, end) => {
+      liveCalls.push({ start, end });
+      return makeFramedBlocks(start, end - start + 1);
+    },
+  };
+
+  const transport = cdnSegmentTransport({
+    cdnUrl: "https://cdn.example.com",
+    network: "mainnet",
+    live: mockLive,
+    segmentBlocks: 1000,
+    reorgDepth: 100, // safeTip = 4900
+    fetch: mockFetch,
+  });
+
+  // Query 4950..5000 (all in tip zone)
+  await transport.blocks(4950, 5000);
+  assert.equal(requestedCdnUrls.length, 0, "No CDN requests should be made for tip blocks");
+  assert.equal(liveCalls.length, 1);
+  assert.deepEqual(liveCalls[0], { start: 4950, end: 5000 });
+});
+
+test("cdnSegmentTransport splits boundary ranges between historical CDN and live tip", async () => {
+  const requestedCdnUrls: string[] = [];
+  const liveCalls: Array<{ start: number; end: number }> = [];
+
+  const segment4000 = makeFramedBlocks(4000, 1000, 0x44);
+
+  const mockFetch: typeof fetch = async (input) => {
+    requestedCdnUrls.push(String(input));
+    return new Response(segment4000, { status: 200 });
+  };
+
+  const mockLive: BlockTransport = {
+    kind: "mock-live",
+    label: "Mock Live",
+    tip: async () => 5000,
+    blocks: async (start, end) => {
+      liveCalls.push({ start, end });
+      return makeFramedBlocks(start, end - start + 1, 0x55);
+    },
+  };
+
+  const transport = cdnSegmentTransport({
+    cdnUrl: "https://cdn.example.com",
+    network: "mainnet",
+    live: mockLive,
+    segmentBlocks: 1000,
+    reorgDepth: 100, // safeTip = 4900
+    fetch: mockFetch,
+  });
+
+  // Query 4800..4950 (crosses safeTip = 4900)
+  const result = await transport.blocks(4800, 4950);
+
+  // Historical: 4800..4900 fetched from CDN (segment 4000 sliced)
+  assert.equal(requestedCdnUrls.length, 1);
+  assert.ok(requestedCdnUrls[0].includes("/compact-blocks/mainnet/4000.bin"));
+
+  // Live tip: 4901..4950 queried directly from live transport
+  assert.equal(liveCalls.length, 1);
+  assert.deepEqual(liveCalls[0], { start: 4901, end: 4950 });
+
+  const expectedHist = makeFramedBlocks(4800, 101, 0x44);
+  const expectedLive = makeFramedBlocks(4901, 50, 0x55);
+  const expected = new Uint8Array(expectedHist.length + expectedLive.length);
+  expected.set(expectedHist, 0);
+  expected.set(expectedLive, expectedHist.length);
+
+  assert.deepEqual(result, expected);
+});
+
+test("cdnSegmentTransport delegates all metadata and spending methods to live transport", async () => {
+  let submitCalled = false;
+  let treeStateCalled = false;
+  let subtreeRootsCalled = false;
+  let txCalled = false;
+  let infoCalled = false;
+
+  const mockLive: BlockTransport = {
+    kind: "mock-live",
+    label: "Mock Live",
+    tip: async () => 1234,
+    blocks: async () => new Uint8Array(0),
+    submit: async (hex) => {
+      submitCalled = true;
+      return `txid-${hex}`;
+    },
+    treeState: async (h) => {
+      treeStateCalled = true;
+      return { height: h, hash: "abc" };
+    },
+    subtreeRoots: async () => {
+      subtreeRootsCalled = true;
+      return [];
+    },
+    tx: async (txid) => {
+      txCalled = true;
+      return `raw-${txid}`;
+    },
+    info: async () => {
+      infoCalled = true;
+      return { chain: "main", blockHeight: 1234 };
+    },
+  };
+
+  const transport = cdnSegmentTransport({
+    cdnUrl: "https://cdn.example.com",
+    network: "mainnet",
+    live: mockLive,
+  });
+
+  assert.equal(await transport.tip(), 1234);
+  assert.equal(await transport.submit?.("deadbeef"), "txid-deadbeef");
+  assert.ok(submitCalled);
+
+  await transport.treeState?.(500);
+  assert.ok(treeStateCalled);
+
+  await transport.subtreeRoots?.("orchard");
+  assert.ok(subtreeRootsCalled);
+
+  await transport.tx?.("1234");
+  assert.ok(txCalled);
+
+  const info = await transport.info?.();
+  assert.equal(info?.chain, "main");
+  assert.ok(infoCalled);
+});

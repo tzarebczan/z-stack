@@ -1403,3 +1403,12 @@ function decodeBlockIdHeight(buf: Uint8Array): number {
   }
   throw new Error("GetLatestBlock missing height");
 }
+
+export {
+  cdnSegmentTransport,
+  sliceSegmentFrames,
+  DEFAULT_SEGMENT_BLOCKS,
+  DEFAULT_REORG_DEPTH,
+  DEFAULT_CDN_CONCURRENCY,
+  type CdnTransportOptions,
+} from "./cdn-transport";
