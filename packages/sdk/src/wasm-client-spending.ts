@@ -211,7 +211,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       finishDrain?.();
       // Stop waiting on close/replacement without claiming the already-started
       // request was cancelled. The pending transaction and known ID survive.
-      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(hex));
+      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(hex, operation.signal, { txid: sentTxid }));
       ctx.assertSource(operation, source);
       return txid ?? (/^[0-9a-f]{64}$/i.test(submitted) ? submitted.toLowerCase() : undefined);
     } catch (e) {
@@ -479,7 +479,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       assertReviewCurrent();
       broadcastStarted = true;
       finishDrain?.();
-      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(done.hex!));
+      const submitted = await abortable(operation.signal, () => ctx.transport.submit!(done.hex!, operation.signal, { txid: finalizedTxid }));
       ctx.assertSource(operation, source);
       return done.txid ?? (/^[0-9a-f]{64}$/i.test(submitted) ? submitted.toLowerCase() : undefined);
     } catch (e) {
