@@ -188,26 +188,6 @@ export type WalletSnapshot = {
   transactions?: HistoryEntry[];
 };
 
-export type TransparentPirSnapshot = {
-  trust: string;
-  spendingEnabled: boolean;
-  rescanRequired?: boolean;
-  completion: string;
-  confirmedZat: string;
-  coveredThrough: number;
-  pendingPages: number;
-  unresolvedSpends: number;
-  scope?: {
-    sourceId?: string;
-    scopeId?: string;
-    generation?: number;
-    anchor?: { height: number; hash: string };
-    scriptCount?: number;
-    [key: string]: any;
-  };
-  [key: string]: any;
-};
-
 /** When the spending seed is requested. Keep lockstep with `z_engine::native::UnlockPolicy`. */
 export type UnlockPolicy = "session" | "each-spend" | "always";
 
