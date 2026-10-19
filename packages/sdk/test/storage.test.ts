@@ -1809,7 +1809,7 @@ for (const compactAdvance of [false, true]) {
 
 test("on-demand enhances pending transactions via targeted sharedMemos block queries when tx lookup is absent", async t => {
   installDb(t); const worker = new MemoWorker();
-  worker.candidates = ["tx1-raw", "tx2-raw"];
+  worker.candidates = ["tx-old", "tx-new"];
   await restartScanWorker(() => worker as unknown as Worker);
   const requestedBlocks: number[] = [];
   const client = createWasmClient({
@@ -1820,27 +1820,36 @@ test("on-demand enhances pending transactions via targeted sharedMemos block que
     transport: {
       kind: "mock",
       label: "mock",
-      tip: async () => 100,
+      tip: async () => 1000,
       blocks: async () => new Uint8Array(),
       sharedMemos: async (start, end) => {
         requestedBlocks.push(start);
-        return JSON.stringify({ start, end, transactions: ["tx1-raw", "tx2-raw"] });
+        const txid = start === 7 ? "tx-old" : "tx-new";
+        return JSON.stringify({ start, end, transactions: [txid] });
       },
     },
   });
+  const mined = new Map([["tx-old", 7], ["tx-new", 900]]);
   const origPost = worker.postMessage.bind(worker);
-  worker.postMessage = (msg) => {
+  worker.postMessage = (msg: { id: number; op: string; txid?: string }) => {
     if (msg.op === "history") {
-      const rows = worker.candidates.map((txid) => ({ txid, minedHeight: 42, receivedNoteCount: 1 }));
+      // Newest page only. The older id is absent here on purpose.
+      const rows = [{ txid: "tx-new", minedHeight: 900, receivedNoteCount: 1 }];
       queueMicrotask(() => worker.dispatchEvent(new MessageEvent("message", { data: { id: msg.id, json: JSON.stringify(rows) } })));
       return;
     }
-    origPost(msg);
+    if (msg.op === "historyQuery") {
+      const height = mined.get(msg.txid ?? "");
+      const rows = height === undefined ? [] : [{ txid: msg.txid, minedHeight: height, receivedNoteCount: 1 }];
+      queueMicrotask(() => worker.dispatchEvent(new MessageEvent("message", { data: { id: msg.id, json: JSON.stringify(rows) } })));
+      return;
+    }
+    origPost(msg as never);
   };
   await client.restore("test-only worker fixture", "regtest", 1);
   assert.equal((await client.fetchMemos()).memoFetchStatus, "complete");
-  assert.deepEqual(requestedBlocks, [42], "only queries block 42 where transactions actually mined");
-  assert.deepEqual(worker.enhanced, ["tx1-raw", "tx2-raw"]);
+  assert.deepEqual(requestedBlocks, [7, 900], "older pending ids are queried by txid, not the newest history page");
+  assert.deepEqual(worker.enhanced, ["tx-old", "tx-new"]);
   assert.equal((await client.fetchMemos()).memoFetchStatus, "complete");
-  assert.equal(requestedBlocks.length, 1, "completed transactions are not requested again");
+  assert.equal(requestedBlocks.length, 2, "completed transactions are not requested again");
 });

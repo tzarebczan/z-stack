@@ -1201,15 +1201,27 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
           if (outages === chunk.length) break;
         }
       } else if (targetedShared && need.length > 0) {
-        const rawHistory = await source.history(500);
-        const rows = JSON.parse(rawHistory || "[]") as HistoryEntry[];
-        const needSet = new Set(need);
-        const heights = [...new Set(
-          rows.filter((r) => needSet.has(r.txid) && typeof r.minedHeight === "number")
-            .map((r) => r.minedHeight as number),
-        )].sort((a, b) => a - b);
+        // memoEnhancementTxids already skipped completed rows before its limit.
+        // history(500) is the newest page, so an older pending id would never
+        // gain a height. Look each id up directly.
+        const heights = new Set<number>();
+        for (const txid of need) {
+          if (!current()) return;
+          let rows: HistoryEntry[] = [];
+          try {
+            rows = JSON.parse(await source.historyQuery(1, "", txid) || "[]") as HistoryEntry[];
+          } catch (error) {
+            signal.throwIfAborted();
+            failed = true;
+            continue;
+          }
+          const minedHeight = rows.find((row) => row.txid === txid)?.minedHeight;
+          if (typeof minedHeight === "number") heights.add(minedHeight);
+          else failed = true;
+        }
+        const orderedHeights = [...heights].sort((a, b) => a - b);
         let outages = 0;
-        for (const height of heights) {
+        for (const height of orderedHeights) {
           if (!current()) return;
           let json: string | null = null;
           try {

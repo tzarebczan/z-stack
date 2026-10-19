@@ -10,10 +10,28 @@
 import type { BlockTransport } from "./lwd";
 import { transportFetchOptions } from "./lwd";
 import type { Network } from "./runtime";
+import { COMPACT_RANGE_MAX_BYTES } from "./transport-bounds";
 
 export const DEFAULT_SEGMENT_BLOCKS = 1_000;
 export const DEFAULT_REORG_DEPTH = 100;
 export const DEFAULT_CDN_CONCURRENCY = 6;
+const CDN_BODY_MAX = COMPACT_RANGE_MAX_BYTES;
+const CDN_FRAME_MAX = 4 * 1024 * 1024;
+const CDN_TIMEOUT_MS = 60_000;
+
+class CdnSegmentError extends Error {}
+
+/** A ref'd deadline. AbortSignal.timeout() does not keep the event loop alive. */
+function startDeadline(ms: number): { signal: AbortSignal; stop: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new DOMException("cdn segment timed out", "TimeoutError")), ms);
+  return {
+    signal: controller.signal,
+    stop() {
+      clearTimeout(timer);
+    },
+  };
+}
 
 export interface CdnTransportOptions {
   /** Base URL of the CDN, e.g. "https://cloud.cofferwallet.com" */
@@ -28,6 +46,8 @@ export interface CdnTransportOptions {
   reorgDepth?: number;
   /** Maximum concurrent segment downloads. Default 6. */
   concurrency?: number;
+  /** Per-request deadline before the same range is read from the live transport. Default 60s. */
+  segmentTimeoutMs?: number;
   /** Custom fetch implementation. Defaults to global fetch. */
   fetch?: typeof fetch;
 }
@@ -93,6 +113,61 @@ export function sliceSegmentFrames(
   return segment.subarray(sliceStart, sliceEnd);
 }
 
+/** Count length-delimited frames. A short or torn object is not a usable segment. */
+function countCompleteFrames(segment: Uint8Array): number {
+  const view = new DataView(segment.buffer, segment.byteOffset, segment.byteLength);
+  let offset = 0;
+  let frames = 0;
+  while (offset < segment.byteLength) {
+    if (offset + 4 > segment.byteLength) throw new CdnSegmentError("truncated length header");
+    const msgLen = view.getUint32(offset, false);
+    if (msgLen > CDN_FRAME_MAX) throw new CdnSegmentError("cdn frame exceeds size limit");
+    const frameLen = 4 + msgLen;
+    if (offset + frameLen > segment.byteLength) throw new CdnSegmentError("truncated frame data");
+    offset += frameLen;
+    frames++;
+  }
+  return frames;
+}
+
+/** Stop before a declared or streaming body can exceed the compact-range ceiling. */
+async function readBoundedBody(response: Response, signal: AbortSignal, maxBytes: number): Promise<Uint8Array> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null && (!/^\d+$/.test(declared.trim()) || Number(declared.trim()) > maxBytes)) {
+    await response.body?.cancel().catch(() => {});
+    throw new CdnSegmentError("cdn segment exceeds size limit");
+  }
+  if (!response.body) throw new CdnSegmentError("cdn segment has no body");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  void aborted.catch(() => {});
+  try {
+    for (;;) {
+      signal.throwIfAborted();
+      const step = await Promise.race([reader.read(), aborted]);
+      signal.throwIfAborted();
+      if (step.done) break;
+      if (step.value.byteLength > maxBytes - total) throw new CdnSegmentError("cdn segment exceeds size limit");
+      total += step.value.byteLength;
+      if (step.value.byteLength) chunks.push(step.value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+    reader.releaseLock();
+  }
+  return concatBytes(chunks);
+}
+
 /** Bounded concurrency queue for parallel fetching */
 async function mapConcurrent<T, R>(
   items: T[],
@@ -128,6 +203,7 @@ export function cdnSegmentTransport(options: CdnTransportOptions): BlockTranspor
   const segmentBlocks = Math.max(1, Math.floor(options.segmentBlocks ?? DEFAULT_SEGMENT_BLOCKS));
   const reorgDepth = Math.max(0, Math.floor(options.reorgDepth ?? DEFAULT_REORG_DEPTH));
   const concurrency = Math.max(1, Math.floor(options.concurrency ?? DEFAULT_CDN_CONCURRENCY));
+  const segmentTimeoutMs = Math.max(1, Math.floor(options.segmentTimeoutMs ?? CDN_TIMEOUT_MS));
   const fetcher = options.fetch ?? globalThis.fetch;
 
   /** Fetch a segment range from CDN, falling back to live transport for [subStart..subEnd] if unavailable */
@@ -145,45 +221,51 @@ export function cdnSegmentTransport(options: CdnTransportOptions): BlockTranspor
     }
 
     const url = `${cdnBase}/compact-blocks/${network}/${segStart}.bin`;
+    const segEnd = segStart + segmentBlocks - 1;
 
     const MAX_CDN_RETRIES = 2;
     for (let attempt = 0; attempt <= MAX_CDN_RETRIES; attempt++) {
+      const deadline = startDeadline(segmentTimeoutMs);
+      const attemptSignal = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
       try {
         signal?.throwIfAborted();
         const res = await fetcher(url, {
           ...transportFetchOptions,
-          signal,
+          signal: attemptSignal,
           headers: { Accept: "application/octet-stream" },
         });
 
         if (res.ok) {
-          const buf = await res.arrayBuffer();
+          const bytes = await readBoundedBody(res, attemptSignal, CDN_BODY_MAX);
           signal?.throwIfAborted();
-          const bytes = new Uint8Array(buf);
-          if (bytes.byteLength > 0) {
-            const segEnd = segStart + segmentBlocks - 1;
-            const needSlice = subStart > segStart || subEnd < segEnd;
-            return needSlice
-              ? sliceSegmentFrames(bytes, segStart, subStart, subEnd)
-              : bytes;
+          // A 200 that ends on a frame boundary can still omit blocks. Accept
+          // the object only when it is the whole segment, then slice.
+          if (countCompleteFrames(bytes) !== segmentBlocks) {
+            throw new CdnSegmentError(`cdn segment ${segStart} does not cover ${segmentBlocks} blocks`);
           }
-        } else if (res.status === 404) {
-          // 404 means segment is not on CDN; fall back directly without retry
-          break;
-        } else if (res.status >= 500 && attempt < MAX_CDN_RETRIES) {
-          // Transient server/edge error (502, 503, 504); backoff and retry
-          signal?.throwIfAborted();
-          await new Promise((r) => setTimeout(r, 300 * Math.pow(2, attempt)));
-          continue;
+          const needSlice = subStart > segStart || subEnd < segEnd;
+          const sliced = needSlice ? sliceSegmentFrames(bytes, segStart, subStart, subEnd) : bytes;
+          if (countCompleteFrames(sliced) !== subEnd - subStart + 1) {
+            throw new CdnSegmentError(`cdn segment ${segStart} does not cover ${subStart}..${subEnd}`);
+          }
+          return sliced;
         }
-      } catch {
+        await res.body?.cancel().catch(() => {});
+        // 404 and other non-transient statuses fall back immediately.
+        if (res.status === 404 || res.status < 500 || attempt >= MAX_CDN_RETRIES) break;
+      } catch (error) {
         signal?.throwIfAborted();
-        if (attempt < MAX_CDN_RETRIES) {
-          await new Promise((r) => setTimeout(r, 300 * Math.pow(2, attempt)));
-          continue;
-        }
-        break;
+        const message = error instanceof Error ? error.message : "";
+        const giveUp = error instanceof CdnSegmentError
+          || deadline.signal.aborted
+          || (error instanceof Error && error.name === "AbortError")
+          || /size limit/.test(message);
+        if (giveUp || attempt >= MAX_CDN_RETRIES) break;
+      } finally {
+        deadline.stop();
       }
+      signal?.throwIfAborted();
+      await new Promise((resolve) => setTimeout(resolve, 300 * 2 ** attempt));
     }
 
     // Fallback to live transport for the exact requested sub-range

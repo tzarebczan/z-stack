@@ -407,3 +407,142 @@ test("cdnSegmentTransport does not query CDN for segments extending beyond chain
   assert.deepEqual(liveCalls[0], { start: 3522000, end: 3522020 });
 });
 
+test("cdnSegmentTransport falls back when a 200 segment is short or torn", async () => {
+  const liveCalls: Array<{ start: number; end: number }> = [];
+  const oneFrame = makeFramedBlocks(1000, 1);
+  let calls = 0;
+  const mockFetch: typeof fetch = async () => {
+    calls++;
+    // Full-range request gets one frame. Partial request gets a torn frame.
+    if (calls === 1) return new Response(oneFrame, { status: 200 });
+    const torn = new Uint8Array(10);
+    new DataView(torn.buffer).setUint32(0, 100, false);
+    return new Response(torn, { status: 200 });
+  };
+  const mockLive: BlockTransport = {
+    kind: "mock-live",
+    label: "Mock Live",
+    tip: async () => 5000,
+    blocks: async (start, end) => {
+      liveCalls.push({ start, end });
+      return makeFramedBlocks(start, end - start + 1, 0x11);
+    },
+  };
+  const transport = cdnSegmentTransport({
+    cdnUrl: "https://cdn.example.com",
+    network: "mainnet",
+    live: mockLive,
+    segmentBlocks: 1000,
+    reorgDepth: 100,
+    fetch: mockFetch,
+  });
+
+  const full = await transport.blocks(1000, 1999);
+  assert.deepEqual(liveCalls, [{ start: 1000, end: 1999 }]);
+  assert.deepEqual(full, makeFramedBlocks(1000, 1000, 0x11));
+
+  liveCalls.length = 0;
+  const partial = await transport.blocks(1002, 1004);
+  assert.deepEqual(liveCalls, [{ start: 1002, end: 1004 }]);
+  assert.deepEqual(partial, makeFramedBlocks(1002, 3, 0x11));
+});
+
+test("cdnSegmentTransport rejects an oversized CDN body before using it", async () => {
+  let sent = 0;
+  const chunk = new Uint8Array(8 * 1024 * 1024);
+  const mockFetch: typeof fetch = async () => new Response(
+    new ReadableStream({
+      pull(controller) {
+        if (sent > 64 * 1024 * 1024) throw new Error("read past the cap");
+        controller.enqueue(chunk);
+        sent += chunk.byteLength;
+      },
+    }),
+    { status: 200 },
+  );
+  const liveCalls: Array<{ start: number; end: number }> = [];
+  const mockLive: BlockTransport = {
+    kind: "mock-live",
+    label: "Mock Live",
+    tip: async () => 5000,
+    blocks: async (start, end) => {
+      liveCalls.push({ start, end });
+      return makeFramedBlocks(start, end - start + 1);
+    },
+  };
+  const transport = cdnSegmentTransport({
+    cdnUrl: "https://cdn.example.com",
+    network: "mainnet",
+    live: mockLive,
+    segmentBlocks: 4,
+    reorgDepth: 0,
+    fetch: mockFetch,
+  });
+  await transport.blocks(0, 1);
+  // One extra chunk can be queued before cancel. The body must still stop.
+  assert.ok(sent < 64 * 1024 * 1024, `read ${sent} bytes`);
+  assert.deepEqual(liveCalls, [{ start: 0, end: 1 }]);
+});
+
+test("cdnSegmentTransport refuses a declared oversized content-length", async () => {
+  const mockFetch: typeof fetch = async () => new Response(new Uint8Array(4), {
+    status: 200,
+    headers: { "content-length": String(33 * 1024 * 1024) },
+  });
+  const liveCalls: Array<{ start: number; end: number }> = [];
+  const mockLive: BlockTransport = {
+    kind: "mock-live",
+    label: "Mock Live",
+    tip: async () => 5000,
+    blocks: async (start, end) => {
+      liveCalls.push({ start, end });
+      return makeFramedBlocks(start, end - start + 1);
+    },
+  };
+  const transport = cdnSegmentTransport({
+    cdnUrl: "https://cdn.example.com",
+    network: "mainnet",
+    live: mockLive,
+    segmentBlocks: 4,
+    reorgDepth: 0,
+    fetch: mockFetch,
+  });
+  await transport.blocks(0, 1);
+  assert.deepEqual(liveCalls, [{ start: 0, end: 1 }]);
+});
+
+test("cdnSegmentTransport falls back when a CDN body never ends", async () => {
+  const mockFetch: typeof fetch = async (_input, init) => {
+    const signal = init?.signal ?? undefined;
+    const body = new ReadableStream({
+      pull(controller) {
+        if (signal?.aborted) controller.error(signal.reason);
+      },
+    });
+    return new Response(body, { status: 200 });
+  };
+  const liveCalls: Array<{ start: number; end: number }> = [];
+  const mockLive: BlockTransport = {
+    kind: "mock-live",
+    label: "Mock Live",
+    tip: async () => 50,
+    blocks: async (start, end) => {
+      liveCalls.push({ start, end });
+      return makeFramedBlocks(start, end - start + 1);
+    },
+  };
+  const transport = cdnSegmentTransport({
+    cdnUrl: "https://cdn.example.com",
+    network: "mainnet",
+    live: mockLive,
+    segmentBlocks: 4,
+    reorgDepth: 0,
+    segmentTimeoutMs: 30,
+    fetch: mockFetch,
+  });
+  const started = Date.now();
+  await transport.blocks(0, 1);
+  assert.ok(Date.now() - started < 2_000);
+  assert.deepEqual(liveCalls, [{ start: 0, end: 1 }]);
+});
+
