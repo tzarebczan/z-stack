@@ -4,6 +4,7 @@ import type { ScanSession } from "./scan-host";
 // remain side-effect free with respect to the persisted Rust wallet state.
 const READS = new Set<keyof ScanSession>([
   "snapshotJson", "toSnapshot", "persistenceSnapshot", "history", "historyQuery", "balanceWithConfirmations", "pendingRawTxs",
+  "pendingTxs", "pendingRawTx",
   "scannedHeight", "birthday", "nextHeight", "treesReady", "sinsemillaLive",
   "subtreeRootCounts", "subtreeRootsStart", "transparentAddress",
   "supportsTransparentBlocks", "supportsTransparentSend", "memoEnhancementTxids", "warmProvingKey",

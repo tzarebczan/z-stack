@@ -424,6 +424,8 @@ export type WasmClient = EngineClient & {
   setTransparentScan(mode: "compact" | "off" | "pir"): void;
   /** Changes future background key builds; an already-running WASM build is not interruptible. */
   setPrewarmProvingKey(enabled: boolean): void;
+  /** Resubmit an existing unmined signed transaction by txid. */
+  retryPendingSubmission(txid: string, opts?: { signal?: AbortSignal }): Promise<{ txid: string }>;
 };
 
 export type WasmProgress = {

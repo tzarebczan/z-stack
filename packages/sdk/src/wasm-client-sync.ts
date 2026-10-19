@@ -868,13 +868,20 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         throw e;
       }
       const epoch = ctx.stateEpoch;
-      let raws: string[];
-      try { raws = await source.pendingRawTxs(); } catch { return; }
+      let items: { txid: string; hex: string }[] = [];
+      if (typeof source.pendingTxs === "function") {
+        try { items = await source.pendingTxs(); } catch { return; }
+      } else {
+        try {
+          const raws = await source.pendingRawTxs();
+          items = raws.map((hex) => ({ txid: "", hex }));
+        } catch { return; }
+      }
       if (ctx.stateEpoch !== epoch) return;
-      for (const hex of raws.slice(0, 8)) {
+      for (const item of items.slice(0, 8)) {
         if (ctx.stateEpoch !== epoch) return;
         try {
-          await ctx.transport.submit!(hex);
+          await ctx.transport.submit!(item.hex, undefined, item.txid ? { txid: item.txid } : undefined);
         } catch (e) {
           if (runtime.isDuplicateBroadcastError(e)) continue;
           const msg = e instanceof Error ? e.message : String(e);

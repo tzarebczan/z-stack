@@ -723,6 +723,22 @@ impl WasmWallet {
         serde_json::to_string(&self.inner.pending_raw_txs()).map_err(js_err)
     }
 
+    #[wasm_bindgen(js_name = pendingTxs)]
+    pub fn pending_txs(&self) -> Result<String, JsValue> {
+        self.inner.pending_txs_json().map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = pendingRawTx)]
+    pub fn pending_raw_tx(&self, txid: &str) -> Result<Option<String>, JsValue> {
+        self.inner.pending_tx_raw(txid).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = rawTxid)]
+    pub fn raw_txid(&self, raw_hex: &str) -> Result<String, JsValue> {
+        let raw = z_engine::web::from_hex(raw_hex).map_err(js_err)?;
+        self.inner.raw_txid(&raw).map_err(js_err)
+    }
+
     #[wasm_bindgen(js_name = abandon)]
     pub fn abandon(&mut self, txid: &str) -> Result<bool, JsValue> {
         self.inner.abandon_unmined(txid).map_err(js_err)

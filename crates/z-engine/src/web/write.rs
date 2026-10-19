@@ -1427,7 +1427,11 @@ impl WalletWrite for WebWallet {
                 .orchard_received
                 .saturating_add(received_zat - ironwood_received);
             if !memos.is_empty() {
-                agg.memos.extend(memos);
+                for m in memos {
+                    if !agg.memos.contains(&m) {
+                        agg.memos.push(m);
+                    }
+                }
             }
         }
         // Unlock-on-store: the spend records now guard these notes.

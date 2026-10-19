@@ -79,6 +79,8 @@ export type ScanSession = {
   historyQuery: (limit: number, status: string, txid: string) => Promise<string>;
   /** Raw hex of unmined, unexpired sends, for an idempotent rebroadcast. */
   pendingRawTxs: () => Promise<string[]>;
+  pendingTxs?: () => Promise<{ txid: string; hex: string }[]>;
+  pendingRawTx?: (txid: string) => Promise<string | null>;
   scannedHeight: () => Promise<number>;
   birthday: () => Promise<number>;
   nextHeight: () => Promise<number>;
@@ -137,6 +139,8 @@ type WalletHandle = HardwareWalletHandle & {
   history: (limit: number) => string;
   historyQuery?: (limit: number, status: string, txid: string) => string;
   pendingRawTxs?: () => string;
+  pendingTxs?: () => string;
+  pendingRawTx?: (txid: string) => string | undefined;
   scannedHeight: () => number;
   birthday: () => number;
   nextHeight: () => number;
@@ -328,6 +332,20 @@ export function localScanSession(
       return cur.historyQuery(limit, status, txid);
     },
     pendingRawTxs: async () => parseRawTxs(w().pendingRawTxs?.()),
+    pendingTxs: async () => {
+      const cur = w();
+      if (typeof cur.pendingTxs !== "function") return [];
+      try {
+        return JSON.parse(cur.pendingTxs()) as { txid: string; hex: string }[];
+      } catch {
+        return [];
+      }
+    },
+    pendingRawTx: async (txid: string) => {
+      const cur = w();
+      if (typeof cur.pendingRawTx !== "function") return null;
+      return cur.pendingRawTx(txid) ?? null;
+    },
     scannedHeight: async () => w().scannedHeight(),
     birthday: async () => w().birthday(),
     nextHeight: async () => w().nextHeight(),
@@ -896,6 +914,18 @@ export function workerScanSession(): ScanSession | null {
       return Number(data.nextHeight) || 1;
     },
     pendingRawTxs: async () => parseRawTxs((await sessionRpc("pendingRawTxs")).json),
+    pendingTxs: async () => {
+      const resp = await sessionRpc("pendingTxs");
+      try {
+        return (typeof resp.json === "string" ? JSON.parse(resp.json) : []) as { txid: string; hex: string }[];
+      } catch {
+        return [];
+      }
+    },
+    pendingRawTx: async (txid: string) => {
+      const resp = await sessionRpc("pendingRawTx", { txid });
+      return typeof resp.hex === "string" ? resp.hex : null;
+    },
     treesReady: async () => {
       const data = await sessionRpc("meta");
       return !!data.treesReady;

@@ -140,7 +140,7 @@ export type Wallet = Omit<WasmClient, "baseUrl" | "health" | "probeSetup" | "sav
   /** Follow new blocks (see the `autoSync` option in {@link WalletOptions}). Idempotent. */
   startAutoSync(intervalMs?: number): void;
   stopAutoSync(): void;
-  retryPendingSubmission?(txid: string, opts?: { signal?: AbortSignal }): Promise<{ txid: string }>;
+  retryPendingSubmission(txid: string, opts?: { signal?: AbortSignal }): Promise<{ txid: string }>;
   /**
    * Lock, cancel work and release the owner. Saved data stays. Await before
    * opening another client. A rollback storage error rejects after cleanup;
@@ -378,6 +378,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
         memoFetchMode = mode;
       },
       cancelSync: () => cancelWasmSync(),
+      retryPendingSubmission: (txid: string, options?: { signal?: AbortSignal }) => client.retryPendingSubmission(txid, options),
       startAutoSync,
       stopAutoSync,
       close,

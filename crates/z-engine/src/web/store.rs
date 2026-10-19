@@ -2105,6 +2105,38 @@ impl WebWallet {
             .collect()
     }
 
+    /// JSON list of `{ "txid": string, "hex": string }` for every unmined, unexpired send.
+    pub fn pending_txs_json(&self) -> Result<String> {
+        let list: Vec<serde_json::Value> = self
+            .unmined_pending_txs()
+            .map(|(key, raw)| {
+                serde_json::json!({
+                    "txid": Self::display_txid(&key),
+                    "hex": to_hex(raw),
+                })
+            })
+            .collect();
+        serde_json::to_string(&list).map_err(|e| EngineError::Message(e.to_string()))
+    }
+
+    /// Retrieve the signed raw hex of a pending transaction by display txid or wire hex.
+    pub fn pending_tx_raw(&self, txid: &str) -> Result<Option<String>> {
+        let trimmed = txid.trim();
+        let id = TxId::from_hex(trimmed)
+            .or_else(|| Self::txid_from_hex(trimmed).ok())
+            .ok_or_else(|| EngineError::Message("invalid txid".into()))?;
+        let key = to_hex(id.as_ref());
+        if let Some(agg) = self.txs.get(&key) {
+            if agg.mined_height.is_some() {
+                return Err(EngineError::Message("transaction is already mined".into()));
+            }
+            if self.expired_unmined(agg) {
+                return Err(EngineError::Message("transaction expired unmined".into()));
+            }
+        }
+        Ok(self.pending_txs.get(&id).map(|raw| to_hex(raw)))
+    }
+
     fn expired_unmined(&self, agg: &TxAgg) -> bool {
         agg.mined_height.is_none()
             && agg

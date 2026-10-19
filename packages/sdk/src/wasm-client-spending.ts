@@ -582,5 +582,71 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
     if (typeof v.maxSendZat !== "number") throw new Error("invalid max send");
     return v;
   }
-  return { transparentSendSource, proveAndSubmit, proveAndSubmitHere, hardwareSubmit, requireSeed, finishSpend, parseFeeJson, parseMaxJson };
+
+  function retryPendingSubmission(
+    txid: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<{ txid: string }> {
+    return runtime.withOriginSpendLock(() => retryPendingSubmissionHere(txid, opts));
+  }
+
+  async function retryPendingSubmissionHere(
+    txid: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<{ txid: string }> {
+    if (!ctx.transport.submit) {
+      throw new WalletError("broadcast_rejected", "This wallet connection does not support payment submission.");
+    }
+    const cleanTxid = txid.trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(cleanTxid)) {
+      throw new WalletError("unknown", "Invalid transaction id.");
+    }
+    const operation = ctx.sessionOperation ?? captureWalletOperation();
+    if (!ctx.currentSession() && !(await ctx.loadIfNeeded())) {
+      throw new Error("no wasm wallet");
+    }
+    operation.assertCurrent();
+    const source = ctx.session!;
+    ctx.assertSource(operation, source);
+
+    let rawHex: string | null = null;
+    if (typeof source.pendingRawTx === "function") {
+      try {
+        rawHex = await source.pendingRawTx(cleanTxid);
+      } catch (e) {
+        throw WalletError.fromUnknown(e);
+      }
+    }
+    if (!rawHex && typeof source.pendingTxs === "function") {
+      try {
+        const list = await source.pendingTxs();
+        const match = list.find((item) => item.txid.toLowerCase() === cleanTxid);
+        if (match) rawHex = match.hex;
+      } catch {}
+    }
+    if (!rawHex) {
+      throw new WalletError(
+        "unknown",
+        "The saved transaction was not found in pending submissions. It may have already mined or expired.",
+      );
+    }
+
+    opts?.signal?.throwIfAborted();
+
+    try {
+      await ctx.transport.submit(rawHex, opts?.signal, { txid: cleanTxid });
+    } catch (e) {
+      if (!runtime.isDuplicateBroadcastError(e)) {
+        throw WalletError.fromUnknown(e);
+      }
+    }
+
+    try {
+      await ctx.refreshMempool();
+    } catch {}
+
+    return { txid: cleanTxid };
+  }
+
+  return { transparentSendSource, proveAndSubmit, proveAndSubmitHere, hardwareSubmit, requireSeed, finishSpend, parseFeeJson, parseMaxJson, retryPendingSubmission };
 }

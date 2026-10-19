@@ -63,6 +63,8 @@ type Wallet = HardwareWalletHandle & {
   history: (limit: number) => string;
   historyQuery?: (limit: number, status: string, txid: string) => string;
   pendingRawTxs?: () => string;
+  pendingTxs?: () => string;
+  pendingRawTx?: (txid: string) => string | undefined | null;
   scannedHeight: () => number;
   birthday: () => number;
   nextHeight: () => number;
@@ -434,6 +436,14 @@ async function handle(msg: Req): Promise<void> {
       }
       case "pendingRawTxs": {
         post({ id: msg.id, json: needWallet().pendingRawTxs?.() ?? "[]" });
+        return;
+      }
+      case "pendingTxs": {
+        post({ id: msg.id, json: needWallet().pendingTxs?.() ?? "[]" });
+        return;
+      }
+      case "pendingRawTx": {
+        post({ id: msg.id, hex: needWallet().pendingRawTx?.(msg.txid ?? "") ?? null });
         return;
       }
       case "toSnapshot": {

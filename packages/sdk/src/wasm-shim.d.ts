@@ -76,8 +76,11 @@ declare module "./generated/z_wasm.js" {
     sinsemillaLive(): boolean;
     subtreeRootCount(protocol: string): number;
     subtreeRootsStart(protocol: string): number;
-    history(limit: number): string;
     historyQuery(limit: number, status: string, txid: string): string;
+    pendingRawTxs?(): string;
+    pendingTxs?(): string;
+    pendingRawTx?(txid: string): string | undefined;
+    rawTxid?(hex: string): string;
     snapshotJson(server: string): string;
     scannedHeight(): number;
     birthday(): number;
@@ -152,8 +155,11 @@ declare module "./generated-mt/z_wasm.js" {
     sinsemillaLive(): boolean;
     subtreeRootCount(protocol: string): number;
     subtreeRootsStart(protocol: string): number;
-    history(limit: number): string;
     historyQuery(limit: number, status: string, txid: string): string;
+    pendingRawTxs?(): string;
+    pendingTxs?(): string;
+    pendingRawTx?(txid: string): string | undefined;
+    rawTxid?(hex: string): string;
     snapshotJson(server: string): string;
     scannedHeight(): number;
     birthday(): number;
