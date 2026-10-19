@@ -828,12 +828,6 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     }
     let rootsApplied = false;
     if (ctx.transport.subtreeRoots) {
-      // Optional pruning must not stall an otherwise caught-up wallet for the
-      // transport's full RPC timeout. Keep any completed prefix on a deadline;
-      // user cancellation still rejects the whole operation via `signal`.
-      const rootsSignal = AbortSignal.any([
-        wait, AbortSignal.timeout(treesReady ? 15_000 : 30_000),
-      ]);
       const protos =
         ctx.network === "regtest" ? (["sapling", "orchard"] as const) : (["sapling", "orchard", "ironwood"] as const);
       // Older wasm cannot report the birthday shard; resume from the stored count.
@@ -842,6 +836,12 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         protos.map(async (proto) => {
           const startIndex = starts?.[proto] ?? 0;
           onProto?.(proto);
+          // Keep each protocol on its own deadline so serial transports (e.g. Private Cloud OHTTP)
+          // do not starve later pools. `wait` still rejects the whole operation on cancel.
+          const rootsSignal = AbortSignal.any([
+            wait,
+            AbortSignal.timeout(treesReady ? 45_000 : 60_000),
+          ]);
           try {
             const page = (at: number) => abortable(rootsSignal, () => ctx.transport.subtreeRoots!(proto, at, rootsSignal, SUBTREE_ROOTS_PAGE));
             return { proto, startIndex, roots: await fetchSubtreeRoots(page, startIndex, wait) };
@@ -1130,7 +1130,14 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
   }
 
   async function enhanceMemos(automatic = false): Promise<void> {
-    if (!ctx.session || !ctx.transport.tx || ctx.transport.enhance) { ctx.selectiveMemoStatus = "unsupported"; return; }
+    // Enhance PIR replaces public txid lookups. A transport with no tx method
+    // can still fill missing memos from one-block shared ranges.
+    const selectiveTx = !!ctx.transport.tx && !ctx.transport.enhance;
+    const targetedShared = !!ctx.transport.sharedMemos && !ctx.transport.tx;
+    if (!ctx.session || (!selectiveTx && !targetedShared)) {
+      ctx.selectiveMemoStatus = "unsupported";
+      return;
+    }
     const source = ctx.session;
     const epoch = runtime.runtimeState.wasmSyncEpoch;
     const state = ctx.stateEpoch;
@@ -1162,35 +1169,89 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       }
       let n = 0;
       let failed = false;
-      const conc = 8;
-      for (let i = 0; i < need.length && current(); i += conc) {
-        const chunk = need.slice(i, i + conc);
-        let outages = 0;
-        const hexes = await Promise.all(
-          chunk.map((txid) =>
-            abortable(signal, () => ctx.transport.tx!(txid, signal)).catch((error) => {
-              signal.throwIfAborted();
-              if (isTransientLightServerError(error)) outages++;
-              return null;
-            }),
-          ),
-        );
-        for (const hex of hexes) {
-          if (!current()) return;
-          if (!hex) { failed = true; continue; }
-          try {
-            await source.enhanceRawTx(hex);
-            n += 1;
-          } catch {
-            failed = true; // Keep failed entries in Rust's durable enhancement queue.
+      if (selectiveTx) {
+        const conc = 8;
+        for (let i = 0; i < need.length && current(); i += conc) {
+          const chunk = need.slice(i, i + conc);
+          let outages = 0;
+          const hexes = await Promise.all(
+            chunk.map((txid) =>
+              abortable(signal, () => ctx.transport.tx!(txid, signal)).catch((error) => {
+                signal.throwIfAborted();
+                if (isTransientLightServerError(error)) outages++;
+                return null;
+              }),
+            ),
+          );
+          for (const hex of hexes) {
+            if (!current()) return;
+            if (!hex) { failed = true; continue; }
+            try {
+              await source.enhanceRawTx(hex);
+              n += 1;
+            } catch {
+              failed = true; // Keep failed entries in Rust's durable enhancement queue.
+            }
           }
+          // Persist progress in bounded groups, including successful blank memos.
+          // Storage failures must escape, not masquerade as a network retry.
+          if (n >= 40 && current()) { await ctx.persist(); n = 0; }
+          // A down server must not consume 500 sequential request deadlines.
+          // Permanent per-transaction errors still allow later entries to run.
+          if (outages === chunk.length) break;
         }
-        // Persist progress in bounded groups, including successful blank memos.
-        // Storage failures must escape, not masquerade as a network retry.
-        if (n >= 40 && current()) { await ctx.persist(); n = 0; }
-        // A down server must not consume 500 sequential request deadlines.
-        // Permanent per-transaction errors still allow later entries to run.
-        if (outages === chunk.length) break;
+      } else if (targetedShared && need.length > 0) {
+        // memoEnhancementTxids already skipped completed rows before its limit.
+        // history(500) is the newest page, so an older pending id would never
+        // gain a height. Look each id up directly.
+        const heights = new Set<number>();
+        for (const txid of need) {
+          if (!current()) return;
+          let rows: HistoryEntry[] = [];
+          try {
+            rows = JSON.parse(await source.historyQuery(1, "", txid) || "[]") as HistoryEntry[];
+          } catch (error) {
+            signal.throwIfAborted();
+            failed = true;
+            continue;
+          }
+          const minedHeight = rows.find((row) => row.txid === txid)?.minedHeight;
+          if (typeof minedHeight === "number") heights.add(minedHeight);
+          else failed = true;
+        }
+        const orderedHeights = [...heights].sort((a, b) => a - b);
+        let outages = 0;
+        for (const height of orderedHeights) {
+          if (!current()) return;
+          let json: string | null = null;
+          try {
+            json = await abortable(signal, () => ctx.transport.sharedMemos!(height, height, signal));
+          } catch (error) {
+            signal.throwIfAborted();
+            if (isTransientLightServerError(error)) outages++;
+            failed = true;
+            if (outages >= 3) break;
+            continue;
+          }
+          if (!json) { failed = true; continue; }
+          try {
+            const bundle = JSON.parse(json) as { transactions?: string[] };
+            if (Array.isArray(bundle.transactions)) {
+              for (const hex of bundle.transactions) {
+                if (!current()) return;
+                try {
+                  await source.enhanceRawTx(hex);
+                  n += 1;
+                } catch {
+                  failed = true;
+                }
+              }
+            }
+          } catch {
+            failed = true;
+          }
+          if (n >= 40 && current()) { await ctx.persist(); n = 0; }
+        }
       }
       if (!current()) return;
       // Also retry a previously failed save when every entry completed in memory.

@@ -56,11 +56,14 @@ export {
   grpcWebTransport,
   httpLwdTransport,
   SDK_TRANSPORT_CAPABILITIES,
+  cdnSegmentTransport,
+  sliceSegmentFrames,
   // A custom transport's `submit` throws this for the node's explicit refusal.
   BroadcastRejection,
   type BlockTransport,
   type SubmissionPolicy,
   type SubmissionContext,
+  type CdnTransportOptions,
   type GrpcWebTransportOpts,
   type TransparentUtxo,
 } from "./lwd";
