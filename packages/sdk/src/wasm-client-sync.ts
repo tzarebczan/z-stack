@@ -957,7 +957,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
   }
 
   async function enhanceMemos(automatic = false): Promise<void> {
-    if (!ctx.session || !ctx.transport.tx) { ctx.selectiveMemoStatus = "unsupported"; return; }
+    if (!ctx.session || (!ctx.transport.tx && !ctx.transport.sharedMemos)) {
+      ctx.selectiveMemoStatus = "unsupported";
+      return;
+    }
     const source = ctx.session;
     const epoch = runtime.runtimeState.wasmSyncEpoch;
     const state = ctx.stateEpoch;
@@ -989,34 +992,75 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       }
       let n = 0;
       let failed = false;
-      const conc = 8;
-      for (let i = 0; i < need.length && current(); i += conc) {
-        const chunk = need.slice(i, i + conc);
-        let outages = 0;
-        const hexes = await Promise.all(
-          chunk.map((txid) =>
-            ctx.transport.tx!(txid, signal).catch((error) => {
-              if (isTransientLightServerError(error)) outages++;
-              return null;
-            }),
-          ),
-        );
-        for (const hex of hexes) {
-          if (!current()) return;
-          if (!hex) { failed = true; continue; }
-          try {
-            await source.enhanceRawTx(hex);
-            n += 1;
-          } catch {
-            failed = true; // Keep failed entries in Rust's durable enhancement queue.
+      if (ctx.transport.tx) {
+        const conc = 8;
+        for (let i = 0; i < need.length && current(); i += conc) {
+          const chunk = need.slice(i, i + conc);
+          let outages = 0;
+          const hexes = await Promise.all(
+            chunk.map((txid) =>
+              ctx.transport.tx!(txid, signal).catch((error) => {
+                if (isTransientLightServerError(error)) outages++;
+                return null;
+              }),
+            ),
+          );
+          for (const hex of hexes) {
+            if (!current()) return;
+            if (!hex) { failed = true; continue; }
+            try {
+              await source.enhanceRawTx(hex);
+              n += 1;
+            } catch {
+              failed = true; // Keep failed entries in Rust's durable enhancement queue.
+            }
           }
+          // Persist progress in bounded groups, including successful blank memos.
+          // Storage failures must escape, not masquerade as a network retry.
+          if (n >= 40 && current()) { await ctx.persist(); n = 0; }
+          // A down server must not consume 500 sequential request deadlines.
+          // Permanent per-transaction errors still allow later entries to run.
+          if (outages === chunk.length) break;
         }
-        // Persist progress in bounded groups, including successful blank memos.
-        // Storage failures must escape, not masquerade as a network retry.
-        if (n >= 40 && current()) { await ctx.persist(); n = 0; }
-        // A down server must not consume 500 sequential request deadlines.
-        // Permanent per-transaction errors still allow later entries to run.
-        if (outages === chunk.length) break;
+      } else if (ctx.transport.sharedMemos && need.length > 0) {
+        const rawHistory = await source.history(500);
+        const rows = JSON.parse(rawHistory || "[]") as HistoryEntry[];
+        const needSet = new Set(need);
+        const heights = [...new Set(
+          rows.filter((r) => needSet.has(r.txid) && typeof r.minedHeight === "number")
+            .map((r) => r.minedHeight as number),
+        )].sort((a, b) => a - b);
+        let outages = 0;
+        for (const height of heights) {
+          if (!current()) return;
+          let json: string | null = null;
+          try {
+            json = await ctx.transport.sharedMemos(height, height, signal);
+          } catch (error) {
+            if (isTransientLightServerError(error)) outages++;
+            failed = true;
+            if (outages >= 3) break;
+            continue;
+          }
+          if (!json) { failed = true; continue; }
+          try {
+            const bundle = JSON.parse(json) as { transactions?: string[] };
+            if (Array.isArray(bundle.transactions)) {
+              for (const hex of bundle.transactions) {
+                if (!current()) return;
+                try {
+                  await source.enhanceRawTx(hex);
+                  n += 1;
+                } catch {
+                  failed = true;
+                }
+              }
+            }
+          } catch {
+            failed = true;
+          }
+          if (n >= 40 && current()) { await ctx.persist(); n = 0; }
+        }
       }
       if (!current()) return;
       // Also retry a previously failed save when every entry completed in memory.
