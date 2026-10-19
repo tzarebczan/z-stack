@@ -1806,3 +1806,41 @@ for (const compactAdvance of [false, true]) {
     assert.equal(events.at(-1)?.stage, "synced");
   });
 }
+
+test("on-demand enhances pending transactions via targeted sharedMemos block queries when tx lookup is absent", async t => {
+  installDb(t); const worker = new MemoWorker();
+  worker.candidates = ["tx1-raw", "tx2-raw"];
+  await restartScanWorker(() => worker as unknown as Worker);
+  const requestedBlocks: number[] = [];
+  const client = createWasmClient({
+    unlockPolicy: "session",
+    memoFetch: "on-demand",
+    network: "regtest",
+    autoShield: false,
+    transport: {
+      kind: "mock",
+      label: "mock",
+      tip: async () => 100,
+      blocks: async () => new Uint8Array(),
+      sharedMemos: async (start, end) => {
+        requestedBlocks.push(start);
+        return JSON.stringify({ start, end, transactions: ["tx1-raw", "tx2-raw"] });
+      },
+    },
+  });
+  const origPost = worker.postMessage.bind(worker);
+  worker.postMessage = (msg) => {
+    if (msg.op === "history") {
+      const rows = worker.candidates.map((txid) => ({ txid, minedHeight: 42, receivedNoteCount: 1 }));
+      queueMicrotask(() => worker.dispatchEvent(new MessageEvent("message", { data: { id: msg.id, json: JSON.stringify(rows) } })));
+      return;
+    }
+    origPost(msg);
+  };
+  await client.restore("test-only worker fixture", "regtest", 1);
+  assert.equal((await client.fetchMemos()).memoFetchStatus, "complete");
+  assert.deepEqual(requestedBlocks, [42], "only queries block 42 where transactions actually mined");
+  assert.deepEqual(worker.enhanced, ["tx1-raw", "tx2-raw"]);
+  assert.equal((await client.fetchMemos()).memoFetchStatus, "complete");
+  assert.equal(requestedBlocks.length, 1, "completed transactions are not requested again");
+});
