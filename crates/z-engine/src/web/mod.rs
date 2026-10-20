@@ -435,6 +435,36 @@ mod tests {
         );
 
         let pending_orchard = pending.orchard_pending;
+        let batch_block = w
+            .mined_raw_tx_block(&raw, 1_700_000_000)
+            .unwrap_or_else(|e| panic!("compact block for shield: {e}"));
+        let mut discovered = WebWallet::from_account(
+            account_from_mnemonic(REGTEST_FAUCET_MNEMONIC, Network::Regtest, 0).unwrap(),
+            1,
+        )
+        .unwrap();
+        let d1 = empty_block(1, vec![0u8; 32]);
+        let d2 = empty_block(2, d1.hash.clone());
+        discovered.apply_compact_block(&d1.encode_to_vec()).unwrap();
+        discovered.apply_compact_block(&d2.encode_to_vec()).unwrap();
+        let found = discovered
+            .apply_compact_blocks_blob(&encode_delimited([batch_block]))
+            .unwrap_or_else(|e| panic!("batch-scan discovered shield: {e}"));
+        assert!(
+            found.iter().any(|delta| delta.notes_found > 0),
+            "batch scan should decrypt the new receipt"
+        );
+        let discovered_row = discovered
+            .history(5)
+            .into_iter()
+            .find(|entry| entry.mined_height == Some(3))
+            .expect("batch-scanned receipt");
+        assert_eq!(
+            discovered_row.block_time,
+            Some(1_700_000_000),
+            "a receipt first seen in a batch scan keeps the block time"
+        );
+
         let mined = w
             .apply_mined_raw_tx(&raw, 1_700_000_000)
             .unwrap_or_else(|e| panic!("mine pending shield: {e}"));

@@ -519,7 +519,6 @@ impl WebWallet {
             for (txid, nf) in &head.spends {
                 spends_found += self.mark_spent(nf, txid, head.height);
             }
-            self.note_included(head.height, head.time, &head.txids);
             match sc {
                 DecryptOut::Empty {
                     hash,
@@ -527,6 +526,9 @@ impl WebWallet {
                     orchard_sz,
                     ironwood_sz,
                 } => {
+                    // No new receipt is created here. Stamp a send we already
+                    // track before finish_empty can release it as expired.
+                    self.note_included(head.height, head.time, &head.txids);
                     self.finish_empty(
                         head.height,
                         &hash,
@@ -564,6 +566,11 @@ impl WebWallet {
                     self.append_sapling(head.height, sc.sapling().commitments())?;
                     self.append_orchard(head.height, sc.orchard().commitments())?;
                     self.append_ironwood(head.height, sc.ironwood().commitments())?;
+                    // Ingest creates a receipt with a mined height and no
+                    // block time. Stamp after that, and before set_scanned,
+                    // so a send we already tracked is mined before expiry
+                    // release and a newly decrypted receipt keeps its date.
+                    self.note_included(head.height, head.time, &head.txids);
                     self.set_scanned(
                         head.height,
                         Self::make_prior(
