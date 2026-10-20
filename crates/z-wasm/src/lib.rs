@@ -749,6 +749,12 @@ impl WasmWallet {
         self.inner.abandon_unmined(txid).map_err(js_err)
     }
 
+    /// Activity removal. Still-pending sends stay; hardware rollback uses `abandon`.
+    #[wasm_bindgen(js_name = abandonExpired)]
+    pub fn abandon_expired(&mut self, txid: &str) -> Result<bool, JsValue> {
+        self.inner.abandon_expired(txid).map_err(js_err)
+    }
+
     /// Apply a proved raw tx as the next compact block (pending → mined).
     #[wasm_bindgen(js_name = applyMinedTx)]
     pub fn apply_mined_tx(&mut self, hex: &str, time: u32) -> Result<String, JsValue> {

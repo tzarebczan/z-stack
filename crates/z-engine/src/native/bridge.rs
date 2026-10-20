@@ -41,6 +41,11 @@ struct ShieldBody {
 }
 
 #[derive(Debug, Deserialize, Default)]
+struct TxidBody {
+    txid: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
 struct MaxSendBody {
     to: Option<String>,
 }
@@ -559,6 +564,21 @@ impl Bridge {
                         Some(row) => Ok(row.to_json()),
                         None => Err(anyhow::anyhow!("transaction not found")),
                     }
+                })
+                .await
+            }
+            ("POST", "/history/remove") => {
+                let body: TxidBody = serde_json::from_slice(if req.body.is_empty() {
+                    b"{}"
+                } else {
+                    &req.body
+                })
+                .unwrap_or_default();
+                let txid = body.txid.unwrap_or_default();
+                let dir = self.wallet.clone();
+                self.locked(async move {
+                    let w = NativeWallet::open(&dir)?;
+                    Ok(json!({ "removed": w.abandon_expired(&txid)? }))
                 })
                 .await
             }

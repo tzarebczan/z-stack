@@ -67,6 +67,7 @@ type Wallet = HardwareWalletHandle & {
   toSnapshot: () => Uint8Array;
   history: (limit: number) => string;
   historyQuery?: (limit: number, status: string, txid: string) => string;
+  abandonExpired?: (txid: string) => boolean;
   pendingRawTxs?: () => string;
   pendingSubmissions?: () => string;
   scannedHeight: () => number;
@@ -503,6 +504,13 @@ async function handle(msg: Req): Promise<void> {
       }
       case "history": {
         post({ id: msg.id, json: needWallet().history(msg.limit ?? 50) });
+        return;
+      }
+      case "abandon": {
+        const w = needWallet();
+        // Hardware rollback still calls `abandon` for a pending send.
+        if (typeof w.abandonExpired !== "function") throw new Error("this wasm build cannot remove an expired payment");
+        post({ id: msg.id, removed: w.abandonExpired(msg.txid ?? "") });
         return;
       }
       case "meta": {

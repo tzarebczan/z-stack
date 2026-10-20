@@ -3152,6 +3152,66 @@ impl WebWallet {
         Ok(true)
     }
 
+    /// Delete one expired, unmined activity row.
+    ///
+    /// `abandon_unmined` remains the hardware-rollback primitive and can drop a
+    /// still-pending send. This path is the activity control: confirmed and
+    /// pending rows stay, and so does a payment whose output another saved
+    /// payment spends.
+    pub fn abandon_expired(&mut self, txid: &str) -> Result<bool> {
+        let id = TxId::from_hex(txid.trim())
+            .ok_or_else(|| EngineError::Message("invalid_txid".into()))?;
+        let wire = to_hex(id.as_ref());
+        let Some(agg) = self.txs.get(&wire) else {
+            return Ok(false);
+        };
+        if agg.mined_height.is_some()
+            || !self.expired_unmined(agg)
+            || self.recorded_as_mined_spender(&wire)
+        {
+            return Err(EngineError::Message("history_remove_refused".into()));
+        }
+        if self.payment_output_spent_elsewhere(&wire) {
+            return Err(EngineError::Message("history_remove_spent".into()));
+        }
+        self.abandon_unmined(&id.to_string())
+    }
+
+    fn recorded_as_mined_spender(&self, txid: &str) -> bool {
+        self.txs.values().any(|agg| {
+            agg.accounted_transparent_receipts.values().any(|receipt| {
+                receipt.spent_in.as_ref().is_some_and(|spent| {
+                    spent.txid == txid && spent.height.is_some_and(|height| height > 0)
+                })
+            })
+        })
+    }
+
+    fn payment_output_spent_elsewhere(&self, txid: &str) -> bool {
+        let spent_by_other = |created: &str, spender: Option<&str>| {
+            created == txid && spender.is_some_and(|spender| spender != txid)
+        };
+        self.notes
+            .iter()
+            .any(|note| spent_by_other(&note.txid, note.spent_in.as_deref()))
+            || self
+                .spend_notes
+                .iter()
+                .any(|note| spent_by_other(&note.txid, note.spent_in.as_deref()))
+            || self
+                .utxos
+                .iter()
+                .any(|utxo| spent_by_other(&utxo.txid, utxo.spent_in.as_deref()))
+            || self.txs.get(txid).is_some_and(|agg| {
+                agg.accounted_transparent_receipts.values().any(|receipt| {
+                    receipt
+                        .spent_in
+                        .as_ref()
+                        .is_some_and(|spent| spent.txid != txid)
+                })
+            })
+    }
+
     pub(crate) fn prior_metadata(&self) -> Result<Option<BlockMetadata>> {
         let Some(p) = &self.prior else {
             return Ok(None);

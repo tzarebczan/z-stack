@@ -105,6 +105,7 @@ they can be cached forever.
 | `wallet.sync()` | Catches up to the chain tip. Progress arrives through `on("sync")`, and `onProgress` gives scan detail. |
 | `wallet.getWallet()` | Returns the snapshot: addresses, per-pool balances, scanned height and recent history. |
 | `wallet.history(limit?)` | Returns transactions, newest first. `classifyHistory(entry)` gives the action (sent, received, shielding, …) and the display amount. Classify at read time; do not persist the result (`type`), since the engine refines it as it learns more. |
+| `wallet.abandonExpired(txid)` | Removes one expired, unmined payment from activity and persists that change. Confirmed payments, still-pending payments, and a payment whose output another saved payment spends stay. Returns false when the wallet has no such transaction. |
 | `wallet.maxSend(to?)` / `wallet.estimateFee(to, amount?)` | Gives the ZIP-317 fee from the engine's current proposal. Ordinary send builds a fresh proposal; this estimate is not a binding fee cap. |
 | `wallet.send(to, amountZec, memo?)` | Sends to a unified address or a `zcash:` ZIP-321 URI (multi-recipient). Returns `{ …snapshot, txid }`. |
 | `wallet.supportsTransparentSend()` | Probes the loaded browser engine for explicit transparent swap-output support; it does not prove ownership, funds or signing readiness. Hardware wallets return false; the native client does not expose this method. |

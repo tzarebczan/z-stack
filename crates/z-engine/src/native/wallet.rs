@@ -3107,6 +3107,92 @@ impl NativeWallet {
         Ok(self.query_history(1, None, Some(txid))?.into_iter().next())
     }
 
+    /// Delete one expired, unmined history row.
+    ///
+    /// Confirmed and still-pending payments stay. A missing id returns
+    /// `Ok(false)`. An output of this payment that another saved transaction
+    /// spends is left in place.
+    pub fn abandon_expired(&self, txid: &str) -> Result<bool> {
+        // Public ids are display order. Convert once; looking the display
+        // string up as the stored blob would select a different transaction.
+        let id = TxId::from_hex(txid.trim())
+            .ok_or_else(|| EngineError::Message("invalid_txid".into()))?;
+        let _lease = database_lease::shared(&self.paths.data_db)?;
+        let Some(entry) = self.transaction(&id.to_string())? else {
+            return Ok(false);
+        };
+        if entry.mined_height.is_some() || !entry.expired_unmined {
+            return Err(EngineError::Message("history_remove_refused".into()));
+        }
+        let mut conn = rusqlite::Connection::open(&self.paths.data_db)
+            .map_err(|e| EngineError::WalletDb(format!("history remove open: {e}")))?;
+        // Cascade must be enabled before BEGIN. It drops this payment's spend
+        // rows and its unconfirmed change, and leaves the notes it spent.
+        conn.pragma_update(None, "foreign_keys", true)
+            .map_err(|e| EngineError::WalletDb(format!("history remove foreign keys: {e}")))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| EngineError::WalletDb(format!("history remove begin: {e}")))?;
+        // Same predicate as `v_transactions.expired_unmined`: chain tip is
+        // MAX(blocks.height), not the filled scan island. A row that mined
+        // between the read above and this write stays.
+        let id_tx = match tx.query_row(
+            "SELECT id_tx FROM transactions
+             WHERE txid = ?1
+               AND mined_height IS NULL
+               AND expiry_height BETWEEN 1 AND (SELECT COALESCE(MAX(height), 0) FROM blocks)",
+            [id.as_ref()],
+            |row| row.get::<_, i64>(0),
+        ) {
+            Ok(id_tx) => id_tx,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(EngineError::Message("history_remove_refused".into()));
+            }
+            Err(e) => {
+                return Err(EngineError::WalletDb(format!("history remove lookup: {e}")));
+            }
+        };
+        let spent_elsewhere: i64 = tx
+            .query_row(
+                "SELECT (
+                    SELECT COUNT(*) FROM sapling_received_notes n
+                    JOIN sapling_received_note_spends s ON s.sapling_received_note_id = n.id
+                    WHERE n.transaction_id = ?1 AND s.transaction_id != ?1
+                 ) + (
+                    SELECT COUNT(*) FROM orchard_received_notes n
+                    JOIN orchard_received_note_spends s ON s.orchard_received_note_id = n.id
+                    WHERE n.transaction_id = ?1 AND s.transaction_id != ?1
+                 ) + (
+                    SELECT COUNT(*) FROM ironwood_received_notes n
+                    JOIN ironwood_received_note_spends s ON s.ironwood_received_note_id = n.id
+                    WHERE n.transaction_id = ?1 AND s.transaction_id != ?1
+                 ) + (
+                    SELECT COUNT(*) FROM transparent_received_outputs n
+                    JOIN transparent_received_output_spends s
+                      ON s.transparent_received_output_id = n.id
+                    WHERE n.transaction_id = ?1 AND s.transaction_id != ?1
+                 )",
+                [id_tx],
+                |row| row.get(0),
+            )
+            .map_err(|e| EngineError::WalletDb(format!("history remove spends: {e}")))?;
+        if spent_elsewhere != 0 {
+            return Err(EngineError::Message("history_remove_spent".into()));
+        }
+        let removed = tx
+            .execute(
+                "DELETE FROM transactions WHERE id_tx = ?1 AND mined_height IS NULL",
+                [id_tx],
+            )
+            .map_err(|e| EngineError::WalletDb(format!("history remove delete: {e}")))?;
+        if removed != 1 {
+            return Err(EngineError::Message("history_remove_refused".into()));
+        }
+        tx.commit()
+            .map_err(|e| EngineError::WalletDb(format!("history remove commit: {e}")))?;
+        Ok(true)
+    }
+
     /// `status` filters before `LIMIT`, so a pending row is not pushed out by mined history.
     pub fn query_history(
         &self,
@@ -5982,6 +6068,156 @@ mod tests {
         let ids: Vec<u8> = pending.iter().map(|(id, _)| id.as_ref()[0]).collect();
         assert_eq!(ids, vec![1, 5]);
         assert_eq!(pending[0].1, vec![1u8; 4]);
+    }
+
+    #[test]
+    fn abandon_expired_removes_only_an_expired_unmined_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = fixture_wallet(dir.path());
+        let (ufvk, birthday) = fixture_account();
+        wallet.replace_scan_db(&ufvk, &birthday).unwrap();
+        let conn = rusqlite::Connection::open(&wallet.paths.data_db).unwrap();
+        conn.execute_batch(
+            "INSERT INTO blocks (height, hash, time, sapling_tree) VALUES (100, zeroblob(32), 0, X'000000')",
+        )
+        .unwrap();
+        let parent = [1u8; 32];
+        let expired = [2u8; 32];
+        let pending = [3u8; 32];
+        let mined = [4u8; 32];
+        let expired_spent = [6u8; 32];
+        let later = [5u8; 32];
+        let note_a = [0x11u8; 32];
+        let note_b = [0x12u8; 32];
+        let note_c = [0x13u8; 32];
+        let change = [0x21u8; 32];
+        let spent_change = [0x31u8; 32];
+        let mined_note = [0x41u8; 32];
+        let insert_tx = |id: &[u8; 32], mined_height: Option<u32>, expiry: u32| {
+            assert_eq!(
+                conn.execute(
+                    "INSERT INTO transactions (txid, mined_height, expiry_height, min_observed_height)
+                     VALUES (?1, ?2, ?3, 1)",
+                    rusqlite::params![id.as_slice(), mined_height, expiry],
+                )
+                .unwrap(),
+                1
+            );
+        };
+        let insert_note = |txid: &[u8; 32],
+                           output: i64,
+                           value: i64,
+                           nf: &[u8; 32],
+                           is_change: i64| {
+            assert_eq!(
+                conn.execute(
+                    "INSERT INTO sapling_received_notes
+                        (transaction_id, output_index, account_id, diversifier, value, rcm, nf, is_change)
+                     SELECT id_tx, ?2, (SELECT id FROM accounts LIMIT 1), zeroblob(11), ?3, zeroblob(32), ?4, ?5
+                     FROM transactions WHERE txid = ?1",
+                    rusqlite::params![txid.as_slice(), output, value, nf.as_slice(), is_change],
+                )
+                .unwrap(),
+                1
+            );
+        };
+        let spend = |nf: &[u8; 32], spender: &[u8; 32]| {
+            assert_eq!(
+                conn.execute(
+                    "INSERT INTO sapling_received_note_spends (sapling_received_note_id, transaction_id)
+                     SELECT n.id, t.id_tx
+                     FROM sapling_received_notes n, transactions t
+                     WHERE n.nf = ?1 AND t.txid = ?2",
+                    rusqlite::params![nf.as_slice(), spender.as_slice()],
+                )
+                .unwrap(),
+                1
+            );
+        };
+        let show = |id: &[u8; 32]| TxId::from_bytes(*id).to_string();
+        let notes = |nf: &[u8; 32]| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sapling_received_notes WHERE nf = ?1",
+                [nf.as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let spends = |nf: &[u8; 32]| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sapling_received_note_spends s
+                 JOIN sapling_received_notes n ON n.id = s.sapling_received_note_id
+                 WHERE n.nf = ?1",
+                [nf.as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+
+        insert_tx(&parent, Some(50), 90);
+        insert_tx(&expired, None, 80);
+        insert_tx(&pending, None, 200);
+        insert_tx(&mined, Some(60), 40);
+        insert_tx(&expired_spent, None, 70);
+        insert_tx(&later, None, 180);
+        insert_note(&parent, 0, 50_000, &note_a, 0);
+        insert_note(&parent, 1, 40_000, &note_b, 0);
+        insert_note(&parent, 2, 30_000, &note_c, 0);
+        insert_note(&expired, 0, 1_000, &change, 1);
+        insert_note(&expired_spent, 0, 500, &spent_change, 1);
+        insert_note(&mined, 0, 2_000, &mined_note, 0);
+        spend(&note_a, &expired);
+        spend(&note_b, &pending);
+        spend(&note_c, &expired_spent);
+        spend(&spent_change, &later);
+
+        let expired_id = show(&expired);
+        assert_eq!(
+            wallet.transaction(&expired_id).unwrap().unwrap().status(),
+            "expired"
+        );
+        assert_eq!(
+            wallet
+                .transaction(&show(&pending))
+                .unwrap()
+                .unwrap()
+                .status(),
+            "pending"
+        );
+        assert_eq!(
+            wallet.transaction(&show(&mined)).unwrap().unwrap().status(),
+            "mined"
+        );
+
+        assert!(wallet.abandon_expired(&expired_id).unwrap());
+        assert!(wallet.transaction(&expired_id).unwrap().is_none());
+        assert_eq!(notes(&note_a), 1);
+        assert_eq!(spends(&note_a), 0);
+        assert_eq!(notes(&change), 0);
+        assert!(wallet.transaction(&show(&pending)).unwrap().is_some());
+        assert!(!wallet.abandon_expired(&expired_id).unwrap());
+
+        let pending_err = wallet.abandon_expired(&show(&pending)).unwrap_err();
+        assert_eq!(pending_err.to_string(), "history_remove_refused");
+        assert!(wallet.transaction(&show(&pending)).unwrap().is_some());
+        let mined_err = wallet.abandon_expired(&show(&mined)).unwrap_err();
+        assert_eq!(mined_err.to_string(), "history_remove_refused");
+        assert!(wallet.transaction(&show(&mined)).unwrap().is_some());
+        assert_eq!(
+            wallet
+                .abandon_expired("not-a-txid")
+                .unwrap_err()
+                .to_string(),
+            "invalid_txid"
+        );
+        assert!(!wallet.abandon_expired(&show(&[9u8; 32])).unwrap());
+
+        let spent_err = wallet.abandon_expired(&show(&expired_spent)).unwrap_err();
+        assert_eq!(spent_err.to_string(), "history_remove_spent");
+        assert!(wallet.transaction(&show(&expired_spent)).unwrap().is_some());
+        assert!(wallet.transaction(&show(&later)).unwrap().is_some());
+        assert_eq!(notes(&spent_change), 1);
+        assert_eq!(notes(&note_c), 1);
     }
 
     #[test]
