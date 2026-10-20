@@ -1032,6 +1032,21 @@ export function createWasmClient(
       const rows = await loadHistory(1, { txid });
       return rows[0] ?? null;
     },
+    abandonExpired: async (txid) => {
+      const id = txid.trim();
+      if (!/^[0-9a-fA-F]{64}$/.test(id)) {
+        throw new WalletError("unknown", "That transaction id is not valid.");
+      }
+      if (!currentSession() && !(await loadIfNeeded())) return false;
+      const row = (await loadHistory(1, { txid: id }))[0];
+      if (!row) return false;
+      if (row.status !== "expired") {
+        throw new WalletError("unknown", "Only an expired payment can be removed.");
+      }
+      const removed = await session!.abandon(id);
+      if (removed) await persist();
+      return removed;
+    },
     pending: (limit = 50) => loadHistory(limit, { status: "pending" }),
     tip: async () => {
       const operation = captureWalletOperation();

@@ -512,6 +512,75 @@ fn abandon_resolves_canonical_ids_once_without_reverse_alias_fallback() {
     assert!(w.abandon_unmined("invalid transaction id").is_err());
 }
 
+#[test]
+fn abandon_expired_keeps_pending_mined_and_spent_outputs() {
+    let id = TxId::from_bytes([7u8; 32]);
+    let public_id = id.to_string();
+    let wire = to_hex(id.as_ref());
+    let mut w = wallet();
+    w.scanned_height = 10;
+    w.txs.insert(
+        wire.clone(),
+        TxAgg {
+            expiry_height: Some(10),
+            ..TxAgg::default()
+        },
+    );
+    w.notes.push(TrackedNote {
+        pool: "orchard".into(),
+        txid: wire.clone(),
+        output_index: 0,
+        value_zat: 1,
+        nf: "aa".repeat(32),
+        is_change: true,
+        spent: true,
+        spent_in: Some("ab".repeat(32)),
+        spent_height: None,
+        mined_height: 1,
+    });
+    assert_eq!(
+        w.abandon_expired(&public_id).unwrap_err().to_string(),
+        "history_remove_spent"
+    );
+    assert!(w.txs.contains_key(&wire));
+    assert!(w.notes[0].spent);
+
+    w.notes.clear();
+    assert!(w.abandon_expired(&public_id).unwrap());
+    assert!(!w.txs.contains_key(&wire));
+
+    w.txs.insert(
+        wire.clone(),
+        TxAgg {
+            expiry_height: Some(11),
+            ..TxAgg::default()
+        },
+    );
+    assert_eq!(
+        w.abandon_expired(&public_id).unwrap_err().to_string(),
+        "history_remove_refused"
+    );
+    assert!(w.txs.contains_key(&wire));
+
+    w.txs.insert(
+        wire.clone(),
+        TxAgg {
+            mined_height: Some(4),
+            expiry_height: Some(1),
+            ..TxAgg::default()
+        },
+    );
+    assert_eq!(
+        w.abandon_expired(&public_id).unwrap_err().to_string(),
+        "history_remove_refused"
+    );
+    assert!(!w.abandon_expired(&"12".repeat(32)).unwrap());
+    assert_eq!(
+        w.abandon_expired("nope").unwrap_err().to_string(),
+        "invalid_txid"
+    );
+}
+
 /// Real Sapling note encryption, with inert proof/signature bytes: enhancement
 /// parses/decrypts transactions and deliberately does not validate consensus.
 fn legacy_sapling_memo(w: &WebWallet, mined: u32, memo: &str) -> Vec<u8> {

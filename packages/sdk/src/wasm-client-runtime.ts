@@ -224,6 +224,7 @@ export type WasmWalletHandle = {
   rewindTo?: (height: number) => number;
   rewindToChecked?: (height: number) => number;
   abandon?: (txid: string) => boolean;
+  abandonExpired?: (txid: string) => boolean;
   applyMinedTx?: (hex: string, time: number) => string;
   attachSeed?: (mnemonic: string) => void;
   recomputePools?: () => void;

@@ -81,6 +81,8 @@ export type ScanSession = PrivateEnhanceHost & PrivateTransparentHost & {
   persistenceRevision?: () => number | undefined;
   history: (limit: number) => Promise<string>;
   historyQuery: (limit: number, status: string, txid: string) => Promise<string>;
+  /** Delete one history row. Callers must already know it is expired. */
+  abandon: (txid: string) => Promise<boolean>;
   /** Raw hex of unmined, unexpired sends, for an idempotent rebroadcast. */
   pendingRawTxs: () => Promise<string[]>;
   pendingSubmissions: () => Promise<PendingSubmission[]>;
@@ -144,6 +146,7 @@ type WalletHandle = HardwareWalletHandle & {
   toSnapshot: () => Uint8Array;
   history: (limit: number) => string;
   historyQuery?: (limit: number, status: string, txid: string) => string;
+  abandonExpired?: (txid: string) => boolean;
   pendingRawTxs?: () => string;
   pendingSubmissions?: () => string;
   scannedHeight: () => number;
@@ -366,6 +369,11 @@ export function localScanSession(
       const cur = w();
       if (typeof cur.historyQuery !== "function") throw new Error("this wasm build cannot query complete transaction history");
       return cur.historyQuery(limit, status, txid);
+    },
+    abandon: async (txid) => {
+      const cur = w();
+      if (typeof cur.abandonExpired !== "function") throw new Error("this wasm build cannot remove an expired payment");
+      return cur.abandonExpired(txid);
     },
     pendingRawTxs: async () => parseRawTxs(w().pendingRawTxs?.()),
     pendingSubmissions: async () => parsePendingSubmissions(w().pendingSubmissions?.()),
@@ -941,6 +949,10 @@ export function workerScanSession(): ScanSession | null {
     historyQuery: async (limit, status, txid) => {
       const data = await sessionRpc("historyQuery", { limit, status, txid });
       return String(data.json ?? "[]");
+    },
+    abandon: async (txid) => {
+      const data = await sessionRpc("abandon", { txid });
+      return data.removed === true;
     },
     scannedHeight: async () => {
       const data = await sessionRpc("meta");

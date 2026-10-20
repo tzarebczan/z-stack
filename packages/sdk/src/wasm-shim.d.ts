@@ -66,6 +66,7 @@ declare module "./generated/z_wasm.js" {
     rewindTo(height: number): number;
     rewindToChecked(height: number): number;
     abandon(txid: string): boolean;
+    abandonExpired(txid: string): boolean;
     applyMinedTx(hex: string, time: number): string;
     toSnapshot(): Uint8Array;
     applyCompactBlock(bytes: Uint8Array): string;
@@ -143,6 +144,7 @@ declare module "./generated-mt/z_wasm.js" {
     rewindTo(height: number): number;
     rewindToChecked(height: number): number;
     abandon(txid: string): boolean;
+    abandonExpired(txid: string): boolean;
     applyMinedTx(hex: string, time: number): string;
     toSnapshot(): Uint8Array;
     applyCompactBlock(bytes: Uint8Array): string;

@@ -226,6 +226,12 @@ export type EngineClient = {
   history: (limit?: number, query?: HistoryQuery) => Promise<HistoryEntry[]>;
   /** One row, or null when the wallet has no such txid. */
   transaction: (txid: string) => Promise<HistoryEntry | null>;
+  /**
+   * Remove one expired, unmined payment from activity.
+   * Confirmed and still-pending payments stay.
+   * Returns false when the wallet has no such transaction.
+   */
+  abandonExpired: (txid: string) => Promise<boolean>;
   /** Unmined rows that have not expired (`status=pending`). */
   pending: (limit?: number) => Promise<HistoryEntry[]>;
   tip: () => Promise<ChainTip>;
@@ -475,6 +481,25 @@ export function createEngineClient(baseUrl: string, opts?: EngineClientOpts): En
         if (err.message.toLowerCase().includes("not found")) return null;
         throw err;
       }
+    },
+    abandonExpired: async (txid) => {
+      const id = txid.trim();
+      if (!/^[0-9a-fA-F]{64}$/.test(id)) {
+        throw new WalletError("unknown", "That transaction id is not valid.");
+      }
+      const listed = await call<{ transactions: HistoryEntry[] }>(
+        `/history?${new URLSearchParams({ limit: "1", txid: id })}`,
+      );
+      const row = listed.transactions?.[0];
+      if (!row) return false;
+      if (row.status !== "expired") {
+        throw new WalletError("unknown", "Only an expired payment can be removed.");
+      }
+      const removed = await call<{ removed: boolean }>("/history/remove", {
+        method: "POST",
+        body: JSON.stringify({ txid: id }),
+      });
+      return removed.removed === true;
     },
     pending: (limit = 50) => {
       const q = new URLSearchParams({ limit: String(limit), status: "pending" });
