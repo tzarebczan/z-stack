@@ -131,11 +131,12 @@ pub(crate) fn scan_address_fixture_structure(w: &mut WebWallet) {
 
 #[cfg(test)]
 mod tests {
+    use super::store::{TrackedNote, TxAgg};
     use super::*;
     use crate::keys::{account_from_mnemonic, REGTEST_FAUCET_MNEMONIC};
     use crate::Network;
     use prost::Message;
-    use zcash_client_backend::proto::compact_formats::{ChainMetadata, CompactBlock};
+    use zcash_client_backend::proto::compact_formats::{ChainMetadata, CompactBlock, CompactTx};
 
     fn empty_block(height: u64, prev_hash: Vec<u8>) -> CompactBlock {
         let mut hash = vec![0u8; 32];
@@ -516,6 +517,90 @@ mod tests {
         assert!(h[0].expired_unmined);
         assert_eq!(h[0].status(), "expired");
         assert_eq!(h[0].fee_zat, Some(1));
+    }
+
+    /// A saved send whose id is in the scanned block is mined. Expiry must not
+    /// release its note when that block is the expiry height and no nullifier matched.
+    #[test]
+    fn saved_send_in_a_scanned_block_stays_mined_at_expiry() {
+        for blob in [false, true] {
+            let acct = account_from_mnemonic(REGTEST_FAUCET_MNEMONIC, Network::Regtest, 0).unwrap();
+            let mut w = WebWallet::from_account(acct, 1).unwrap();
+            let b1 = empty_block(1, vec![0u8; 32]);
+            let b2 = empty_block(2, b1.hash.clone());
+            w.apply_compact_block(&b1.encode_to_vec()).unwrap();
+            w.apply_compact_block(&b2.encode_to_vec()).unwrap();
+            let included = "ab".repeat(32);
+            let missed = "cd".repeat(32);
+            for txid in [&included, &missed] {
+                w.txs_mut().insert(
+                    txid.clone(),
+                    TxAgg {
+                        spent_zat: 50_000,
+                        spent_notes: 1,
+                        fee_zat: Some(10_000),
+                        expiry_height: Some(3),
+                        ..TxAgg::default()
+                    },
+                );
+                w.notes_mut().push(TrackedNote {
+                    pool: "ironwood".into(),
+                    txid: "11".repeat(32),
+                    output_index: if txid == &included { 0 } else { 1 },
+                    value_zat: 50_000,
+                    nf: txid.clone(),
+                    is_change: false,
+                    spent: true,
+                    spent_in: Some(txid.clone()),
+                    spent_height: None,
+                    mined_height: 1,
+                });
+            }
+            let mut block = empty_block(3, b2.hash.clone());
+            block.time = 1_700_000_003;
+            block.vtx.push(CompactTx {
+                index: 1,
+                txid: from_hex(&included).unwrap(),
+                ..CompactTx::default()
+            });
+            if blob {
+                w.apply_compact_blocks_blob(&encode_delimited([block]))
+                    .unwrap();
+            } else {
+                w.apply_compact_block(&block.encode_to_vec()).unwrap();
+            }
+
+            let shown = WebWallet::display_txid(&included);
+            let row = w
+                .history(10)
+                .into_iter()
+                .find(|entry| entry.txid == shown)
+                .expect("included send");
+            assert_eq!(row.mined_height, Some(3), "blob={blob}");
+            assert_eq!(row.block_time, Some(1_700_000_003), "blob={blob}");
+            assert!(!row.expired_unmined, "blob={blob}");
+            assert_eq!(row.status(), "mined", "blob={blob}");
+            let reserved = w
+                .notes()
+                .iter()
+                .find(|note| note.spent_in.as_deref() == Some(included.as_str()))
+                .expect("mined send keeps its note");
+            assert!(reserved.spent, "blob={blob}");
+
+            let expired = w
+                .history(10)
+                .into_iter()
+                .find(|entry| entry.txid == WebWallet::display_txid(&missed))
+                .expect("unmined send");
+            assert!(expired.expired_unmined, "blob={blob}");
+            assert_eq!(expired.status(), "expired", "blob={blob}");
+            assert!(
+                w.notes()
+                    .iter()
+                    .all(|note| note.spent_in.as_deref() != Some(missed.as_str())),
+                "blob={blob}"
+            );
+        }
     }
 
     #[test]

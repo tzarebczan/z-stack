@@ -320,11 +320,12 @@ impl WebWallet {
             self.append_sapling(height, &[])?;
             self.append_orchard(height, &[])?;
             self.append_ironwood(height, &[])?;
+            // Inclusion has to land before set_scanned releases expired spends.
+            self.note_included(height, block_time, &block_txids);
             self.set_scanned(
                 height,
                 Self::make_prior(height, hash32(&block.hash), sap, orch, iron),
             )?;
-            self.stamp_block_time(block_time, &block_txids);
             return Ok(ScanDelta {
                 height,
                 notes_found: 0,
@@ -356,11 +357,14 @@ impl WebWallet {
         let orchard_sz = scanned.orchard().final_tree_size();
         let ironwood_sz = scanned.ironwood().final_tree_size();
         let hash = scanned.block_hash();
+        // A saved send is mined when its id is in this block, even if no note
+        // of ours decrypted. Expiry is only 40 blocks later; missing the link
+        // shows that mined send as expired once the chain passes it.
+        self.note_included(height, block_time, &block_txids);
         self.set_scanned(
             height,
             Self::make_prior(height, hash, sapling_sz, orchard_sz, ironwood_sz),
         )?;
-        self.stamp_block_time(block_time, &block_txids);
         self.retain_enhance_candidates(enhance);
 
         Ok(ScanDelta {
@@ -370,15 +374,21 @@ impl WebWallet {
         })
     }
 
-    fn stamp_block_time(&mut self, time: u32, txids: &[String]) {
-        if time == 0 {
-            return;
-        }
+    /// Record that a transaction we already track was in this block.
+    ///
+    /// Nullifier matching and trial decryption also set `mined_height`, but
+    /// either can miss a send we built. `set_scanned` then treats it as
+    /// expired once `expiry_height` is reached and releases its inputs.
+    fn note_included(&mut self, height: u32, time: u32, txids: &[String]) {
         for txid in txids {
-            if let Some(agg) = self.txs_mut().get_mut(txid) {
-                if agg.block_time.is_none() {
-                    agg.block_time = Some(time);
-                }
+            let Some(agg) = self.txs_mut().get_mut(txid) else {
+                continue;
+            };
+            if agg.mined_height.is_none() {
+                agg.mined_height = Some(height);
+            }
+            if time != 0 && agg.block_time.is_none() {
+                agg.block_time = Some(time);
             }
         }
     }
@@ -483,7 +493,7 @@ impl WebWallet {
                     orch,
                     iron,
                     shielded: false,
-                    txids: Vec::new(),
+                    txids: block.vtx.iter().map(|t| to_hex(&t.txid)).collect(),
                     spends: Vec::new(),
                     enhance: Vec::new(),
                 });
@@ -509,6 +519,7 @@ impl WebWallet {
             for (txid, nf) in &head.spends {
                 spends_found += self.mark_spent(nf, txid, head.height);
             }
+            self.note_included(head.height, head.time, &head.txids);
             match sc {
                 DecryptOut::Empty {
                     hash,
@@ -524,7 +535,6 @@ impl WebWallet {
                         ironwood_sz,
                         true,
                     )?;
-                    self.stamp_block_time(head.time, &head.txids);
                     self.retain_enhance_candidates(head.enhance.clone());
                     out.push(ScanDelta {
                         height: head.height,
@@ -564,7 +574,6 @@ impl WebWallet {
                             sc.ironwood().final_tree_size(),
                         ),
                     )?;
-                    self.stamp_block_time(head.time, &head.txids);
                     self.retain_enhance_candidates(head.enhance.clone());
                     out.push(ScanDelta {
                         height: head.height,
@@ -591,6 +600,7 @@ impl WebWallet {
             let is_last = i + 1 == run.len();
             let checkpoint =
                 is_last || h.height.saturating_sub(last_cp) >= crate::scan::CHECKPOINT_EVERY;
+            self.note_included(h.height, h.time, &h.txids);
             self.finish_empty(h.height, &h.hash, h.sap, h.orch, h.iron, checkpoint)?;
             if checkpoint {
                 last_cp = h.height;
