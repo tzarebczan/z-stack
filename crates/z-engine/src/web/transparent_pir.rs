@@ -728,6 +728,108 @@ mod tests {
         assert!(scope.scripts.iter().all(|script| script.required_from == 0));
     }
 
+    #[test]
+    fn shard_event_below_the_birthday_estimate_does_not_reject_the_checkpoint() {
+        fn history(w: &mut WebWallet, events: Vec<TransparentEvent>) -> TransparentPirCheckpoint {
+            let scope: TransparentPirScope =
+                serde_json::from_str(&w.begin_transparent_pir(&"ab".repeat(32)).unwrap()).unwrap();
+            let script = super::super::super::to_hex(&w.public_transparent_scripts().unwrap()[0].0);
+            let through = scope.anchor.height;
+            TransparentPirCheckpoint {
+                source_id: scope.source_id,
+                generation: scope.generation,
+                scope_id: scope.scope_id,
+                anchor: scope.anchor,
+                checkpoint_id: "cd".repeat(32),
+                previous_checkpoint_id: None,
+                covered_through: through,
+                complete: true,
+                pending_pages: 0,
+                unresolved_spends: 0,
+                records: events
+                    .into_iter()
+                    .map(|event| TransparentPirRecord {
+                        script: script.clone(),
+                        event: super::super::super::to_hex(&event.to_bytes()),
+                        shard_id: 0,
+                        revision: "ef".repeat(32),
+                    })
+                    .collect(),
+                coverage: scope
+                    .scripts
+                    .into_iter()
+                    .map(|script| Coverage {
+                        script: script.script,
+                        required_from: script.required_from,
+                        through,
+                        revision: "ef".repeat(32),
+                    })
+                    .collect(),
+                rewind_to: None,
+                continuation: String::new(),
+            }
+        }
+        let overlap = TransparentEvent::Receive(ReceiveEvent {
+            metadata: None,
+            height: 1_679_000,
+            txid: Txid([3; 32]),
+            transaction_index: 1,
+            output_index: 0,
+            value: 150_000,
+            coinbase: false,
+        });
+        let spent_overlap = TransparentEvent::Spend(SpendEvent {
+            metadata: None,
+            height: 1_690_000,
+            spending_txid: Txid([4; 32]),
+            transaction_index: 1,
+            input_index: 0,
+            spent_txid: Txid([3; 32]),
+            spent_output_index: 0,
+        });
+        let mut w = mainnet_wallet(1_687_104, 1_700_000);
+        let overlap_checkpoint = history(&mut w, vec![overlap, spent_overlap]);
+        w.apply_transparent_pir_checkpoint(&serde_json::to_string(&overlap_checkpoint).unwrap())
+            .unwrap();
+        assert!(w.utxos.is_empty());
+
+        let mut missing = mainnet_wallet(1_687_104, 1_700_000);
+        let in_scope_spend = TransparentEvent::Spend(SpendEvent {
+            metadata: None,
+            height: 1_690_000,
+            spending_txid: Txid([5; 32]),
+            transaction_index: 1,
+            input_index: 0,
+            spent_txid: Txid([6; 32]),
+            spent_output_index: 1,
+        });
+        let missing_checkpoint = history(&mut missing, vec![in_scope_spend]);
+        assert!(missing
+            .apply_transparent_pir_checkpoint(&serde_json::to_string(&missing_checkpoint).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("transparent_pir_unresolved_spend"));
+        assert!(missing.utxos.is_empty());
+
+        let mut funded = mainnet_wallet(1_687_104, 1_700_000);
+        let in_scope = TransparentEvent::Receive(ReceiveEvent {
+            metadata: None,
+            height: 1_681_000,
+            txid: Txid([7; 32]),
+            transaction_index: 1,
+            output_index: 0,
+            value: 150_000,
+            coinbase: false,
+        });
+        let funded_checkpoint = history(&mut funded, vec![in_scope]);
+        funded
+            .apply_transparent_pir_checkpoint(&serde_json::to_string(&funded_checkpoint).unwrap())
+            .unwrap();
+        assert_eq!(funded.utxos.len(), 1);
+        assert_eq!(funded.utxos[0].value_zat, 150_000);
+        assert_eq!(funded.utxos[0].height, 1_681_000);
+    }
+
     fn scope_anchor(height: u64) -> crate::transparent_pir::TransparentPirAnchor {
         crate::transparent_pir::TransparentPirAnchor {
             height,

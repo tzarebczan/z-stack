@@ -29,9 +29,11 @@ provider requires new consent. Map revisions do not change that source identity.
 The wallet derives its own supported external/internal script inventory and gap
 expansion. Mainnet and testnet scan those scripts from a birthday estimate
 rounded down to 10,000 blocks, about nine days, so the request does not publish
-the exact creation height. A journal that already required earlier history keeps
-that obligation. Regtest keeps its fixture height. Completion applies to that
-enrolled inventory at the accepted chain anchor. It cannot discover arbitrary
+the exact creation height. A publication shard that starts before that estimate
+can still contain an older event. The acquisition journal keeps it, and the
+wallet applies events from the estimate forward. A journal that already required
+earlier history keeps that obligation. Regtest keeps its fixture height.
+Completion applies to that enrolled inventory at the accepted chain anchor. It cannot discover arbitrary
 unissued addresses or unsupported imported scripts. Receive-then-spend history
 remains recoverable even when the current transparent balance is zero.
 
