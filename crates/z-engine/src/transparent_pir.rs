@@ -203,6 +203,8 @@ impl ProjectionState {
         let mut decoded = Vec::new();
         let mut identities = BTreeMap::new();
         let mut received_totals = BTreeMap::<[u8; 32], u64>::new();
+        let mut below_floor_outputs = BTreeSet::<([u8; 32], u32)>::new();
+        let mut in_scope_outputs = BTreeSet::<([u8; 32], u32)>::new();
         for record in &checkpoint.records {
             if !hash(&record.revision) {
                 return Err(refused("transparent_pir_revision_invalid"));
@@ -218,13 +220,22 @@ impl ProjectionState {
                 .map_err(|_| refused("transparent_pir_record_invalid"))?;
             let event = TransparentEvent::from_bytes(&bytes)
                 .map_err(|_| refused("transparent_pir_record_invalid"))?;
-            if event.to_bytes() != bytes
-                || u64::from(event_height(event)) < entry.required_from
-                || u64::from(event_height(event)) > scope.anchor.height
-            {
+            let height = u64::from(event_height(event));
+            if event.to_bytes() != bytes || height > scope.anchor.height {
                 return Err(refused("transparent_pir_record_invalid"));
             }
+            // The first publication shard overlaps the birthday estimate. Keep
+            // that older event out of the wallet scope instead of refusing the
+            // checkpoint. A spend of it is outside the scope too, unless this
+            // same checkpoint also has the receive inside the scope.
+            if height < entry.required_from {
+                if let TransparentEvent::Receive(receive) = event {
+                    below_floor_outputs.insert((receive.txid.0, receive.output_index));
+                }
+                continue;
+            }
             if let TransparentEvent::Receive(receive) = event {
+                in_scope_outputs.insert((receive.txid.0, receive.output_index));
                 let total = received_totals.entry(receive.txid.0).or_default();
                 *total = total
                     .checked_add(receive.value)
@@ -241,6 +252,13 @@ impl ProjectionState {
             }
             decoded.push((script, event));
         }
+        decoded.retain(|(_, event)| {
+            let TransparentEvent::Spend(spend) = event else {
+                return true;
+            };
+            let outpoint = (spend.spent_txid.0, spend.spent_output_index);
+            !(below_floor_outputs.contains(&outpoint) && !in_scope_outputs.contains(&outpoint))
+        });
         decoded.sort_by_key(|(_, e)| match e {
             TransparentEvent::Receive(e) => (e.height, e.transaction_index, 0, e.output_index),
             TransparentEvent::Spend(e) => (e.height, e.transaction_index, 1, e.input_index),

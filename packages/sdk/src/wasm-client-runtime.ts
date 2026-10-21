@@ -4,6 +4,7 @@ import type { PrivateEnhanceOperation } from "./private-enhance";
 import {
   HASH_KEEP,
   MAX_SYNC_BLOCKS,
+  coarseBirthdayHeight,
   parseBirthdayInput,
   validateBirthdayInput,
   WalletError,
@@ -370,15 +371,40 @@ export async function peekWasmWallet(): Promise<WalletSnapshot | null> {
   }
 }
 
+/** Height the caller named, before the 10,000-block estimate. */
+export function requestedBirthdayHeight(
+  raw: BirthdayInput,
+  tip: number,
+  network: import("@z-stack/core").BirthdayNetwork = "mainnet",
+): number {
+  validateBirthdayInput(raw);
+  return typeof raw === "number" ? raw : parseBirthdayInput(raw, tip, network);
+}
+
 export async function resolveBirthday(
   raw: BirthdayInput | undefined,
   tip: number,
   fallback: number,
   network: import("@z-stack/core").BirthdayNetwork = "mainnet",
 ): Promise<number> {
-  if (raw == null || raw === "") return fallback;
-  validateBirthdayInput(raw);
-  return typeof raw === "number" ? raw : parseBirthdayInput(raw, tip, network);
+  if (raw == null || raw === "") return coarseBirthdayHeight(fallback, network);
+  return coarseBirthdayHeight(requestedBirthdayHeight(raw, tip, network), network);
+}
+
+/** Rescan height. A later named height is rejected before that estimate is applied. */
+export function rescanBirthdayHeight(
+  raw: BirthdayInput,
+  tip: number,
+  storedBirthday: number,
+  network: import("@z-stack/core").BirthdayNetwork = "mainnet",
+): number {
+  const requested = requestedBirthdayHeight(raw, tip, network);
+  if (requested > tip) throw new WalletError("birthday_above_tip", "birthday is above chain tip");
+  if (requested > storedBirthday) throw new WalletError("rescan_later_birthday", "rescan later birthday");
+  const height = coarseBirthdayHeight(requested, network);
+  if (height > tip) throw new WalletError("birthday_above_tip", "birthday is above chain tip");
+  if (height > storedBirthday) throw new WalletError("rescan_later_birthday", "rescan later birthday");
+  return height;
 }
 
 export type WasmClientOpts = {

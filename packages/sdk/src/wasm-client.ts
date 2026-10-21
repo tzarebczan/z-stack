@@ -1145,10 +1145,12 @@ export function createWasmClient(
             await refreshIfStale(source, operation);
             assertSource(operation, source);
             const tip = await abortable(operation.signal, () => transport.tip(operation.signal));
-            const height = await runtime.resolveBirthday(birthday, tip, 1, { network, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
+            const storedBirthday = await source.birthday();
             assertSource(operation, source);
-            if (height > tip) throw new WalletError("birthday_above_tip", "birthday is above chain tip");
-            if (height > await source.birthday()) throw new WalletError("rescan_later_birthday", "rescan later birthday");
+            // Compare the named height before rounding. A later request in the
+            // same 10,000-block bin must not collapse onto the stored birthday.
+            const height = runtime.rescanBirthdayHeight(birthday, tip, storedBirthday, { network, regtestNu7Height: runtime.runtimeState.workerRegtestNu7 });
+            assertSource(operation, source);
             if ((await source.pendingRawTxs()).length) throw new WalletError("rescan_pending", "rescan pending payment");
             if (tip - height + 1 > runtime.MAX_GAP && !opts.allowDeepSync) throw new WalletError("deep_sync_rejected", "deep sync requires explicit opt-in");
             // A reset must never remove reservations for unknown broadcast outcomes.

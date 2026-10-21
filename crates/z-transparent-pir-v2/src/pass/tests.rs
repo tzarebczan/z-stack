@@ -36,6 +36,43 @@ pub(super) fn snapshot(p: &Pass) -> Checkpoint {
     p.checkpoint(&bytes).unwrap()
 }
 #[test]
+fn restored_genesis_placeholder_adopts_the_scope_floor_when_no_event_is_older() {
+    use crate::store::WalletStore;
+    let pass = Pass::new(scope(), None, Limits::default()).unwrap();
+    let script = hex::decode(&scope().scripts[0].script).unwrap();
+    pass.store
+        .inner
+        .borrow_mut()
+        .add_scripts(&[crate::store::ScriptEntry {
+            script: script.clone(),
+            origin: crate::store::ScriptOrigin::Derived,
+            required_from: 0,
+        }])
+        .unwrap();
+    let saved = snapshot(&pass);
+    let mut next = scope();
+    next.scripts[0].required_from = 50_000;
+    next.scope_id = "3".repeat(64);
+    let reopened = Pass::new(next, Some(saved), Limits::default()).unwrap();
+    let stored = reopened.store.inner.borrow().scripts().unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].required_from, 50_000);
+    assert_eq!(stored[0].script, script);
+}
+#[test]
+fn older_saved_event_keeps_the_genesis_placeholder() {
+    use crate::store::WalletStore;
+    let mut pass = Pass::new(scope(), None, Limits::default()).unwrap();
+    history_cap_seed(&mut pass, vec![history_cap_event(0)]);
+    let saved = snapshot(&pass);
+    let mut next = scope();
+    next.scripts[0].required_from = 50_000;
+    next.scope_id = "4".repeat(64);
+    let reopened = Pass::new(next, Some(saved), Limits::default()).unwrap();
+    let stored = reopened.store.inner.borrow().scripts().unwrap();
+    assert_eq!(stored[0].required_from, 0);
+}
+#[test]
 fn version_two_migrates_only_after_its_original_digest_is_verified() {
     let p = Pass::new(scope(), None, Limits::default()).unwrap();
     let script = hex::decode(&scope().scripts[0].script).unwrap();

@@ -102,3 +102,9 @@ only the typed local cap preserves that known content failure and owed query
 count. The failure update attaches to the unchanged durable pending cursor.
 Real Walker regressions cover stamped anchors and both event/byte refusals with
 publisher-built page fragments, followed by terminal checkpoint and cold resume.
+
+A restored web journal stored `required_from: 0` as its genesis placeholder.
+`MemoryStore::raise_genesis_placeholder` replaces that zero with the current
+scope floor for the same script. A nonzero earlier floor stays unchanged.
+`Pass` applies the raise only when that script has no stored event older than
+the floor, so a saved earlier event keeps the genesis walk.

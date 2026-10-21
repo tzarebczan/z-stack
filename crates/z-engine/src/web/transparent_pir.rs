@@ -4,6 +4,50 @@ use crate::transparent_pir::{
 };
 use transparent_events::TransparentEvent;
 
+/// Mainnet and testnet history starts at the coarse birthday. Regtest stays at
+/// genesis so fixture checkpoints keep their existing floors. A saved event
+/// below the estimate keeps the genesis obligation: the journal is not allowed
+/// to forget a range it already required.
+fn transparent_history_floor(wallet: &WebWallet, anchor: u64) -> u64 {
+    if wallet.network == crate::Network::Regtest {
+        return 0;
+    }
+    let estimate = u64::from(crate::birthday::coarse_birthday_height(
+        wallet.network,
+        wallet.birthday,
+    ));
+    if saved_transparent_event_below(wallet, estimate) {
+        return 0;
+    }
+    estimate.min(anchor)
+}
+
+fn saved_transparent_event_below(wallet: &WebWallet, floor: u64) -> bool {
+    if floor == 0 {
+        return false;
+    }
+    if wallet
+        .transparent_pir
+        .records
+        .values()
+        .any(|(height, _)| u64::from(*height) < floor)
+    {
+        return true;
+    }
+    let Some(checkpoint) = wallet.transparent_pir.continuation.as_ref() else {
+        return false;
+    };
+    checkpoint.records.iter().any(|record| {
+        let Ok(bytes) = super::super::from_hex(&record.event) else {
+            return true;
+        };
+        let Ok(event) = TransparentEvent::from_bytes(&bytes) else {
+            return true;
+        };
+        u64::from(crate::transparent_pir::event_height(event)) < floor
+    })
+}
+
 impl WebWallet {
     pub(crate) fn reconcile_transparent_pir_history(&mut self) {
         let owned: std::collections::BTreeSet<_> = self
@@ -68,12 +112,13 @@ impl WebWallet {
             height: u64::from(height),
             hash: super::super::to_hex(&hash),
         };
+        let required_from = transparent_history_floor(self, u64::from(height));
         let scripts = self
             .public_transparent_scripts()?
             .into_iter()
             .map(|(script, _)| TransparentPirScript {
                 script: super::super::to_hex(&script),
-                required_from: 0,
+                required_from,
             })
             .collect();
         let mut scope = self.transparent_pir.begin(source_id, anchor, scripts)?;
@@ -527,7 +572,9 @@ impl WebWallet {
 mod tests {
     use super::*;
     use crate::keys::{account_from_mnemonic, REGTEST_FAUCET_MNEMONIC};
-    use crate::transparent_pir::{TransparentPirRecord, TransparentPirScope};
+    use crate::transparent_pir::{
+        TransparentPirCheckpoint, TransparentPirRecord, TransparentPirScope,
+    };
     use transparent_events::{ReceiveEvent, SpendEvent, Txid};
     use z_transparent_pir_v2::Coverage;
 
@@ -605,6 +652,191 @@ mod tests {
             spent_output_index: 0,
         })
     }
+
+    fn mainnet_wallet(birthday: u32, scanned: u32) -> WebWallet {
+        let mut w = WebWallet::from_account(
+            account_from_mnemonic(REGTEST_FAUCET_MNEMONIC, crate::Network::Mainnet, 0).unwrap(),
+            birthday,
+        )
+        .unwrap();
+        w.scanned_height = scanned;
+        w.block_hashes.insert(scanned, "11".repeat(32));
+        w
+    }
+
+    #[test]
+    fn regtest_transparent_history_stays_at_genesis() {
+        let mut w = wallet();
+        let scope: TransparentPirScope =
+            serde_json::from_str(&w.begin_transparent_pir(&"ab".repeat(32)).unwrap()).unwrap();
+        assert!(scope.scripts.iter().all(|script| script.required_from == 0));
+    }
+
+    #[test]
+    fn mainnet_transparent_history_uses_the_birthday_estimate() {
+        let mut w = mainnet_wallet(1_687_104, 1_700_000);
+        let scope: TransparentPirScope =
+            serde_json::from_str(&w.begin_transparent_pir(&"ab".repeat(32)).unwrap()).unwrap();
+        assert!(!scope.scripts.is_empty());
+        assert!(scope
+            .scripts
+            .iter()
+            .all(|script| script.required_from == 1_680_000));
+        let mut early = mainnet_wallet(1, 10);
+        let scope: TransparentPirScope =
+            serde_json::from_str(&early.begin_transparent_pir(&"ab".repeat(32)).unwrap()).unwrap();
+        assert!(scope.scripts.iter().all(|script| script.required_from == 1));
+    }
+
+    #[test]
+    fn saved_event_below_the_estimate_keeps_the_genesis_floor() {
+        let mut w = mainnet_wallet(1_687_104, 1_700_000);
+        // A current journal, not a legacy one that begin refuses to open.
+        w.transparent_pir.unverified_outputs = Some(std::collections::BTreeSet::new());
+        w.transparent_pir
+            .records
+            .insert("r:old:0".into(), (100, "aa".repeat(32)));
+        let scope: TransparentPirScope =
+            serde_json::from_str(&w.begin_transparent_pir(&"ab".repeat(32)).unwrap()).unwrap();
+        assert!(scope.scripts.iter().all(|script| script.required_from == 0));
+
+        let mut resumed = mainnet_wallet(1_687_104, 1_700_000);
+        resumed.transparent_pir.continuation = Some(TransparentPirCheckpoint {
+            source_id: "ab".repeat(32),
+            generation: 1,
+            scope_id: "cd".repeat(32),
+            anchor: scope_anchor(1_700_000),
+            checkpoint_id: "ef".repeat(32),
+            previous_checkpoint_id: None,
+            covered_through: 0,
+            complete: false,
+            pending_pages: 0,
+            unresolved_spends: 0,
+            records: vec![TransparentPirRecord {
+                script: "51".into(),
+                event: super::super::super::to_hex(&receive().to_bytes()),
+                shard_id: 0,
+                revision: "ab".repeat(32),
+            }],
+            coverage: Vec::new(),
+            rewind_to: None,
+            continuation: String::new(),
+        });
+        let scope: TransparentPirScope =
+            serde_json::from_str(&resumed.begin_transparent_pir(&"ab".repeat(32)).unwrap())
+                .unwrap();
+        assert!(scope.scripts.iter().all(|script| script.required_from == 0));
+    }
+
+    #[test]
+    fn shard_event_below_the_birthday_estimate_does_not_reject_the_checkpoint() {
+        fn history(w: &mut WebWallet, events: Vec<TransparentEvent>) -> TransparentPirCheckpoint {
+            let scope: TransparentPirScope =
+                serde_json::from_str(&w.begin_transparent_pir(&"ab".repeat(32)).unwrap()).unwrap();
+            let script = super::super::super::to_hex(&w.public_transparent_scripts().unwrap()[0].0);
+            let through = scope.anchor.height;
+            TransparentPirCheckpoint {
+                source_id: scope.source_id,
+                generation: scope.generation,
+                scope_id: scope.scope_id,
+                anchor: scope.anchor,
+                checkpoint_id: "cd".repeat(32),
+                previous_checkpoint_id: None,
+                covered_through: through,
+                complete: true,
+                pending_pages: 0,
+                unresolved_spends: 0,
+                records: events
+                    .into_iter()
+                    .map(|event| TransparentPirRecord {
+                        script: script.clone(),
+                        event: super::super::super::to_hex(&event.to_bytes()),
+                        shard_id: 0,
+                        revision: "ef".repeat(32),
+                    })
+                    .collect(),
+                coverage: scope
+                    .scripts
+                    .into_iter()
+                    .map(|script| Coverage {
+                        script: script.script,
+                        required_from: script.required_from,
+                        through,
+                        revision: "ef".repeat(32),
+                    })
+                    .collect(),
+                rewind_to: None,
+                continuation: String::new(),
+            }
+        }
+        let overlap = TransparentEvent::Receive(ReceiveEvent {
+            metadata: None,
+            height: 1_679_000,
+            txid: Txid([3; 32]),
+            transaction_index: 1,
+            output_index: 0,
+            value: 150_000,
+            coinbase: false,
+        });
+        let spent_overlap = TransparentEvent::Spend(SpendEvent {
+            metadata: None,
+            height: 1_690_000,
+            spending_txid: Txid([4; 32]),
+            transaction_index: 1,
+            input_index: 0,
+            spent_txid: Txid([3; 32]),
+            spent_output_index: 0,
+        });
+        let mut w = mainnet_wallet(1_687_104, 1_700_000);
+        let overlap_checkpoint = history(&mut w, vec![overlap, spent_overlap]);
+        w.apply_transparent_pir_checkpoint(&serde_json::to_string(&overlap_checkpoint).unwrap())
+            .unwrap();
+        assert!(w.utxos.is_empty());
+
+        let mut missing = mainnet_wallet(1_687_104, 1_700_000);
+        let in_scope_spend = TransparentEvent::Spend(SpendEvent {
+            metadata: None,
+            height: 1_690_000,
+            spending_txid: Txid([5; 32]),
+            transaction_index: 1,
+            input_index: 0,
+            spent_txid: Txid([6; 32]),
+            spent_output_index: 1,
+        });
+        let missing_checkpoint = history(&mut missing, vec![in_scope_spend]);
+        assert!(missing
+            .apply_transparent_pir_checkpoint(&serde_json::to_string(&missing_checkpoint).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("transparent_pir_unresolved_spend"));
+        assert!(missing.utxos.is_empty());
+
+        let mut funded = mainnet_wallet(1_687_104, 1_700_000);
+        let in_scope = TransparentEvent::Receive(ReceiveEvent {
+            metadata: None,
+            height: 1_681_000,
+            txid: Txid([7; 32]),
+            transaction_index: 1,
+            output_index: 0,
+            value: 150_000,
+            coinbase: false,
+        });
+        let funded_checkpoint = history(&mut funded, vec![in_scope]);
+        funded
+            .apply_transparent_pir_checkpoint(&serde_json::to_string(&funded_checkpoint).unwrap())
+            .unwrap();
+        assert_eq!(funded.utxos.len(), 1);
+        assert_eq!(funded.utxos[0].value_zat, 150_000);
+        assert_eq!(funded.utxos[0].height, 1_681_000);
+    }
+
+    fn scope_anchor(height: u64) -> crate::transparent_pir::TransparentPirAnchor {
+        crate::transparent_pir::TransparentPirAnchor {
+            height,
+            hash: "11".repeat(32),
+        }
+    }
+
     fn public_range(
         w: &mut WebWallet,
         with_spend: bool,

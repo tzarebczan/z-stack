@@ -63,6 +63,18 @@ impl MemoryStore {
         self.event_limit = Some(limit);
     }
 
+    /// Replaces the web genesis placeholder. An explicit earlier floor stays.
+    pub(crate) fn raise_genesis_placeholder(&mut self, script: &[u8], floor: u64) {
+        if floor == 0 {
+            return;
+        }
+        if let Some(existing) = self.state.scripts.get_mut(script) {
+            if existing.required_from == 0 {
+                existing.required_from = floor;
+            }
+        }
+    }
+
     pub(crate) fn retain_scope(&mut self, scripts: &std::collections::BTreeSet<Vec<u8>>) {
         self.state.scripts.retain(|s, _| scripts.contains(s));
         self.state.coverage.retain(|s, _| scripts.contains(s));
