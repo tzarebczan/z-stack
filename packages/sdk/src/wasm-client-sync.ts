@@ -4,6 +4,7 @@ import type { SyncStage } from "@z-stack/core";
 import {
   canShield,
   catchUpPercent,
+  coarseBirthdayHeight,
   fmtSecs,
   grpcWebPrefetch,
   isWalletError,
@@ -195,6 +196,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     const tip = await recovery.run(() => ctx.transport.tip(signal));
     recoveryTip = tip;
     if (cancelled()) throw new Error("sync cancelled");
+    await alignUnscannedBirthday(source);
     let start = await source.nextHeight();
     const birthday = await source.birthday();
     // Refuse an unseeded strict wallet before overlap reads can rewind it.
@@ -767,6 +769,23 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       }
     }
     return after;
+  }
+
+  async function alignUnscannedBirthday(source: ScanSession): Promise<void> {
+    if (ctx.network === "regtest") return;
+    const birthday = await source.birthday();
+    const next = await source.nextHeight();
+    // A scanned wallet's next request is its cursor, not its creation height.
+    if (next !== birthday) return;
+    const floor = coarseBirthdayHeight(birthday, ctx.network);
+    if (floor >= birthday) return;
+    try {
+      await source.rescanFrom(floor);
+    } catch {
+      return;
+    }
+    ctx.rootsChecked = null;
+    await ctx.persist();
   }
 
   async function seedBirthdayTrees(

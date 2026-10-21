@@ -15,6 +15,19 @@ pub const BLOCK_SECONDS: u32 = 75;
 /// Extra blocks subtracted when birthday is an approximate date, not an exact height.
 pub const DATE_SAFETY_BLOCKS: u32 = 200;
 
+/// Published birthday bin. 10,000 blocks is about nine days at the 75-second
+/// target. Compact-block requests, birthday tree state, and transparent history
+/// use this floor so the exact creation height is not sent. Rounding down scans
+/// the extra blocks. Regtest keeps the fixture height.
+pub const BIRTHDAY_ESTIMATE_BLOCKS: u32 = 10_000;
+
+pub fn coarse_birthday_height(network: Network, birthday: u32) -> u32 {
+    if network == Network::Regtest || birthday <= 1 {
+        return birthday;
+    }
+    (birthday / BIRTHDAY_ESTIMATE_BLOCKS * BIRTHDAY_ESTIMATE_BLOCKS).max(1)
+}
+
 /// Session catch-up this small is “almost at tip”, not a full-chain sync.
 pub const NEAR_TIP_BLOCKS: u32 = 512;
 
@@ -554,6 +567,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn coarse_birthday_is_a_ten_thousand_block_estimate() {
+        assert_eq!(
+            coarse_birthday_height(Network::Mainnet, 1_687_104),
+            1_680_000
+        );
+        assert_eq!(
+            coarse_birthday_height(Network::Mainnet, 1_680_000),
+            1_680_000
+        );
+        assert_eq!(coarse_birthday_height(Network::Testnet, 9_999), 1);
+        assert_eq!(coarse_birthday_height(Network::Mainnet, 1), 1);
+        assert_eq!(
+            coarse_birthday_height(Network::Regtest, 1_687_104),
+            1_687_104
+        );
+        assert_eq!(
+            coarse_birthday_height(
+                Network::Mainnet,
+                coarse_birthday_height(Network::Mainnet, 1_687_104)
+            ),
+            1_680_000
+        );
     }
 
     #[test]

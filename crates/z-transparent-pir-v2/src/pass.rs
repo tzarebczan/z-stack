@@ -483,6 +483,30 @@ fn checkpoint_id(
     digest.update(bytes);
     hex::encode(digest.finalize())
 }
+
+/// A restored web journal used `required_from: 0` for every script. Adopt the
+/// scope floor only when no saved event for that script is older than it.
+fn raise_genesis_floors(memory: &mut MemoryStore, scope: &Scope) {
+    let Ok(events) = memory.events() else {
+        return;
+    };
+    for script in &scope.scripts {
+        if script.required_from == 0 {
+            continue;
+        }
+        let Ok(bytes) = hex::decode(&script.script) else {
+            continue;
+        };
+        let older = events.iter().any(|event| {
+            event.script == bytes && sync::event_height(&event.event) < script.required_from
+        });
+        if older {
+            continue;
+        }
+        memory.raise_genesis_placeholder(&bytes, script.required_from);
+    }
+}
+
 impl Pass {
     /// Borrow only the current held checkpoint's exact accepted rewind. No I/O.
     pub fn accepted_rewind(&self) -> Result<Option<AcceptedRewind<'_>>> {
@@ -620,6 +644,7 @@ impl Pass {
             .map(|s| hex::decode(&s.script).map_err(|_| Error("script")))
             .collect::<Result<std::collections::BTreeSet<_>>>()?;
         memory.retain_scope(&current_scripts);
+        raise_genesis_floors(&mut memory, &scope);
         let old_endpoints = retained_endpoints(&memory);
         let unsupported_history = old_endpoints.is_err();
         let terminal_without_checkpoint = unsupported_history

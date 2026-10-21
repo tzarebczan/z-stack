@@ -13,6 +13,7 @@ import {
   formatZatoshis,
   heightFromDate,
   inferTransactionType,
+  coarseBirthdayHeight,
   parseBirthdayInput,
   parseZecToZatoshis,
   zecToZatoshis,
@@ -121,6 +122,15 @@ test("parseBirthdayInput digits or date", () => {
   assert.throws(() => parseBirthdayInput("2023-02-29", 3_000_000));
   assert.ok(parseBirthdayInput("2024-02-29", 3_000_000) > 1);
   assert.equal(parseBirthdayInput("auto", 1000), 900);
+});
+
+test("coarseBirthdayHeight hides the exact height on mainnet and testnet", () => {
+  assert.equal(coarseBirthdayHeight(1_687_104), 1_680_000);
+  assert.equal(coarseBirthdayHeight(1_680_000, "mainnet"), 1_680_000);
+  assert.equal(coarseBirthdayHeight(9_999, "testnet"), 1);
+  assert.equal(coarseBirthdayHeight(1, { network: "mainnet" }), 1);
+  assert.equal(coarseBirthdayHeight(1_687_104, "regtest"), 1_687_104);
+  assert.equal(coarseBirthdayHeight(50, { network: "regtest", regtestNu7Height: 250 }), 50);
 });
 
 function entry(partial: Partial<HistoryEntry>): HistoryEntry {

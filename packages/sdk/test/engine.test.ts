@@ -15,7 +15,8 @@ import {
   WalletError,
 } from "../src/lab.ts";
 import { peekSnapshotBytes, reorgRestartFrom } from "../src/wasm-client.ts";
-import { HASH_KEEP } from "@z-stack/core";
+import { rescanBirthdayHeight, resolveBirthday } from "../src/wasm-client-runtime.ts";
+import { HASH_KEEP, coarseBirthdayHeight } from "@z-stack/core";
 
 const origFetch = globalThis.fetch;
 const calls: Array<{ url: string; method: string; body: string | undefined; auth?: string }> = [];
@@ -650,4 +651,23 @@ test("native date birthdays reach the bridge unchanged for live-tip resolution",
   await engine.restoreUfvk("fixture", "testnet", "2026-10-07");
   await engine.create("testnet", "2026-10-07");
   for (const body of captured) assert.equal((body as {birthday:unknown}).birthday, "2026-10-07");
+});
+
+test("wasm birthday resolution stores the coarse estimate except on regtest", async () => {
+  assert.equal(await resolveBirthday(1_687_104, 3_000_000, 1, "mainnet"), 1_680_000);
+  assert.equal(await resolveBirthday(1_687_104, 3_000_000, 1, { network: "mainnet" }), 1_680_000);
+  assert.equal(await resolveBirthday(1_687_104, 3_000_000, 1, "regtest"), 1_687_104);
+  assert.equal(await resolveBirthday("auto", 3_523_673, 1, "mainnet"), coarseBirthdayHeight(3_523_573, "mainnet"));
+  assert.equal(await resolveBirthday(undefined, 3_523_673, 1, "regtest"), 1);
+});
+
+test("public rescan rejects a later named height before the birthday estimate", () => {
+  const later = (error: unknown) => error instanceof WalletError && error.code === "rescan_later_birthday";
+  const above = (error: unknown) => error instanceof WalletError && error.code === "birthday_above_tip";
+  assert.throws(() => rescanBirthdayHeight(1_682_000, 3_000_000, 1_680_000, "mainnet"), later);
+  assert.equal(rescanBirthdayHeight(1_685_000, 3_000_000, 1_687_104, "mainnet"), 1_680_000);
+  assert.equal(rescanBirthdayHeight(1_687_104, 3_000_000, 1_687_104, "mainnet"), 1_680_000);
+  assert.throws(() => rescanBirthdayHeight(1_689_000, 1_685_000, 1_680_000, "mainnet"), above);
+  assert.throws(() => rescanBirthdayHeight(9, 20, 8, "regtest"), later);
+  assert.equal(rescanBirthdayHeight(3, 20, 8, "regtest"), 3);
 });

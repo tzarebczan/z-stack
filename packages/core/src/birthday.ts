@@ -8,6 +8,19 @@ import { WalletError } from "./errors";
 /** Post-Blossom, pre-NU7 spacing; use blockSpacingSeconds for a network and height. */
 export const BLOCK_SECONDS = 75;
 export const DATE_SAFETY_BLOCKS = 200;
+/** Published birthday bin. 10,000 blocks is about nine days at the 75-second target. */
+export const BIRTHDAY_ESTIMATE_BLOCKS = 10_000;
+
+/** Round a mainnet or testnet height down to [`BIRTHDAY_ESTIMATE_BLOCKS`].
+ * Regtest keeps the fixture height. A height already on the bin stays there.
+ * The minimum result is 1.
+ */
+export function coarseBirthdayHeight(height: number, network: BirthdayNetwork = "mainnet"): number {
+  const name = typeof network === "string" ? network : network.network;
+  if (name === "regtest") return height;
+  if (!Number.isSafeInteger(height) || height < 1) return 1;
+  return Math.max(1, Math.floor(height / BIRTHDAY_ESTIMATE_BLOCKS) * BIRTHDAY_ESTIMATE_BLOCKS);
+}
 
 export function typicalTip(network: string): number {
   switch (network) {
