@@ -272,7 +272,7 @@ pub fn fmt_secs(secs: u32) -> String {
     }
 }
 
-/// Consensus spacing at a height. Mainnet NU7 remains unscheduled upstream.
+/// Consensus spacing at a height, using the engine's finalized network schedule.
 pub fn block_spacing_seconds(network: Network, height: u32) -> u32 {
     let active = |nu| {
         network

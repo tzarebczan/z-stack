@@ -21,6 +21,34 @@ import {
 
 const gen = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "generated", "z_wasm_bg.wasm");
 
+test("real Rust branch schedule matches Mainnet NU7 and refuses stale-node spending", async () => {
+  await initialize({ wasmModule: readFileSync(gen), prewarmProvingKey: false, prewarmProveWorker: false });
+  const { requireBindings } = await import("../src/wasm-client-runtime.ts");
+  const { assertSpendingConsensus } = await import("../src/spend-consensus.ts");
+  const branch = requireBindings().consensusBranchId;
+  assert.ok(branch, "release engines must expose their transaction consensus schedule");
+  assert.equal(branch("mainnet", 3_543_404), "37a5165b");
+  assert.equal(branch("mainnet", 3_543_405), "77190ad9");
+  assert.equal(branch("mainnet", 3_555_906), "77190ad9");
+  assert.equal(branch("testnet", 4_465_025), "37a5165b");
+  assert.equal(branch("testnet", 4_465_026), "77190ad9");
+  const signal = new AbortController().signal;
+  let nodeHeight = 3_555_906, nodeBranch = "77190ad9";
+  const transport = { kind: "fixture", label: "local node", tip: async () => nodeHeight,
+    blocks: async () => new Uint8Array(), info: async () => ({chain: "main", blockHeight: nodeHeight, consensusBranchId: nodeBranch}) };
+  await assertSpendingConsensus(transport, "mainnet", nodeHeight, branch, signal);
+  await assert.rejects(assertSpendingConsensus(transport, "mainnet", nodeHeight, () => "37a5165b", signal), /disagree on the active network upgrade/);
+  nodeBranch = "37a5165b";
+  await assert.rejects(assertSpendingConsensus(transport, "mainnet", nodeHeight, branch, signal), /disagree on the active network upgrade/);
+  nodeBranch = "77190ad9";
+  await assert.rejects(assertSpendingConsensus(transport, "mainnet", 3_543_403, branch, signal), /network upgrade changed/);
+  nodeHeight = 3_543_404; nodeBranch = "37a5165b";
+  await assertSpendingConsensus(transport, "mainnet", nodeHeight, branch, signal);
+  await assert.rejects(assertSpendingConsensus(transport, "mainnet", nodeHeight, undefined, signal), /cannot verify the node's consensus/);
+  const cancelled = new AbortController(); cancelled.abort();
+  await assert.rejects(assertSpendingConsensus(transport, "mainnet", nodeHeight, branch, cancelled.signal), {name: "AbortError"});
+});
+
 test("thread defaults use one worker per physical core, capped", () => {
   assert.equal(MAX_WASM_THREADS, 32);
   assert.equal(DEFAULT_WASM_THREADS, 16);

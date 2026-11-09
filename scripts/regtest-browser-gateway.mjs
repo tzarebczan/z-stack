@@ -5,7 +5,7 @@ import { assertLocalRegtestChain } from './sdk-harness.mjs';
 import { zebraRpc, ZEBRA_RPC } from './regtest-rpc.mjs';
 
 /** Fixture-only validator fallback. Never bind remotely or use a public chain. */
-export async function regtestBrowserGateway(origins, port = 0) {
+export async function regtestBrowserGateway(origins, port = 0, { nativeSubmission = false } = {}) {
   assert.ok(origins.length && origins.every(value => ['127.0.0.1', 'localhost'].includes(new URL(value).hostname)), 'Fixture origins must be loopback');
   assertLocalRegtestChain(await zebraRpc('getblockchaininfo'), ZEBRA_RPC);
   const upstream = regtestLwdUrl();
@@ -15,6 +15,7 @@ export async function regtestBrowserGateway(origins, port = 0) {
   const forward = server.listeners('request')[0]; server.removeAllListeners('request');
   server.on('request', async (req, res) => {
     if (!req.url?.endsWith('/SendTransaction')) { forward(req, res); return; }
+    if (nativeSubmission && !loseAcknowledgement) { forward(req, res); return; }
     const origin = req.headers.origin;
     if (!origin || !origins.includes(origin)) { res.writeHead(403).end(); return; }
     const headers = { 'access-control-allow-origin': origin, vary: 'Origin',

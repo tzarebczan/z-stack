@@ -58,6 +58,12 @@ pub enum Network {
 }
 
 impl Network {
+    /// Branch used by transaction construction at this height.
+    pub fn consensus_branch_id(self, height: u32) -> u32 {
+        use zcash_protocol::consensus::BranchId;
+        u32::from(BranchId::for_height(&self, BlockHeight::from_u32(height)))
+    }
+
     /// Canonical chain identity, independent of configured endpoints.
     pub fn genesis_hash(self) -> &'static str {
         match self {
@@ -123,6 +129,9 @@ impl Parameters for Network {
 
     fn activation_height(&self, nu: NetworkUpgrade) -> Option<BlockHeight> {
         match self {
+            // ZIP 259 finalized this after the pinned Common 2.2.0 release.
+            // Keep the application-owned schedule current without mixing crypto crates.
+            Self::Mainnet if nu == NetworkUpgrade::Nu7 => Some(BlockHeight::from_u32(3_543_405)),
             Self::Mainnet => ZcashNetwork::MainNetwork.activation_height(nu),
             Self::Testnet => ZcashNetwork::TestNetwork.activation_height(nu),
             // Must match `infra/compose/regtest/zebra.toml`.
@@ -786,7 +795,15 @@ mod tests {
         );
         assert_eq!(
             Network::Mainnet.activation_height(NetworkUpgrade::Nu7),
-            None
+            Some(BlockHeight::from_u32(3_543_405))
+        );
+        assert_eq!(
+            BranchId::for_height(&Network::Mainnet, BlockHeight::from_u32(3_543_404)),
+            BranchId::Nu6_3
+        );
+        assert_eq!(
+            BranchId::for_height(&Network::Mainnet, BlockHeight::from_u32(3_543_405)),
+            BranchId::Nu7
         );
         assert_eq!(
             BranchId::for_height(&Network::Testnet, BlockHeight::from_u32(4_465_025)),
