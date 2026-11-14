@@ -593,3 +593,14 @@ use that client’s `forget()` method instead. Reuse the
 owner or await its `close()` before opening another. A competing action on that
 client still uses `busy`. The React example serializes StrictMode teardown and
 remount rather than creating overlapping owners.
+
+### Birthday date estimates
+
+Use `parseBirthdayInput(date, tipHeight, network, tipTimeUnix)` for a date-based
+scan start, or `dateFromHeight(height, tipHeight, network, tipTimeUnix)` for an
+approximate date. The optional fourth argument anchors the observed tip in Unix
+seconds and defaults to the current clock. Estimates account for Blossom and
+NU7 (25-second blocks on Mainnet from 3,543,405 and Testnet from 4,465,026).
+Date inputs include a time-based safety margin; exact heights remain exact.
+A date estimate is not a chain timestamp lookup. Prefer a known block height
+before the first deposit when one is available.
