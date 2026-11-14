@@ -289,7 +289,7 @@ function unixToYmd(unix: number): string {
 
 export type BirthdayNetwork = string | {
   network: string;
-  /** Regtest only; match the validator. NU7 is otherwise unscheduled. */
+  /** Regtest only; match the validator. Omitted keeps pre-NU7 spacing. */
   regtestNu7Height?: number;
 };
 
@@ -298,8 +298,8 @@ function spacingEras(config: BirthdayNetwork): Array<[number, number]> {
   if (!["mainnet", "testnet", "regtest"].includes(network)) throw new WalletError("invalid_birthday", "invalid network");
   const eras: Array<[number, number]> = [[1, 150]];
   eras.push([network === "mainnet" ? 653_600 : network === "testnet" ? 584_000 : 1, 75]);
-  // Common 2.2.0 does not schedule mainnet NU7. Never infer it from wall time.
-  const nu7 = network === "testnet" ? 4_465_026 : network === "regtest" && typeof config !== "string" ? config.regtestNu7Height : undefined;
+  // ZIP 259 finalized mainnet NU7 after Common 2.2.0; match z-engine::Network.
+  const nu7 = network === "mainnet" ? 3_543_405 : network === "testnet" ? 4_465_026 : network === "regtest" && typeof config !== "string" ? config.regtestNu7Height : undefined;
   if (nu7 !== undefined) {
     if (!Number.isInteger(nu7) || nu7 < 3 || nu7 > 0xffff_ffff) {
       throw new WalletError("invalid_birthday", "invalid regtest NU7 height");
@@ -326,15 +326,23 @@ function heightBeforeSeconds(tip: number, seconds: number, network: BirthdayNetw
   return 1;
 }
 
+function validateTipTime(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0)
+    throw new WalletError("invalid_birthday", "invalid tip timestamp");
+}
+
 /** Approximate conversion from a live tip and wall clock, across spacing changes.
  * Prefer the wallet's exact birthday height when available.
+ * tipTimeUnix is the tip anchor in Unix seconds; defaults to the current clock.
  */
-export function heightFromDate(ymd: string, tipHeight: number, network: BirthdayNetwork = "mainnet"): number {
-  const seconds = Math.max(0, nowUnix() - ymdToUnix(ymd));
+export function heightFromDate(ymd: string, tipHeight: number, network: BirthdayNetwork = "mainnet", tipTimeUnix: number = nowUnix()): number {
+  validateTipTime(tipTimeUnix);
+  const seconds = Math.max(0, tipTimeUnix - ymdToUnix(ymd));
   return heightBeforeSeconds(tipHeight, seconds, network);
 }
 
-export function dateFromHeight(height: number, tipHeight: number, network: BirthdayNetwork = "mainnet"): string {
+export function dateFromHeight(height: number, tipHeight: number, network: BirthdayNetwork = "mainnet", tipTimeUnix: number = nowUnix()): string {
+  validateTipTime(tipTimeUnix);
   let cursor = tipHeight;
   let seconds = 0;
   for (const [start, spacing] of spacingEras(network).reverse()) {
@@ -343,7 +351,7 @@ export function dateFromHeight(height: number, tipHeight: number, network: Birth
     seconds += (cursor - lower) * spacing;
     cursor = lower;
   }
-  return unixToYmd(nowUnix() - seconds);
+  return unixToYmd(tipTimeUnix - seconds);
 }
 
 export function ymdDaysAgo(days: number): string {
@@ -369,7 +377,8 @@ export function validateBirthdayInput(raw: string | number): void {
 /** Digits are an exact height; dates estimate a height with a safety margin.
  * Empty / `auto` defaults to tip minus 100.
  */
-export function parseBirthdayInput(raw: string, tipHeight: number, network: BirthdayNetwork = "mainnet"): number {
+export function parseBirthdayInput(raw: string, tipHeight: number, network: BirthdayNetwork = "mainnet", tipTimeUnix: number = nowUnix()): number {
+  validateTipTime(tipTimeUnix);
   validateBirthdayInput(raw);
   const s = raw.trim();
   if (!s || s.toLowerCase() === "auto") return Math.max(1, tipHeight - 100);
@@ -379,8 +388,8 @@ export function parseBirthdayInput(raw: string, tipHeight: number, network: Birt
     return h;
   }
   // Dates are UTC days; allow one day for the user's timezone.
-  if (ymdToUnix(s) > nowUnix() + 86_400) {
+  if (ymdToUnix(s) > tipTimeUnix + 86_400) {
     throw new WalletError("birthday_above_tip", "birthday date is in the future");
   }
-  return heightBeforeSeconds(heightFromDate(s, tipHeight, network), DATE_SAFETY_BLOCKS * BLOCK_SECONDS, network);
+  return heightBeforeSeconds(heightFromDate(s, tipHeight, network, tipTimeUnix), DATE_SAFETY_BLOCKS * BLOCK_SECONDS, network);
 }
