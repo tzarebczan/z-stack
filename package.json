@@ -15,7 +15,7 @@
     "regtest:mine": "node scripts/regtest-mine.mjs",
     "regtest:native:up": "node scripts/regtest-native.mjs up",
     "regtest:native:down": "node scripts/regtest-native.mjs down",
-    "test": "node --conditions=@z-stack/source --import tsx --test scripts/build-consumer.test.mjs scripts/ci-wasm-cache.test.mjs scripts/wasm-build-variant.test.mjs scripts/ci.test.mjs scripts/consumer-archives.test.mjs scripts/release-versions.test.mjs scripts/regtest-rpc.test.mjs scripts/regtest-container.test.mjs scripts/create-example.test.mjs scripts/check-testnet-chain.test.mjs scripts/check-patches.test.mjs scripts/example-lifetime.test.mjs scripts/example-wallet-view.test.mjs scripts/grpc-web-proxy.test.mjs packages/passkey/test/vault.test.ts packages/sdk/test/grpc-web.test.ts packages/sdk/test/diagnostics.test.ts packages/sdk/test/public-data.test.ts packages/sdk/test/private-enhance.test.ts packages/sdk/test/private-transparent.test.ts packages/core/test/core.test.ts packages/sdk/test/browser-wallet.test.ts packages/sdk/test/engine.test.ts packages/sdk/test/confirmation-policy.test.ts packages/sdk/test/integrity.test.ts packages/sdk/test/loading.test.ts packages/sdk/test/lifecycle.test.ts packages/sdk/test/lifecycle-review.test.ts packages/sdk/test/harness.test.ts packages/sdk/test/worker-artifacts.test.ts packages/sdk/test/storage.test.ts packages/sdk/test/prefetch.test.ts packages/sdk/test/cdn-transport.test.ts packages/sdk/test/subtree-roots.test.ts packages/sdk/test/wasm.test.ts packages/sdk/test/passkey.test.ts packages/sdk/test/hardware.test.ts packages/sdk/test/package-exports.test.ts packages/sdk/test/setup-diagnostics.test.ts packages/sdk/test/adapter-conformance.test.ts && pnpm test:base && pnpm test:gift-cards && pnpm test:solana && pnpm test:swaps",
+    "test": "node --conditions=@z-stack/source --import tsx --test scripts/build-consumer.test.mjs scripts/ci-wasm-cache.test.mjs scripts/wasm-build-variant.test.mjs scripts/ci.test.mjs scripts/consumer-archives.test.mjs scripts/release-versions.test.mjs scripts/regtest-rpc.test.mjs scripts/regtest-container.test.mjs scripts/create-example.test.mjs scripts/check-testnet-chain.test.mjs scripts/check-patches.test.mjs scripts/example-lifetime.test.mjs scripts/example-wallet-view.test.mjs scripts/grpc-web-proxy.test.mjs packages/passkey/test/vault.test.ts packages/passkey/test/device-approval.test.ts packages/sdk/test/grpc-web.test.ts packages/sdk/test/diagnostics.test.ts packages/sdk/test/public-data.test.ts packages/sdk/test/private-enhance.test.ts packages/sdk/test/private-transparent.test.ts packages/core/test/core.test.ts packages/sdk/test/browser-wallet.test.ts packages/sdk/test/engine.test.ts packages/sdk/test/confirmation-policy.test.ts packages/sdk/test/integrity.test.ts packages/sdk/test/loading.test.ts packages/sdk/test/lifecycle.test.ts packages/sdk/test/lifecycle-review.test.ts packages/sdk/test/harness.test.ts packages/sdk/test/worker-artifacts.test.ts packages/sdk/test/storage.test.ts packages/sdk/test/prefetch.test.ts packages/sdk/test/cdn-transport.test.ts packages/sdk/test/subtree-roots.test.ts packages/sdk/test/wasm.test.ts packages/sdk/test/passkey.test.ts packages/sdk/test/hardware.test.ts packages/sdk/test/package-exports.test.ts packages/sdk/test/setup-diagnostics.test.ts packages/sdk/test/adapter-conformance.test.ts && pnpm test:base && pnpm test:gift-cards && pnpm test:solana && pnpm test:swaps",
     "test:regtest": "node scripts/regtest-test.mjs && node --import tsx scripts/sdk-regtest.mjs",
     "test:sdk:regtest": "node --conditions=@z-stack/source --import tsx scripts/sdk-regtest.mjs",
     "test:sdk:testnet": "node --import tsx scripts/sdk-testnet.mjs",
@@ -29,7 +29,7 @@
     "check:patches": "node scripts/check-patches.mjs && node tools/check-transparent-pir-upstream.mjs",
     "pack:sdk": "node scripts/pack-sdk.mjs",
     "test:packages": "node scripts/test-packages.mjs",
-    "release:check": "pnpm check:licenses && pnpm check:docs && pnpm check:patches && pnpm check:packages && pnpm docs:api && pnpm test && pnpm test:packages && pnpm test:base:package && pnpm test:combined:package && pnpm test:gift-cards:package && pnpm test:solana:package",
+    "release:check": "pnpm check:licenses && pnpm check:docs && pnpm check:patches && pnpm check:packages && pnpm docs:api && pnpm test && pnpm test:packages && pnpm test:base:package && pnpm test:combined:package && pnpm test:gift-cards:package && pnpm test:solana:package && pnpm test:device-approval:package",
     "docs:api": "typedoc",
     "check:licenses": "python3 scripts/license-inventory.py --check && node scripts/base-license-inventory.mjs --check && node scripts/optional-license-inventory.mjs solana --check && node scripts/optional-license-inventory.mjs swaps --check",
     "test:packages:browser": "node scripts/test-packages.mjs --browser --browsers=chromium,firefox,webkit",
@@ -57,7 +57,8 @@
     "test:swaps": "node --conditions=@z-stack/source --import tsx --test packages/swaps/test/*.test.ts",
     "pack:solana": "node scripts/pack-sdk.mjs artifacts --solana-only",
     "pack:swaps": "node scripts/pack-sdk.mjs artifacts --swaps-only",
-    "test:solana:package": "node scripts/test-solana-package.mjs"
+    "test:solana:package": "node scripts/test-solana-package.mjs",
+    "test:device-approval:package": "node scripts/test-device-approval-package.mjs"
   },
   "engines": {
     "node": ">=22.18.0"

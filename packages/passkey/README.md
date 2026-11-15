@@ -26,6 +26,14 @@ const words = unlocked.text();
 unlocked.wipe();
 ```
 
+## Device approval
+
+The optional [`@z-stack/passkey/device-approval`](https://github.com/tzarebczan/z-stack/blob/main/docs/DEVICE-APPROVAL.md)
+entry transfers an encrypted wallet or full viewing key by QR or copy/paste. It
+uses memory-only ephemeral WebCrypto keys and does not load the vault or wallet
+engine. Apps must provide fresh source authentication, physical comparison and
+explicit local profile import.
+
 ## What it does for you
 
 Each item below has broken at least one real wallet.

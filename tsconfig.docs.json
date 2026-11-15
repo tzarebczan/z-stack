@@ -6,6 +6,7 @@
     "packages/sdk/src/wasm-shim.d.ts",
     "packages/core/src/index.ts",
     "packages/passkey/src/index.ts",
+    "packages/passkey/src/device-approval.ts",
     "packages/sdk/src/services.ts",
     "packages/sdk/src/native.ts",
     "packages/sdk/src/engine-tools.ts",

@@ -6,6 +6,7 @@
     "packages/sdk/src/vite.ts",
     "packages/core/src/index.ts",
     "packages/passkey/src/index.ts",
+    "packages/passkey/src/device-approval.ts",
     "packages/sdk/src/services.ts",
     "packages/sdk/src/hardware.ts",
     "packages/sdk/src/native.ts",

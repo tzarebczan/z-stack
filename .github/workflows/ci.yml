@@ -353,6 +353,7 @@ jobs:
           node scripts/test-packages.mjs --browser --browsers="$BROWSER" --archives=artifacts
           node scripts/test-base-package.mjs --browser --browsers="$BROWSER" --archives=artifacts
           node scripts/test-solana-package.mjs --browser --browsers="$BROWSER" --archives=artifacts
+          node scripts/test-device-approval-package.mjs --browser --browsers="$BROWSER" --archives=artifacts
           node scripts/test-gift-cards-package.mjs --browser --browsers="$BROWSER" --archives=artifacts
 
   # Keep the required check on every run, including intentional docs-only routes.
