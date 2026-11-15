@@ -92,3 +92,63 @@ test('days-later restored route releases only past its saved RPC conservative ex
   finalizedBlockHeight = 121;
   assert.equal((await restored.resume('route-1')).state.kind, 'intermediate-recoverable');
 });
+
+test('polling and reopening an unfunded pending deposit preserves its one funding claim', async () => {
+  const store = createMemoryTwoLegRouteStore(), pending = adapters({ refreshNear: async () => ({ status: 'pending', checkedAt: Date.now() }) });
+  const controller = createTwoLegController({ owner, store, adapters: pending });
+  await controller.create({ id: 'route-1', near });
+  assert.equal((await controller.resume('route-1')).state.kind, 'awaiting-source-funding');
+  const reopened = createTwoLegController({ owner, store, adapters: pending });
+  assert.equal((await reopened.resume('route-1')).state.kind, 'awaiting-source-funding');
+  const claim = await reopened.claimFunding('route-1');
+  assert.ok(claim.claimId);
+  assert.equal((await reopened.resume('route-1')).state.kind, 'source-funding-unknown');
+  await assert.rejects(reopened.claimFunding('route-1'), /already claimed/);
+  await reopened.create({ id: 'route-2', near: { ...near, providerReference: 'second-deposit', depositAddress: 'second-disposable-address' } });
+  await reopened.recordNearObservation('route-2', { status: 'processing', checkedAt: Date.now() });
+  assert.equal((await reopened.get('route-2')).state.kind, 'near-processing');
+  await assert.rejects(reopened.claimFunding('route-2'), /already claimed/);
+});
+
+test('twentieth attempt finalizes durably and a new review is rejected without dropping history', async () => {
+  const f = fixture(), prepared = await prepareJupiterSwap(f), tx = validateSignedSolanaSwap(prepared, prepared.transaction, { requireOwnerSignature: false }); tx.sign([signer]);
+  const signed = Buffer.from(tx.serialize()).toString('base64'), transaction = coSignSolanaSwap(prepared, signed, payer), signature = solanaTransactionSignature(transaction);
+  const store = createMemoryTwoLegRouteStore(); let submitted = 0;
+  const controller = createTwoLegController({ owner, store, adapters: adapters({ submitJupiter: async () => { submitted++; return { signature }; }, reconcileJupiter: async () => ({ kind: 'failed', signature, transaction, finality: 'finalized', reason: 'Finalized fixture failure' }) }) });
+  await ready(controller);
+  const prior = Array.from({ length: 19 }, (_, index) => ({ outcome: 'failed' as const, prepared, signedTransaction: transaction, signature, reason: `Earlier failure ${index}`, observedAt: Date.now() + index }));
+  await store.transaction(owner, routes => ({ routes: routes.map(route => ({ ...route, jupiterAttempts: prior })), result: undefined }));
+  await controller.saveJupiterReview('route-1', prepared);
+  await controller.executeJupiter('route-1', { accepted: true, reviewedMessage: prepared.message, signedTransaction: signed });
+  const settled = await controller.resume('route-1');
+  assert.equal(settled.jupiterAttempts.length, 20);
+  assert.deepEqual(settled.jupiterAttempts.slice(0, 19), prior);
+  assert.equal(settled.state.kind, 'intermediate-recoverable');
+  await assert.rejects(controller.saveJupiterReview('route-1', prepared), /20-attempt limit.*funds remain/);
+  assert.equal(submitted, 1);
+  assert.deepEqual((await controller.get('route-1')).jupiterAttempts, settled.jupiterAttempts);
+});
+
+test('fresh execute and retry capacity checks stop transmission while legacy finalized overflow remains recordable', async () => {
+  const f = fixture(), prepared = await prepareJupiterSwap(f), tx = validateSignedSolanaSwap(prepared, prepared.transaction, { requireOwnerSignature: false }); tx.sign([signer]);
+  const signed = Buffer.from(tx.serialize()).toString('base64'), transaction = coSignSolanaSwap(prepared, signed, payer), signature = solanaTransactionSignature(transaction);
+  const store = createMemoryTwoLegRouteStore(); let submitted = 0;
+  const controller = createTwoLegController({ owner, store, adapters: adapters({ submitJupiter: async () => { submitted++; return { signature }; }, reconcileJupiter: async () => ({ kind: 'failed', signature, transaction, finality: 'finalized', reason: 'Legacy in-flight failure' }) }) });
+  await ready(controller); await controller.saveJupiterReview('route-1', prepared);
+  const prior = Array.from({ length: 20 }, (_, index) => ({ outcome: 'failed' as const, prepared, signedTransaction: transaction, signature, reason: `Earlier failure ${index}`, observedAt: Date.now() + index }));
+  await store.transaction(owner, routes => ({ routes: routes.map(route => ({ ...route, jupiterAttempts: prior })), result: undefined }));
+  await assert.rejects(controller.executeJupiter('route-1', { accepted: true, reviewedMessage: prepared.message, signedTransaction: signed }), /20-attempt limit.*funds remain/);
+  const unchanged = await controller.get('route-1');
+  assert.equal(unchanged.state.kind, 'awaiting-jupiter-review');
+  assert.equal(submitted, 0);
+  assert.ok('settlement' in unchanged.state);
+  const settlement = unchanged.state.settlement;
+  // Reproduce an old-version reservation that had already reached the network.
+  await store.transaction(owner, routes => ({ routes: routes.map(route => ({ ...route, state: { kind: 'jupiter-submission-unknown' as const, settlement, prepared, signedTransaction: signed, signature: null } })), result: undefined }));
+  await assert.rejects(controller.retryJupiter('route-1'), /20-attempt limit.*funds remain/);
+  assert.equal(submitted, 0);
+  const finalized = await controller.resume('route-1');
+  assert.equal(finalized.state.kind, 'intermediate-recoverable');
+  assert.equal(finalized.jupiterAttempts.length, 21);
+  assert.deepEqual(finalized.jupiterAttempts.slice(0, 20), prior);
+});

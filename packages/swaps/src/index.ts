@@ -39,6 +39,7 @@ const stateSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('source-failed') }).strict(),
   z.object({ kind: z.literal('intermediate-recoverable'), settlement: IntermediateSettlementSchema, reason: z.string().min(1).max(256) }).strict(),
 ]);
+export const MAX_JUPITER_ATTEMPTS = 20;
 const jupiterAttemptSchema = z.discriminatedUnion('outcome', [
   z.object({ outcome: z.literal('failed'), prepared: PreparedSolanaSwapSchema, signedTransaction: z.string().max(1800), signature: z.string(), reason: z.string(), observedAt: z.number().int().positive() }).strict(),
   z.object({ outcome: z.literal('completed'), prepared: PreparedSolanaSwapSchema, signedTransaction: z.string().max(1800), signature: z.string(), outputAmount: AtomicAmountSchema, observedAt: z.number().int().positive() }).strict(),
@@ -47,7 +48,7 @@ export const TwoLegRouteSchema = z.object({
   version: z.literal(1), id: z.string().min(1).max(128), owner: RouteOwnerSchema,
   atomicity: z.literal('recoverable-sequential'), targetMint: z.literal(SOLANA_CYPH.mint),
   near: NearLegSchema, sourceFunding: sourceFundingSchema, nearObservation: nearObservationSchema.nullable(),
-  state: stateSchema, jupiterAttempts: z.array(jupiterAttemptSchema).max(20).default([]), revision: z.number().int().nonnegative(), createdAt: z.number().int().positive(), updatedAt: z.number().int().positive(),
+  state: stateSchema, jupiterAttempts: z.array(jupiterAttemptSchema).max(MAX_JUPITER_ATTEMPTS + 1).default([]), revision: z.number().int().nonnegative(), createdAt: z.number().int().positive(), updatedAt: z.number().int().positive(),
 }).strict().refine(route => route.owner.solanaAddress === route.near.destinationOwner, 'Wrong route destination owner');
 export type TwoLegRoute = z.infer<typeof TwoLegRouteSchema>;
 export type TwoLegRouteState = TwoLegRoute['state'];
@@ -57,6 +58,12 @@ export interface TwoLegRouteStore {
   transaction<T>(owner: RouteOwner, change: (routes: TwoLegRoute[]) => RouteMutation<T>): Promise<T>;
 }
 const ownerKey = (owner: RouteOwner) => JSON.stringify([owner.profileId, owner.walletFingerprint, owner.solanaAddress]);
+// A legacy 21st in-flight submission may still finalize; keep its receipt while
+// enforcing the 20-attempt spending policy before any new submission.
+/** Check before fresh unlock for an already-saved review; execute/retry repeat it under the durable store lock. */
+export function assertJupiterAttemptCapacity(route: Pick<TwoLegRoute, "jupiterAttempts">): void {
+  if (route.jupiterAttempts.length >= MAX_JUPITER_ATTEMPTS) throw new Error('This route has reached its 20-attempt limit. Intermediate funds remain in your Solana wallet. Keep the saved route history for recovery.');
+}
 function freezeRoute(route: TwoLegRoute): TwoLegRoute { return structuredClone(TwoLegRouteSchema.parse(route)); }
 function parseRoutes(raw: unknown, owner: RouteOwner): TwoLegRoute[] {
   const routes = z.array(TwoLegRouteSchema).max(100).parse(raw);
@@ -119,11 +126,13 @@ export function createTwoLegController(options: { owner: RouteOwner; store: TwoL
     if (route.nearObservation?.status === 'success' && parsed.status !== 'success') throw new Error('Provider observation contradicts saved completion.');
     const eligible = ['awaiting-source-funding', 'source-funding-unknown', 'near-processing', 'awaiting-settlement-proof'].includes(route.state.kind);
     if (!eligible) return { route, result: undefined };
-    const state: TwoLegRouteState = parsed.status === 'success' ? { kind: 'awaiting-settlement-proof' } : parsed.status === 'refunded' ? { kind: 'refunded' } : parsed.status === 'failed' ? { kind: 'source-failed' } : route.state.kind === 'source-funding-unknown' ? route.state : { kind: 'near-processing' };
+    const preserveFundingState = route.state.kind === 'source-funding-unknown' || route.state.kind === 'awaiting-source-funding' && parsed.status === 'pending';
+    const state: TwoLegRouteState = parsed.status === 'success' ? { kind: 'awaiting-settlement-proof' } : parsed.status === 'refunded' ? { kind: 'refunded' } : parsed.status === 'failed' ? { kind: 'source-failed' } : preserveFundingState ? route.state : { kind: 'near-processing' };
     return { route: { ...route, state, nearObservation: parsed }, result: undefined };
   }, false);
   const submitStored = async (route: TwoLegRoute) => {
     if (route.state.kind !== 'jupiter-submission-unknown') throw new Error('No saved submission to retry.');
+    assertJupiterAttemptCapacity(route);
     const state = route.state;
     // Reservation is already persisted. Late outcomes update this original owner even after UI account changes.
     const result = await options.adapters.submitJupiter(route, state.prepared, state.signedTransaction);
@@ -177,6 +186,7 @@ export function createTwoLegController(options: { owner: RouteOwner; store: TwoL
       const prepared = PreparedSolanaSwapSchema.parse(value);
       await mutate(id, route => {
         if (route.state.kind !== 'intermediate-ready' && route.state.kind !== 'intermediate-recoverable' && route.state.kind !== 'awaiting-jupiter-review') throw new Error('Intermediate funds are not ready for a new review.');
+        assertJupiterAttemptCapacity(route);
         const { settlement } = route.state;
         if (prepared.review.owner !== owner.solanaAddress || prepared.review.inputMint !== settlement.mint || prepared.review.outputMint !== SOLANA_CYPH.mint || prepared.review.amount !== settlement.amount || prepared.review.expiresAt <= now()) throw new Error('Jupiter review does not match the settled intermediate funds.');
         validateSignedSolanaSwap(prepared, prepared.transaction, { requireOwnerSignature: false });
@@ -187,6 +197,7 @@ export function createTwoLegController(options: { owner: RouteOwner; store: TwoL
       if (input.accepted !== true) throw new Error('Approve the exact second-leg review before signing.');
       await mutate(id, route => {
         if (route.state.kind !== 'awaiting-jupiter-review' || route.state.prepared.message !== input.reviewedMessage || route.state.prepared.review.expiresAt <= now()) throw new Error('Review changed, expired or already started.');
+        assertJupiterAttemptCapacity(route);
         validateSignedSolanaSwap(route.state.prepared, input.signedTransaction);
         return { route: { ...route, state: { ...route.state, kind: 'jupiter-submission-unknown', signedTransaction: input.signedTransaction, signature: null } }, result: undefined };
       });

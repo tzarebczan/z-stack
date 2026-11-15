@@ -49,3 +49,11 @@ transaction authorization bytes, never phrases, private keys or login tokens.
 The route is not atomic: if Jupiter is unavailable, funds remain as the shown
 intermediate Solana asset. The operator and public networks can observe addresses,
 amounts, timing, fees and Solana token activity.
+
+Pending-deposit polling preserves an unfunded route's funding action. The
+controller allows at most `MAX_JUPITER_ATTEMPTS` (20) second-leg attempts. Call
+`assertJupiterAttemptCapacity(route)` before fresh unlock when resuming a saved
+review; review, execute and submit/retry boundaries also enforce the limit.
+Intermediate funds remain in the wallet when the limit is reached. Finalized
+history is never truncated, and one legacy in-flight overflow can still record
+its final receipt.
