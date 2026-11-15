@@ -1,0 +1,77 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { fixture, owner as signer, payer } from '../../solana/test/fixtures';
+import { prepareJupiterSwap, validateSignedSolanaSwap, coSignSolanaSwap, solanaTransactionSignature, SOLANA_CYPH, SOLANA_USDC } from '../../solana/src/index';
+import { createTwoLegController, createMemoryTwoLegRouteStore, IntermediateSettlementSchema, type TwoLegRouteAdapters, type RouteOwner } from '../src/index';
+const owner: RouteOwner = { profileId: 'disposable-profile', walletFingerprint: 'fixture-only', solanaAddress: signer.publicKey.toBase58() };
+const near = { providerReference: 'near-quote-fixture', sourceAssetId: 'zec-mainnet', sourceAmount: '10000', depositAddress: 'disposable-transparent-fixture', depositMemo: null, refundAddress: 'disposable-refund-fixture', destinationMint: SOLANA_USDC.mint, destinationOwner: owner.solanaAddress, minimumDestinationAmount: '90', expiresAt: Date.now() + 600000 };
+const proof = { providerReference: near.providerReference, signature: 'finalized-first-leg-disposable-signature', owner: owner.solanaAddress, mint: SOLANA_USDC.mint, amount: '100', slot: 123, finality: 'finalized' as const };
+function adapters(overrides: Partial<TwoLegRouteAdapters> = {}): TwoLegRouteAdapters {
+  return { verifyIntermediate: async (_route, evidence) => IntermediateSettlementSchema.parse(evidence), submitJupiter: async () => { throw new Error('not configured'); }, refreshNear: async () => ({ status: 'success', checkedAt: Date.now() }), reconcileJupiter: async () => ({ kind: 'unknown' }), ...overrides };
+}
+async function ready(controller: ReturnType<typeof createTwoLegController>, id = 'route-1') {
+  await controller.create({ id, near }); await controller.recordNearObservation(id, { status: 'success', checkedAt: Date.now() }); return controller.acceptIntermediate(id, proof);
+}
+test('concurrent funding claims persist one unknown reservation, and resume never resends', async () => {
+  const store = createMemoryTwoLegRouteStore(), controller = createTwoLegController({ owner, store, adapters: adapters() });
+  await controller.create({ id: 'route-1', near });
+  const claims = await Promise.allSettled([controller.claimFunding('route-1'), controller.claimFunding('route-1')]);
+  assert.equal(claims.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal((await controller.get('route-1')).state.kind, 'source-funding-unknown');
+  assert.equal((await controller.resume('route-1')).state.kind, 'awaiting-settlement-proof');
+  await assert.rejects(controller.acceptIntermediate('route-1', { ...proof, owner: payer.publicKey.toBase58() }), /match/);
+  assert.equal((await controller.acceptIntermediate('route-1', proof)).state.kind, 'intermediate-ready');
+});
+test('timeout persists exact bytes, resume reads only, explicit retry reuses identical signature authorization', async () => {
+  const f = fixture(), prepared = await prepareJupiterSwap(f), tx = validateSignedSolanaSwap(prepared, prepared.transaction, { requireOwnerSignature: false }); tx.sign([signer]);
+  const signed = Buffer.from(tx.serialize()).toString('base64'), final = coSignSolanaSwap(prepared, signed, payer), signature = solanaTransactionSignature(final);
+  const sent: string[] = [];
+  const controller = createTwoLegController({ owner, store: createMemoryTwoLegRouteStore(), adapters: adapters({ submitJupiter: async (_route, _prepared, value) => { sent.push(value); if (sent.length === 1) throw new Error('response timeout'); return { signature }; } }) });
+  await ready(controller); await controller.saveJupiterReview('route-1', prepared);
+  await assert.rejects(controller.executeJupiter('route-1', { accepted: true, reviewedMessage: prepared.message, signedTransaction: signed }), /timeout/);
+  assert.equal((await controller.get('route-1')).state.kind, 'jupiter-submission-unknown');
+  await controller.resume('route-1'); assert.equal(sent.length, 1);
+  await assert.rejects(controller.saveJupiterReview('route-1', prepared), /not ready/);
+  assert.equal((await controller.retryJupiter('route-1')).state.kind, 'jupiter-processing');
+  assert.deepEqual(sent, [signed, signed]);
+});
+test('failed second leg preserves intermediate funds and only a finalized matching output completes', async () => {
+  const f = fixture(), prepared = await prepareJupiterSwap(f), tx = validateSignedSolanaSwap(prepared, prepared.transaction, { requireOwnerSignature: false }); tx.sign([signer]);
+  const signed = Buffer.from(tx.serialize()).toString('base64'), transaction = coSignSolanaSwap(prepared, signed, payer), signature = solanaTransactionSignature(transaction);
+  let failed = true;
+  const controller = createTwoLegController({ owner, store: createMemoryTwoLegRouteStore(), adapters: adapters({ submitJupiter: async () => ({ signature }), reconcileJupiter: async () => failed ? { kind: 'failed', reason: 'finalized on-chain failure', signature, transaction, finality: 'finalized' } : { kind: 'completed', signature, transaction, owner: owner.solanaAddress, mint: SOLANA_CYPH.mint, outputAmount: '200', finality: 'finalized' } }) });
+  await ready(controller); await controller.saveJupiterReview('route-1', prepared); await controller.executeJupiter('route-1', { accepted: true, reviewedMessage: prepared.message, signedTransaction: signed });
+  const recovered = await controller.resume('route-1'); assert.equal(recovered.state.kind, 'intermediate-recoverable');
+  assert.equal('settlement' in recovered.state && recovered.state.settlement.amount, '100');
+  failed = false; await controller.saveJupiterReview('route-1', prepared); await controller.executeJupiter('route-1', { accepted: true, reviewedMessage: prepared.message, signedTransaction: signed });
+  assert.equal((await controller.resume('route-1')).state.kind, 'completed');
+});
+test('storage failure precedes transmission, provider success alone never spends, original owner namespace survives', async () => {
+  let submitted = 0;
+  const store = createMemoryTwoLegRouteStore();
+  const controller = createTwoLegController({ owner, store, adapters: adapters({ submitJupiter: async () => { submitted++; throw new Error(); } }) });
+  await controller.create({ id: 'route-1', near });
+  await controller.resume('route-1'); assert.equal(submitted, 0);
+  const other = createTwoLegController({ owner: { ...owner, profileId: 'different-profile' }, store, adapters: adapters() });
+  assert.deepEqual(await other.list(), []);
+  await assert.rejects(other.get('route-1'), /not found/);
+  const broken = createTwoLegController({ owner, store: { transaction: async () => { throw new Error('quota failure'); } }, adapters: adapters() });
+  await assert.rejects(broken.create({ id: 'route-2', near }), /quota/); assert.equal(submitted, 0);
+});
+
+test('only an exact provider cancellation can release a never-acknowledged submission', async () => {
+  const f = fixture(), prepared = { ...await prepareJupiterSwap(f), providerQuoteId: 'provider_quote_disposable' };
+  const tx = validateSignedSolanaSwap(prepared, prepared.transaction, { requireOwnerSignature: false }); tx.sign([signer]);
+  const signed = Buffer.from(tx.serialize()).toString('base64');
+  let wrong = true;
+  const controller = createTwoLegController({ owner, store: createMemoryTwoLegRouteStore(), adapters: adapters({
+    submitJupiter: async () => { throw new Error('request did not receive an acknowledgement'); },
+    reconcileJupiter: async () => ({ kind: 'not-sent', providerQuoteId: wrong ? 'different_quote' : prepared.providerQuoteId, reviewedMessage: prepared.message, reason: 'Backend atomically canceled unsigned quote' }),
+  }) });
+  await ready(controller); await controller.saveJupiterReview('route-1', prepared);
+  await assert.rejects(controller.executeJupiter('route-1', { accepted: true, reviewedMessage: prepared.message, signedTransaction: signed }));
+  await assert.rejects(controller.resume('route-1'), /Cancellation does not match/);
+  assert.equal((await controller.get('route-1')).state.kind, 'jupiter-submission-unknown');
+  wrong = false;
+  assert.equal((await controller.resume('route-1')).state.kind, 'intermediate-recoverable');
+});

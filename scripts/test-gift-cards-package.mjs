@@ -85,17 +85,21 @@ import { zStack } from "@z-stack/sdk/vite";
 export default defineConfig({ plugins: [zStack()], optimizeDeps: { exclude: ["@z-stack/gift-cards"] }, build: { target: "es2022" } });\n`);
   writeFileSync(join(app, "index.html"), '<!doctype html><html><head><meta charset="UTF-8"></head><body><script type="module" src="/src/gift-fixture.ts"></script></body></html>\n');
   writeFileSync(join(app, "src/gift-fixture.ts"), `
-import { createWallet, memoryWalletStorage } from "@z-stack/sdk";
+import { createWallet, memoryWalletStorage, lightServer } from "@z-stack/sdk";
 import { deriveGiftAccount } from "@z-stack/sdk/gift-keys";
-import { createBrowserGiftBackend } from "@z-stack/gift-cards/browser";
+import { createBrowserGiftBackend, BROWSER_GIFT_CAPABILITIES } from "@z-stack/gift-cards/browser";
 import type { GiftCard } from "@z-stack/gift-cards";
 const check = (value: unknown, message: string) => { if (!value) throw new Error(message); };
 async function smoke() {
+  check(BROWSER_GIFT_CAPABILITIES.blockTransport && BROWSER_GIFT_CAPABILITIES.submissionContext, "Packaged gift adapter must advertise its transport contract");
   let stage = "main-wallet startup";
   const options = { network: "regtest" as const, server: location.origin + "/light", regtestNu63Height: 150,
     regtestNu7Height: 250, threads: 1, preferMulticore: false, autoShield: false, transparent: false, prewarmProvingKey: false };
   const main = await createWallet({ ...options, storage: memoryWalletStorage() });
-  const backend = createBrowserGiftBackend({ network: options.network, server: options.server,
+  const selected = lightServer(options.server, { network: options.network, transparent: false });
+  let transportCalls = 0;
+  const transport = { ...selected, kind: "private-cloud-fixture", label: "Explicit selected fixture", tip: async (signal?: AbortSignal) => { transportCalls++; return selected.tip(signal); } };
+  const backend = createBrowserGiftBackend({ network: options.network, server: transport,
     namespace: "archive-gift-smoke", regtestNu63Height: options.regtestNu63Height, regtestNu7Height: options.regtestNu7Height });
   try {
     const created = await main.create({ birthday: 1 });
@@ -126,6 +130,7 @@ async function smoke() {
     check((await isolated.getWallet()).unifiedAddress === snapshot.unifiedAddress, "Gift wallet must reopen its durable snapshot");
     await isolated.close();
     check((await main.getWallet()).unifiedAddress === before.unifiedAddress, "Gift close must preserve the main wallet");
+    check(transportCalls === 1, "Gift worker must route through the selected parent transport and never a relay URL");
     return { generated: true, isolated: true, reopened: true, leaseProtected: true, preservedMainWallet: true };
   } catch (error) { throw new Error(stage + ": " + (error instanceof Error ? error.message : "gift worker failure")); }
   finally { await backend.dispose(); await main.close(); }

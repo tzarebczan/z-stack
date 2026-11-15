@@ -13,15 +13,17 @@ function run(command, args, cwd) {
   const result = spawnSync(command, args, { cwd, stdio: "inherit", shell: process.platform === "win32" });
   assert.equal(result.status, 0, `${command} failed to pack distribution`);
 }
-assert.ok(!(process.argv.includes("--base-only") && process.argv.includes("--gift-cards-only")), "select one optional package");
-const names = process.argv.includes("--base-only") ? ["base"] : process.argv.includes("--gift-cards-only") ? ["gift-cards"] : ["core", "passkey", "sdk"];
+const optionalModes = ['base', 'gift-cards', 'solana', 'swaps'].filter(name => process.argv.includes(`--${name}-only`));
+assert.ok(optionalModes.length <= 1, 'select one optional package');
+const selected = optionalModes[0];
+const names = selected === 'swaps' ? ['solana', 'swaps'] : selected ? [selected] : ['core', 'passkey', 'sdk'];
 for (const name of names) {
   const pkg = join(root, "packages", name);
-  if (name !== "sdk") {
+  if (name !== "sdk" && name !== "swaps") {
     run("pnpm", ["pack", "--pack-destination", out], pkg);
     continue;
   }
-  run(process.execPath, [join(root, "scripts/check-package.mjs"), "sdk"], root);
+  run(process.execPath, [join(root, "scripts/check-package.mjs"), name], root);
   // Stage only declared distribution files. Include the unpublished, dependency-
   // free helpers so a lone SDK archive never looks them up in the public registry.
   const scratch = mkdtempSync(join(tmpdir(), "z-stack-pack-"));
@@ -32,8 +34,9 @@ for (const name of names) {
     delete manifest.publishConfig;
     delete manifest.scripts;
     delete manifest.devDependencies;
-    manifest.bundleDependencies = ["@z-stack/core", "@z-stack/passkey"];
-    for (const dep of ["core", "passkey"]) {
+    const bundled = name === "sdk" ? ["core", "passkey"] : ["solana"];
+    manifest.bundleDependencies = bundled.map(dep => `@z-stack/${dep}`);
+    for (const dep of bundled) {
       const dependency = join(scratch, "node_modules", "@z-stack", dep);
       mkdirSync(dependency, { recursive: true });
       // These archives were built and checked immediately above.

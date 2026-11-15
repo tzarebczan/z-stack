@@ -1,20 +1,24 @@
+import type { BlockTransport } from '@z-stack/sdk';
+import { describeGiftTransport, runGiftTransportCall, giftTransportFailure } from './transport-bridge';
 import { GiftError, GIFT_CONFIRMATIONS } from "./protocol";
 import type { GiftBackend, GiftSendOptions, GiftWallet } from "./service";
 import type { BrowserGiftOptions, GiftWorkerReply, GiftWorkerRequest, WorkerConfiguration } from "./worker-messages";
 export type { BrowserGiftOptions } from "./worker-messages";
 
+export const BROWSER_GIFT_CAPABILITIES = Object.freeze({ blockTransport: true, submissionContext: true, cancellation: true });
+
 /** One isolated JS realm and durable viewing database per active gift. No account/backend service. */
 export function createBrowserGiftBackend(options: BrowserGiftOptions): GiftBackend {
-  if (!options.namespace.trim() || !options.server.trim()) throw new GiftError("invalid_link");
-  const { onProgress, ...configuration } = options;
-  const config: WorkerConfiguration = { ...configuration,
+  if (!options.namespace.trim() || (typeof options.server === "string" && !options.server.trim())) throw new GiftError("invalid_link");
+  const { onProgress, server, ...configuration } = options;
+  const config: WorkerConfiguration = { ...configuration, server: typeof server === "string" ? server : describeGiftTransport(server),
     ...(options.wasmBasePath ? { wasmBasePath: new URL(options.wasmBasePath, globalThis.location.href).href } : {}) };
   let disposed = false;
   const sessions = new Set<GiftConnection>();
   const create = () => {
     if (disposed) throw new GiftError("closed");
     const session = new GiftConnection(new Worker(new URL("./gift.worker.ts", import.meta.url), { type: "module" }), onProgress,
-      () => sessions.delete(session));
+      () => sessions.delete(session), typeof server === "string" ? null : server);
     sessions.add(session);
     return session;
   };
@@ -86,9 +90,20 @@ class GiftConnection {
   private abort = new AbortController();
   private pending = new Map<number, Pending>();
   private journals = new Set<Promise<void>>();
-  constructor(private worker: Worker, onProgress: BrowserGiftOptions["onProgress"], private removed: () => void) {
+  private transports = new Map<number, AbortController>();
+  constructor(private worker: Worker, onProgress: BrowserGiftOptions["onProgress"], private removed: () => void, private transport: BlockTransport | null) {
     worker.onmessage = (event: MessageEvent<GiftWorkerReply>) => {
       const reply = event.data;
+      if (reply.kind === 'transport-cancel') { this.transports.get(reply.requestId)?.abort(); this.transports.delete(reply.requestId); return; }
+      if (reply.kind === 'transport-call') {
+        if (!this.transport || !Number.isSafeInteger(reply.requestId) || reply.requestId < 1 || this.transports.has(reply.requestId) || this.transports.size >= 16) { worker.postMessage({ op: 'transport-result', requestId: reply.requestId, ok: false, code: 'connection' }); return; }
+        const controller = new AbortController(); this.transports.set(reply.requestId, controller);
+        void runGiftTransportCall(this.transport, reply.call, AbortSignal.any([controller.signal, this.abort.signal])).then(
+          result => worker.postMessage({ op: 'transport-result', requestId: reply.requestId, ok: true, result }),
+          error => worker.postMessage({ op: 'transport-result', requestId: reply.requestId, ...giftTransportFailure(error) }),
+        ).catch(() => {}).finally(() => this.transports.delete(reply.requestId));
+        return;
+      }
       if (reply.kind === "progress") { onProgress?.(reply); return; }
       const waiting = this.pending.get(reply.id);
       if (!waiting) return;
@@ -121,7 +136,7 @@ class GiftConnection {
     worker.onmessageerror = fail;
   }
   next(): number { return ++this.sequence; }
-  call(request: GiftWorkerRequest, options?: GiftSendOptions): Promise<GiftWorkerReply> {
+  call(request: Exclude<GiftWorkerRequest, { op: "transport-result" }>, options?: GiftSendOptions): Promise<GiftWorkerReply> {
     if (this.stopped && request.op !== "close") return Promise.reject(new GiftError("closed"));
     return new Promise((resolve, reject) => {
       this.pending.set(request.id, { resolve, reject, beforeSubmit: options?.beforeSubmit });

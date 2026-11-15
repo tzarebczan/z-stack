@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** Fingerprint the Base package sources/configuration, never environment or wallet data. */
+/** Fingerprint optional package sources/configuration, never environment or wallet data. */
 export function basePackageInputs(directory) {
   const files = ['package.json', 'tsconfig.json'];
   function walk(relative) {

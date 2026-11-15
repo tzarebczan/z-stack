@@ -138,7 +138,9 @@ localhost. A Vite development build alone does not configure production headers.
 | [`@z-stack/sdk`](packages/sdk/README.md) | Browser wallet, events, transport, native bridge client, Vite plugin |
 | [`@z-stack/core`](packages/core/README.md) | Platform-independent amounts, addresses, history, errors |
 | [`@z-stack/passkey`](packages/passkey/README.md) | WebAuthn PRF vaults; no runtime dependencies |
-| [`@z-stack/gift-cards`](packages/gift-cards/README.md) | Optional source package for bearer gifts, encrypted recovery and isolated browser wallets |
+| [`@z-stack/gift-cards`](packages/gift-cards/README.md) | Optional bearer gifts, encrypted recovery and isolated browser wallets |
+| [`@z-stack/solana`](packages/solana/README.md) | Optional same-phrase SOL/USDC/CYPH wallet and reviewed Jupiter transaction validation |
+| [`@z-stack/swaps`](packages/swaps/README.md) | Durable, resumable NEAR-to-Solana-to-CYPH trade coordination |
 | `z-engine` | Zakura-backed wallet engine; native SQLite and browser snapshot stores |
 | `z-wasm` | WASM bindings; single-thread and threaded builds |
 | `z-desktop`, `z-node-launcher` | Native app and node tooling; separate from browser integration |
@@ -182,3 +184,14 @@ and backup providers.
 and explicit paymaster primitives. It can reuse the recovery phrase without
 requiring the Zcash engine or an account service. Follow the [Base integration
 guide](docs/BASE-WALLET.md) or run the [Base-only demo](examples/base-wallet/README.md).
+
+## Optional Solana wallet and CYPH routes
+
+[`@z-stack/solana`](packages/solana/README.md) derives the standard Solana account
+from the existing wallet phrase. The application supplies RPC consent, fresh
+unlock and an explicitly funded sponsor. Jupiter builds receive exact instruction,
+account, amount, fee, authority and simulated-balance checks before signing.
+[`@z-stack/swaps`](packages/swaps/README.md) journals the two-leg route and keeps
+uncertain submissions for reconciliation. A failed second leg leaves the shown
+intermediate SOL/USDC recoverable. Both optional packages install without the
+Zcash engine; their matching preview archives include portable exports and notices.

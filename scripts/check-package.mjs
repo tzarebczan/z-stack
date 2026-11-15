@@ -14,7 +14,7 @@ import { assertWasmVariant } from "./wasm-build-variant.mjs";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 assertReleaseVersions(root);
 const name = process.argv[2];
-assert.ok(["core", "passkey", "sdk", "base", "gift-cards"].includes(name), "expected core, passkey, sdk, base or gift-cards");
+assert.ok(["core", "passkey", "sdk", "base", "gift-cards", "solana", "swaps"].includes(name), "expected core, passkey, sdk, base or gift-cards");
 const dir = join(root, "packages", name);
 const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
 for (const entry of Object.values(pkg.publishConfig.exports)) {
@@ -23,12 +23,17 @@ for (const entry of Object.values(pkg.publishConfig.exports)) {
 for (const file of ["README.md", "LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt", "THIRD_PARTY_DEPENDENCIES.json"]) assert.ok(existsSync(join(dir, file)), `missing ${file}`);
 for (const [target, source] of [["LICENSE", "LICENSE"], ["NOTICE", "NOTICE"],
   ["THIRD_PARTY_LICENSES.txt", "LICENSES.txt"], ["THIRD_PARTY_DEPENDENCIES.json", "dependencies.json"]]) {
-  const expected = name === "base" && target !== "LICENSE" ? join(root, "licenses/base", source) :
+  const expected = ["base", "solana", "swaps"].includes(name) && target !== "LICENSE" ? join(root, "licenses", name, source) :
     target === "THIRD_PARTY_DEPENDENCIES.json" ? join(root, "licenses/WASM-dependencies.json") : join(root, target);
   assert.equal(readFileSync(join(dir, target), "utf8"), readFileSync(expected, "utf8"), `${target} is stale; rebuild packages`);
 }
 assert.equal(pkg.license, "Apache-2.0", "distribution license must match the approved project license");
 assert.equal(pkg.private, true, "publication remains a separate, intentional release step");
+if (name === "solana" || name === "swaps") {
+  assert.equal(JSON.parse(readFileSync(join(dir, "dist/build-inputs.json"))).sha256, basePackageInputs(dir), "Optional package sources/config changed; rebuild before packing");
+  const inventory = spawnSync(process.execPath, [join(root, 'scripts/optional-license-inventory.mjs'), name, '--check'], { stdio: 'inherit' });
+  assert.equal(inventory.status, 0, 'Optional runtime dependency licenses must match the installed packages');
+}
 if (name === "gift-cards") {
   assert.deepEqual(Object.keys(pkg.dependencies ?? {}), [], "gift-cards root must have no runtime dependencies");
   assert.deepEqual(Object.keys(pkg.peerDependencies ?? {}), ["@z-stack/sdk"], "browser SDK must be the only peer");

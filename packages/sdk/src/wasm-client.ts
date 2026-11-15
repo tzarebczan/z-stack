@@ -646,7 +646,7 @@ export function createWasmClient(
       const seed = requireSeed("send a transparent swap deposit");
       const txid = await runtime.withOriginSpendLock(() => {
         assertSource(operation, source);
-        return proveAndSubmitHere("sendTransparent", seed, { to: to.trim(), amountZec, maxFeeZat }, beforeBroadcast);
+        return proveAndSubmitHere("sendTransparent", seed, { to: to.trim(), amountZec, maxFeeZat }, beforeBroadcast, options?.beforeSubmit);
       });
       return finishSpend(txid, operation, source);
     },

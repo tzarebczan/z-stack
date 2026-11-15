@@ -12,7 +12,7 @@ function fixture(t) {
   const source = join(root, "source"), destination = join(root, "consumer");
   mkdirSync(source);
   const file = name => `z-stack-${name}-0.1.0-alpha.fixture.tgz`;
-  for (const name of ["core", "passkey", "sdk", "base", "gift-cards"]) writeFileSync(join(source, file(name)), name);
+  for (const name of ["core", "passkey", "sdk", "base", "gift-cards", "solana", "swaps"]) writeFileSync(join(source, file(name)), name);
   return { root, source, destination, file };
 }
 
