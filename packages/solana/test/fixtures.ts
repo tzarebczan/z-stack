@@ -23,6 +23,8 @@ export function fixture() {
     getAddressLookupTable: async () => ({ context: { slot: 1 }, value: null }),
     getFeeForMessage: async () => ({ context: { slot: 1 }, value: 5000 }),
     getBlockHeight: async () => 10,
+    isBlockhashValid: async () => ({ context: { slot: 1 }, value: true }),
+    getLatestBlockhashAndContext: async () => ({ context: { slot: 1 }, value: { blockhash: Keypair.fromSeed(new Uint8Array(32).fill(9)).publicKey.toBase58(), lastValidBlockHeight: 120 } }),
     simulateTransaction: async (_tx: VersionedTransaction, options: { accounts: { addresses: string[] } }) => ({ context: { slot: 1 }, value: { err: null, accounts: options.accounts.addresses.map(address => { const account = after.get(address); return account ? { ...account, owner: account.owner.toBase58(), data: [account.data.toString('base64'), 'base64'] } : null; }) } }),
   } as unknown as SolanaRpc;
   const intent = { owner: owner.publicKey.toBase58(), payer: payer.publicKey.toBase58(), inputMint: inputMint.toBase58(), outputMint: outputMint.toBase58(), amount: '100', slippageBps: 50, feeBps: 0, feeAccount: null, feeMint: null, maxSponsorLamports: '10000000', maxPriorityFeeLamports: '100000' };

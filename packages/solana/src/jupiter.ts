@@ -44,7 +44,7 @@ export const PreparedSolanaSwapSchema = z.object({
   version: z.literal(1), providerQuoteId: z.string().regex(/^[A-Za-z0-9_-]{1,96}$/).optional(), build: JupiterBuildSchema, transaction: z.string().max(1800), message: z.string().max(1800),
   review: jupiterIntentObject.extend({
     minimumOutputAmount: AtomicAmountSchema, expectedOutputAmount: AtomicAmountSchema,
-    lastValidBlockHeight: integer, preparedAtSlot: integer, expiresAt: integer,
+    lastValidBlockHeight: integer, conservativeExpiryBlockHeight: integer, preparedAtSlot: integer, expiresAt: integer,
   }).refine(validIntent, 'Invalid Jupiter trade or fee terms'),
 }).strict();
 export type PreparedSolanaSwap = z.infer<typeof PreparedSolanaSwapSchema>;
@@ -214,8 +214,18 @@ export async function prepareJupiterSwap(options: { build: unknown; intent: Jupi
   const feeDenominator = BigInt(intent.feeMint === input.mint ? 10000 : 10000 - intent.feeBps);
   if (intent.feeBps && (feeChange <= 0n || feeChange > (feeBase * BigInt(intent.feeBps) + feeDenominator - 1n) / feeDenominator + 1n)) throw new Error('Integrator fee differs from reviewed terms.');
   check();
-  if (await options.rpc.getBlockHeight('confirmed') >= build.blockhashWithMetadata.lastValidBlockHeight) throw new Error('Swap blockhash expired.');
-  return deepFreeze({ version: 1, build, transaction: Buffer.from(tx.serialize()).toString('base64'), message: Buffer.from(tx.message.serialize()).toString('base64'), review: Object.freeze({ ...intent, minimumOutputAmount: minOut.toString(), expectedOutputAmount: build.outAmount, lastValidBlockHeight: build.blockhashWithMetadata.lastValidBlockHeight, preparedAtSlot: simulation.context.slot, expiresAt: (options.now ?? Date.now()) + 60000 }) });
+  const validity = await options.rpc.isBlockhashValid(tx.message.recentBlockhash, { commitment: 'confirmed', minContextSlot: simulation.context.slot });
+  if (validity.value !== true || !Number.isSafeInteger(validity.context.slot) || validity.context.slot < simulation.context.slot) throw new Error('Swap blockhash expired or could not be verified.');
+  // A currently known hash cannot expire later than the same RPC's newer latest
+  // hash. Keep the signed message unchanged and save that conservative RPC bound
+  // separately from Jupiter's signing-eligibility metadata.
+  const latest = await options.rpc.getLatestBlockhashAndContext({ commitment: 'confirmed', minContextSlot: validity.context.slot });
+  const conservativeExpiryBlockHeight = latest.value.lastValidBlockHeight;
+  if (!Number.isSafeInteger(latest.context.slot) || latest.context.slot < validity.context.slot || !Number.isSafeInteger(conservativeExpiryBlockHeight) || conservativeExpiryBlockHeight < 0 || !SolanaAddressSchema.safeParse(latest.value.blockhash).success) throw new Error('RPC blockhash expiry could not be verified.');
+  const currentBlockHeight = await options.rpc.getBlockHeight('confirmed');
+  if (currentBlockHeight >= build.blockhashWithMetadata.lastValidBlockHeight || currentBlockHeight >= conservativeExpiryBlockHeight) throw new Error('Swap blockhash expired.');
+  check();
+  return deepFreeze({ version: 1, build, transaction: Buffer.from(tx.serialize()).toString('base64'), message: Buffer.from(tx.message.serialize()).toString('base64'), review: Object.freeze({ ...intent, minimumOutputAmount: minOut.toString(), expectedOutputAmount: build.outAmount, lastValidBlockHeight: build.blockhashWithMetadata.lastValidBlockHeight, conservativeExpiryBlockHeight, preparedAtSlot: simulation.context.slot, expiresAt: (options.now ?? Date.now()) + 60000 }) });
 }
 
 /** This checks saved server/local reviewed bytes, never an untrusted caller-supplied prepared record. */
@@ -247,14 +257,20 @@ export function coSignSolanaSwap(prepared: PreparedSolanaSwap, transaction: stri
 export async function signPreparedSolanaSwap(prepared: PreparedSolanaSwap, options: { guard: SolanaGuard; rpc: SolanaRpc; tokens?: readonly SolanaToken[]; withSigner<T>(run: (signer: Keypair) => Promise<T>): Promise<T> }): Promise<string> {
   prepared = deepFreeze(PreparedSolanaSwapSchema.parse(prepared));
   options.guard.assertCurrent(); options.guard.signal?.throwIfAborted();
-  if (Date.now() >= prepared.review.expiresAt) throw new Error('Swap quote expired.');
-  const { minimumOutputAmount, expectedOutputAmount, lastValidBlockHeight, preparedAtSlot, expiresAt, ...intent } = prepared.review;
+  if (Date.now() >= prepared.review.expiresAt || await options.rpc.getBlockHeight('confirmed') >= prepared.review.conservativeExpiryBlockHeight) throw new Error('Swap quote expired.');
+  const { minimumOutputAmount, expectedOutputAmount, lastValidBlockHeight, conservativeExpiryBlockHeight, preparedAtSlot, expiresAt, ...intent } = prepared.review;
   const verified = await prepareJupiterSwap({ build: prepared.build, intent, rpc: options.rpc, tokens: options.tokens, guard: options.guard });
   if (verified.message !== prepared.message || verified.review.minimumOutputAmount !== minimumOutputAmount || verified.review.expectedOutputAmount !== expectedOutputAmount || verified.review.lastValidBlockHeight !== lastValidBlockHeight || verified.review.preparedAtSlot < preparedAtSlot) throw new Error('Prepared swap terms changed.');
   return options.withSigner(async signer => {
     options.guard.assertCurrent(); options.guard.signal?.throwIfAborted();
     if (signer.publicKey.toBase58() !== prepared.review.owner) throw new Error('Wrong selected Solana wallet.');
     const tx = validateSignedSolanaSwap(prepared, prepared.transaction, { requireOwnerSignature: false });
+    // Unlock may have taken time; never use the conservative recovery bound to
+    // extend the original quote's signing eligibility.
+    const currentValidity = await options.rpc.isBlockhashValid(tx.message.recentBlockhash, { commitment: 'confirmed', minContextSlot: verified.review.preparedAtSlot });
+    const currentHeight = await options.rpc.getBlockHeight('confirmed');
+    options.guard.assertCurrent(); options.guard.signal?.throwIfAborted();
+    if (currentValidity.value !== true || currentHeight >= lastValidBlockHeight || currentHeight >= conservativeExpiryBlockHeight || Date.now() >= expiresAt) throw new Error('Swap quote expired.');
     tx.sign([signer]);
     options.guard.assertCurrent(); options.guard.signal?.throwIfAborted();
     if (Date.now() >= prepared.review.expiresAt) throw new Error('Swap quote expired.');

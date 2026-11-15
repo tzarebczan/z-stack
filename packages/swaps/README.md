@@ -29,9 +29,10 @@ Solana address. All amounts are exact atomic decimal strings.
    saved provider quote ID and reviewed message.
 
 Completed, failed and non-inclusion observations must include the fully signed transaction.
-A `not-included` result additionally requires the complete bounded finalized
-block-signature coverage returned by `proveSolanaNotIncluded`. Unsupported or
-pruned history keeps the route unresolved.
+A `not-included` result additionally requires the complete bounded historical
+block-signature coverage returned by `proveSolanaNotIncluded`, ending beyond the
+saved conservative RPC expiry bound. Reloading days later inspects the original
+validity window. Unsupported, changed or pruned history keeps the route unresolved.
 The controller checks its owner/payer signatures, exact message and canonical
 signature against the saved review before accepting the outcome.
 

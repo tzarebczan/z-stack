@@ -52,3 +52,26 @@ test('expiry without historical transaction evidence stays unresolved', async ()
   const status = await getSolanaTransactionStatus({ getSignatureStatuses: async () => ({ context: { slot: 1 }, value: [null] }), getBlockHeight: async () => 101 }, 'disposable', 100);
   assert.deepEqual(status, { kind: 'expired-unresolved', signature: 'disposable' });
 });
+
+test('RPC conservative expiry never extends signing eligibility or replaces the signed blockhash', async () => {
+  const expired = fixture(); expired.build.blockhashWithMetadata.lastValidBlockHeight = 10;
+  await assert.rejects(prepareJupiterSwap(expired), /expired/);
+  const invalid = fixture(); invalid.rpc.isBlockhashValid = async () => ({ context: { slot: 1 }, value: false });
+  await assert.rejects(prepareJupiterSwap(invalid), /expired or could not be verified/);
+  const value = fixture(), prepared = await prepareJupiterSwap(value);
+  const transaction = validateSignedSolanaSwap(prepared, prepared.transaction, { requireOwnerSignature: false });
+  assert.equal(prepared.review.lastValidBlockHeight, 100);
+  assert.equal(prepared.review.conservativeExpiryBlockHeight, 120);
+  assert.notEqual(transaction.message.recentBlockhash, (await value.rpc.getLatestBlockhashAndContext()).value.blockhash);
+  let signed = false;
+  await assert.rejects(signPreparedSolanaSwap({ ...prepared, review: { ...prepared.review, conservativeExpiryBlockHeight: 10 } }, { rpc: value.rpc, tokens: value.tokens, guard: { assertCurrent() {} }, withSigner: async run => { signed = true; return run(owner); } }), /expired/);
+  assert.equal(signed, false);
+});
+
+test('a blockhash that expires during fresh unlock is never signed', async () => {
+  const value = fixture(), prepared = await prepareJupiterSwap(value);
+  await assert.rejects(signPreparedSolanaSwap(prepared, { rpc: value.rpc, tokens: value.tokens, guard: { assertCurrent() {} }, withSigner: async run => {
+    value.rpc.isBlockhashValid = async () => ({ context: { slot: 1 }, value: false });
+    return run(owner);
+  } }), /expired/);
+});

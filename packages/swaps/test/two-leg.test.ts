@@ -75,3 +75,20 @@ test('only an exact provider cancellation can release a never-acknowledged submi
   wrong = false;
   assert.equal((await controller.resume('route-1')).state.kind, 'intermediate-recoverable');
 });
+
+test('days-later restored route releases only past its saved RPC conservative expiry bound', async () => {
+  const f = fixture(), prepared = await prepareJupiterSwap(f), tx = validateSignedSolanaSwap(prepared, prepared.transaction, { requireOwnerSignature: false }); tx.sign([signer]);
+  const signed = Buffer.from(tx.serialize()).toString('base64'), transaction = coSignSolanaSwap(prepared, signed, payer), signature = solanaTransactionSignature(transaction);
+  const store = createMemoryTwoLegRouteStore();
+  const original = createTwoLegController({ owner, store, adapters: adapters({ submitJupiter: async () => { throw new Error('acknowledgement lost'); } }) });
+  await ready(original); await original.saveJupiterReview('route-1', prepared);
+  await assert.rejects(original.executeJupiter('route-1', { accepted: true, reviewedMessage: prepared.message, signedTransaction: signed }));
+  let finalizedBlockHeight = 110;
+  const restored = createTwoLegController({ owner, store, now: () => Date.now() + 3 * 86400000, adapters: adapters({ reconcileJupiter: async () => ({
+    kind: 'not-included', signature, transaction, proof: { kind: 'finalized-block-signatures', signature, blockhash: tx.message.recentBlockhash, fromSlot: 1, throughSlot: 3, checkedBlocks: 3, finalizedBlockHeight, lastValidBlockHeight: 100, conservativeExpiryBlockHeight: 120, throughBlockhash: tx.message.recentBlockhash, blockhashValid: false },
+  }) }) });
+  await assert.rejects(restored.resume('route-1'), /Non-inclusion coverage/);
+  assert.equal((await restored.get('route-1')).state.kind, 'jupiter-submission-unknown');
+  finalizedBlockHeight = 121;
+  assert.equal((await restored.resume('route-1')).state.kind, 'intermediate-recoverable');
+});

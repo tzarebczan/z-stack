@@ -72,11 +72,17 @@ Jupiter reference: [Build](https://developers.jup.ag/docs/swap/build) and
 Fees are explicit `feeBps`, `feeAccount` and `feeMint` review fields. Jupiter's
 platform fee collection and this package's configured integrator fee are public.
 
-`proveSolanaNotIncluded` is a bounded recovery check for an expired submission.
-It requires an invalid blockhash at a fixed finalized context, full archival
-coverage from the saved simulation slot, every produced slot's signatures and a
-continuous parent/hash chain through that finalized context. Any inclusion,
-pruned history, unsupported RPC call or a span over 300 slots returns unknown.
-The result is an observation verified through the selected RPC, not a
-cryptographic light-client proof. A missing transaction or elapsed deadline alone
-never proves that a payment was not sent.
+`proveSolanaNotIncluded` checks an expired submission against its original
+historical window, including after a reload days later. Preparation separately
+records a conservative expiry bound from the selected RPC's latest known hash,
+after verifying that the transaction's original hash is valid. This bound never
+replaces the signed blockhash or extends Jupiter's signing eligibility.
+
+Recovery requires an invalid original blockhash at a fresh finalized context,
+full archival coverage for at most 300 historical slots after preparation, every
+produced block's signatures and a continuous parent/hash chain. The final covered
+header must have a block height beyond the saved RPC expiry bound and must match
+a second read. Missing or changed headers, pruned history, an inclusion or a
+window that does not reach the bound remains unknown. The selected RPC is a trust
+boundary; this observation is not a cryptographic light-client proof. A missing
+transaction or elapsed deadline alone never proves non-inclusion.

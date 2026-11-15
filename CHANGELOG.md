@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reconcile expired Solana submissions against their original bounded finalized history after late reloads. Use a separately saved RPC expiry bound, require stable finalized headers, and recheck original blockhash validity after unlock before signing.
+
 - Add optional same-phrase Solana SOL/USDC/CYPH accounts, bounded reviewed Jupiter V2 builds and explicit sponsor co-signing. Keep integration credentials, authentication and sponsor policy application-owned.
 - Add durable two-leg NEAR-to-Solana-to-CYPH route coordination with separate intermediate settlement proof, exact signed-byte retries and bounded finalized-history reconciliation. Preserve reviewed fees and recoverable intermediate funds.
 - Support selected verified BlockTransport objects in isolated gift workers, preserving cancellation and Rust submission identities without interpreting a Private Cloud relay as a light-server URL.

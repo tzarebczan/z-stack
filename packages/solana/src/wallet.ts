@@ -1,7 +1,7 @@
 import { Connection, PublicKey, type FetchFn } from '@solana/web3.js';
 import { getScaledUiAmountConfig, unpackAccount, unpackMint } from '@solana/spl-token';
 import { AtomicAmountSchema, SolanaAddressSchema, SolanaTokenSchema, SOLANA_TOKENS, type SolanaToken } from './tokens';
-export type SolanaRpc = Pick<Connection, 'getBalance' | 'getTokenAccountsByOwner' | 'getMultipleAccountsInfo' | 'getAddressLookupTable' | 'simulateTransaction' | 'getFeeForMessage' | 'getBlockHeight' | 'getSignatureStatuses' | 'getTransaction' | 'sendRawTransaction' | 'getFirstAvailableBlock' | 'getBlocks' | 'getBlockSignatures' | 'isBlockhashValid'>;
+export type SolanaRpc = Pick<Connection, 'getBalance' | 'getTokenAccountsByOwner' | 'getMultipleAccountsInfo' | 'getAddressLookupTable' | 'simulateTransaction' | 'getFeeForMessage' | 'getBlockHeight' | 'getSignatureStatuses' | 'getTransaction' | 'sendRawTransaction' | 'getFirstAvailableBlock' | 'getBlocks' | 'getBlockSignatures' | 'isBlockhashValid' | 'getBlock' | 'getLatestBlockhashAndContext'>;
 export function createSolanaRpcClient(endpoint: string, options: { fetch?: FetchFn } = {}): SolanaRpc {
   const url = new URL(endpoint);
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) throw new Error('Solana RPC must use HTTPS or loopback.');
