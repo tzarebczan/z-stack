@@ -22,6 +22,7 @@ export function fixture() {
     getMultipleAccountsInfo: async (keys: PublicKey[]) => keys.map(key => before.get(key.toBase58()) ?? null),
     getAddressLookupTable: async () => ({ context: { slot: 1 }, value: null }),
     getFeeForMessage: async () => ({ context: { slot: 1 }, value: 5000 }),
+    getMinimumBalanceForRentExemption: async (size: number) => (size + 128) * 6960,
     getBlockHeight: async () => 10,
     isBlockhashValid: async () => ({ context: { slot: 1 }, value: true }),
     getLatestBlockhashAndContext: async () => ({ context: { slot: 1 }, value: { blockhash: Keypair.fromSeed(new Uint8Array(32).fill(9)).publicKey.toBase58(), lastValidBlockHeight: 120 } }),
@@ -29,6 +30,6 @@ export function fixture() {
   } as unknown as SolanaRpc;
   const intent = { owner: owner.publicKey.toBase58(), payer: payer.publicKey.toBase58(), inputMint: inputMint.toBase58(), outputMint: outputMint.toBase58(), amount: '100', slippageBps: 50, feeBps: 0, feeAccount: null, feeMint: null, maxSponsorLamports: '10000000', maxPriorityFeeLamports: '100000' };
   const tokens = [{ symbol: 'IN', mint: inputMint.toBase58(), program: TOKEN_PROGRAM_ID.toBase58(), decimals: 6 }, { symbol: 'OUT', mint: outputMint.toBase58(), program: TOKEN_2022_PROGRAM_ID.toBase58(), decimals: 6 }];
-  return { build, rpc, intent, tokens, after, account };
+  return { build, rpc, intent, tokens, before, after, account };
 }
 

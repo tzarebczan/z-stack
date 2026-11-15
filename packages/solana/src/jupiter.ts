@@ -9,6 +9,7 @@ import {
   ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID,
   getAssociatedTokenAddressSync, unpackAccount, unpackMint, getTransferHook,
   getScaledUiAmountConfig, getPausableConfig,
+  ACCOUNT_SIZE, ExtensionType, getAccountLen, getExtensionTypes, getAccountTypeOfMintType,
 } from '@solana/spl-token';
 import { verifySolanaSignature } from './account';
 import { AtomicAmountSchema, SolanaAddressSchema, SOLANA_TOKENS, SOL_MINT, type SolanaToken } from './tokens';
@@ -44,6 +45,7 @@ export const PreparedSolanaSwapSchema = z.object({
   version: z.literal(1), providerQuoteId: z.string().regex(/^[A-Za-z0-9_-]{1,96}$/).optional(), build: JupiterBuildSchema, transaction: z.string().max(1800), message: z.string().max(1800),
   review: jupiterIntentObject.extend({
     minimumOutputAmount: AtomicAmountSchema, expectedOutputAmount: AtomicAmountSchema,
+    sponsorCostCeilingLamports: AtomicAmountSchema.optional(),
     lastValidBlockHeight: integer, conservativeExpiryBlockHeight: integer, preparedAtSlot: integer, expiresAt: integer,
   }).refine(validIntent, 'Invalid Jupiter trade or fee terms'),
 }).strict();
@@ -80,6 +82,7 @@ function checkMint(info: AccountInfo<Buffer> | null, token: SolanaToken) {
 /** Current Anchor IDL read from C88XWfp26heEmDkmfSzeXP7Fd7GQJ2j9dDTUsyiZbUTa, 2026-11-14. */
 function checkSwapInstruction(ix: TransactionInstruction, intent: JupiterIntent, out: bigint, input: SolanaToken, output: SolanaToken) {
   if (ix.programId.toBase58() !== JUPITER_PROGRAM) throw new Error('Unsupported Jupiter program.');
+  if (intent.payer !== intent.owner && ix.keys.some(key => key.pubkey.toBase58() === intent.payer)) throw new Error('Sponsor must not appear in Jupiter swap accounts.');
   const discriminator = Buffer.from(ix.data.subarray(0, 8)).toString('hex');
   const shared = discriminator === 'd19853937cfed8e9';
   if (!shared && discriminator !== 'bb64facc31c4af14') throw new Error('Unsupported Jupiter instruction version.');
@@ -104,6 +107,9 @@ function unchangedAuthority(a: ReturnType<typeof unpackAccount>, b: ReturnType<t
   return a.owner.equals(b.owner) && a.mint.equals(b.mint) && a.delegate?.toBase58() === b.delegate?.toBase58() && a.delegatedAmount === b.delegatedAmount && a.closeAuthority?.toBase58() === b.closeAuthority?.toBase58() && a.isFrozen === b.isFrozen && a.isNative === b.isNative && a.tlvData.equals(b.tlvData);
 }
 function safeLamports(value: number) { if (!Number.isSafeInteger(value) || value < 0) throw new Error('Unsafe account balance.'); return BigInt(value); }
+function checkSponsoredRoute(intent: Pick<JupiterIntent, 'payer' | 'owner' | 'inputMint' | 'outputMint'>) {
+  if (intent.payer !== intent.owner && (intent.inputMint === SOL_MINT || intent.outputMint === SOL_MINT)) throw new Error('Sponsored native SOL routes are unavailable; use a token-to-token route.');
+}
 
 /** Build locally from raw Jupiter V2 instructions. RPC and Jupiter are explicitly selected by the app. */
 export async function prepareJupiterSwap(options: { build: unknown; intent: JupiterIntent; rpc: SolanaRpc; tokens?: readonly SolanaToken[]; now?: number; guard?: SolanaGuard }): Promise<PreparedSolanaSwap> {
@@ -112,6 +118,7 @@ export async function prepareJupiterSwap(options: { build: unknown; intent: Jupi
   check();
   const intent = JupiterIntentSchema.parse(options.intent), build = JupiterBuildSchema.parse(options.build);
   const input = tokenFor(intent.inputMint, options.tokens ?? SOLANA_TOKENS), output = tokenFor(intent.outputMint, options.tokens ?? SOLANA_TOKENS);
+  checkSponsoredRoute(intent);
   if (build.inputMint !== intent.inputMint || build.outputMint !== intent.outputMint || build.inAmount !== intent.amount || build.slippageBps !== intent.slippageBps || BigInt(build.outAmount) <= 0n || build.otherInstructions.length || build.tipInstruction)
     throw new Error('Jupiter changed the requested route or added instructions.');
   const minOut = (BigInt(build.outAmount) * BigInt(10000 - intent.slippageBps) + 9999n) / 10000n;
@@ -119,6 +126,7 @@ export async function prepareJupiterSwap(options: { build: unknown; intent: Jupi
   const swap = instruction(build.swapInstruction);
   checkSwapInstruction(swap, intent, BigInt(build.outAmount), input, output);
   const allowedAtas = new Map<string, { mint: string; program: string }>();
+  const fundedAtas = new Map<string, { mint: string; program: string }>();
   for (const token of [input, output]) allowedAtas.set(ata(intent.owner, token.mint, token.program), token);
   const setup = build.setupInstructions.map(instruction);
   const cleanup = build.cleanupInstruction ? instruction(build.cleanupInstruction) : null;
@@ -136,6 +144,7 @@ export async function prepareJupiterSwap(options: { build: unknown; intent: Jupi
       // Intermediate ATAs may be needed by multihop routes; they are owner-bound and inspected after simulation.
       if (ix.data.length !== 1 || ix.data[0] !== 1 || ix.keys.length !== 6 || ix.keys[0]?.pubkey.toBase58() !== intent.payer || ix.keys[2]?.pubkey.toBase58() !== intent.owner || !mint || !program || ![TOKEN_PROGRAM_ID.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58()].includes(program) || ix.keys[4]?.pubkey.toBase58() !== SystemProgram.programId.toBase58() || account !== ata(intent.owner, mint, program)) throw new Error('Unexpected ATA creation.');
       allowedAtas.set(account, { mint, program });
+      fundedAtas.set(account, { mint, program });
     } else if (ix.programId.equals(SystemProgram.programId)) {
       nativeTransfers++;
       if (input.mint !== SOL_MINT || ix.data.length !== 12 || ix.data.readUInt32LE(0) !== 2 || ix.data.readBigUInt64LE(4) !== BigInt(intent.amount) || ix.keys.length !== 2 || ix.keys[0]?.pubkey.toBase58() !== intent.owner || ix.keys[1]?.pubkey.toBase58() !== ata(intent.owner, SOL_MINT, input.program)) throw new Error('Unexpected native transfer.');
@@ -159,9 +168,11 @@ export async function prepareJupiterSwap(options: { build: unknown; intent: Jupi
   const writable = [...Array(keys.length).keys()].filter(index => tx.message.isAccountWritable(index)).map(index => { const key = keys.get(index); if (!key) throw new Error('Unresolved account.'); return key; });
   if (writable.length > 64) throw new Error('Too many writable swap accounts.');
   const before = await options.rpc.getMultipleAccountsInfo(writable, 'confirmed');
-  const mintInfos = await options.rpc.getMultipleAccountsInfo([new PublicKey(input.mint), new PublicKey(output.mint)], 'confirmed');
-  if (input.mint !== SOL_MINT) checkMint(mintInfos[0] ?? null, input);
-  if (output.mint !== SOL_MINT) checkMint(mintInfos[1] ?? null, output);
+  const mintAddresses = [...new Set([input.mint, output.mint, ...[...fundedAtas.values()].filter(token => token.program === TOKEN_2022_PROGRAM_ID.toBase58()).map(token => token.mint)])];
+  const mintInfos = await options.rpc.getMultipleAccountsInfo(mintAddresses.map(address => new PublicKey(address)), 'confirmed');
+  const mintInfo = (address: string) => mintInfos[mintAddresses.indexOf(address)] ?? null;
+  if (input.mint !== SOL_MINT) checkMint(mintInfo(input.mint), input);
+  if (output.mint !== SOL_MINT) checkMint(mintInfo(output.mint), output);
   const feeInfo = intent.feeAccount ? (await options.rpc.getMultipleAccountsInfo([new PublicKey(intent.feeAccount)], 'confirmed'))[0] : null;
   if (intent.feeAccount) {
     const fee = tokenAccount(feeInfo ?? null, new PublicKey(intent.feeAccount));
@@ -170,6 +181,23 @@ export async function prepareJupiterSwap(options: { build: unknown; intent: Jupi
   check();
   const fee = (await options.rpc.getFeeForMessage(tx.message, 'confirmed')).value;
   if (fee === null || safeLamports(fee) > BigInt(intent.maxSponsorLamports)) throw new Error('Network fee exceeds approved ceiling.');
+  // Idempotent creates can allocate after review even if accounts exist now.
+  // Price every distinct possible allocation, including Token2022's immutable owner.
+  const sizes = [...fundedAtas.values()].map(token => {
+    if (token.program === TOKEN_PROGRAM_ID.toBase58()) return ACCOUNT_SIZE;
+    const mint = unpackMint(new PublicKey(token.mint), mintInfo(token.mint), TOKEN_2022_PROGRAM_ID);
+    if (!mint.isInitialized) throw new Error('Token mint is uninitialized.');
+    return getAccountLen([ExtensionType.ImmutableOwner, ...getExtensionTypes(mint.tlvData).map(getAccountTypeOfMintType)]);
+  });
+  const rents = new Map<number, bigint>();
+  for (const size of new Set(sizes)) {
+    const rent = safeLamports(await options.rpc.getMinimumBalanceForRentExemption(size, 'confirmed'));
+    if (rent === 0n) throw new Error('Rent-exempt minimum could not be verified.');
+    rents.set(size, rent);
+  }
+  const sponsorCostCeilingLamports = sizes.reduce((total, size) => total + rents.get(size)!, safeLamports(fee));
+  if (sponsorCostCeilingLamports > BigInt(intent.maxSponsorLamports)) throw new Error('Possible account rent and fee exceed approved sponsor ceiling.');
+  check();
   const simulation = await options.rpc.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: false, commitment: 'confirmed', accounts: { encoding: 'base64', addresses: writable.map(key => key.toBase58()) } });
   if (!Number.isSafeInteger(simulation.context.slot) || simulation.context.slot < 0) throw new Error('Invalid simulation slot.');
   if (simulation.value.err || !simulation.value.accounts || simulation.value.accounts.length !== writable.length) throw new Error('Swap simulation failed.');
@@ -203,13 +231,13 @@ export async function prepareJupiterSwap(options: { build: unknown; intent: Jupi
   }
   if (input.mint === SOL_MINT) {
     // Exact native input is bound both by the System transfer and Jupiter args.
-    // A newly sponsored temporary wSOL account may return its rent to the owner.
     if (ownerLamports < -BigInt(intent.amount)) throw new Error('Unreviewed native debit.');
     inputChange = -BigInt(intent.amount);
   }
   if (output.mint === SOL_MINT) outputChange = ownerLamports;
   if (inputChange !== -BigInt(intent.amount) || outputChange < minOut || (input.mint !== SOL_MINT && output.mint !== SOL_MINT && ownerLamports < 0n)) throw new Error('Simulated wallet changes differ from the trade.');
-  if (intent.payer !== intent.owner && (-sponsorLamports > BigInt(intent.maxSponsorLamports) || sponsorLamports > 0n)) throw new Error('Sponsor charge exceeds approved ceiling.');
+  if (intent.payer !== intent.owner && (-sponsorLamports > sponsorCostCeilingLamports || sponsorLamports > 0n)) throw new Error('Sponsor charge exceeds approved ceiling.');
+  if (intent.payer !== intent.owner && ownerLamports !== 0n) throw new Error('Sponsored token swap changed owner native SOL balance.');
   const feeBase = intent.feeMint === input.mint ? BigInt(intent.amount) : outputChange;
   const feeDenominator = BigInt(intent.feeMint === input.mint ? 10000 : 10000 - intent.feeBps);
   if (intent.feeBps && (feeChange <= 0n || feeChange > (feeBase * BigInt(intent.feeBps) + feeDenominator - 1n) / feeDenominator + 1n)) throw new Error('Integrator fee differs from reviewed terms.');
@@ -225,7 +253,7 @@ export async function prepareJupiterSwap(options: { build: unknown; intent: Jupi
   const currentBlockHeight = await options.rpc.getBlockHeight('confirmed');
   if (currentBlockHeight >= build.blockhashWithMetadata.lastValidBlockHeight || currentBlockHeight >= conservativeExpiryBlockHeight) throw new Error('Swap blockhash expired.');
   check();
-  return deepFreeze({ version: 1, build, transaction: Buffer.from(tx.serialize()).toString('base64'), message: Buffer.from(tx.message.serialize()).toString('base64'), review: Object.freeze({ ...intent, minimumOutputAmount: minOut.toString(), expectedOutputAmount: build.outAmount, lastValidBlockHeight: build.blockhashWithMetadata.lastValidBlockHeight, conservativeExpiryBlockHeight, preparedAtSlot: simulation.context.slot, expiresAt: (options.now ?? Date.now()) + 60000 }) });
+  return deepFreeze({ version: 1, build, transaction: Buffer.from(tx.serialize()).toString('base64'), message: Buffer.from(tx.message.serialize()).toString('base64'), review: Object.freeze({ ...intent, sponsorCostCeilingLamports: sponsorCostCeilingLamports.toString(), minimumOutputAmount: minOut.toString(), expectedOutputAmount: build.outAmount, lastValidBlockHeight: build.blockhashWithMetadata.lastValidBlockHeight, conservativeExpiryBlockHeight, preparedAtSlot: simulation.context.slot, expiresAt: (options.now ?? Date.now()) + 60000 }) });
 }
 
 /** This checks saved server/local reviewed bytes, never an untrusted caller-supplied prepared record. */
@@ -247,6 +275,10 @@ export function validateSignedSolanaSwap(prepared: PreparedSolanaSwap, transacti
   return tx;
 }
 export function coSignSolanaSwap(prepared: PreparedSolanaSwap, transaction: string, payer: Keypair): string {
+  prepared = PreparedSolanaSwapSchema.parse(prepared);
+  checkSponsoredRoute(prepared.review);
+  if (prepared.review.payer !== prepared.review.owner &&
+    (prepared.review.sponsorCostCeilingLamports === undefined || BigInt(prepared.review.sponsorCostCeilingLamports) <= 0n || BigInt(prepared.review.sponsorCostCeilingLamports) > BigInt(prepared.review.maxSponsorLamports))) throw new Error('Sponsor cost ceiling unavailable; prepare a fresh review.');
   if (payer.publicKey.toBase58() !== prepared.review.payer) throw new Error('Wrong sponsor.');
   const tx = validateSignedSolanaSwap(prepared, transaction);
   tx.sign([payer]);
@@ -258,9 +290,10 @@ export async function signPreparedSolanaSwap(prepared: PreparedSolanaSwap, optio
   prepared = deepFreeze(PreparedSolanaSwapSchema.parse(prepared));
   options.guard.assertCurrent(); options.guard.signal?.throwIfAborted();
   if (Date.now() >= prepared.review.expiresAt || await options.rpc.getBlockHeight('confirmed') >= prepared.review.conservativeExpiryBlockHeight) throw new Error('Swap quote expired.');
-  const { minimumOutputAmount, expectedOutputAmount, lastValidBlockHeight, conservativeExpiryBlockHeight, preparedAtSlot, expiresAt, ...intent } = prepared.review;
+  const { minimumOutputAmount, expectedOutputAmount, sponsorCostCeilingLamports, lastValidBlockHeight, conservativeExpiryBlockHeight, preparedAtSlot, expiresAt, ...intent } = prepared.review;
   const verified = await prepareJupiterSwap({ build: prepared.build, intent, rpc: options.rpc, tokens: options.tokens, guard: options.guard });
   if (verified.message !== prepared.message || verified.review.minimumOutputAmount !== minimumOutputAmount || verified.review.expectedOutputAmount !== expectedOutputAmount || verified.review.lastValidBlockHeight !== lastValidBlockHeight || verified.review.preparedAtSlot < preparedAtSlot) throw new Error('Prepared swap terms changed.');
+  if (sponsorCostCeilingLamports !== undefined && verified.review.sponsorCostCeilingLamports !== sponsorCostCeilingLamports) throw new Error('Reviewed sponsor cost ceiling changed.');
   return options.withSigner(async signer => {
     options.guard.assertCurrent(); options.guard.signal?.throwIfAborted();
     if (signer.publicKey.toBase58() !== prepared.review.owner) throw new Error('Wrong selected Solana wallet.');

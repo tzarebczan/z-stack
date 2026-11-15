@@ -49,6 +49,26 @@ and simulated changes to every writable account. Existing token authorities and
 extensions must remain unchanged. Unrelated owner and sponsor token debits fail.
 Unsupported instructions fail explicitly.
 
+Sponsored swaps support token-to-token routes. Native SOL input/output is refused
+when payer and owner differ: a temporary wrapped-SOL close must not turn sponsored
+rent into an owner payout. The sponsor is forbidden from every Jupiter swap account,
+including read-only remaining accounts. Sponsored token swaps must leave the owner's
+native SOL balance unchanged.
+
+Every fresh review includes `sponsorCostCeilingLamports`: the exact compiled-message
+fee plus the selected RPC's rent-exempt minimum for every distinct possible sponsored
+ATA creation. This charges for idempotent creates even when those ATAs currently exist,
+and includes Token2022's immutable-owner and mint-required account extensions. The
+total must fit `maxSponsorLamports`; the simulated sponsor debit must also fit the
+computed ceiling. Fresh signing recomputes the cost and refuses a changed review.
+The read RPC must expose `getMinimumBalanceForRentExemption` for these bounded sizes.
+
+The cost field is optional only to keep older saved records readable. Sponsor
+co-signing refuses records without a positive ceiling; prepare and review a fresh
+quote instead. The app must still enforce per-account and global budgets, minimum
+trade value and fee economics. Sponsored output ATAs can later be closed by their
+owner; static rent accounting bounds this cost, rather than preventing that action.
+
 The prepared review includes raw build data and exact immutable message bytes.
 Client signing re-runs these checks through the app's explicitly selected RPC.
 RPC answers and the pinned Jupiter program remain trust boundaries; simulation
