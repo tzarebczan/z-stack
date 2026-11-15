@@ -16,7 +16,9 @@
     "packages/base/src/smart-account/index.ts",
     "packages/gift-cards/src/index.ts",
     "packages/gift-cards/src/browser.ts",
-    "packages/sdk/src/gift-keys.ts"
+    "packages/sdk/src/gift-keys.ts",
+    "packages/solana/src/index.ts",
+    "packages/swaps/src/index.ts"
   ],
   "tsconfig": "tsconfig.docs.json",
   "out": "docs/api",
@@ -39,6 +41,12 @@
     },
     "viem/account-abstraction": {
       "*": "https://viem.sh/account-abstraction"
+    },
+    "@solana/web3.js": {
+      "*": "https://solana-foundation.github.io/solana-web3.js/"
+    },
+    "zod": {
+      "*": "https://zod.dev/"
     }
   }
 }

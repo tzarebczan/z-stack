@@ -45,3 +45,17 @@ The optional `@z-stack/base` package has a separate [runtime inventory](../licen
 The optional `@z-stack/gift-cards` root has no runtime dependencies. Its browser
 adapter uses the matching SDK as an optional peer and retains the same project
 notices and WASM inventory. It introduces no separate cryptography dependency.
+
+The optional Solana and swaps packages retain independent runtime inventories in
+[Solana dependencies](../licenses/solana/dependencies.json) and
+[swap dependencies](../licenses/swaps/dependencies.json), with the exact license
+texts and source archive URLs. Regenerate using
+`node scripts/optional-license-inventory.mjs solana` and `swaps`; append `--check`
+to verify. The Solana chain libraries include the unmodified LGPL-3.0-only
+`rpc-websockets` dependency; its notices and source reference are retained even
+though this integration uses HTTP RPC. Distributors must preserve the LGPL
+library's applicable source and replacement rights when packaging it. Historical
+`bs58` packages retain their MIT declaration in README; `text-encoding-utf-8`
+retains its public-domain/WHATWG notice; the omitted `tr46` license is retained
+from its upstream repository alongside provenance. These inventories contain no
+Rust/WASM inventory or wallet data.

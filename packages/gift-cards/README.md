@@ -95,3 +95,15 @@ From a source checkout, run `pnpm build:gift-cards`, `pnpm check:gift-cards`,
 `pnpm test:gift-cards`, and `pnpm test:gift-cards:package`. The browser check is
 `pnpm test:gift-cards:browser`; install the Playwright browsers first. Tests use
 disposable fixture keys and the real packaged engine.
+
+The browser backend accepts either an explicit light-server URL or a selected
+SDK `BlockTransport`. For Private Cloud, pass the verified transport object; a
+relay URL is not a light-server URL. The object remains in the parent realm and
+only bounded public chain operations cross a per-gift worker bridge. Gift keys,
+credentials and protocol clients do not cross that bridge. Transport cancellation
+and exact Rust transaction submission context are preserved. The bridge has no
+hosted fallback, transparent address lookup or implicit PIR consent.
+`BROWSER_GIFT_CAPABILITIES` advertises this browser-adapter contract. Closing a
+gift cancels its bridge, clears temporary entropy copies, locks its spending key
+and terminates the isolated worker; JavaScript cannot guarantee physical erasure
+of strings held by the runtime.

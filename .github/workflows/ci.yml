@@ -241,11 +241,15 @@ jobs:
           pnpm --filter @z-stack/sdk build
           pnpm --filter @z-stack/base build
           pnpm build:gift-cards
+          pnpm build:solana
+          pnpm build:swaps
       - name: Prepare consumer archives once
         run: |
           pnpm pack:sdk
           pnpm pack:base
           pnpm pack:gift-cards
+          pnpm pack:solana
+          pnpm pack:swaps
           cd artifacts
           sha256sum *.tgz > SHA256SUMS
       - name: SDK, core, and passkey types and regression tests
@@ -255,6 +259,8 @@ jobs:
           pnpm --filter @z-stack/sdk typecheck
           pnpm --filter @z-stack/base typecheck
           pnpm check:gift-cards
+          pnpm check:solana
+          pnpm check:swaps
           pnpm test
           pnpm check:docs
           pnpm docs:api
@@ -264,6 +270,7 @@ jobs:
           Z_STACK_CONSUMER_BUILD_MODE=prepare node scripts/test-packages.mjs --archives=artifacts
           Z_STACK_CONSUMER_BUILD_MODE=prepare node scripts/test-base-package.mjs --archives=artifacts
           node scripts/test-combined-package.mjs --archives=artifacts
+          node scripts/test-solana-package.mjs --archives=artifacts
           Z_STACK_CONSUMER_BUILD_MODE=prepare node scripts/test-gift-cards-package.mjs --archives=artifacts
       - name: Browser diagnostic app production build
         run: pnpm web:build
@@ -345,6 +352,7 @@ jobs:
         run: |
           node scripts/test-packages.mjs --browser --browsers="$BROWSER" --archives=artifacts
           node scripts/test-base-package.mjs --browser --browsers="$BROWSER" --archives=artifacts
+          node scripts/test-solana-package.mjs --browser --browsers="$BROWSER" --archives=artifacts
           node scripts/test-gift-cards-package.mjs --browser --browsers="$BROWSER" --archives=artifacts
 
   # Keep the required check on every run, including intentional docs-only routes.
