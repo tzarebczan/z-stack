@@ -10,11 +10,13 @@ use zcash_address::{ConversionError, TryFromAddress, ZcashAddress};
 use zcash_keys::{
     address::Address as ZkAddress,
     encoding::encode_transparent_address_p,
-    keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey},
+    keys::{
+        AddressGenerationError, UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey,
+    },
 };
 use zcash_protocol::consensus::NetworkType;
 use zeroize::Zeroize;
-use zip32::AccountId;
+use zip32::{AccountId, DiversifierIndex};
 
 /// Well-known BIP-39 vector used as the compose faucet seed (regtest only, not money).
 pub const REGTEST_FAUCET_MNEMONIC: &str =
@@ -159,6 +161,100 @@ pub fn unified_address_for_set(
         .default_address(set.request())
         .map_err(|e| EngineError::Message(format!("address: {e:?}")))?;
     Ok(ua.encode(&network))
+}
+
+/// What [`unified_address_at`] does when a requested Sapling receiver has no
+/// valid diversifier at the chosen index (about half of all indices).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidDiversifier {
+    /// Fail with an `invalid diversifier index` error.
+    Reject,
+    /// Use the first valid index at or above the chosen one.
+    Next,
+}
+
+/// A UA and the diversifier index it was derived at. The index is decimal
+/// because diversifier indices are 88-bit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddressAtIndex {
+    pub address: String,
+    pub diversifier_index: String,
+}
+
+/// Transparent child indices are non-hardened BIP-32 indices.
+const TRANSPARENT_INDEX_LIMIT: u128 = 1 << 31;
+
+/// Encode the UA at diversifier index `index`. Pure: it reads no wallet state
+/// and advances no address counter. Orchard and Sapling incoming viewing keys
+/// detect notes at every diversifier, so scanning finds funds sent to it.
+/// A transparent receiver needs `allow_transparent`: transparent scanning only
+/// follows the gap limit from the last used index.
+pub fn unified_address_at(
+    ufvk_str: &str,
+    network: Network,
+    set: UaReceiverSet,
+    index: u128,
+    invalid: InvalidDiversifier,
+    allow_transparent: bool,
+) -> Result<AddressAtIndex> {
+    if set.includes_transparent() {
+        if !allow_transparent {
+            return Err(EngineError::Message(
+                "transparent receiver requires explicit opt-in".into(),
+            ));
+        }
+        if index >= TRANSPARENT_INDEX_LIMIT {
+            return Err(EngineError::Message(
+                "invalid diversifier index: above the transparent child index range".into(),
+            ));
+        }
+    }
+    let start = DiversifierIndex::try_from(index).map_err(|_| {
+        EngineError::Message("invalid diversifier index: above the 88-bit range".into())
+    })?;
+    let ufvk = UnifiedFullViewingKey::decode(&network, ufvk_str.trim())
+        .map_err(|e| EngineError::Message(format!("ufvk: {e}")))?;
+    // Require every receiver in the set. The `shielded` request used for the
+    // default address allows Sapling, so it silently drops it at invalid indices.
+    let request = {
+        use zcash_keys::keys::ReceiverRequirement::{Omit, Require};
+        let p2pkh = if set.includes_transparent() {
+            Require
+        } else {
+            Omit
+        };
+        let sapling = if set == UaReceiverSet::Orchard {
+            Omit
+        } else {
+            Require
+        };
+        UnifiedAddressRequest::custom(Require, sapling, p2pkh)
+            .map_err(|e| EngineError::Message(format!("address: {e:?}")))?
+    };
+    let found = match invalid {
+        InvalidDiversifier::Reject => ufvk.address(start, request).map(|ua| (ua, start)),
+        InvalidDiversifier::Next => ufvk.find_address(start, request),
+    };
+    let (ua, at) = found.map_err(|e| match e {
+        AddressGenerationError::InvalidSaplingDiversifierIndex(_) => EngineError::Message(
+            "invalid diversifier index: no Sapling receiver at this index".into(),
+        ),
+        AddressGenerationError::DiversifierSpaceExhausted => EngineError::Message(
+            "invalid diversifier index: no valid index at or above this one".into(),
+        ),
+        other => EngineError::Message(format!("address: {other:?}")),
+    })?;
+    let at = u128::from(at);
+    if set.includes_transparent() && at >= TRANSPARENT_INDEX_LIMIT {
+        return Err(EngineError::Message(
+            "invalid diversifier index: above the transparent child index range".into(),
+        ));
+    }
+    Ok(AddressAtIndex {
+        address: ua.encode(&network),
+        diversifier_index: at.to_string(),
+    })
 }
 
 /// Receivers present on an encoded address (UA / sapling / t).
@@ -571,5 +667,74 @@ mod tests {
         let t = inspect_address(REGTEST_FAUCET_TRANSPARENT).unwrap();
         assert_eq!(t.kind, AddressKind::P2pkh);
         assert_eq!(t.receiver_set, None);
+    }
+
+    #[test]
+    fn unified_address_at_chosen_indices() {
+        use InvalidDiversifier::{Next, Reject};
+        let acct = account_from_mnemonic(REGTEST_FAUCET_MNEMONIC, Network::Regtest, 0).unwrap();
+        let at = |set, index, invalid| {
+            unified_address_at(&acct.ufvk, Network::Regtest, set, index, invalid, false)
+        };
+        let orchard = UaReceiverSet::Orchard;
+
+        // Deterministic, index 0 is the default, and indices give distinct addresses.
+        let zero = at(orchard, 0, Reject).unwrap();
+        assert_eq!(zero, at(orchard, 0, Reject).unwrap());
+        assert_eq!(
+            zero.address,
+            unified_address_for_set(&acct.ufvk, Network::Regtest, orchard).unwrap()
+        );
+        assert_eq!(zero.diversifier_index, "0");
+        let mut seen = std::collections::BTreeSet::new();
+        for index in [0u128, 1, 2, 1000, u32::MAX as u128 + 1, (1 << 88) - 1] {
+            let found = at(orchard, index, Reject).unwrap();
+            assert_eq!(found.diversifier_index, index.to_string());
+            assert_eq!(
+                inspect_address(&found.address).unwrap().receiver_set,
+                Some(UaReceiverSet::Orchard)
+            );
+            assert!(seen.insert(found.address));
+        }
+        assert!(at(orchard, 1 << 88, Reject)
+            .unwrap_err()
+            .to_string()
+            .starts_with("invalid diversifier index"));
+
+        // Sapling: some indices are invalid. Reject errors; Next returns the next valid one.
+        // Every requested receiver is present; index 0 matches the default when it is valid.
+        let shielded = UaReceiverSet::Shielded;
+        let first = at(shielded, 0, Next).unwrap();
+        assert_eq!(
+            inspect_address(&first.address).unwrap().receiver_set,
+            Some(UaReceiverSet::Shielded)
+        );
+        if first.diversifier_index == "0" {
+            assert_eq!(
+                first.address,
+                unified_address_for_set(&acct.ufvk, Network::Regtest, shielded).unwrap()
+            );
+        }
+        let invalid = (0..64u128)
+            .find(|&i| at(shielded, i, Reject).is_err())
+            .expect("a Sapling-invalid index below 64");
+        let err = at(shielded, invalid, Reject).unwrap_err();
+        assert_eq!(
+            crate::error::classify_wallet_error_code(&err.to_string()),
+            "invalid_diversifier_index"
+        );
+        let next = at(shielded, invalid, Next).unwrap();
+        let next_index: u128 = next.diversifier_index.parse().unwrap();
+        assert!(next_index > invalid);
+        assert_eq!(next, at(shielded, next_index, Reject).unwrap());
+
+        // Transparent receivers need an explicit opt-in and a non-hardened index.
+        let full = UaReceiverSet::Full;
+        assert!(at(full, 0, Reject).is_err());
+        let opted =
+            |index| unified_address_at(&acct.ufvk, Network::Regtest, full, index, Next, true);
+        let first = opted(0).unwrap();
+        assert_eq!(first.address, acct.unified_address);
+        assert!(opted(1 << 31).is_err());
     }
 }

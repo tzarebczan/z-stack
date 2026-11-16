@@ -12,7 +12,8 @@ import { initialize, wasmRuntime, type Network, type SdkInitOptions, type WasmRu
 import { observeEngineProgress, type EngineLoadProgress } from "./engine-progress";
 import { cancelWasmSync, createWasmClient, forgetWasmWallet, peekWasmWallet, type WasmClient, type WasmProgress } from "./wasm-client";
 import { useWalletStorage, abortable, walletStorageAvailable } from "./wallet-storage";
-import { type WalletStorage } from "./storage";
+import { indexedDbWalletStorage, type WalletStorage } from "./storage";
+import { encryptedWalletStorage, type WalletStoreKey } from "./store-encryption";
 import { claimWalletOwner, releaseWalletOwner } from "./wallet-owner";
 
 export interface WalletUnlockRequest {
@@ -40,6 +41,16 @@ export type WalletCreateOptions = {
 export type WalletOptions = {
   /** Local storage only. Remote encrypted backups are a separate optional service. */
   storage?: WalletStorage;
+  /**
+   * Optional 32-byte key (or AES-GCM-256 `CryptoKey`) that encrypts everything
+   * this wallet writes to `storage`. Without it the store is unencrypted, as
+   * before. The application owns the key: the SDK never derives, saves or logs
+   * it. A missing or wrong key rejects with `store_locked` or
+   * `store_key_rejected`, never as an empty wallet. A lost key means erasing
+   * the store and restoring from the recovery phrase. Convert an existing
+   * store with `encryptWalletStore` / `decryptWalletStore`.
+   */
+  storageKey?: WalletStoreKey;
   /** Optional application-owned unlock method. No account/backend is required. */
   unlocker?: WalletUnlocker;
   network: Network;
@@ -202,7 +213,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
     if (opts.lightServerGraceMs !== undefined && (!Number.isSafeInteger(opts.lightServerGraceMs) || opts.lightServerGraceMs < 0 || opts.lightServerGraceMs > 2_147_483_647)) {
       throw new WalletError("unknown", "lightServerGraceMs must be a nonnegative integer below 2,147,483,648.");
     }
-    useWalletStorage(opts.storage);
+    useWalletStorage(withStorageKey(opts.storage, opts.storageKey));
     const onLoadProgress = opts.onLoadProgress;
     if (onLoadProgress) offLoadProgress = observeEngineProgress(onLoadProgress);
     if (!walletStorageAvailable()) throw new WalletError("wallet_db", "Local storage is unavailable. Supply a WalletStorage adapter before creating a browser wallet.");
@@ -437,13 +448,17 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
   }
 }
 
+function withStorageKey(storage: WalletStorage | undefined, key: WalletStoreKey | undefined): WalletStorage | undefined {
+  return key === undefined ? storage : encryptedWalletStorage(storage ?? indexedDbWalletStorage(), key);
+}
+
 /** Delete a local wallet without loading WASM. Use the owning client's forget() when it is open. */
-export async function forgetWallet(options: { storage?: WalletStorage; passkey?: boolean } = {}): Promise<void> {
+export async function forgetWallet(options: { storage?: WalletStorage; storageKey?: WalletStoreKey; passkey?: boolean } = {}): Promise<void> {
   const claimed = claimWalletOwner();
   if (!claimed) throw new WalletError("owner_conflict", "Use the open wallet client's forget() before closing it.");
   const lease = claimed;
-  useWalletStorage(options.storage);
   try {
+    useWalletStorage(withStorageKey(options.storage, options.storageKey));
     if (!walletStorageAvailable()) throw new WalletError("wallet_db", "Local storage is unavailable. This device’s saved wallet has not been deleted.");
     await forgetWasmWallet({ passkey: options.passkey });
   }

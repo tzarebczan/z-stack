@@ -6,6 +6,12 @@ export interface WalletStorageTransaction<T> {
   put(key: string, value: unknown): void;
   delete(key: string): void;
   deletePrefix(prefix: string): void;
+  /**
+   * Optional: every record name in the store. Only explicit store migration
+   * (`encryptWalletStore`, `decryptWalletStore`) needs it; adapters without it
+   * cannot be migrated.
+   */
+  keys?(receive: (keys: string[]) => void): void;
   result(value: T): void;
   fail(error: unknown): void;
 }
@@ -99,6 +105,7 @@ export function indexedDbWalletStorage(options: { name?: string; factory?: IDBFa
               put: (key, value) => { store.put(value, key); },
               delete: key => { store.delete(key); },
               deletePrefix: prefix => { store.delete(IDBKeyRange.bound(prefix, `${prefix}\uffff`)); },
+              keys: receive => read(store.getAllKeys(), keys => receive(keys.map(String))),
               result: next => { value = next; }, fail,
             });
           } catch (error) { fail(error); }
@@ -130,6 +137,7 @@ export function memoryWalletStorage(): WalletStorage {
           put: (key, value) => write(() => { draft.set(key, structuredClone(value)); }),
           delete: key => write(() => { draft.delete(key); }),
           deletePrefix: prefix => write(() => { for (const key of draft.keys()) if (key.startsWith(prefix)) draft.delete(key); }),
+          keys: receive => receive([...draft.keys()]),
           result: value => { result = value; }, fail: error => { throw error; },
         });
         opts.signal?.throwIfAborted();

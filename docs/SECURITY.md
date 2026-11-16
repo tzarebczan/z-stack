@@ -32,8 +32,10 @@ Tor, a relay, or anonymity from request timing.
 ## Recovery and locking
 
 The browser snapshot contains viewing material and decrypted wallet history.
-Chunking and integrity verification do not encrypt it. Protect the device and
-origin accordingly. JavaScript strings cannot be reliably zeroized; wipe byte
+Chunking and integrity verification do not encrypt it. An application can
+encrypt the whole store with its own key (`storageKey`, see
+[encryption at rest](STORAGE.md#optional-encryption-at-rest)). Protect the
+device and origin accordingly. JavaScript strings cannot be reliably zeroized; wipe byte
 buffers where possible and limit the lifetime of secret strings.
 
 - A new wallet returns its phrase once. An imported phrase stays the user's

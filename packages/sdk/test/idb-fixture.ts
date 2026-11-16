@@ -46,6 +46,7 @@ export function memoryIndexedDb() {
             keyReads.push(key);
             return local.has(key) ? key : undefined;
           }),
+          getAllKeys: () => request(() => [...local.keys()]),
           put: (value: unknown, key: IDBValidKey) => {
             if (mode !== "readwrite") throw new DOMException("readonly transaction", "ReadOnlyError");
             // IndexedDB clones synchronously at the call boundary.

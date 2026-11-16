@@ -25,6 +25,8 @@ declare module "./generated/z_wasm.js" {
     receiverSet?: string | null;
   };
   export function unifiedAddressForSet(ufvk: string, network: string, set: string): string;
+  export function unifiedAddressAt(ufvk: string, network: string, set: string, index: string,
+    nextValid: boolean, allowTransparent: boolean): { address: string; diversifierIndex: string };
   export function ufvkCovers(network: string, derived: string, stored: string): void;
   export function checkViewingKey(network: string, ufvk: string): void;
   export function warmOrchardProvingKey(): boolean;
@@ -113,6 +115,8 @@ declare module "./generated-mt/z_wasm.js" {
     receiverSet?: string | null;
   };
   export function unifiedAddressForSet(ufvk: string, network: string, set: string): string;
+  export function unifiedAddressAt(ufvk: string, network: string, set: string, index: string,
+    nextValid: boolean, allowTransparent: boolean): { address: string; diversifierIndex: string };
   export class WasmWallet {
     static create(
       network: string,

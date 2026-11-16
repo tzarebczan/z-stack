@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add optional encryption at rest for the browser wallet store. `createWallet({ storageKey })` seals every persisted record with AES-256-GCM under an application-owned key, bound to its store, name and commit sequence. A missing or wrong key, or a tampered, swapped or replayed record, rejects with `store_locked`, `store_key_rejected` or `store_corrupt` instead of reading as an empty wallet. `encryptWalletStore`, `decryptWalletStore`, `inspectWalletStore` and `eraseWalletStore` convert, inspect and erase a store. Stores opened without a key keep their unencrypted format unchanged. `WalletStorageTransaction` gains an optional `keys` method, which migration requires.
+- Add `unifiedAddressAt(ufvk, network, receivers, index)` to derive the unified address at a chosen diversifier index without writing the wallet store or advancing the next address. Orchard is recommended; Sapling-invalid indices reject with `invalid_diversifier_index` unless `invalidIndex: "next"` is set, and transparent receivers require `allowTransparent`.
+
 ## 0.1.0-alpha.11
 
 - Resolve native historical tree states by the same block's hash when a supported light server rejects a height lookup. Bound the fallback, validate the returned chain identity and frontiers, and refuse malformed successful responses without moving the wallet birthday.

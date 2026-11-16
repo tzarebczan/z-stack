@@ -35,6 +35,11 @@ export type WalletErrorCode =
   | "transport"
   | "wallet_db"
   | "storage_full"
+  | "store_locked"
+  | "store_key_rejected"
+  | "store_not_encrypted"
+  | "store_corrupt"
+  | "invalid_diversifier_index"
   | "invalid_network"
   | "invalid_address"
   | "invalid_amount"
@@ -84,6 +89,11 @@ export const WALLET_ERROR_MESSAGES: Record<WalletErrorCode, string> = {
   transport: "Could not reach the light server.",
   wallet_db: "Could not read or update wallet data. Keep your recovery backup and try again.",
   storage_full: "Could not save recent wallet progress: browser storage is full. Free device space and retry. Keep this site's data and your recovery backup.",
+  store_locked: "This device's wallet data is encrypted. Unlock it to continue.",
+  store_key_rejected: "This key does not open this device's wallet data.",
+  store_not_encrypted: "This device's wallet data is not encrypted. Encrypt it before opening it with a key.",
+  store_corrupt: "This device's encrypted wallet data failed an integrity check. Keep it and your recovery backup.",
+  invalid_diversifier_index: "No address exists at that diversifier index.",
   invalid_network: "Unknown network.",
   invalid_address: "That address is not a valid Zcash destination.",
   invalid_amount: "Enter a valid amount with up to eight decimal places.",
@@ -159,6 +169,7 @@ export function classifyWalletError(message: string): WalletErrorCode {
   const lower = m.toLowerCase();
 
   if (lower === "sync cancelled") return "cancelled";
+  if (lower.startsWith("invalid diversifier index")) return "invalid_diversifier_index";
 
   if (lower.includes("invalid recovery phrase:") || lower.includes("invalid mnemonic:")) return "invalid_recovery_phrase";
 

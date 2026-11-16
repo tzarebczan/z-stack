@@ -109,6 +109,9 @@ impl EngineError {
 /// Map a known engine / bridge / WASM string to a stable code. Unknown → `unknown`.
 pub fn classify_wallet_error_code(message: &str) -> &'static str {
     let lower = message.trim().to_ascii_lowercase();
+    if lower.starts_with("invalid diversifier index") {
+        return "invalid_diversifier_index";
+    }
     if lower.contains("bridge token")
         || lower.contains("401 ")
         || lower.contains("unauthorized")
@@ -212,6 +215,7 @@ pub fn classify_wallet_error_code(message: &str) -> &'static str {
 pub fn wallet_error_user_message(code: &str, fallback: &str) -> String {
     match code {
         "not_found" => "No wallet on this device.".into(),
+        "invalid_diversifier_index" => "No address exists at that diversifier index.".into(),
         "already_exists" => "A wallet already exists here.".into(),
         "no_account" => "This wallet has no account yet.".into(),
         "sync_required" => "Sync the wallet before sending.".into(),

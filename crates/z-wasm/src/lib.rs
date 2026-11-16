@@ -116,6 +116,35 @@ pub fn unified_address_for_set(ufvk: &str, network: &str, set: &str) -> Result<S
     keys::unified_address_for_set(ufvk, network, set).map_err(js_err)
 }
 
+/// `{ address, diversifierIndex }` at a decimal diversifier index. No snapshot
+/// write and no address counter change. `next_valid` advances past indices
+/// without a Sapling receiver instead of failing.
+#[wasm_bindgen(js_name = unifiedAddressAt)]
+pub fn unified_address_at(
+    ufvk: &str,
+    network: &str,
+    set: &str,
+    index: &str,
+    next_valid: bool,
+    allow_transparent: bool,
+) -> Result<JsValue, JsValue> {
+    let network = parse_network(network)?;
+    let set = keys::UaReceiverSet::parse(set)
+        .ok_or_else(|| js_err(format!("unknown UA receiver set: {set}")))?;
+    let index = Some(index)
+        .filter(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|i| i.parse::<u128>().ok())
+        .ok_or_else(|| js_err("invalid diversifier index: not a decimal integer"))?;
+    let invalid = if next_valid {
+        keys::InvalidDiversifier::Next
+    } else {
+        keys::InvalidDiversifier::Reject
+    };
+    let found = keys::unified_address_at(ufvk, network, set, index, invalid, allow_transparent)
+        .map_err(js_err)?;
+    serde_wasm_bindgen::to_value(&found).map_err(js_err)
+}
+
 #[wasm_bindgen(js_name = cryptoSmoke)]
 pub fn wasm_crypto_smoke() -> String {
     crypto_smoke().to_string()
