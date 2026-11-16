@@ -547,6 +547,57 @@ It does not unlock the seed or enable automatic shielding. Use the older
 A rescan cannot recover a transaction absent from the configured server’s chain.
 
 
+## Encrypted local storage
+
+`storageKey` encrypts everything the wallet persists. The application owns the
+key; see [encryption at rest](STORAGE.md#optional-encryption-at-rest).
+
+<!-- sdk-example: encrypted-store -->
+```ts
+import { createWallet, indexedDbWalletStorage, inspectWalletStore } from '@z-stack/sdk';
+declare function appStorageKey(): Promise<Uint8Array>;
+export async function openWallet() {
+  const storage = indexedDbWalletStorage({ name: 'my-app-wallet' });
+  const { encrypted } = await inspectWalletStore({ storage });
+  const storageKey = encrypted ? await appStorageKey() : undefined;
+  return createWallet({ network: 'testnet', server: 'https://zcash-testnet.chainsafe.dev', storage, storageKey });
+}
+```
+
+## Address at a chosen diversifier index
+
+`unifiedAddressAt(ufvk, network, receivers, index)` returns the unified address
+at that diversifier index, for example one address per invoice. It is pure: it
+does not write the wallet store or advance the wallet's next address. Orchard
+and Sapling scanning detects funds sent to any index. Use `'orchard'`.
+
+<!-- sdk-example: address-at-index -->
+```ts
+import { isWalletError, unifiedAddressAt } from '@z-stack/sdk';
+declare const ufvk: string;
+export function invoiceAddress(invoice: number): string {
+  return unifiedAddressAt(ufvk, 'testnet', 'orchard', invoice).address;
+}
+export function shieldedAddress(index: bigint): string | null {
+  try {
+    return unifiedAddressAt(ufvk, 'testnet', 'shielded', index).address;
+  } catch (error) {
+    if (isWalletError(error) && error.code === 'invalid_diversifier_index') return null;
+    throw error;
+  }
+}
+```
+
+Indices run from 0 to 2^88 - 1. Index 0 gives the same address as
+`unifiedAddressForSet(ufvk, network, 'orchard')`. About half of all indices have
+no Sapling receiver: with `'shielded'` or `'full'` these reject with
+`invalid_diversifier_index`, or pass `{ invalidIndex: 'next' }` to receive the
+first valid index above it (`result.diversifierIndex`). Every requested receiver
+is always present. `'full'` adds a transparent receiver and requires
+`{ allowTransparent: true }`: transparent scanning only looks a gap limit past
+the last used transparent index, so funds sent to an arbitrary transparent index
+may not be found. Call it after `createWallet` or `initialize`.
+
 ## Network-aware date estimates
 
 Wallet create/restore/rescan operations resolve date birthdays using their own

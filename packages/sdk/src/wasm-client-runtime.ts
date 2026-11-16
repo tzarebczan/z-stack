@@ -8,6 +8,7 @@ import {
   parseBirthdayInput,
   validateBirthdayInput,
   WalletError,
+  isWalletError,
   type InspectedAddress,
   type UnlockPolicy,
   type WalletSnapshot
@@ -365,7 +366,9 @@ export async function peekWasmWallet(): Promise<WalletSnapshot | null> {
   try {
     const preview = await withTimeout(peekSavedSnapshot(peekSnapshotBytes), IDB_READ_MS, "IndexedDB wallet read timed out");
     return generation === runtimeState.persistGen ? preview : null;
-  } catch {
+  } catch (error) {
+    // A locked or unverifiable encrypted store is not an absent wallet.
+    if (isWalletError(error) && error.code.startsWith("store_")) throw error;
     console.warn("peekWasmWallet");
     return null;
   }

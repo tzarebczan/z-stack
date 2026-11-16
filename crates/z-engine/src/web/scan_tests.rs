@@ -31,11 +31,23 @@ fn action(
     ironwood: bool,
 ) -> (CompactOrchardAction, [u8; 32]) {
     let ufvk = recipient.decode_ufvk().unwrap();
+    let address = ufvk.orchard().unwrap().address_at(0u32, Scope::External);
+    action_to(recipient, address, value, nullifier, ironwood)
+}
+
+fn action_to(
+    recipient: &WebWallet,
+    address: orchard::Address,
+    value: u64,
+    nullifier: [u8; 32],
+    ironwood: bool,
+) -> (CompactOrchardAction, [u8; 32]) {
+    let ufvk = recipient.decode_ufvk().unwrap();
     let fvk = ufvk.orchard().unwrap();
     let rho = Rho::from_bytes(&nullifier).unwrap();
     let rseed = RandomSeed::from_bytes([7; 32], &rho).unwrap();
     let note = Note::from_parts(
-        fvk.address_at(0u32, Scope::External),
+        address,
         NoteValue::from_raw(value),
         rho,
         rseed,
@@ -204,6 +216,56 @@ fn serial_and_parallel_batches_preserve_notes_spends_and_snapshot() {
         apply(&mut streaming, &blocks, blocks.len());
         assert_eq!(snapshot(&serial), snapshot(&streaming));
     }
+}
+
+#[test]
+fn scanning_detects_orchard_notes_at_a_chosen_diversifier_index() {
+    use zcash_keys::address::Address as ZkAddress;
+    let mut w = wallet(REGTEST_FAUCET_MNEMONIC);
+    let index = 7_340_033u128;
+    let at = crate::keys::unified_address_at(
+        &w.decode_ufvk().unwrap().encode(&Network::Regtest),
+        Network::Regtest,
+        crate::keys::UaReceiverSet::Orchard,
+        index,
+        crate::keys::InvalidDiversifier::Reject,
+        false,
+    )
+    .unwrap();
+    let Some(ZkAddress::Unified(ua)) = ZkAddress::decode(&Network::Regtest, &at.address) else {
+        panic!("unified address");
+    };
+    let address = *ua.orchard().unwrap();
+    assert_ne!(
+        address,
+        w.decode_ufvk()
+            .unwrap()
+            .orchard()
+            .unwrap()
+            .address_at(0u32, Scope::External),
+        "a non-default receiver"
+    );
+    let mut nullifier = [0; 32];
+    nullifier[0] = 9;
+    let (action, _) = action_to(&w, address, 42_000, nullifier, false);
+    let block = CompactBlock {
+        height: BIRTHDAY.into(),
+        hash: vec![1; 32],
+        prev_hash: vec![0; 32],
+        vtx: vec![CompactTx {
+            index: 1,
+            txid: vec![2; 32],
+            actions: vec![action],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let deltas = apply(&mut w, &[block], 1);
+    assert_eq!(deltas.iter().map(|d| d.notes_found).sum::<u32>(), 1);
+    assert_eq!(
+        w.notes().iter().map(|note| note.value_zat).sum::<u64>(),
+        42_000
+    );
 }
 
 #[test]

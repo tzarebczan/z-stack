@@ -1,11 +1,17 @@
 import { WalletError } from "@z-stack/core";
 import { indexedDbWalletStorage, type WalletStorage } from "./storage";
+import { isEncryptedWalletStorage, plainWalletStorage } from "./store-encryption";
 import { aborted, checkSignal } from "./abort";
 export { aborted, checkSignal, abortable } from "./abort";
 
-let storage = indexedDbWalletStorage();
+function configured(next?: WalletStorage): WalletStorage {
+  const selected = next ?? indexedDbWalletStorage();
+  return isEncryptedWalletStorage(selected) ? selected : plainWalletStorage(selected);
+}
+
+let storage = configured();
 /** Internal: changed only while the public wallet lease is exclusively held. */
-export function useWalletStorage(next?: WalletStorage): void { storage = next ?? indexedDbWalletStorage(); }
+export function useWalletStorage(next?: WalletStorage): void { storage = configured(next); }
 export function walletStorageAvailable(): boolean { return storage.available; }
 
 /** Shared transaction plumbing. Callbacks must queue requests synchronously. */

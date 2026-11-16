@@ -22,6 +22,7 @@
  */
 
 export { indexedDbWalletStorage, memoryWalletStorage, type WalletStorage, type WalletStorageTransaction } from "./storage";
+export { decryptWalletStore, encryptWalletStore, eraseWalletStore, inspectWalletStore, type WalletStoreKey, type WalletStoreStatus } from "./store-encryption";
 
 export { createWallet, forgetWallet, lightServer, type Wallet, type WalletOptions, type WalletImportOptions, type WalletCreation, type WalletCreationPreparation, type WalletCreateOptions, type WalletUnlocker, type WalletUnlockRequest } from "./create-wallet";
 export type { EngineLoadProgress } from "./engine-progress";
@@ -35,6 +36,7 @@ export {
   isValidAddress,
   inspectAddress,
   unifiedAddressForSet,
+  unifiedAddressAt,
   defaultLightServer,
   MAINNET_PUBLIC_LWD,
   TESTNET_PUBLIC_LWD,
@@ -43,6 +45,8 @@ export {
   type Network,
   type ParsedAddress,
   type SdkInitOptions,
+  type UnifiedAddressAtIndex,
+  type UnifiedAddressAtOptions,
   type WasmRuntime,
 } from "./runtime";
 

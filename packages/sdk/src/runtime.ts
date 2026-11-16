@@ -183,6 +183,8 @@ type WasmBindings = {
     receiverSet?: string | null;
   };
   unifiedAddressForSet?: (ufvk: string, network: string, set: string) => string;
+  unifiedAddressAt?: (ufvk: string, network: string, set: string, index: string, nextValid: boolean,
+    allowTransparent: boolean) => { address: string; diversifierIndex: string };
   cryptoSmoke: () => string;
   WasmEngine: new (
     network: string,
@@ -568,6 +570,62 @@ export function unifiedAddressForSet(ufvk: string, network: Network, set: UaRece
     throw new Error("this wasm build cannot derive UA receiver sets");
   }
   return fn(ufvk, network, set);
+}
+
+/** Options for {@link unifiedAddressAt}. */
+export type UnifiedAddressAtOptions = {
+  /**
+   * An index with no valid Sapling diversifier (about half of them, for a
+   * receiver set that includes Sapling): `"error"` (default) rejects with
+   * `invalid_diversifier_index`; `"next"` returns the first valid index above it.
+   */
+  invalidIndex?: "error" | "next";
+  /**
+   * Required for the `full` set. Wallet scanning finds transparent funds only
+   * within the gap limit after the last used transparent index, so funds sent
+   * to a transparent receiver at an arbitrary index may not be found.
+   */
+  allowTransparent?: boolean;
+};
+
+/** A unified address and the diversifier index it encodes. */
+export type UnifiedAddressAtIndex = { address: string; diversifierIndex: bigint };
+
+const MAX_DIVERSIFIER_INDEX = (1n << 88n) - 1n;
+
+/**
+ * The unified address at a chosen diversifier index (0 to 2^88 - 1). Pure and
+ * deterministic: no wallet storage write and no change to the wallet's next
+ * address. Orchard and Sapling scanning detects funds at every index.
+ * Prefer `"orchard"`; `"full"` requires `allowTransparent`. Needs {@link initialize}.
+ *
+ * ```ts
+ * const { address } = unifiedAddressAt(ufvk, "testnet", "orchard", 1234n);
+ * ```
+ */
+export function unifiedAddressAt(
+  ufvk: string, network: Network, receivers: UaReceiverSet, diversifierIndex: number | bigint,
+  options: UnifiedAddressAtOptions = {},
+): UnifiedAddressAtIndex {
+  const index = typeof diversifierIndex === "bigint" ? diversifierIndex
+    : Number.isSafeInteger(diversifierIndex) ? BigInt(diversifierIndex) : -1n;
+  if (index < 0n || index > MAX_DIVERSIFIER_INDEX) {
+    throw new WalletError("invalid_diversifier_index", "Diversifier index must be an integer from 0 to 2^88 - 1.");
+  }
+  if (receivers === "full" && options.allowTransparent !== true) {
+    throw new TypeError("A transparent receiver at a chosen index needs allowTransparent: true.");
+  }
+  if (options.invalidIndex !== undefined && !["error", "next"].includes(options.invalidIndex)) {
+    throw new TypeError("invalidIndex must be \"error\" or \"next\".");
+  }
+  const fn = requireWasm().unifiedAddressAt;
+  if (typeof fn !== "function") throw new Error("this wasm build cannot derive addresses at a diversifier index");
+  try {
+    const found = fn(ufvk, network, receivers, index.toString(), options.invalidIndex === "next", options.allowTransparent === true);
+    return { address: found.address, diversifierIndex: BigInt(found.diversifierIndex) };
+  } catch (error) {
+    throw WalletError.fromUnknown(error);
+  }
 }
 
 export function canDeriveUaReceiverSet(): boolean {
