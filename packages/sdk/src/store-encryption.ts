@@ -1,5 +1,6 @@
 import { WalletError } from "@z-stack/core";
 import { indexedDbWalletStorage, type WalletStorage, type WalletStorageTransaction } from "./storage";
+import { claimWalletOwner, releaseWalletOwner } from "./wallet-owner";
 
 /**
  * Optional encryption at rest for a {@link WalletStorage}.
@@ -46,6 +47,7 @@ const locked = () => new WalletError("store_locked", "The wallet store is encryp
 const rejected = () => new WalletError("store_key_rejected", "The supplied key does not open this wallet store.");
 const notEncrypted = () => new WalletError("store_not_encrypted", "The wallet store is not encrypted; migrate it with encryptWalletStore first.");
 const corrupt = (why: string) => new WalletError("store_corrupt", `Encrypted wallet store failed verification: ${why}.`);
+const invalidKey = (why: string) => new WalletError("store_key_rejected", why);
 const changing = () => new WalletError("wallet_changed", "The wallet store kept changing; retry the operation.");
 
 function isEnvelope(value: unknown): value is Envelope {
@@ -185,17 +187,17 @@ function subtle(): SubtleCrypto {
 /** Validates and imports without retaining the caller's bytes. */
 function importStoreKey(key: WalletStoreKey): Promise<CryptoKey> {
   if (key instanceof Uint8Array) {
-    if (key.byteLength !== 32) throw new TypeError("A wallet store key is exactly 32 bytes.");
+    if (key.byteLength !== 32) throw invalidKey("A wallet store key is exactly 32 bytes.");
     return subtle().importKey("raw", key.slice(), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
   }
   if (typeof CryptoKey !== "undefined" && key instanceof CryptoKey) {
     const algorithm = key.algorithm as AesKeyAlgorithm;
     if (algorithm.name !== "AES-GCM" || algorithm.length !== 256 || !key.usages.includes("encrypt") || !key.usages.includes("decrypt")) {
-      throw new TypeError("A wallet store CryptoKey must be AES-GCM, 256-bit, with encrypt and decrypt usages.");
+      throw invalidKey("A wallet store CryptoKey must be AES-GCM, 256-bit, with encrypt and decrypt usages.");
     }
     return Promise.resolve(key);
   }
-  throw new TypeError("A wallet store key is a 32-byte Uint8Array or an AES-GCM CryptoKey.");
+  throw invalidKey("A wallet store key is a 32-byte Uint8Array or an AES-GCM CryptoKey.");
 }
 
 function associatedData(storeId: string, name: string, seq: number): Bytes {
@@ -242,6 +244,9 @@ async function readMeta(key: CryptoKey, markerRaw: unknown, headRaw: unknown): P
 async function readRecord(key: CryptoKey, meta: Meta, name: string, raw: unknown): Promise<Uint8Array | undefined> {
   if (!meta.head || !meta.storeId) {
     if (raw === undefined) return undefined;
+    // A store holding only generation tombstones (after forget or erase) has no
+    // wallet data; their random identifiers are read as they are.
+    if (TOMBSTONES.has(name) && typeof raw === "string") return encodeValue(raw);
     if (branded(raw)) throw corrupt("record without marker");
     throw notEncrypted();
   }
@@ -321,18 +326,43 @@ function dryRun<T>(mode: "readonly" | "readwrite", body: (tx: WalletStorageTrans
 
 const CONFLICT = Symbol("wallet store changed");
 /** Records the SDK writes outside `snapshot:`; used when an adapter cannot list records. */
-const KNOWN_RECORDS = [SAVED_WALLET_KEY, GENERATION_KEY, "meta", "seed.enc", "passkey.v1", "passkey.vault.v1",
-  "vault:seed:generation", "vault:passkey:generation"];
+const TOMBSTONES = new Set([GENERATION_KEY, "vault:seed:generation", "vault:passkey:generation"]);
+const KNOWN_RECORDS = [SAVED_WALLET_KEY, "meta", "seed.enc", "passkey.v1", "passkey.vault.v1"];
 
-/** A new encrypted store starts only in an empty one, never on top of unencrypted records. */
-function whenEmpty(tx: WalletStorageTransaction<void>, next: () => void): void {
-  const refuse = () => tx.fail(notEncrypted());
-  if (tx.keys) { tx.keys(names => names.length ? refuse() : next()); return; }
-  let pending = KNOWN_RECORDS.length, found = false;
-  for (const name of KNOWN_RECORDS) tx.has(name, exists => {
-    found ||= exists;
-    if (--pending === 0) { if (found) refuse(); else next(); }
-  });
+type Tombstones = Map<string, string>;
+
+/** Unencrypted generation tombstones of an otherwise empty store, or null when it holds other records. */
+function readTombstones(tx: WalletStorageTransaction<Tombstones | null>): void {
+  const stones: Tombstones = new Map();
+  const names = [...TOMBSTONES];
+  let pending = names.length, occupied = false;
+  const finish = () => { if (--pending === 0) tx.result(occupied ? null : stones); };
+  const read = () => names.forEach(name => tx.get(name, value => {
+    if (typeof value === "string") stones.set(name, value);
+    else if (value !== undefined) occupied = true;
+    finish();
+  }));
+  if (tx.keys) {
+    tx.keys(list => { occupied = list.some(name => !TOMBSTONES.has(name)); read(); });
+    return;
+  }
+  pending += KNOWN_RECORDS.length;
+  for (const name of KNOWN_RECORDS) tx.has(name, exists => { occupied ||= exists; finish(); });
+  read();
+}
+
+/**
+ * A new encrypted store starts only in an empty one, never on top of
+ * unencrypted records. Generation tombstones it finds are sealed into it, so
+ * pages open on the old generation stay fenced.
+ */
+function whenEmpty(tx: WalletStorageTransaction<void>, expected: Tombstones, next: () => void): void {
+  const check = tx as unknown as WalletStorageTransaction<Tombstones | null>;
+  readTombstones({ ...check, result: stones => {
+    if (!stones) { tx.fail(notEncrypted()); return; }
+    if (stones.size !== expected.size || [...stones].some(([name, value]) => expected.get(name) !== value)) { tx.fail(CONFLICT); return; }
+    next();
+  } });
 }
 
 async function commit(inner: WalletStorage, key: CryptoKey, meta: Meta, ops: Op[],
@@ -341,6 +371,9 @@ async function commit(inner: WalletStorage, key: CryptoKey, meta: Meta, ops: Op[
   const storeId = meta.storeId ?? crypto.randomUUID();
   const seq = (meta.head?.seq ?? 0) + 1;
   const keys: Record<string, number> = { ...meta.head?.keys };
+  const stones = fresh ? await inner.transaction<Tombstones | null>("readonly", readTombstones, { signal: options.signal }) : new Map<string, string>();
+  if (!stones) throw notEncrypted();
+  for (const name of stones.keys()) keys[name] = seq;
   let rewriteMarker = fresh;
   for (const op of ops) {
     if ("put" in op) { if (!writeOnce(op.put)) keys[op.put] = seq; }
@@ -351,6 +384,7 @@ async function commit(inner: WalletStorage, key: CryptoKey, meta: Meta, ops: Op[
     }
   }
   const sealed = await Promise.all(ops.map(op => "put" in op ? seal(key, storeId, op.put, seq, op.bytes) : undefined));
+  const sealedStones = await Promise.all([...stones].map(([name, value]) => seal(key, storeId, name, seq, encodeValue(value))));
   const head = await seal(key, storeId, HEAD_KEY, seq, encodeValue({ seq, keys }));
   const marker = rewriteMarker ? fresh ? await newMarker(key, storeId) : meta.markerRaw : undefined;
   try {
@@ -361,10 +395,11 @@ async function commit(inner: WalletStorage, key: CryptoKey, meta: Meta, ops: Op[
         // Every encrypted commit rewrites the head with a fresh nonce, so an
         // unchanged head proves that nothing this run read has changed.
         if (!sameRaw(markerNow, meta.markerRaw) || !sameRaw(headNow, meta.headRaw)) { tx.fail(CONFLICT); return; }
-        if (fresh) whenEmpty(tx, write);
+        if (fresh) whenEmpty(tx, stones, write);
         else write();
       };
       const write = () => {
+        [...stones.keys()].forEach((name, i) => tx.put(name, sealedStones[i]));
         ops.forEach((op, i) => {
           if ("put" in op) tx.put(op.put, sealed[i]);
           else if ("remove" in op) tx.delete(op.remove);
@@ -467,6 +502,14 @@ export function plainWalletStorage(inner: WalletStorage): WalletStorage {
 
 type StoreOptions = { storage?: WalletStorage; signal?: AbortSignal };
 
+/** Store-wide operations refuse to run under an open wallet client in this page. */
+async function exclusively<T>(work: () => Promise<T>): Promise<T> {
+  const lease = claimWalletOwner();
+  if (!lease) throw new WalletError("owner_conflict", "Close the open wallet client before converting or erasing its store.");
+  try { return await work(); }
+  finally { releaseWalletOwner(lease); }
+}
+
 /** Inspect a store without its key, for example to choose an unlock or create screen. */
 export async function inspectWalletStore(options: StoreOptions = {}): Promise<WalletStoreStatus> {
   const inner = options.storage ?? indexedDbWalletStorage();
@@ -528,7 +571,11 @@ async function replaceAll(inner: WalletStorage, before: Contents, unchanged: (na
  * no wallet client is open. Calling it on a store already encrypted with this
  * key does nothing.
  */
-export async function encryptWalletStore(options: StoreOptions & { key: WalletStoreKey }): Promise<void> {
+export function encryptWalletStore(options: StoreOptions & { key: WalletStoreKey }): Promise<void> {
+  return exclusively(() => encryptWalletStoreNow(options));
+}
+
+async function encryptWalletStoreNow(options: StoreOptions & { key: WalletStoreKey }): Promise<void> {
   const inner = options.storage ?? indexedDbWalletStorage();
   const key = await importStoreKey(options.key);
   for (let attempt = 0; attempt < MAX_ROUNDS; attempt++) {
@@ -571,7 +618,11 @@ export async function encryptWalletStore(options: StoreOptions & { key: WalletSt
  * Every record is verified first. Run it while no wallet client is open.
  * Calling it on an unencrypted store does nothing.
  */
-export async function decryptWalletStore(options: StoreOptions & { key: WalletStoreKey }): Promise<void> {
+export function decryptWalletStore(options: StoreOptions & { key: WalletStoreKey }): Promise<void> {
+  return exclusively(() => decryptWalletStoreNow(options));
+}
+
+async function decryptWalletStoreNow(options: StoreOptions & { key: WalletStoreKey }): Promise<void> {
   const inner = options.storage ?? indexedDbWalletStorage();
   const key = await importStoreKey(options.key);
   for (let attempt = 0; attempt < MAX_ROUNDS; attempt++) {
@@ -599,10 +650,10 @@ export async function decryptWalletStore(options: StoreOptions & { key: WalletSt
  * host whose key is lost. The wallet must then be restored from its recovery
  * phrase. Leaves a fresh generation so other open pages stop using old state.
  */
-export async function eraseWalletStore(options: StoreOptions = {}): Promise<void> {
+export function eraseWalletStore(options: StoreOptions = {}): Promise<void> {
   const inner = options.storage ?? indexedDbWalletStorage();
-  await inner.transaction<void>("readwrite", tx => {
+  return exclusively(() => inner.transaction<void>("readwrite", tx => {
     tx.deletePrefix("");
     tx.put(GENERATION_KEY, crypto.randomUUID());
-  }, { signal: options.signal });
+  }, { signal: options.signal }));
 }

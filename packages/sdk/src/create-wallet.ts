@@ -457,8 +457,8 @@ export async function forgetWallet(options: { storage?: WalletStorage; storageKe
   const claimed = claimWalletOwner();
   if (!claimed) throw new WalletError("owner_conflict", "Use the open wallet client's forget() before closing it.");
   const lease = claimed;
-  useWalletStorage(withStorageKey(options.storage, options.storageKey));
   try {
+    useWalletStorage(withStorageKey(options.storage, options.storageKey));
     if (!walletStorageAvailable()) throw new WalletError("wallet_db", "Local storage is unavailable. This device’s saved wallet has not been deleted.");
     await forgetWasmWallet({ passkey: options.passkey });
   }

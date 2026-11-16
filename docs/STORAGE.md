@@ -69,7 +69,13 @@ const wallet = await createWallet({ network: "testnet", server: "https://zcash-t
   need an adapter that lists its records (`WalletStorageTransaction.keys`); the
   IndexedDB and memory adapters do. Run them while no wallet client is open.
 - `inspectWalletStore({ storage })` returns `{ exists, encrypted }` without a key.
-- `eraseWalletStore({ storage })` deletes every record without a key.
+- `eraseWalletStore({ storage })` deletes every record without a key and leaves
+  a fresh generation tombstone that fences other open pages. The erased store
+  then starts again unencrypted or with any key. Forgetting an encrypted wallet
+  keeps the store encrypted with the same key. Migration and erase refuse to run
+  while a wallet client is open in the page (`owner_conflict`).
+- An invalid key (not 32 bytes, or a `CryptoKey` that is not AES-GCM-256 with
+  encrypt and decrypt usages) rejects with `store_key_rejected`.
 
 The SDK never derives, stores or logs the key; your application owns key
 management. Losing the key makes the store unreadable: erase it and restore the

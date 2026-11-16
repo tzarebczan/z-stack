@@ -129,7 +129,7 @@ test("wrong or missing keys fail closed and never read as an empty wallet", asyn
   await assert.rejects(blind.transaction("readwrite", tx => tx.put("meta", { unlockPolicy: "session" })), code("store_not_encrypted"));
   assert.deepEqual([...vaultOnly.db.records.keys()], ["passkey.v1"]);
 
-  assert.throws(() => encryptedWalletStorage(storage, new Uint8Array(16)), TypeError);
+  assert.throws(() => encryptedWalletStorage(storage, new Uint8Array(16)), code("store_key_rejected"));
 });
 
 test("tampered, swapped, replayed or deleted records fail verification", async t => {
@@ -269,3 +269,84 @@ test("createWallet with storageKey: saved wallet is sealed and opens only with i
   assert.equal(await wallet.load(), null);
   await wallet.close();
 });
+
+test("an erased store starts again unencrypted or with any key, and inspection stays truthful", async t => {
+  if (!existsSync(gen)) { t.skip("run pnpm build:wasm first"); return; }
+  const { initialize, REGTEST_FAUCET_MNEMONIC, deriveAccount } = await import("../src/lab.ts");
+  const { createWallet, forgetWallet } = await import("../src/create-wallet.ts");
+  await initialize({ wasmModule: readFileSync(gen), prewarmProvingKey: false, prewarmProveWorker: false });
+  const { db, storage } = installDb(t);
+  const server = { kind: "fixture", label: "offline", tip: async () => 2, blocks: async () => new Uint8Array() };
+  const open = (storageKey?: Uint8Array) => createWallet({ network: "regtest", storage, storageKey, prewarmProvingKey: false, server });
+  const { unifiedAddress } = deriveAccount(REGTEST_FAUCET_MNEMONIC, "regtest", 0);
+  const restore = async (key?: Uint8Array) => {
+    const wallet = await open(key);
+    assert.equal((await wallet.restore(REGTEST_FAUCET_MNEMONIC, { birthday: 1, replace: true })).unifiedAddress, unifiedAddress);
+    await wallet.close();
+  };
+  const status = () => inspectWalletStore({ storage });
+  const erase = async () => {
+    const before = await readWalletGenerationOf(storage);
+    await eraseWalletStore({ storage });
+    assert.deepEqual(await status(), { exists: false, encrypted: false });
+    assert.deepEqual([...db.records.keys()], ["wallet:generation"]);
+    assert.notEqual(db.records.get("wallet:generation"), before, "erase fences pages on the old generation");
+  };
+
+  const first = newKey(), second = newKey();
+  await restore(first);
+  assert.deepEqual(await status(), { exists: true, encrypted: true });
+  await erase(); // Without the key.
+  await restore(second);
+  assert.deepEqual(await status(), { exists: true, encrypted: true });
+  assert.ok(!("wallet:generation" in Object.fromEntries([...db.records].filter(([, v]) => typeof v === "string"))), "the tombstone is sealed too");
+  const reopened = await open(first);
+  await assert.rejects(reopened.load(), code("store_key_rejected"));
+  await reopened.close();
+
+  await erase();
+  await restore();
+  assert.deepEqual(await status(), { exists: true, encrypted: false });
+  const blocked = await open(newKey());
+  await assert.rejects(blocked.load(), code("store_not_encrypted"), "a live unencrypted store is never adopted by a key");
+  await blocked.close();
+
+  await erase();
+  const third = newKey();
+  await restore(third);
+  assert.deepEqual(await status(), { exists: true, encrypted: true });
+  // Forget leaves a tombstone only; a different key may start again.
+  await forgetWallet({ storage, storageKey: third });
+  assert.deepEqual(await status(), { exists: false, encrypted: true });
+  const plainAgain = await open();
+  await assert.rejects(plainAgain.load(), code("store_locked"), "a forgotten encrypted store still needs its key or an erase");
+  await plainAgain.close();
+
+  // Store-wide operations refuse to run under an open client.
+  const held = await open(third);
+  await assert.rejects(eraseWalletStore({ storage }), code("owner_conflict"));
+  await held.close();
+});
+
+test("an invalid storage key rejects with a typed error and releases the wallet owner", async t => {
+  if (!existsSync(gen)) { t.skip("run pnpm build:wasm first"); return; }
+  const { initialize } = await import("../src/lab.ts");
+  const { createWallet, forgetWallet } = await import("../src/create-wallet.ts");
+  await initialize({ wasmModule: readFileSync(gen), prewarmProvingKey: false, prewarmProveWorker: false });
+  const { storage } = installDb(t);
+  const server = { kind: "fixture", label: "offline", tip: async () => 2, blocks: async () => new Uint8Array() };
+  const signOnly = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt"]);
+  for (const bad of [new Uint8Array(31), signOnly]) {
+    await assert.rejects(forgetWallet({ storage, storageKey: bad }), code("store_key_rejected"));
+    await assert.rejects(createWallet({ network: "regtest", storage, storageKey: bad, server }), code("store_key_rejected"));
+  }
+  const key = newKey();
+  await forgetWallet({ storage, storageKey: key });
+  const wallet = await createWallet({ network: "regtest", storage, storageKey: key, prewarmProvingKey: false, server });
+  assert.equal(await wallet.load(), null);
+  await wallet.close();
+});
+
+function readWalletGenerationOf(storage: WalletStorage): Promise<unknown> {
+  return storage.transaction("readonly", tx => tx.get("wallet:generation", value => tx.result(value)));
+}
