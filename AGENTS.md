@@ -7,9 +7,11 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup and checks, and
 
 - Zcash cryptography, transaction construction and hardware signature verification
   belong in `z-engine`. TypeScript handles transport, workers, storage and events.
-  Optional Base operations use viem; do not implement cryptographic primitives.
+  Optional Base operations use viem. The optional Solana sidecar uses maintained
+  Solana, scure and noble libraries for SLIP-0010 derivation and signing; do not
+  implement cryptographic primitives.
 - Keep the wallet independent of registration, authentication and remote backup.
-  These are optional, application-owned services. Base, swap and fiat integrations
+  These are optional, application-owned services. Base, Solana, swap and fiat integrations
   must not become requirements for a Zcash wallet.
 - SDK root exports are the supported integration surface. `/engine` and `/lab`
   are experimental. Consumers use built `dist/` exports; repository tools may use

@@ -44,7 +44,7 @@ export function inspectArchives(directory, version = JSON.parse(readFileSync(joi
     assert.ok(lstatSync(file).isFile() && !lstatSync(file).isSymbolicLink(), 'Archives must be regular files');
     const members = archiveMembers(file);
     const manifest = JSON.parse(members.get('package/package.json')?.toString() || 'null');
-    assert.ok(manifest && /^@z-stack\/(core|passkey|sdk|base|gift-cards)$/.test(manifest.name), 'Unexpected archive package');
+    assert.ok(manifest && /^@z-stack\/(core|passkey|sdk|base|gift-cards|solana|swaps)$/.test(manifest.name), 'Unexpected archive package');
     assert.equal(manifest.name, `@z-stack/${names[candidates.indexOf(filename)]}`, "Archive filename does not match its package");
     assert.equal(manifest.version, version, 'Archive manifest version differs from the selected version');
     assert.ok(!packages.has(manifest.name), `Multiple versions of ${manifest.name}: choose a directory with one matching set`);
@@ -66,6 +66,14 @@ export function inspectArchives(directory, version = JSON.parse(readFileSync(joi
         const integrity = JSON.parse(members.get(`package/dist/${kind}/integrity.json`)?.toString() || 'null');
         assert.ok(bytes?.length > 1_000_000 && bytes.subarray(0, 4).equals(Buffer.from([0, 97, 115, 109])), 'Missing production WASM');
         assert.equal(checksum(bytes), integrity?.sha256, `${kind}: WASM integrity mismatch`);
+      }
+    }
+    if (manifest.name === '@z-stack/swaps') {
+      const helper = packages.get('@z-stack/solana');
+      assert.ok(helper, 'Missing matching Solana archive');
+      for (const [name, bytes] of archiveMembers(helper.file)) {
+        const bundled = members.get(name.replace('package/', 'package/node_modules/@z-stack/solana/'));
+        assert.ok(bundled?.equals(bytes), 'Swaps bundled Solana differs from matching archive');
       }
     }
     packages.set(manifest.name, { filename, file, version: manifest.version, sha256: checksum(readFileSync(file)) });

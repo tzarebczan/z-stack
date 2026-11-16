@@ -12,6 +12,11 @@
       "@z-stack/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./device-approval": {
+      "@z-stack/source": "./src/device-approval.ts",
+      "types": "./dist/device-approval.d.ts",
+      "import": "./dist/device-approval.js"
     }
   },
   "files": [
@@ -49,6 +54,10 @@
       ".": {
         "types": "./dist/index.d.ts",
         "import": "./dist/index.js"
+      },
+      "./device-approval": {
+        "types": "./dist/device-approval.d.ts",
+        "import": "./dist/device-approval.js"
       }
     }
   }

@@ -34,6 +34,7 @@ import { abortable, readWalletGeneration, walletStorageAvailable, type WalletGen
 import type { WasmClientContext } from './wasm-client-context';
 import * as runtime from './wasm-client-runtime';
 import { createSpendingController } from './wasm-client-spending';
+import { assertSpendingConsensus } from './spend-consensus';
 import { createStorageController } from './wasm-client-storage';
 import { createSyncController } from './wasm-client-sync';
 export { attachWasmBindings, cancelWasmSync, configureRegtestNu63Height, configureRegtestNu7Height, configureWasmWorkerBasePath, forgetWasmWallet, isDuplicateBroadcastError, orchardProvingKeyReady, peekSnapshotBytes, peekWasmWallet, prewarmOrchardProvingKey, prewarmProveWorker, reorgRestartFrom, setWasmSpendingSeed, startScanWorker, submitVerdict, wasmCapabilities } from './wasm-client-runtime';
@@ -645,7 +646,7 @@ export function createWasmClient(
       const seed = requireSeed("send a transparent swap deposit");
       const txid = await runtime.withOriginSpendLock(() => {
         assertSource(operation, source);
-        return proveAndSubmitHere("sendTransparent", seed, { to: to.trim(), amountZec, maxFeeZat }, beforeBroadcast);
+        return proveAndSubmitHere("sendTransparent", seed, { to: to.trim(), amountZec, maxFeeZat }, beforeBroadcast, options?.beforeSubmit);
       });
       return finishSpend(txid, operation, source);
     },
@@ -655,6 +656,8 @@ export function createWasmClient(
       const { source, operation } = ready;
       assertSource(operation, source);
       try {
+        await assertSpendingConsensus(transport, network, await source.scannedHeight(), runtime.requireBindings().consensusBranchId, operation.signal);
+        assertSource(operation, source);
         const raw = await source.estimateTransparentFee!(to.trim(), amountZec);
         assertSource(operation, source);
         return parseFeeJson(raw);

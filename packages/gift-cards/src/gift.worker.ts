@@ -1,3 +1,4 @@
+import { createGiftTransportProxy } from './transport-bridge';
 import { createWallet, indexedDbWalletStorage, WalletError, deriveAccount, type Wallet } from "@z-stack/sdk";
 import { initializeGiftKeys, createGiftAccount, deriveGiftAccount, giftMnemonicFromEntropy } from "@z-stack/sdk/gift-keys";
 import { GiftError, validateGiftCard } from "./protocol";
@@ -14,6 +15,7 @@ let releaseLease: (() => void) | null = null;
 let lease: Promise<unknown> | null = null;
 let stopped = false;
 let queue: Promise<void> = Promise.resolve();
+let transportProxy: ReturnType<typeof createGiftTransportProxy> | null = null;
 const receipts = new Map<number, { resolve: () => void; reject: () => void }>();
 const post = (reply: GiftWorkerReply) => port.postMessage(reply);
 function requireWallet(): Wallet {
@@ -33,6 +35,7 @@ async function initialize(config: WorkerConfiguration): Promise<void> {
 }
 async function close(): Promise<void> {
   stopped = true;
+  transportProxy?.dispose(); transportProxy = null;
   // Let the journal outcome settle before retiring the wallet. ACKs bypass the queue.
   await queue;
   const active = wallet;
@@ -42,19 +45,22 @@ async function close(): Promise<void> {
   finally { releaseLease?.(); releaseLease = null; await lease; lease = null; }
 }
 async function handle(request: GiftWorkerRequest): Promise<void> {
+  if (request.op === "transport-result") { transportProxy?.receive(request); return; }
   if (!Number.isSafeInteger(request.id) || request.id < 1) throw new GiftError("invalid_link");
   if (stopped && request.op !== "close") throw new GiftError("closed");
   switch (request.op) {
     case "create": {
       await initialize(request.config);
-      post({ kind: "account", id: request.id, value: createGiftAccount(request.config.network) });
+      const account = createGiftAccount(request.config.network);
+      try { post({ kind: "account", id: request.id, value: account }); } finally { account.entropy.fill(0); }
       return;
     }
     case "derive": {
       validateGiftCard(request.card);
       if (request.card.network !== request.config.network) throw new GiftError("wrong_network");
       await initialize(request.config);
-      post({ kind: "account", id: request.id, value: deriveGiftAccount(request.card.entropy, request.config.network) });
+      const account = deriveGiftAccount(request.card.entropy, request.config.network);
+      try { post({ kind: "account", id: request.id, value: account }); } finally { account.entropy.fill(0); }
       return;
     }
     case "open": {
@@ -63,6 +69,7 @@ async function handle(request: GiftWorkerRequest): Promise<void> {
       if (request.card.network !== request.config.network) throw new GiftError("wrong_network");
       await initialize(request.config);
       const account = deriveGiftAccount(request.card.entropy, request.config.network);
+      account.entropy.fill(0);
       const name = `${request.config.namespace}:${giftIdentity(request.card.network, account.fingerprint)}`;
       if (!navigator.locks) throw new GiftError("storage");
       const held = new Promise<void>(resolve => { releaseLease = resolve; });
@@ -74,7 +81,8 @@ async function handle(request: GiftWorkerRequest): Promise<void> {
         }).catch(reject);
       });
       if (stopped) { releaseLease?.(); throw new GiftError("closed"); }
-      const opened = await createWallet({ ...request.config, storage: indexedDbWalletStorage({ name }),
+      const server = typeof request.config.server === "string" ? request.config.server : (transportProxy = createGiftTransportProxy(request.config.server, post)).transport;
+      const opened = await createWallet({ ...request.config, server, storage: indexedDbWalletStorage({ name }),
         autoShield: false, transparent: false, transparentScan: "off", memoFetch: "on-demand",
         unlockPolicy: "each-spend", autoSync: false, preferMulticore: false, threads: 1, prewarmProvingKey: false,
         verifyChainTip: true,
@@ -135,6 +143,7 @@ function fail(id: number, error: unknown) {
 }
 port.onmessage = event => {
   const request = event.data;
+  if (request.op === "transport-result") { transportProxy?.receive(request); return; }
   if (request.op === "reserved-ack") {
     const receipt = receipts.get(request.id);
     receipts.delete(request.id);
@@ -145,5 +154,7 @@ port.onmessage = event => {
     void close().then(() => post({ kind: "done", id: request.id })).catch(error => fail(request.id, error));
     return;
   }
-  queue = queue.then(() => handle(request)).catch(error => fail(request.id, error));
+  queue = queue.then(() => handle(request)).catch(error => fail(request.id, error)).finally(() => {
+    if (request.op === "derive" || request.op === "open") request.card.entropy.fill(0);
+  });
 };

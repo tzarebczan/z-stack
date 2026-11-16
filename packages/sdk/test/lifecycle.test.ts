@@ -672,6 +672,53 @@ test("transparent swap dispatch reserves the same wallet and retains its pending
   await forgetWasmWallet();
 });
 
+test("transparent swap submission waits for its durable application receipt", async (t) => {
+  fixture(t, handle => {
+    handle.proveTransparentSend = () => (handle.proveSend as () => string)();
+    handle.estimateTransparentFee = () => JSON.stringify({ feeZat: 10000, feeZec: "0.0001" });
+  });
+  const journal = deferred<void>();
+  const entered = deferred<void>();
+  let submissions = 0;
+  const c = client(async () => 10, async () => {
+    submissions++;
+    return "ab".repeat(32);
+  });
+  await c.restore("transparent-receipt", "regtest", 1);
+  const sending = c.sendTransparent("recipient", "0.1", {
+    maxFeeZat: "10000",
+    beforeSubmit: async (receipt, signal) => {
+      assert.deepEqual(receipt, { txid: "ab".repeat(32) });
+      signal.throwIfAborted();
+      assert.equal(decode((await readSavedSnapshot())!).pending, true);
+      entered.resolve();
+      await journal.promise;
+    },
+  });
+  await entered.promise;
+  assert.equal(submissions, 0);
+  journal.resolve();
+  assert.equal((await sending).txid, "ab".repeat(32));
+  assert.equal(submissions, 1);
+  await forgetWasmWallet();
+});
+
+test("a failed transparent swap journal prevents broadcast and releases its reservation", async (t) => {
+  fixture(t, handle => {
+    handle.proveTransparentSend = () => (handle.proveSend as () => string)();
+    handle.estimateTransparentFee = () => JSON.stringify({ feeZat: 10000, feeZec: "0.0001" });
+  });
+  let submissions = 0;
+  const c = client(async () => 10, async () => { submissions++; return "ab".repeat(32); });
+  await c.restore("transparent-no-receipt", "regtest", 1);
+  await assert.rejects(c.sendTransparent("recipient", "0.1", {
+    beforeSubmit: async () => { throw new Error("application journal unavailable"); },
+  }), /application journal unavailable/);
+  assert.equal(submissions, 0);
+  assert.equal(decode((await readSavedSnapshot())!).pending, false);
+  await forgetWasmWallet();
+});
+
 for (const method of ["supportsTransparentSend", "estimateTransparentFee", "sendTransparent"] as const) {
   test(`${method} cannot adopt a replacement wallet during capability probing`, async (t) => {
     const gate = deferred<void>();

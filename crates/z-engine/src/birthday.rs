@@ -272,7 +272,7 @@ pub fn fmt_secs(secs: u32) -> String {
     }
 }
 
-/// Consensus spacing at a height. Mainnet NU7 remains unscheduled upstream.
+/// Consensus spacing at a height, using the engine's finalized network schedule.
 pub fn block_spacing_seconds(network: Network, height: u32) -> u32 {
     let active = |nu| {
         network
@@ -489,32 +489,34 @@ mod tests {
 
     #[test]
     fn nu7_spacing_and_boundary_estimates() {
-        let activation = 4_465_026;
-        assert_eq!(block_spacing_seconds(Network::Testnet, activation - 1), 75);
-        assert_eq!(block_spacing_seconds(Network::Testnet, activation), 25);
-        assert_eq!(block_spacing_seconds(Network::Mainnet, u32::MAX), 75);
-        assert_eq!(
-            seconds_between_heights(Network::Testnet, activation - 2, activation + 2),
-            150
-        );
-        assert_eq!(
-            height_before_seconds(Network::Testnet, activation + 2, 150),
-            activation - 2
-        );
-        assert_eq!(
-            height_before_seconds(Network::Testnet, activation + 2, 74),
-            activation
-        );
-        assert_eq!(
-            height_before_seconds(Network::Testnet, activation + 2, 75),
-            activation - 1
-        );
-        assert_eq!(
-            height_before_seconds(Network::Testnet, activation + 1_000, 15_000),
-            activation + 400
-        );
-        assert_eq!(height_before_seconds(Network::Testnet, 10, u64::MAX), 1);
-        assert_eq!(seconds_between_heights(Network::Testnet, 100, 90), 0);
+        for (network, activation) in [(Network::Testnet, 4_465_026), (Network::Mainnet, 3_543_405)]
+        {
+            assert_eq!(block_spacing_seconds(network, activation - 1), 75);
+            assert_eq!(block_spacing_seconds(network, activation), 25);
+            assert_eq!(block_spacing_seconds(network, u32::MAX), 25);
+            assert_eq!(
+                seconds_between_heights(network, activation - 2, activation + 2),
+                150
+            );
+            assert_eq!(
+                height_before_seconds(network, activation + 2, 150),
+                activation - 2
+            );
+            assert_eq!(
+                height_before_seconds(network, activation + 2, 74),
+                activation
+            );
+            assert_eq!(
+                height_before_seconds(network, activation + 2, 75),
+                activation - 1
+            );
+            assert_eq!(
+                height_before_seconds(network, activation + 1_000, 15_000),
+                activation + 400
+            );
+            assert_eq!(height_before_seconds(network, 10, u64::MAX), 1);
+            assert_eq!(seconds_between_heights(network, 100, 90), 0);
+        }
     }
 
     #[test]
