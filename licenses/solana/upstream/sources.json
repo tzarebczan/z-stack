@@ -1,0 +1,7 @@
+{
+  "tr46@0.0.3": {
+    "url": "https://raw.githubusercontent.com/jsdom/tr46/feff5a1db5fbae23242c15efa4e64f71c9750af0/LICENSE.md",
+    "sha256": "499d6d466d064e0460427967a344e2a32fcb86ea8c6cd1a285ec4f1fa03fba67",
+    "note": "Npm package declares MIT but omits a license file. Retained upstream MIT license names original author Sebastian Mayr."
+  }
+}

@@ -32,8 +32,16 @@ and [wallet libraries](https://github.com/zakura-core/wallet-libraries).
 ## NU7 consensus
 
 The pinned Common 2.2.0 schedule activates NU7 on testnet at **4,465,026**,
-with branch ID `0x77190ad9`. Mainnet NU7 is unscheduled in this release.
-The engine delegates branch selection and transaction formats to these crates.
+with branch ID `0x77190ad9`. Its Mainnet activation was still unscheduled.
+The application-owned `z_engine::Network` now supplies the finalized Mainnet
+activation at **3,543,405**, as specified in
+[ZIP 259](https://github.com/zcash/zips/blob/main/zips/zip-0259.md).
+The existing NU7 transaction and Orchard implementations remain in the pinned
+crates. No cryptographic implementation or dependency family changes.
+Remove this schedule override when upgrading the complete Common/wallet family
+to a release that includes the finalized schedule. Browser spending compares
+the Rust-selected branch with light-server metadata before proving and again
+before submission; mismatches stop without broadcasting.
 Do not replace protocol, address or transparent aliases with upstream crates:
 similarly named types from another release can carry a different schedule.
 

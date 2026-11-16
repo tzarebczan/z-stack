@@ -42,6 +42,13 @@ fn parse_network(network: &str) -> Result<Network, JsValue> {
     Network::parse(network).ok_or_else(|| js_err(format!("unknown network: {network}")))
 }
 
+/// The same branch selection used by transaction construction. No wallet access.
+#[wasm_bindgen(js_name = consensusBranchId)]
+pub fn consensus_branch_id(network: &str, height: u32) -> Result<String, JsValue> {
+    let network = parse_network(network)?;
+    Ok(format!("{:08x}", network.consensus_branch_id(height)))
+}
+
 /// 24-word English mnemonic (32 bytes entropy).
 #[wasm_bindgen(js_name = generateMnemonic)]
 pub fn generate_mnemonic() -> Result<String, JsValue> {

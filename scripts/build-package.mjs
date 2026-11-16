@@ -2,7 +2,7 @@
 // Build a package's dist/: JS + .d.ts from src/ with tsc. For the SDK, also
 // copy the WASM artifacts and point worker URLs at the emitted .js files.
 //
-//   node scripts/build-package.mjs <core|passkey|sdk|base|gift-cards>
+//   node scripts/build-package.mjs <core|passkey|sdk|base|gift-cards|solana|swaps>
 import { basePackageInputs } from "./base-package-inputs.mjs";
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -12,8 +12,8 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const name = process.argv[2];
-if (!["core", "passkey", "sdk", "base", "gift-cards"].includes(name ?? "")) {
-  console.error("usage: node scripts/build-package.mjs <core|passkey|sdk|base|gift-cards>");
+if (!["core", "passkey", "sdk", "base", "gift-cards", "solana", "swaps"].includes(name ?? "")) {
+  console.error("usage: node scripts/build-package.mjs <core|passkey|sdk|base|gift-cards|solana|swaps>");
   process.exit(2);
 }
 const pkg = join(root, "packages", name);
@@ -135,13 +135,13 @@ if (name === "sdk") {
     process.exit(1);
   }
 }
-if (name === "base") writeFileSync(join(dist, "build-inputs.json"), JSON.stringify({ sha256: basePackageInputs(pkg) }) + "\n");
+if (["base", "solana", "swaps"].includes(name)) writeFileSync(join(dist, "build-inputs.json"), JSON.stringify({ sha256: basePackageInputs(pkg) }) + "\n");
 
 // Base has its own runtime inventory; it ships no WASM or Rust dependencies.
 cpSync(join(root, "LICENSE"), join(pkg, "LICENSE"));
 for (const [target, source] of [["NOTICE", "NOTICE"], ["THIRD_PARTY_LICENSES.txt", "LICENSES.txt"],
   ["THIRD_PARTY_DEPENDENCIES.json", "dependencies.json"]]) {
-  const from = name === "base" ? join(root, "licenses/base", source) :
+  const from = ["base", "solana", "swaps"].includes(name) ? join(root, "licenses", name, source) :
     target === "THIRD_PARTY_DEPENDENCIES.json" ? join(root, "licenses/WASM-dependencies.json") : join(root, target);
   cpSync(from, join(pkg, target));
 }

@@ -179,7 +179,7 @@ export type EngineClient = {
   /** Explicit reviewed swap output. Bare network-correct P2PKH/P2SH only, shielded inputs.
    * No URI/memo/multipay; WASM software wallets only. Exposes recipient and amount. */
   /** Explicit public swap output from shielded notes. Optional maximum fee is an exact integer zatoshi string. */
-  sendTransparent: (to: string, amountZec: string, options?: { maxFeeZat?: string; beforeBroadcast?: () => boolean }) => Promise<SpendResult>;
+  sendTransparent: (to: string, amountZec: string, options?: Pick<SendOptions, "maxFeeZat" | "beforeBroadcast" | "beforeSubmit">) => Promise<SpendResult>;
   estimateTransparentFee: (to: string, amountZec: string) => Promise<FeeEstimate>;
   /** Runtime support only; spending still requires the matching seed and spendable notes. */
   supportsTransparentSend: () => Promise<boolean>;

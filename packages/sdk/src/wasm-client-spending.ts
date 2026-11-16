@@ -22,9 +22,10 @@ import { captureWalletOperation, type WalletOperation } from "./wallet-lifecycle
 import { abortable, walletStorageAvailable } from "./wallet-storage";
 import type { WasmClientContext } from './wasm-client-context';
 import * as runtime from './wasm-client-runtime';
+import { assertSpendingConsensus } from './spend-consensus';
 
 /** Software and hardware spend reservations, proving and broadcast. */
-export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOperation" | "currentSession" | "loadIfNeeded" | "session" | "snap" | "assertSource" | "disposing" | "refreshIfStale" | "transport" | "stateEpoch" | "savedKeySeen" | "persist" | "beginReservationDrain" | "adoptSaved" | "bus" | "unlockPolicy" | "spendingSeed" | "disposeWaits" | "storageGeneration" | "bindLocal" | "applyLoaded" | "copyLegacy" | "refreshMempool">) {
+export function createSpendingController(ctx: Pick<WasmClientContext, "network" | "sessionOperation" | "currentSession" | "loadIfNeeded" | "session" | "snap" | "assertSource" | "disposing" | "refreshIfStale" | "transport" | "stateEpoch" | "savedKeySeen" | "persist" | "beginReservationDrain" | "adoptSaved" | "bus" | "unlockPolicy" | "spendingSeed" | "disposeWaits" | "storageGeneration" | "bindLocal" | "applyLoaded" | "copyLegacy" | "refreshMempool">) {
 
   async function transparentSendSource(): Promise<{ source: ScanSession; operation: WalletOperation; supported: boolean } | null> {
     const operation = ctx.sessionOperation ?? captureWalletOperation();
@@ -76,6 +77,8 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       // The transaction expires 40 blocks past the scanned height. Far behind the
       // tip, the node would reject it as expired while its inputs stay reserved.
       const [scanned, tip] = await Promise.all([source.scannedHeight(), abortable(operation.signal, () => ctx.transport.tip(operation.signal))]);
+      ctx.assertSource(operation, source);
+      await assertSpendingConsensus(ctx.transport, ctx.network, scanned, runtime.requireBindings().consensusBranchId, operation.signal);
       ctx.assertSource(operation, source);
       if (tip - scanned > runtime.SPEND_MAX_LAG_BLOCKS) {
         throw new WalletError(
@@ -186,6 +189,8 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       }
       assertBroadcastAllowed();
       if (!sentTxid) throw new WalletError("unknown", "The engine did not return a transaction ID; nothing was broadcast.");
+      await assertSpendingConsensus(ctx.transport, ctx.network, await source.scannedHeight(), runtime.requireBindings().consensusBranchId, operation.signal);
+      ctx.assertSource(operation, source);
       const submissionContext = { txid: sentTxid };
       const reservationGeneration = runtime.runtimeState.persistGen;
       if (!sameLineage()) throw new WalletError("wallet_changed", "the wallet was saved by another tab");
@@ -382,6 +387,8 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       if (!ctx.transport.submit) throw new Error("this block transport cannot broadcast (use the loopback /lwd proxy)");
       const [scanned, tip] = await Promise.all([source.scannedHeight(), abortable(operation.signal, () => ctx.transport.tip(operation.signal))]);
       ctx.assertSource(operation, source);
+      await assertSpendingConsensus(ctx.transport, ctx.network, scanned, runtime.requireBindings().consensusBranchId, operation.signal);
+      ctx.assertSource(operation, source);
       if (tip - scanned > runtime.SPEND_MAX_LAG_BLOCKS) {
         throw new WalletError("sync_required", `wallet is ${tip - scanned} blocks behind the chain tip; sync before sending`);
       }
@@ -450,6 +457,8 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "sessionOp
       ctx.assertSource(operation, source);
       if (!done.hex) throw new Error("finalize returned no transaction");
       if (!finalizedTxid) throw new WalletError("unknown", "The engine did not return a transaction ID; nothing was broadcast.");
+      await assertSpendingConsensus(ctx.transport, ctx.network, await source.scannedHeight(), runtime.requireBindings().consensusBranchId, operation.signal);
+      ctx.assertSource(operation, source);
       const submissionContext = { txid: finalizedTxid };
       if (ctx.stateEpoch !== stateAtHardware) {
         throw new WalletError("wallet_changed", "the wallet was saved by another tab");

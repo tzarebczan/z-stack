@@ -27,6 +27,8 @@ export const SDK_TRANSPORT_CAPABILITIES = Object.freeze({
   transparentPirV12: true,
   submitContext: true,
   pendingSubmissionRetry: true,
+  /** Transparent outputs await the same durable application receipt as shielded sends. */
+  transparentSendBeforeSubmit: true,
 });
 
 export type TransparentUtxo = {

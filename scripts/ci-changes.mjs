@@ -8,7 +8,7 @@ const executableGuides = new Set(["docs/SDK.md", "docs/SERVICES.md", "docs/GIFT-
 export function docsOnly(paths) {
   return paths.length > 0 && paths.every(path => !executableGuides.has(path) && (entrypoints.has(path)
     || (/^docs\/.+\.md$/.test(path) && !path.startsWith("docs/api/"))
-    || /^packages\/(sdk|core|passkey|base|gift-cards)\/README\.md$/.test(path)
+    || /^packages\/(sdk|core|passkey|base|gift-cards|solana|swaps)\/README\.md$/.test(path)
     || /^examples\/[^/]+\/(README|HOW-IT-WORKS)\.md$/.test(path)));
 }
 

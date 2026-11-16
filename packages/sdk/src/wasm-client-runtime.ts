@@ -236,6 +236,7 @@ export type WasmWalletHandle = {
 
 export type Bindings = {
   generateMnemonic: () => string;
+  consensusBranchId?: (network: string, height: number) => string;
   accountFromMnemonic?: (mnemonic: string, network: string, accountIndex: number) => { free?: () => void };
   checkViewingKey?: (network: string, ufvk: string) => void;
   inspectAddress?: (encoded: string) => InspectedAddress;

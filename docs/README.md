@@ -17,6 +17,7 @@ the SDK checkout. The [support matrix](SUPPORT.md) lists tested paths and limits
 - [Storage](STORAGE.md): transactional persistence and wallet ownership.
 - [Accounts and backups](SERVICES.md): optional services supplied by your app.
 - [Passkey vaults](../packages/passkey/README.md): PRF and encrypted records.
+- [Device approval](DEVICE-APPROVAL.md): optional encrypted QR transfer and app authentication boundaries.
 - [Base wallet](BASE-WALLET.md) and [swaps](SWAPS.md): optional integrations.
 - [Gift cards](GIFT-CARDS.md): optional bearer links, isolated wallets and encrypted recovery.
 - [Security and privacy](SECURITY.md): keys, metadata, locking and broadcasts.

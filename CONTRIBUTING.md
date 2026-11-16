@@ -100,6 +100,8 @@ unexpected skips.
 
 - Cryptography, signature checks, and transaction construction belong in Rust.
 - TypeScript owns transport, worker orchestration, storage, events, and UI helpers.
+- Optional Base and Solana packages use maintained chain libraries for their
+  chain-specific construction/signing. Zcash cryptography stays in Rust.
 - `@z-stack/passkey` owns WebAuthn/PRF and remains free of runtime dependencies.
 - Root SDK exports are the integration surface. Put diagnostics in `/lab`.
 - Keep the native wallet bridge bound to loopback. Do not expose it through a proxy.
