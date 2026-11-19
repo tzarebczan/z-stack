@@ -29,6 +29,8 @@ export type BlockPrefetchOpts = {
   prefetch: number;
   /** Total reserved ranges (in flight + buffered). Default 2× prefetch. */
   buffer?: number;
+  /** Aggregate byte reservation. Defaults to the 256 MiB transport cap. */
+  maxReservedBytes?: number;
   fetch: (start: number, end: number, signal: AbortSignal) => Promise<Uint8Array>;
   signal?: AbortSignal;
   cancelled?: () => boolean;
@@ -42,6 +44,10 @@ export function createBlockPrefetch(opts: BlockPrefetchOpts): BlockPrefetch {
   }
   const prefetch = Math.max(1, Math.floor(opts.prefetch));
   const buffer = Math.max(prefetch, Math.floor(opts.buffer ?? prefetch * 2));
+  const maxReservedBytes = opts.maxReservedBytes ?? COMPACT_PREFETCH_MAX_BYTES;
+  if (!Number.isSafeInteger(maxReservedBytes) || maxReservedBytes < COMPACT_RANGE_WORKING_BYTES) {
+    throw new Error(`invalid prefetch maxReservedBytes: ${opts.maxReservedBytes}`);
+  }
   const cancelled = opts.cancelled ?? (() => false);
   let nextFetch = opts.start;
   let nextApply = opts.start;
@@ -95,7 +101,7 @@ export function createBlockPrefetch(opts: BlockPrefetchOpts): BlockPrefetch {
     if (cancelled() || opts.signal?.aborted) dispose();
     if (!live || failed) return;
     while (inFlight < prefetch && ready.size + inFlight < buffer && nextFetch <= opts.tip &&
-        reservedBytes() + COMPACT_RANGE_WORKING_BYTES <= COMPACT_PREFETCH_MAX_BYTES) {
+        reservedBytes() + COMPACT_RANGE_WORKING_BYTES <= maxReservedBytes) {
       const start = nextFetch;
       const end = Math.min(opts.tip, start + opts.batch - 1);
       nextFetch = end + 1;

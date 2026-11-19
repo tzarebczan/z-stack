@@ -23,6 +23,7 @@ import {
 import { createLightServerRecovery, LightServerUnavailableError, type LightServerRecovery } from "./light-server-recovery";
 import { assertCompactBlockHeight, isTransientLightServerError } from "./lwd";
 import { createBlockPrefetch } from "./prefetch";
+import { COMPACT_PREFETCH_PRIVATE_CLOUD_MAX_BYTES } from "./transport-bounds";
 import { supportsTransparentCompact, syncPublicData } from "./public-data";
 import {
   isTreeConflictError,
@@ -333,9 +334,11 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       }
     }
     const tuned = syncTuning(ctx.localLight, ctx.syncOpts);
-    // Private Cloud can send two 500-block reads for each batch. Allow up to
-    // eight batches while the prefetch byte budget limits memory in flight.
-    const shieldedPrefetch = ctx.transport.kind === "private-cloud"
+    // Private Cloud sends two 500-block posts for each batch. Eight batches
+    // fill the gateway's 16 block permits when the reservation cap allows
+    // every batch to stay in flight together.
+    const privateCloud = ctx.transport.kind === "private-cloud";
+    const shieldedPrefetch = privateCloud
       ? 8
       : ctx.grpcWeb
         ? grpcWebPrefetch(scanWorkerRuntime()?.threads, runtime.radioConstrained())
@@ -507,6 +510,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         batch,
         prefetch,
         buffer: prefetchBuffer(prefetch),
+        maxReservedBytes: privateCloud && prefetch === 8 ? COMPACT_PREFETCH_PRIVATE_CLOUD_MAX_BYTES : undefined,
         fetch: (h, end, signal) => {
           if (combinedTransparent) {
             assertCombinedTransparentCurrent();

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { WalletError } from "@z-stack/core";
 import { createBlockPrefetch } from "../src/prefetch.ts";
+import { COMPACT_PREFETCH_PRIVATE_CLOUD_MAX_BYTES, COMPACT_RANGE_WORKING_BYTES } from "../src/transport-bounds.ts";
 import { createLightServerRecovery, LightServerUnavailableError } from "../src/light-server-recovery.ts";
 import { isTransientLightServerError, TransientLightServerError } from "../src/lwd.ts";
 import { setImmediate as turn } from "node:timers/promises";
@@ -469,6 +470,31 @@ test("prefetch 8 starts four HTTP ranges within the working byte budget before a
   p.dispose();
   assert.equal(max, 4, `expected four reserved in-flight GETs, max ${max}, started ${started.join(",")}`);
   assert.equal(started.length, 4);
+});
+
+test("private cloud reservation starts eight ranges before any apply", async () => {
+  assert.equal(COMPACT_PREFETCH_PRIVATE_CLOUD_MAX_BYTES, 8 * COMPACT_RANGE_WORKING_BYTES);
+  let inFlight = 0;
+  let max = 0;
+  const started: number[] = [];
+  const prefetch = createBlockPrefetch({
+    start: 1,
+    tip: 16_000,
+    batch: 1_000,
+    prefetch: 8,
+    buffer: 16,
+    maxReservedBytes: COMPACT_PREFETCH_PRIVATE_CLOUD_MAX_BYTES,
+    fetch: (start) => {
+      started.push(start);
+      inFlight += 1;
+      max = Math.max(max, inFlight);
+      return new Promise(() => {});
+    },
+  });
+  await delay(20);
+  prefetch.dispose();
+  assert.equal(max, 8, `expected eight reserved in-flight ranges, max ${max}`);
+  assert.deepEqual(started, [1, 1001, 2001, 3001, 4001, 5001, 6001, 7001]);
 });
 
 test("consumeDelimitedStream pages a chunked body", async () => {
