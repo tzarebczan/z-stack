@@ -106,3 +106,23 @@ a second read. Missing or changed headers, pruned history, an inclusion or a
 window that does not reach the bound remains unknown. The selected RPC is a trust
 boundary; this observation is not a cryptographic light-client proof. A missing
 transaction or elapsed deadline alone never proves non-inclusion.
+
+## Solana Privacy Ring assets and receipts
+
+Use `getSolanaRingAssetSupport` to check whether the finalized mainnet Ring has
+the registry and vault for a token. Registration alone does not establish
+swap support.
+
+Use `verifySolanaRingDeposit` to verify a finalized, proofless deposit of one SPL
+token into the default Solana mainnet Ring. Supply the signature from the
+reviewed provider execution, its expected Solana depositor, the recipient's
+public address and owner hash resolved from the Ring registry, the token and
+the minimum amount in atomic units. Supply a trusted RPC that returns the
+`result` values for `getGenesisHash` and raw JSON `getTransaction`, with
+transaction version 1 enabled.
+
+A finalized receipt confirms the deposit into the Ring. The recipient syncs
+its private balance separately. The deposit exposes the depositor, recipient,
+token and amount. The default Ring encrypts asset and amount for later Ring
+transfers, while wallet addresses remain visible.
+[Helius deposit guide](https://www.helius.dev/docs/privacy/guides/deposit)

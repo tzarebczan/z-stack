@@ -32,13 +32,16 @@ try {
   for (const name of ['sdk', 'core', 'passkey']) assert.ok(!existsSync(join(app, 'node_modules/@z-stack', name)), `${name} must stay optional`);
   writeFileSync(join(app, 'consumer.mjs'), `
     import assert from 'node:assert/strict';
-    import {deriveSolanaAddress,SOLANA_CYPH,PreparedSolanaSwapSchema,createSolanaRpcClient} from '@z-stack/solana';
-    import {createTwoLegController,createMemoryTwoLegRouteStore,TwoLegRouteSchema} from '@z-stack/swaps';
+    import {deriveSolanaAddress,SOLANA_CYPH,PreparedSolanaSwapSchema,createSolanaRpcClient,getSolanaRingAssetSupport,verifySolanaRingDeposit} from '@z-stack/solana';
+    import {createTwoLegController,createMemoryTwoLegRouteStore,TwoLegRouteSchema,getAuroraRingAssetSupport} from '@z-stack/swaps';
     assert.equal(deriveSolanaAddress('abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'),'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk');
     assert.equal(SOLANA_CYPH.decimals,6); assert.equal(typeof createSolanaRpcClient,'function');
     assert.equal(PreparedSolanaSwapSchema.safeParse({}).success,false);
     assert.equal(typeof createTwoLegController,'function'); assert.equal(typeof createMemoryTwoLegRouteStore,'function');
     assert.equal(TwoLegRouteSchema.safeParse({}).success,false);
+    assert.equal(typeof getSolanaRingAssetSupport,'function');
+    assert.equal(typeof verifySolanaRingDeposit,'function');
+    assert.equal(typeof getAuroraRingAssetSupport,'function');
   `);
   run(process.execPath, ['consumer.mjs'], app);
   writeFileSync(join(app, 'browser.mjs'), `import {deriveSolanaAddress} from '@z-stack/solana';import {createMemoryTwoLegRouteStore} from '@z-stack/swaps';globalThis.solanaConsumer={deriveSolanaAddress,createMemoryTwoLegRouteStore};`);
