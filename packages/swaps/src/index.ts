@@ -240,3 +240,5 @@ export function createTwoLegController(options: { owner: RouteOwner; store: TwoL
   });
 }
 export type TwoLegController = ReturnType<typeof createTwoLegController>;
+
+export { getAuroraRingAssetSupport } from './aurora-ring';

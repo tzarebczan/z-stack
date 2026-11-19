@@ -57,3 +57,13 @@ review; review, execute and submit/retry boundaries also enforce the limit.
 Intermediate funds remain in the wallet when the limit is reached. Finalized
 history is never truncated, and one legacy in-flight overflow can still record
 its final receipt.
+
+## Aurora Intents Connect catalog
+
+`getAuroraRingAssetSupport` checks the live bridge-in catalog for native Zcash
+and canonical USDC on Solana. Wrapped ZEC on NEAR or Solana cannot meet the
+native source requirement. When both assets are listed, qualify a quote that
+binds the Ring deposit instruction and the expected recipient, token, minimum
+and refund before committing a payment. Use `verifySolanaRingDeposit` from
+`@z-stack/solana` to check its finalized deposit receipt.
+[Aurora's Ring demo](https://github.com/aurora-is-near/intents-rings-demo)
