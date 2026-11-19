@@ -423,6 +423,39 @@ test("a sync event cancelling progress prevents its subsequent balance event", a
   assert.deepEqual(emitted, ["progress", "sync"]);
 });
 
+test("Private Cloud keeps fetching through a slow scan within the bounded queue", { timeout: 5000 }, async t => {
+  fixture(t);
+  const scanner = new CrashScanFixture();
+  await attachScanWorker(scanner as unknown as Worker, { threads: 1, preferMulticore: false });
+  const requests: Array<[number, number]> = [];
+  const c = client({
+    kind: "private-cloud",
+    label: "Private Cloud",
+    maxBlocksPerRequest: 1000,
+    tip: async () => 30_010,
+    blocks: async (start, end) => {
+      requests.push([start, end]);
+      return new Uint8Array([1]);
+    },
+  });
+  await c.restore("private-cloud-prefetch", "regtest", 1);
+  scanner.hold = "applyBlob";
+  const syncing = c.sync();
+  const rejected = assert.rejects(syncing, /cancelled|aborted|AbortError/i);
+  try {
+    for (let i = 0; i < 10 && requests.length < 12; i++) await turn();
+    assert.ok(scanner.held, "the sequential scan is still applying its first block range");
+    assert.deepEqual(requests.slice(0, 12), Array.from({ length: 12 }, (_, i) =>
+      [11 + 1000 * i, 1010 + 1000 * i],
+    ));
+    assert.ok(requests.length <= 17, "the sixteen-range queue and one yielded range bound work");
+  } finally {
+    cancelWasmSync();
+    if (scanner.held) scanner.release();
+    await rejected;
+  }
+});
+
 test("post-scan mempool cancellation rejects promptly and discards a late provider result", async t => {
   const { db } = fixture(t);
   const scanner = new ScanFixture();

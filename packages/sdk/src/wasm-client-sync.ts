@@ -333,11 +333,15 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       }
     }
     const tuned = syncTuning(ctx.localLight, ctx.syncOpts);
-    const shieldedPrefetch = ctx.grpcWeb
-      ? grpcWebPrefetch(scanWorkerRuntime()?.threads, runtime.radioConstrained())
-      : ctx.lwdPipe
-        ? pipePrefetch(runtime.radioConstrained())
-        : tuned.prefetch;
+    // Private Cloud can send two 500-block reads for each batch. Allow up to
+    // eight batches while the prefetch byte budget limits memory in flight.
+    const shieldedPrefetch = ctx.transport.kind === "private-cloud"
+      ? 8
+      : ctx.grpcWeb
+        ? grpcWebPrefetch(scanWorkerRuntime()?.threads, runtime.radioConstrained())
+        : ctx.lwdPipe
+          ? pipePrefetch(runtime.radioConstrained())
+          : tuned.prefetch;
     // Dense all-pool ranges can exceed 14 MB per 1k blocks. Sixteen requests
     // queue behind browser sockets/Zaino and exhaust their response deadlines.
     // Bound both range size and concurrency, keeping the same checkpoint span.
