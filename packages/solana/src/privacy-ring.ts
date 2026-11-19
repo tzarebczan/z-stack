@@ -39,8 +39,46 @@ export type SolanaRingRead = (
       commitment: 'finalized';
       encoding: 'json';
       maxSupportedTransactionVersion: 1;
+    }] }
+    | { method: 'getMultipleAccounts'; params: [[string, string], {
+      commitment: 'finalized';
+      encoding: 'base64';
+      dataSlice: { offset: 0; length: 0 };
     }] },
 ) => Promise<unknown>;
+
+function ringAssetVault(mint: PublicKey) {
+  return PublicKey.findProgramAddressSync([encoder.encode('spl_asset_vault'), mint.toBytes()], program);
+}
+
+async function requireMainnet(read: SolanaRingRead) {
+  const genesis = await read({ method: 'getGenesisHash', params: [] });
+  if (genesis !== MAINNET_GENESIS) throw new Error('Ring queries require Solana mainnet.');
+}
+
+const accountOwnerSchema = z.object({ owner: SolanaAddressSchema, executable: z.literal(false) }).nullable();
+const assetAccountsSchema = z.object({ value: z.tuple([accountOwnerSchema, accountOwnerSchema]) });
+
+/** Read the default Ring's finalized SPL registration and vault. This checks token setup only. */
+export async function getSolanaRingAssetSupport(read: SolanaRingRead, expected: z.input<typeof SolanaTokenSchema>) {
+  const token = SolanaTokenSchema.parse(expected);
+  const mint = new PublicKey(token.mint);
+  const [registry] = PublicKey.findProgramAddressSync([encoder.encode('spl_asset_registry'), mint.toBytes()], program);
+  const [vault] = ringAssetVault(mint);
+
+  await requireMainnet(read);
+  const raw = await read({
+    method: 'getMultipleAccounts',
+    params: [[registry.toBase58(), vault.toBase58()], {
+      commitment: 'finalized', encoding: 'base64', dataSlice: { offset: 0, length: 0 },
+    }],
+  });
+  const { value: [registryAccount, vaultAccount] } = assetAccountsSchema.parse(raw);
+  if (registryAccount?.owner !== SOLANA_PRIVACY_RING_PROGRAM || vaultAccount?.owner !== token.program) {
+    return { kind: 'unavailable' as const };
+  }
+  return { kind: 'registered' as const };
+}
 
 export interface SolanaRingDepositExpectation {
   /** Destination signature independently bound to the reviewed provider execution. */
@@ -69,8 +107,7 @@ export async function verifySolanaRingDeposit(read: SolanaRingRead, expected: So
   const minimum = BigInt(AtomicAmountSchema.parse(expected.minimumAmount));
   if (minimum === 0n) throw new Error('Ring deposit minimum must be positive.');
 
-  const genesis = await read({ method: 'getGenesisHash', params: [] });
-  if (genesis !== MAINNET_GENESIS) throw new Error('Ring deposit requires Solana mainnet.');
+  await requireMainnet(read);
 
   const raw = await read({
     method: 'getTransaction',
@@ -85,10 +122,8 @@ export async function verifySolanaRingDeposit(read: SolanaRingRead, expected: So
   const { accountKeys, instructions } = receipt.transaction.message;
   const loaded = receipt.meta.loadedAddresses;
   const keys = [...accountKeys, ...(loaded?.writable ?? []), ...(loaded?.readonly ?? [])];
-  const [vault, bump] = PublicKey.findProgramAddressSync(
-    [encoder.encode('spl_asset_vault'), new PublicKey(token.mint).toBytes()],
-    program,
-  );
+  const [vault, bump] = ringAssetVault(new PublicKey(token.mint));
+  const vaultAddress = vault.toBase58();
 
   let amount: bigint | undefined;
   for (const { programIdIndex, accounts, data } of instructions) {
@@ -96,7 +131,7 @@ export async function verifySolanaRingDeposit(read: SolanaRingRead, expected: So
     const [tree, signer, pool, tokenProgram, mint, source, tokenVault] = accounts.map(index => keys[index]);
     if (tree !== defaultTree.toBase58() || signer !== depositor || pool !== SOLANA_PRIVACY_RING_PROGRAM
       || tokenProgram !== token.program || mint !== token.mint || source === undefined
-      || source === vault.toBase58() || tokenVault !== vault.toBase58()) continue;
+      || source === vaultAddress || tokenVault !== vaultAddress) continue;
 
     // The proofless single-SPL format has one asset, one output and no memo.
     // Protocol layout: @heliuslabs/spr 0.9.0-alpha, encodeDepositInstructionData.

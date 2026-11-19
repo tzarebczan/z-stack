@@ -107,7 +107,11 @@ window that does not reach the bound remains unknown. The selected RPC is a trus
 boundary; this observation is not a cryptographic light-client proof. A missing
 transaction or elapsed deadline alone never proves non-inclusion.
 
-## Solana Privacy Ring receipts
+## Solana Privacy Ring assets and receipts
+
+Use `getSolanaRingAssetSupport` to check whether the finalized mainnet Ring has
+the registry and vault for a token. Registration alone does not establish
+swap support.
 
 Use `verifySolanaRingDeposit` to verify a finalized, proofless deposit of one SPL
 token into the default Solana mainnet Ring. Supply the signature from the

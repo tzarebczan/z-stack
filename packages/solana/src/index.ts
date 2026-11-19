@@ -9,5 +9,5 @@ export type { JupiterIntent, PreparedSolanaSwap } from './jupiter';
 export { proveSolanaNotIncluded } from './settlement';
 export type { SolanaNonInclusionProof } from './settlement';
 
-export { SOLANA_PRIVACY_RING_PROGRAM, verifySolanaRingDeposit } from './privacy-ring';
+export { SOLANA_PRIVACY_RING_PROGRAM, getSolanaRingAssetSupport, verifySolanaRingDeposit } from './privacy-ring';
 export type { SolanaRingDepositExpectation, SolanaRingRead } from './privacy-ring';

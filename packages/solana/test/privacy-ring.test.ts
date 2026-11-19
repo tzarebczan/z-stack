@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import bs58 from 'bs58';
-import { SOLANA_PRIVACY_RING_PROGRAM, SOLANA_USDC, verifySolanaRingDeposit } from '../src/index';
+import { getSolanaRingAssetSupport, SOLANA_PRIVACY_RING_PROGRAM, SOLANA_USDC, verifySolanaRingDeposit } from '../src/index';
 import type { SolanaRingRead } from '../src/index';
 
 const genesis = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
@@ -16,7 +16,7 @@ const expected = {
 const tree = '777pvSGe5LaBd9nCczvE2FXEauiwtfGJ5XRpjKyniGor';
 const vault = 'H4RD4XSWp8TLmrNYCLmV74a5ixude5s9gGqpCFjXkBLQ';
 
-function receipt() {
+function receipt(err: unknown = null) {
   const data = Buffer.concat([
     Buffer.from([15, 1, 1, 250, 1, 0]),
     bs58.decode(expected.recipient),
@@ -34,7 +34,7 @@ function receipt() {
         instructions: [{ programIdIndex: 1, accounts: [2, 0, 1, 3, 4, 5, 6], data: bs58.encode(data) }],
       },
     },
-    meta: { err: null as unknown, loadedAddresses: { writable: [vault], readonly: [] } },
+    meta: { err, loadedAddresses: { writable: [vault], readonly: [] } },
   };
 }
 
@@ -57,7 +57,7 @@ test('checks finality on mainnet and resolves version 1 lookup accounts to verif
 
 test('an unknown receipt stays pending and a different chain fails closed', async () => {
   assert.deepEqual(await verifySolanaRingDeposit(readResult(null), expected), { kind: 'pending' });
-  await assert.rejects(verifySolanaRingDeposit(async () => 'other chain', expected), /requires Solana mainnet/);
+  await assert.rejects(verifySolanaRingDeposit(async () => 'other chain', expected), /require Solana mainnet/);
 });
 
 test('rejects a public payout and a finalized deposit with mismatched signing, assets or recipient', async () => {
@@ -79,8 +79,7 @@ test('rejects a public payout and a finalized deposit with mismatched signing, a
 });
 
 test('rejects failed, wrong-signature and ambiguous receipts', async () => {
-  const failed = receipt();
-  failed.meta.err = { InstructionError: [0, 'InvalidInstructionData'] };
+  const failed = receipt({ InstructionError: [0, 'InvalidInstructionData'] });
   await assert.rejects(verifySolanaRingDeposit(readResult(failed), expected), /Successful finalized/);
 
   const wrongSignature = receipt();
@@ -90,4 +89,23 @@ test('rejects failed, wrong-signature and ambiguous receipts', async () => {
   const duplicate = receipt();
   duplicate.transaction.message.instructions.push(...duplicate.transaction.message.instructions);
   await assert.rejects(verifySolanaRingDeposit(readResult(duplicate), expected), /ambiguous/);
+});
+
+test('checks finalized mint registration and the canonical token vault for Ring asset readiness', async () => {
+  const registryAccount = { owner: SOLANA_PRIVACY_RING_PROGRAM, executable: false };
+  const vaultAccount = { owner: SOLANA_USDC.program, executable: false };
+  const result = await getSolanaRingAssetSupport(request => {
+    if (request.method === 'getGenesisHash') return Promise.resolve(genesis);
+    assert.deepEqual(request, {
+      method: 'getMultipleAccounts',
+      params: [['J85i28ZES8pHqDa21YsmLSbUh2FR56c9WW5GCfQXUeHB', vault], {
+        encoding: 'base64', commitment: 'finalized', dataSlice: { offset: 0, length: 0 },
+      }],
+    });
+    return Promise.resolve({ value: [registryAccount, vaultAccount] });
+  }, SOLANA_USDC);
+  assert.deepEqual(result, { kind: 'registered' });
+  for (const accounts of [[null, vaultAccount], [registryAccount, null], [registryAccount, registryAccount]]) {
+    assert.deepEqual(await getSolanaRingAssetSupport(readResult({ value: accounts }), SOLANA_USDC), { kind: 'unavailable' });
+  }
 });
