@@ -614,7 +614,7 @@ fn read(conn: &rusqlite::Connection, id: &str) -> Result<PaymentReceipt> {
         row.0.as_str(),
         "prepared" | "signed" | "unknown" | "accepted" | "mined"
     ) || (row.0 == "prepared") != txids.is_empty()
-        || txids.len() > 1
+        || txids.len() > 2
         || txids
             .iter()
             .any(|id| id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -788,6 +788,247 @@ impl NativeWallet {
         self.payment_receipt(&id)
     }
 
+    /// Prepare a reviewed two-step ZIP-320 TEX payment for an enrolled wallet source.
+    pub fn prepare_tex_payment_with_source(
+        &self,
+        source: &super::super::NativeWalletSource,
+        to: &str,
+        amount: u64,
+    ) -> Result<PaymentReceipt> {
+        self.prepare_tex_payment_with_access(Some(source), to, amount)
+    }
+
+    /// Prepare a reviewed two-step ZIP-320 TEX payment (direct server).
+    pub fn prepare_tex_payment(&self, to: &str, amount: u64) -> Result<PaymentReceipt> {
+        self.prepare_tex_payment_with_access(None, to, amount)
+    }
+
+    fn prepare_tex_payment_with_access(
+        &self,
+        source: Option<&super::super::NativeWalletSource>,
+        to: &str,
+        amount: u64,
+    ) -> Result<PaymentReceipt> {
+        let _source_lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_payment_source(source)?;
+        let parsed = crate::keys::parse_address(to)?;
+        if parsed.kind != crate::keys::AddressKind::Tex {
+            return Err(failed("payment_tex_address_required"));
+        }
+        if amount == 0 {
+            return Err(failed("payment_amount_zero"));
+        }
+        self.ensure_recovery_selection_ready()?;
+        let recovery_generation = self.recovery_generation()?;
+        let address = ZcashAddress::try_from_encoded(to.trim())
+            .map_err(|e| EngineError::Message(format!("invalid address: {e}")))?;
+        let value = Zatoshis::from_u64(amount).map_err(|_| EngineError::InsufficientFunds)?;
+        let request = TransactionRequest::new(vec![Payment::without_memo(address, value)])
+            .map_err(|e| EngineError::Message(format!("ZIP-321: {e}")))?;
+        let mut db = self.open_db()?;
+        let height = db
+            .chain_height()
+            .map_err(|_| failed("payment_storage_failed"))?
+            .ok_or(EngineError::SyncRequired)?;
+        let hash = db
+            .get_block_hash(height)
+            .map_err(|_| failed("payment_storage_failed"))?
+            .ok_or(EngineError::SyncRequired)?;
+        let account = Self::primary_account_id(&db)?;
+        let proposal = propose_transfer::<_, _, _, _, Infallible>(
+            &mut db,
+            &self.network,
+            account,
+            &GreedyInputSelector::new(),
+            &SingleOutputChangeStrategy::new(
+                StandardFeeRule::Zip317,
+                None,
+                ShieldedPool::Orchard,
+                DustOutputPolicy::default(),
+            ),
+            request,
+            crate::confirmations_policy(self.network),
+            &shielded_spend_policy(),
+            None,
+            None,
+        )
+        .map_err(|e| map_funds_err(format!("propose_transfer: {e}")))?;
+        if proposal.steps().is_empty() || proposal.steps().len() > 2 {
+            return Err(failed("payment_tex_steps_invalid"));
+        }
+        let fee = crate::proposal_fee_zat(&proposal);
+        let bytes = ProposalProto::from_standard_proposal(&proposal).encode_to_vec();
+        if bytes.len() > 1024 * 1024 {
+            return Err(failed("payment_proposal_limit"));
+        }
+        let mut nonce = [0u8; 32];
+        SysRng
+            .try_fill_bytes(&mut nonce)
+            .map_err(|_| failed("payment_random_failed"))?;
+        let id = nonce.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let now = clock()?;
+        drop(db);
+        let conn = connection(self)?;
+        let mut db = WalletDb::from_connection(conn, self.network, SystemClock, new_rng());
+        db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<()> {
+            super::recovery_guard::transaction_recovery_ready(wdb, ext)?;
+            #[cfg(feature = "transparent-pir")]
+            super::transparent_pir_funding::check_proposal(ext, &proposal)?;
+            let marker: bool = ext.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",
+                [],
+                |r| r.get(0),
+            )?;
+            let generation = if marker {
+                Some(ext.query_row(
+                    "SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                    [],
+                    |r| r.get::<_, u64>(0),
+                )?)
+            } else {
+                None
+            };
+            if generation != recovery_generation
+                || wdb.chain_height()? != Some(height)
+                || wdb.get_block_hash(height)?.is_none_or(|h| h != hash)
+            {
+                anyhow::bail!("payment_review_expired");
+            }
+            ext.execute(
+                "DELETE FROM ext_native_payments_v1 WHERE phase='prepared' AND expires < ?1",
+                [now.saturating_sub(86400)],
+            )?;
+            let count: u64 = ext.query_row("SELECT COUNT(*) FROM ext_native_payments_v1", [], |r| r.get(0))?;
+            if count >= 10000 {
+                anyhow::bail!("payment_storage_limit");
+            }
+            ext.execute(
+                "INSERT INTO ext_native_payments_v1 (id,proposal,fee,created,expires,height,block_hash,phase,txids,recovery_generation) VALUES (?1,?2,?3,?4,?5,?6,?7,'prepared','[]',?8)",
+                params![id, bytes, fee, now, now + 120, u32::from(height), hash.0.to_vec(), generation.unwrap_or(0)],
+            )?;
+            Ok(())
+        })
+        .map_err(EngineError::from)?;
+        self.payment_receipt(&id)
+    }
+
+    /// Prepare a reviewed shielding proposal (transparent -> shielded) for an enrolled
+    /// wallet source so Desktop and native apps route shielding through the durable
+    /// review -> sign -> submit journal instead of one-shot sign-and-broadcast.
+    /// Returns `(receipt, shielded_amount_zat)` where `shielded_amount_zat` is the exact
+    /// net value selected by the proposal after fees.
+    #[cfg(feature = "transparent-inputs")]
+    pub fn prepare_shield_payment_with_source(
+        &self,
+        source: &super::super::NativeWalletSource,
+        threshold_zat: u64,
+    ) -> Result<(PaymentReceipt, u64)> {
+        self.prepare_shield_payment_with_access(Some(source), threshold_zat)
+    }
+
+    /// Prepare a reviewed shielding proposal (transparent -> shielded) for a direct server.
+    #[cfg(feature = "transparent-inputs")]
+    pub fn prepare_shield_payment(&self, threshold_zat: u64) -> Result<(PaymentReceipt, u64)> {
+        self.prepare_shield_payment_with_access(None, threshold_zat)
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn prepare_shield_payment_with_access(
+        &self,
+        source: Option<&super::super::NativeWalletSource>,
+        threshold_zat: u64,
+    ) -> Result<(PaymentReceipt, u64)> {
+        let _source_lease = database_lease::shared(&self.paths.data_db)?;
+        self.require_payment_source(source)?;
+        self.ensure_recovery_selection_ready()?;
+        let recovery_generation = self.recovery_generation()?;
+        let threshold = Zatoshis::from_u64(threshold_zat.max(1))
+            .map_err(|_| failed("payment_bad_threshold"))?;
+        let mut db = self.open_db()?;
+        let height = db
+            .chain_height()
+            .map_err(|_| failed("payment_storage_failed"))?
+            .ok_or(EngineError::SyncRequired)?;
+        let hash = db
+            .get_block_hash(height)
+            .map_err(|_| failed("payment_storage_failed"))?
+            .ok_or(EngineError::SyncRequired)?;
+        let account = Self::primary_account_id(&db)?;
+        let from_addrs = Self::all_shieldable_transparent_receivers(&db, account)?;
+        if from_addrs.is_empty() {
+            return Err(EngineError::Message("no transparent receivers".into()));
+        }
+        let proposal = db
+            .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
+                Ok(self.propose_shielding_in_snapshot(wdb, ext, &from_addrs, account, threshold)?)
+            })
+            .map_err(proposal_transaction_error)?;
+        if proposal.steps().len() != 1 {
+            return Err(failed("payment_single_step_required"));
+        }
+        let fee = crate::proposal_fee_zat(&proposal);
+        let total_transparent_in: u64 = proposal
+            .steps()
+            .iter()
+            .flat_map(|s| s.transparent_inputs())
+            .map(|o| u64::from(o.txout().value()))
+            .sum();
+        let shield_amount_zat = total_transparent_in.saturating_sub(fee);
+        let bytes = ProposalProto::from_standard_proposal(&proposal).encode_to_vec();
+        if bytes.len() > 1024 * 1024 {
+            return Err(failed("payment_proposal_limit"));
+        }
+        let mut nonce = [0u8; 32];
+        SysRng
+            .try_fill_bytes(&mut nonce)
+            .map_err(|_| failed("payment_random_failed"))?;
+        let id = nonce.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let now = clock()?;
+        drop(db);
+        let conn = connection(self)?;
+        let mut db = WalletDb::from_connection(conn, self.network, SystemClock, new_rng());
+        db.transactionally_with_extension(|wdb, ext| -> anyhow::Result<()> {
+            super::recovery_guard::transaction_recovery_ready(wdb, ext)?;
+            #[cfg(feature = "transparent-pir")]
+            super::transparent_pir_funding::check_proposal(ext, &proposal)?;
+            let marker: bool = ext.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_coffer_pir_recovery_v1')",
+                [],
+                |r| r.get(0),
+            )?;
+            let generation = if marker {
+                Some(ext.query_row(
+                    "SELECT generation FROM ext_coffer_pir_recovery_v1 WHERE id=1",
+                    [],
+                    |r| r.get::<_, u64>(0),
+                )?)
+            } else {
+                None
+            };
+            if generation != recovery_generation
+                || wdb.chain_height()? != Some(height)
+                || wdb.get_block_hash(height)?.is_none_or(|h| h != hash)
+            {
+                anyhow::bail!("payment_review_expired");
+            }
+            ext.execute(
+                "DELETE FROM ext_native_payments_v1 WHERE phase='prepared' AND expires < ?1",
+                [now.saturating_sub(86400)],
+            )?;
+            let count: u64 = ext.query_row("SELECT COUNT(*) FROM ext_native_payments_v1", [], |r| r.get(0))?;
+            if count >= 10000 {
+                anyhow::bail!("payment_storage_limit");
+            }
+            ext.execute(
+                "INSERT INTO ext_native_payments_v1 (id,proposal,fee,created,expires,height,block_hash,phase,txids,recovery_generation) VALUES (?1,?2,?3,?4,?5,?6,?7,'prepared','[]',?8)",
+                params![id, bytes, fee, now, now + 120, u32::from(height), hash.0.to_vec(), generation.unwrap_or(0)],
+            )?;
+            Ok(())
+        })
+        .map_err(EngineError::from)?;
+        Ok((self.payment_receipt(&id)?, shield_amount_zat))
+    }
+
     /// Prove/sign the stored proposal. The signed transaction, note reservations and
     /// receipt commit in ONE SQLite transaction before this returns. No broadcast.
     /// A failed/interrupted transaction leaves the review prepared and sends nothing.
@@ -868,7 +1109,9 @@ impl NativeWallet {
                 &SpendingKeys::from_unified_spending_key(usk), OvkPolicy::Sender, &proposal, None,
             ).map_err(|_| anyhow::anyhow!("payment_sign_failed"))?;
             let ids = txids.iter().map(ToString::to_string).collect::<Vec<_>>();
-            if ids.len() != 1 { anyhow::bail!("payment_single_step_required"); }
+            if ids.is_empty() || ids.len() > 2 || ids.len() != proposal.steps().len() {
+                anyhow::bail!("payment_step_count_mismatch");
+            }
             // Expiry during proving rolls back transactions and reservations together.
             let now = clock()?;
             if now < created || now >= receipt.expires_at { anyhow::bail!("payment_review_expired"); }
@@ -886,11 +1129,27 @@ impl NativeWallet {
         let mut receipt = read(&conn, id)?;
         let mut all_mined = !receipt.txids.is_empty();
         for txid in &receipt.txids {
-            let transaction = self
+            if let Some(transaction) = self
                 .transaction(txid)
                 .map_err(|_| failed("payment_storage_failed"))?
-                .ok_or_else(|| failed("payment_storage_failed"))?;
-            all_mined &= transaction.mined_height.is_some();
+            {
+                all_mined &= transaction.mined_height.is_some();
+            } else {
+                // Step 2 of a ZIP 320 TEX bundle (ephemeral -> TEX) is stored in
+                // `transactions` with signed `raw` bytes even if `v_transactions` omits it.
+                let raw_id =
+                    TxId::from_hex(txid).ok_or_else(|| failed("payment_storage_failed"))?;
+                let mined: Option<u32> = conn
+                    .query_row(
+                        "SELECT mined_height FROM transactions WHERE txid = ?1 AND raw IS NOT NULL",
+                        [raw_id.as_ref()],
+                        |r| r.get::<_, Option<u32>>(0),
+                    )
+                    .optional()
+                    .map_err(|_| failed("payment_storage_failed"))?
+                    .ok_or_else(|| failed("payment_storage_failed"))?;
+                all_mined &= mined.is_some();
+            }
         }
         if all_mined {
             receipt.phase = "mined".into();

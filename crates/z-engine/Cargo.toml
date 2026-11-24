@@ -38,7 +38,10 @@ native = [
     "zcash_primitives/circuits",
     "rand/sys_rng",
     "hardware",
+    "z-transport/native",
+    "z-transport/ohttp",
 ]
+tor-arti = ["native", "z-transport/tor-arti"]
 native-sqlite = [
     "dep:zcash_client_sqlite",
     "zcash_client_sqlite/orchard",
@@ -97,6 +100,7 @@ cli = [
 ]
 
 [dependencies]
+z-transport = { path = "../z-transport", default-features = false }
 z-transparent-pir-v2 = { path = "../z-transparent-pir-v2", optional = true }
 z-enhance-pir = { path = "../z-enhance-pir", optional = true }
 anyhow.workspace = true

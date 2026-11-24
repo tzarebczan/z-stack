@@ -98,8 +98,8 @@ test("auto-sync retries unavailable ranges and selective memos without waiting f
     zip321: "zcash:uregtest-fixture", balance: { totalAvailable: 0 },
   } as WalletSnapshot, () => true);
   let tick!: () => void;
-  t.mock.method(globalThis, "setInterval", (fn) => { tick = fn as () => void; return 1 as never; });
-  t.mock.method(globalThis, "clearInterval", () => {});
+  t.mock.method(globalThis, "setTimeout", (fn) => { tick = fn as () => void; return 1 as never; });
+  t.mock.method(globalThis, "clearTimeout", () => {});
   const { createWallet } = await import("../src/create-wallet.ts");
   const wallet = await createWallet({ unlockPolicy: "session", autoShield: true, network: "regtest", server: {
     kind: "mock", label: "mock", tip: async () => 10, blocks: async () => new Uint8Array(),
@@ -195,7 +195,7 @@ test("repeated and concurrent catch-up reuses the worker wallet and one download
   assert.equal((await workerScanSession()!.toSnapshot()).buffer, worker.snapshot.buffer);
   let tip = worker.scanned;
   let downloads = 0;
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => tip,
     blocks: async () => { downloads++; await turn(); return new Uint8Array([1]); },
   } });
@@ -225,7 +225,7 @@ test("a compact-range outage resumes from the in-memory scanned height without r
   const starts: number[] = [];
   const headings: string[] = [];
   let secondAttempts = 0;
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => tip,
     blocks: async (start, end) => {
       starts.push(start);
@@ -258,7 +258,7 @@ test("an expensive WASM apply does not report a dead light server", async (t) =>
   worker.onApplied = () => { clock += 20_000; };
   const origin = worker.scanned;
   const headings: string[] = [];
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => origin + 8_000,
     blocks: async (_start, end) => {
       const blob = new Uint8Array(4);
@@ -307,7 +307,7 @@ test("a failed block apply reloads the saved snapshot on the next sync instead o
     post(msg);
   };
   let tip = worker.scanned;
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => tip,
     blocks: async () => new Uint8Array([1]),
   } });
@@ -327,7 +327,7 @@ test("each sync resubmits saved unmined sends and a node that already has one is
   t.after(() => cancelWasmSync());
   const submitted: { hex: string; txid: string | undefined }[] = [];
   let tip = worker.scanned;
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => tip,
     blocks: async () => new Uint8Array([1]),
     submit: async (hex, _signal, context) => {
@@ -361,7 +361,7 @@ test("a mistyped recovery phrase is rejected before it can fence out the saved w
     if (priorRange) Object.defineProperty(globalThis, "IDBKeyRange", priorRange);
     else Reflect.deleteProperty(globalThis, "IDBKeyRange");
   });
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => worker.scanned,
     blocks: async () => new Uint8Array([1]),
   } });
@@ -391,7 +391,7 @@ test("a slow IndexedDB checkpoint queues one latest-height follow-up after commi
     if (priorRange) Object.defineProperty(globalThis, "IDBKeyRange", priorRange);
     else Reflect.deleteProperty(globalThis, "IDBKeyRange");
   });
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => 328_000,
     blocks: async () => new Uint8Array([1]),
   } });
@@ -429,7 +429,7 @@ test("cancelling a scan fences a pending follow-up checkpoint", async (t) => {
     if (priorRange) Object.defineProperty(globalThis, "IDBKeyRange", priorRange);
     else Reflect.deleteProperty(globalThis, "IDBKeyRange");
   });
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => 328_000,
     blocks: async () => new Uint8Array([1]),
   } });
@@ -455,7 +455,7 @@ test("post-scan UTXO and mempool reads overlap but apply in wallet order", async
   const utxos = new Promise<[]>(resolve => { releaseUtxos = resolve; });
   const mempool = new Promise<Array<{ hex: string }>>(resolve => { releaseMempool = resolve; });
   const reads: string[] = [];
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => worker.scanned,
     blocks: async () => new Uint8Array(),
     utxos: async () => { reads.push("utxos"); return utxos; },
@@ -491,7 +491,7 @@ test("cancellation fences snapshots during serialization and during IndexedDB op
     if (previousRange) Object.defineProperty(globalThis, "IDBKeyRange", previousRange);
     else Reflect.deleteProperty(globalThis, "IDBKeyRange");
   });
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => worker.scanned, blocks: async () => new Uint8Array(),
   } });
   await client.restore(REGTEST_FAUCET_MNEMONIC, "regtest", WORKER_BIRTHDAY);
@@ -569,7 +569,7 @@ test("proving worker lifecycle recovers only on explicit calls and preserves its
   await restartScanWorker(() => scan as unknown as Worker);
   let broadcasts = 0;
   let tipLag = 0;
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => scan.scanned + tipLag, blocks: async () => new Uint8Array(),
     submit: async () => { broadcasts++; return "fixture-txid"; },
   } });
@@ -880,7 +880,7 @@ test("a multicore scan worker proves in place with its own wallet and proving ke
   });
   const broadcasts: string[] = [];
   const submissions: string[] = [];
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => scan.scanned, blocks: async () => new Uint8Array(),
     submit: async (hex: string) => { submissions.push("network"); broadcasts.push(hex); return "fixture-txid"; },
   } });

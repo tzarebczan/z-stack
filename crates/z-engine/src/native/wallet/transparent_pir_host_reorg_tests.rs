@@ -623,7 +623,7 @@ fn composed_native_web_scope_growth_accepts_lower_core_frontier_and_cold_recover
     let web_initial: Scope =
         serde_json::from_str(&web.begin_transparent_pir(SOURCE).unwrap()).unwrap();
     let mut future = crate::web::WebWallet::from_account(account, 1).unwrap();
-    future.next_diversifier = 128;
+    future.next_transparent_diversifier = 128;
     let future_script = future
         .public_transparent_scripts()
         .unwrap()
@@ -844,7 +844,7 @@ fn composed_native_web_scope_growth_accepts_lower_core_frontier_and_cold_recover
         wallet.transparent_pir_status().unwrap()["completion"],
         "complete-for-enrolled-scope"
     );
-    web.next_diversifier = 128;
+    web.next_transparent_diversifier = 128;
     let scope = serde_json::from_str(&web.begin_transparent_pir(SOURCE).unwrap()).unwrap();
     assert!(
         web.transparent_pir_checkpoint().as_deref() == Some(web_saved.as_str()),

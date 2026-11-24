@@ -211,10 +211,16 @@ export type WasmWalletHandle = {
   unifiedAddress: () => string;
   transparentAddress: () => string | undefined;
   nextUnifiedAddress: () => string;
+  nextTransparentAddress?: () => string;
   balanceWithConfirmations?: (minConfirmations: number) => string;
   estimateFee?: (to: string, amountZec: string, memo?: string, minConfirmations?: number) => string;
   estimateTransparentFee?: (to: string, amountZec: string) => string;
+  estimateTexFee?: (to: string, amountZec: string) => string;
   proveTransparentSend?: (mnemonic: string, to: string, amountZec: string, maxFeeZat?: string) => string;
+  proveTexSend?: (mnemonic: string, to: string, amountZec: string, maxFeeZat?: string) => string;
+  applyPrivateTxBucket?: (json: string) => number;
+  unverifiedTransparentHeights?: () => string;
+  verifyTransparentCompactBucket?: (blob: Uint8Array, trustedEndHashHex?: string) => number;
   maxSend?: (to?: string) => string;
   proveSend: (mnemonic: string, to: string, amountZec: string, memo?: string, maxFeeZat?: string, minConfirmations?: number) => string;
   proveShield: (mnemonic: string, thresholdZat: number) => string;
@@ -429,8 +435,8 @@ export type WasmClientOpts = {
   autoShield?: boolean;
   /** Build the proving key after a funded sync. False disables automatic background builds. Default true. */
   prewarmProvingKey?: boolean;
-  /** Shared public ranges, or selective transaction lookups (auto/on-demand). Default on-demand. */
-  memoFetch?: "auto" | "on-demand" | "shared";
+  /** Memo enhancement policy. Defaults to "pir-only" when Enhance PIR is present, else "on-demand". */
+  memoFetch?: import("./privacy-policy").MemoPolicy;
   /** Scan transparent inputs/outputs locally; requires protocol >= 0.5. Default off. */
   transparentScan?: TransparentScanMode;
   shieldThresholdZat?: number;
@@ -458,12 +464,28 @@ export type WasmClient = EngineClient & {
   lock(): void;
   /**
    * Fetch and save the next memo batch. Shared mode requests public ranges;
-   * auto/on-demand modes send up to 500 wallet transaction IDs to the server.
+   * pir-only runs Enhance PIR only; on-demand/auto fetches only when explicitly allowed.
    * Does not scan new shielded blocks or broadcast transactions.
    */
   fetchMemos(): Promise<WalletSnapshot>;
+  /**
+   * Explicitly fetch full details (memo, fee, expiry) for a single mined
+   * transaction that is outside Enhance PIR scope using an aligned 10-block
+   * cover bucket over `sharedMemos` (never 1-block or direct `txid` lookup).
+   */
+  fetchTxDetailsPrivate(txid: string): Promise<import("@z-stack/core").HistoryEntry | null>;
+  /** Rotate to the next standalone external transparent P2PKH address independently of shielded UAs. */
+  nextTransparentAddress(): Promise<string>;
+  /** Estimate total ZIP-317 fee across both steps of a ZIP-320 TEX send. */
+  estimateTexFee(to: string, amountZec: string): Promise<import("./engine").FeeEstimate>;
+  /** Execute a two-step ZIP-320 TEX send (shielded -> ephemeral t1 -> TEX). */
+  sendTex(
+    to: string,
+    amountZec: string,
+    opts?: { maxFeeZat?: string; beforeBroadcast?: () => boolean; beforeSubmit?: import("./hardware").HardwareSendOptions["beforeSubmit"] },
+  ): Promise<WalletSnapshot & { txid?: string; txids?: string[] }>;
   /** Change automatic memo fetching for this client; already-sent requests cannot be undone. */
-  setMemoFetch(mode: "auto" | "on-demand" | "shared"): void;
+  setMemoFetch(mode: import("./privacy-policy").MemoPolicy): void;
   setTransparentScan(mode: TransparentScanMode): void;
   /** Changes future background key builds; an already-running WASM build is not interruptible. */
   setPrewarmProvingKey(enabled: boolean): void;

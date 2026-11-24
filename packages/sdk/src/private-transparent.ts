@@ -1,11 +1,11 @@
 import { WalletError } from "@z-stack/core";
 import { abortable } from "./abort";
 
-export type TransparentScanMode = "off" | "compact" | "pir";
+export type TransparentScanMode = "off" | "compact" | "pir" | "compact-plus-pir";
 export function transparentScanMode(value: unknown): TransparentScanMode {
   if (value === undefined) return "off";
-  if (value === "off" || value === "compact" || value === "pir") return value;
-  throw new WalletError("unknown", "transparentScan must be off, compact or pir.");
+  if (value === "off" || value === "compact" || value === "pir" || value === "compact-plus-pir") return value;
+  throw new WalletError("unknown", "transparentScan must be off, compact, pir or compact-plus-pir.");
 }
 
 /** Rust-produced public routing selectors and PIR ciphertext. No scripts or wallet identifiers. */

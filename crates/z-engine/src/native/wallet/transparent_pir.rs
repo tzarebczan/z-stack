@@ -78,7 +78,7 @@ mod inventory_tests {
         );
         drop(db);
         let inventory = wallet
-            .transparent_transaction(|db, tx| Ok(scripts(db, tx, ZNetwork::Regtest)?))
+            .transparent_transaction(|db, tx| Ok(scripts(db, tx, ZNetwork::Regtest, 0)?))
             .unwrap();
         let unique = inventory
             .iter()
@@ -271,16 +271,80 @@ pub(super) fn funding_exclusions(
                 "UPDATE ext_transparent_pir_v1 SET state=?1 WHERE id=1",
                 [encode_native_state(&state)?],
             )?;
-            Ok(state.unverified_outputs.unwrap_or_default())
+            let mut excluded = state.unverified_outputs.unwrap_or_default();
+            // Keep pre-birthday transparent outputs excluded until PIR spend coverage
+            // connects continuously to the wallet's locally scanned birthday horizon.
+            if state.bound_source.is_some() {
+                let birthday: u32 = ext
+                    .query_row(
+                        "SELECT COALESCE(MIN(birthday_height), 0) FROM accounts",
+                        [],
+                        |r| r.get::<_, u32>(0),
+                    )
+                    .unwrap_or(0);
+                let bday_floor = u64::from(birthday.saturating_sub(1));
+                if bday_floor > 0 && state.covered_through < bday_floor {
+                    let rows: String = ext.query_row(
+                        "SELECT COALESCE(group_concat('r:' || lower(hex(t.txid)) || ':' || n.output_index, ','), '') \
+                         FROM transparent_received_outputs n \
+                         JOIN transactions t ON t.id_tx = n.transaction_id \
+                         WHERE t.mined_height < ?1",
+                        [birthday],
+                        |r| r.get(0),
+                    )?;
+                    for key in rows.split(',').filter(|s| !s.is_empty()) {
+                        excluded.insert(key.to_owned());
+                    }
+                }
+            }
+            Ok(excluded)
         }
         None if required => anyhow::bail!("transparent_pir_state_invalid"),
         None => Ok(Default::default()),
     }
 }
+fn native_history_floor(
+    network: ZNetwork,
+    birthday: u32,
+    anchor: u64,
+    state: &ProjectionState,
+) -> u64 {
+    if network == crate::Network::Regtest {
+        return 0;
+    }
+    let estimate = u64::from(crate::birthday::coarse_birthday_height(network, birthday));
+    if estimate == 0 {
+        return 0;
+    }
+    if state
+        .records
+        .values()
+        .any(|(h, _)| u64::from(*h) < estimate)
+    {
+        return 0;
+    }
+    if let Some(cp) = state.continuation.as_ref() {
+        let has_below = cp.records.iter().any(|record| {
+            let Ok(bytes) = crate::web::from_hex(&record.event) else {
+                return true;
+            };
+            let Ok(event) = TransparentEvent::from_bytes(&bytes) else {
+                return true;
+            };
+            u64::from(crate::transparent_pir::event_height(event)) < estimate
+        });
+        if has_below {
+            return 0;
+        }
+    }
+    estimate.min(anchor)
+}
+
 fn scripts<D: WalletRead<AccountId = AccountUuid>>(
     db: &D,
     tx: &rusqlite::Transaction<'_>,
     network: ZNetwork,
+    required_from: u64,
 ) -> Result<Vec<TransparentPirScript>>
 where
     D::Error: std::fmt::Display,
@@ -300,7 +364,7 @@ where
             let script: Script = address.script().into();
             result.push(TransparentPirScript {
                 script: crate::web::to_hex(&script.0 .0),
-                required_from: 0,
+                required_from,
             });
         }
     }
@@ -318,7 +382,7 @@ where
         let script: Script = address.script().into();
         result.push(TransparentPirScript {
             script: crate::web::to_hex(&script.0 .0),
-            required_from: 0,
+            required_from,
         });
         if result.len() > 8192 {
             return Err(refused("transparent_pir_scope_limit"));
@@ -577,7 +641,17 @@ impl NativeWallet {
                     hash: block.block_hash().to_string(),
                 };
                 let mut state = load(ext)?;
-                let mut scope = state.begin(source_id, anchor, scripts(wdb, ext, self.network)?)?;
+                let required_from = native_history_floor(
+                    self.network,
+                    self.meta.birthday_height,
+                    anchor.height,
+                    &state,
+                );
+                let mut scope = state.begin(
+                    source_id,
+                    anchor,
+                    scripts(wdb, ext, self.network, required_from)?,
+                )?;
                 let missing = missing_projection(ext, &state)?;
                 invalidate_missing(&mut state, &missing);
                 scope.accepted_headers.retain(|h| h.height != 0);
@@ -663,7 +737,12 @@ impl NativeWallet {
                 state.durable = true;
                 return Ok(state.status());
             }
-            let current_scripts = scripts(wdb,ext,self.network)?;
+            let required_from = pass
+                .scope
+                .scripts
+                .first()
+                .map_or(0, |s| s.required_from);
+            let current_scripts = scripts(wdb, ext, self.network, required_from)?;
             let current_id = crate::transparent_pir::digest(&serde_json::to_vec(&{let mut s=current_scripts.clone();s.sort_by(|a,b|a.script.cmp(&b.script));s.dedup();s})?);
             if pass.scope.scripts.iter().any(|enrolled| !current_scripts.contains(enrolled)) { anyhow::bail!("transparent_pir_scope_changed"); }
             if retirement_floor.is_some() && !checkpoint.complete {
@@ -732,12 +811,290 @@ impl NativeWallet {
             state.stage(&checkpoint,&records)?;
             if repair && !missing_projection(ext,&state)?.is_empty() { anyhow::bail!("transparent_pir_projection_incomplete"); }
             state.projection_invalidated=false;
-            let next_scripts = scripts(wdb,ext,self.network)?;
+            let next_scripts = scripts(wdb, ext, self.network, required_from)?;
             if next_scripts.len() != current_scripts.len() || current_id != pass.scope.scope_id { state.complete=false; }
             state.durable=true;
             save(ext,&state)?;
             Ok(state.status())
         }))
+    }
+
+    /// Distinct mined heights of unspent transparent UTXOs whose funding is still
+    /// unverified in Transparent PIR state. Callers fetch aligned 500-block all-pool
+    /// compact buckets covering these heights and verify them via
+    /// [`Self::verify_transparent_compact_bucket`] before shielding.
+    pub fn unverified_transparent_heights(&self) -> Result<Vec<u32>> {
+        self.transparent_transaction(|_, ext| -> anyhow::Result<_> {
+            let state = load(ext)?;
+            let Some(unverified) = state.unverified_outputs.as_ref() else {
+                return Ok(Vec::new());
+            };
+            if unverified.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut heights = std::collections::BTreeSet::new();
+            let mut stmt = ext.prepare(
+                "SELECT t.txid, n.output_index, t.mined_height \
+                 FROM transparent_received_outputs n \
+                 JOIN transactions t ON t.id_tx = n.transaction_id \
+                 WHERE t.mined_height IS NOT NULL \
+                 AND NOT EXISTS (SELECT 1 FROM transparent_received_output_spends s WHERE s.transparent_received_output_id = n.id)",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, u32>(1)?,
+                    r.get::<_, u32>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (txid, index, height) = row?;
+                let key = format!("r:{}:{index}", crate::web::to_hex(&txid));
+                if unverified.contains(&key) {
+                    heights.insert(height);
+                }
+            }
+            Ok(heights.into_iter().collect())
+        })
+    }
+
+    /// Verify unverified Transparent PIR UTXOs against an aligned 500-block all-pool
+    /// compact block bucket. Requires cryptographic chain anchoring against SQLite
+    /// scanned hashes (or an explicit publisher-signed end-block hash via
+    /// [`Self::verify_transparent_compact_bucket_anchored`]).
+    pub fn verify_transparent_compact_bucket(&self, blob: &[u8]) -> Result<u32> {
+        self.verify_transparent_compact_bucket_anchored(blob, None)
+    }
+
+    /// Same as [`Self::verify_transparent_compact_bucket`], accepting an optional
+    /// 32-byte wire-order end-block hash attested by the caller for strictly
+    /// pre-birthday buckets that do not overlap SQLite scanned block hashes.
+    ///
+    /// Security requirement: callers MUST derive `trusted_end_hash` exclusively from
+    /// cryptographic verification of a pinned publisher signature over the complete
+    /// bucket payload (never from an unauthenticated transport response or by echoing
+    /// `blocks.last().hash`). Passing `None` enforces anchoring strictly against
+    /// locally scanned SQLite block hashes.
+    pub fn verify_transparent_compact_bucket_anchored(
+        &self,
+        blob: &[u8],
+        trusted_end_hash: Option<&[u8]>,
+    ) -> Result<u32> {
+        const VERIFY_BUCKET_WIDTH: u32 = 500;
+        let blocks = crate::web::decode_delimited(blob)?;
+        if blocks.is_empty() {
+            return Err(refused("transparent_pir_verification_empty"));
+        }
+        let start = u32::try_from(blocks[0].height)
+            .map_err(|_| refused("transparent_pir_verification_invalid"))?;
+        let width = u32::try_from(blocks.len())
+            .map_err(|_| refused("transparent_pir_verification_invalid"))?;
+        if start == 0 || width > VERIFY_BUCKET_WIDTH || (start - 1) % VERIFY_BUCKET_WIDTH != 0 {
+            return Err(refused("transparent_pir_verification_alignment"));
+        }
+        let mut expected_height = start;
+        let mut prev_hash: Option<Vec<u8>> = None;
+        for block in &blocks {
+            let height = u32::try_from(block.height)
+                .map_err(|_| refused("transparent_pir_verification_invalid"))?;
+            if height != expected_height
+                || block.hash.len() != 32
+                || block.prev_hash.len() != 32
+                || prev_hash.as_ref().is_some_and(|p| *p != block.prev_hash)
+            {
+                return Err(refused("transparent_pir_verification_not_contiguous"));
+            }
+            if block.vtx.first().is_none_or(|t| t.index != 0) {
+                return Err(refused("transparent_pir_verification_no_coinbase"));
+            }
+            let mut ids = std::collections::BTreeSet::new();
+            let mut last_idx = None;
+            for tx in &block.vtx {
+                if tx.txid.len() != 32
+                    || !ids.insert(&tx.txid)
+                    || last_idx.is_some_and(|i| tx.index <= i)
+                    || tx.vin.iter().any(|v| v.prevout_txid.len() != 32)
+                    || tx
+                        .vout
+                        .iter()
+                        .any(|v| v.value > 2_100_000_000_000_000 || v.script_pub_key.len() > 10_000)
+                {
+                    return Err(refused("transparent_pir_verification_invalid"));
+                }
+                last_idx = Some(tx.index);
+            }
+            expected_height = height.saturating_add(1);
+            prev_hash = Some(block.hash.clone());
+        }
+        let end = expected_height.saturating_sub(1);
+
+        let mut bucket_outputs =
+            std::collections::BTreeMap::<(u32, Vec<u8>, u32), (u64, Vec<u8>, u64)>::new();
+        let mut bucket_spends =
+            std::collections::BTreeMap::<(Vec<u8>, u32), (Vec<u8>, u32, u64)>::new();
+        for block in &blocks {
+            let height = block.height as u32;
+            for tx in &block.vtx {
+                for (vout_idx, out) in tx.vout.iter().enumerate() {
+                    bucket_outputs.insert(
+                        (height, tx.txid.clone(), vout_idx as u32),
+                        (out.value, out.script_pub_key.clone(), tx.index),
+                    );
+                }
+                for vin in &tx.vin {
+                    bucket_spends.insert(
+                        (vin.prevout_txid.clone(), vin.prevout_index),
+                        (tx.txid.clone(), height, tx.index),
+                    );
+                }
+            }
+        }
+
+        self.transparent_transaction(|wdb, ext| -> anyhow::Result<u32> {
+            let scanned = wdb
+                .block_fully_scanned()?
+                .map(|b| u32::from(b.block_height()))
+                .unwrap_or(0);
+            if width < VERIFY_BUCKET_WIDTH && end != scanned {
+                anyhow::bail!("transparent_pir_verification_alignment");
+            }
+            // Verify known block hashes in SQLite agree with this bucket and require anchoring.
+            let mut anchored = false;
+            for block in &blocks {
+                let height = block.height as u32;
+                if height > 1 {
+                    if let Some(known_prev) = wdb.get_block_hash((height - 1).into())? {
+                        if known_prev.0.as_slice() != block.prev_hash.as_slice() {
+                            anyhow::bail!("transparent_pir_verification_chain_mismatch");
+                        }
+                        anchored = true;
+                    }
+                }
+                if let Some(known) = wdb.get_block_hash(height.into())? {
+                    if known.0.as_slice() != block.hash.as_slice() {
+                        anyhow::bail!("transparent_pir_verification_chain_mismatch");
+                    }
+                    anchored = true;
+                }
+            }
+            if self.network != ZNetwork::Regtest && trusted_end_hash.is_none() {
+                anyhow::bail!("transparent_pir_verification_unauthenticated");
+            }
+            if let Some(expected_end) = trusted_end_hash {
+                if expected_end.len() != 32
+                    || blocks
+                        .last()
+                        .is_none_or(|b| b.hash.as_slice() != expected_end)
+                {
+                    anyhow::bail!("transparent_pir_verification_chain_mismatch");
+                }
+                anchored = true;
+            }
+            if !anchored {
+                anyhow::bail!("transparent_pir_verification_unanchored");
+            }
+            let mut state = load(ext)?;
+            // Require continuous spend coverage between the verified bucket and the
+            // wallet's locally scanned birthday horizon before promoting any output.
+            let birthday = wdb.get_wallet_birthday()?.map(u32::from).unwrap_or(0);
+            let bday_floor = u64::from(birthday.saturating_sub(1));
+            if u64::from(end) < bday_floor && state.covered_through < bday_floor {
+                anyhow::bail!("transparent_pir_spend_coverage_gap");
+            }
+            let unverified = state.unverified_outputs.clone().unwrap_or_default();
+            if unverified.is_empty() {
+                return Ok(0);
+            }
+            let mut stmt = ext.prepare(
+                "SELECT t.txid, n.output_index, n.value_zat, n.script, t.mined_height \
+                 FROM transparent_received_outputs n \
+                 JOIN transactions t ON t.id_tx = n.transaction_id \
+                 WHERE t.mined_height BETWEEN ?1 AND ?2",
+            )?;
+            let candidates: Vec<(Vec<u8>, u32, u64, Vec<u8>, u32)> = stmt
+                .query_map(rusqlite::params![start, end], |r| {
+                    Ok((
+                        r.get::<_, Vec<u8>>(0)?,
+                        r.get::<_, u32>(1)?,
+                        r.get::<_, u64>(2)?,
+                        r.get::<_, Vec<u8>>(3)?,
+                        r.get::<_, u32>(4)?,
+                    ))
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            drop(stmt);
+
+            let mut to_confirm: Vec<(String, Vec<u8>, u64)> = Vec::new();
+            for (txid, index, value_zat, script, height) in candidates {
+                let key = format!("r:{}:{index}", crate::web::to_hex(&txid));
+                if !unverified.contains(&key) {
+                    continue;
+                }
+                let Some((b_val, b_script, tx_index)) =
+                    bucket_outputs.get(&(height, txid.clone(), index))
+                else {
+                    anyhow::bail!("transparent_pir_verification_missing");
+                };
+                if *b_val != value_zat || *b_script != script {
+                    anyhow::bail!("transparent_pir_verification_mismatch");
+                }
+                to_confirm.push((key, txid, *tx_index));
+            }
+
+            let mut confirmed = 0u32;
+            for (key, txid, tx_index) in to_confirm {
+                ext.execute(
+                    "UPDATE transactions SET tx_index = ?2 WHERE txid = ?1",
+                    rusqlite::params![txid, tx_index as i64],
+                )?;
+                if let Some(set) = &mut state.unverified_outputs {
+                    set.remove(&key);
+                }
+                state.projected_outputs.remove(&key);
+                confirmed += 1;
+            }
+
+            // Record transparent spends inside the anchored bucket ONLY for verified outputs.
+            let remaining_unverified = state.unverified_outputs.clone().unwrap_or_default();
+            for ((prev_txid, prev_idx), (spender_txid, spend_height, spend_tx_index)) in
+                &bucket_spends
+            {
+                let key = format!("r:{}:{prev_idx}", crate::web::to_hex(prev_txid));
+                if remaining_unverified.contains(&key) {
+                    continue;
+                }
+                let exists: bool = ext.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM transparent_received_outputs n \
+                     JOIN transactions t ON t.id_tx = n.transaction_id \
+                     WHERE t.txid = ?1 AND n.output_index = ?2)",
+                    rusqlite::params![prev_txid, prev_idx],
+                    |r| r.get(0),
+                )?;
+                if exists && spender_txid.len() == 32 && prev_txid.len() == 32 {
+                    let mut sid = [0u8; 32];
+                    sid.copy_from_slice(spender_txid);
+                    let mut pid = [0u8; 32];
+                    pid.copy_from_slice(prev_txid);
+                    let meta = WalletTx::new(
+                        TxId::from_bytes(sid),
+                        u16::try_from(*spend_tx_index).unwrap_or(u16::MAX).into(),
+                        vec![],
+                        vec![],
+                        vec![],
+                        vec![],
+                        vec![],
+                        vec![],
+                        vec![],
+                    );
+                    let tx_ref = wdb.put_tx_meta(&meta, (*spend_height).into())?;
+                    let _ =
+                        wdb.mark_transparent_utxo_spent(&OutPoint::new(pid, *prev_idx), tx_ref)?;
+                }
+            }
+
+            save(ext, &state)?;
+            Ok(confirmed)
+        })
     }
 
     pub fn transparent_pir_status(&self) -> Result<serde_json::Value> {

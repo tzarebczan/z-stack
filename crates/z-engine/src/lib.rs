@@ -12,6 +12,8 @@ use zcash_protocol::consensus::{
     BlockHeight, Network as ZcashNetwork, NetworkType, NetworkUpgrade, Parameters,
 };
 
+pub use z_transport as transport;
+
 pub mod birthday;
 #[cfg(feature = "private-enhance")]
 pub mod enhancement;

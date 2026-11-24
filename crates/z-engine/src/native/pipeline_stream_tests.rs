@@ -418,37 +418,20 @@ async fn streamed_first_note_refreshes_before_and_after_prefix_boundary() {
             blocks[..STREAM_DECRYPT_BLOCKS as usize].to_vec(),
         )
         .unwrap();
-        let expected = if receive_index < STREAM_DECRYPT_BLOCKS as usize {
-            8_000
-        } else {
-            8_256
-        };
-        let mut fetches = Vec::new();
-        let result = finish_streamed_with_fetch(
+        let result = finish_streamed(
             prefix_job,
             blocks,
-            empty_state(0),
+            prior.clone(),
             (0, 2, 0),
             8_001.into(),
             ZNetwork::Regtest,
             &mut db,
             &context,
             &scanned,
-            |height| {
-                fetches.push(height);
-                std::future::ready(Ok(ChainState::new(
-                    height.into(),
-                    prior.block_hash(),
-                    prior.final_sapling_tree().clone(),
-                    prior.final_orchard_tree().clone(),
-                    prior.final_ironwood_tree().clone(),
-                )))
-            },
         )
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(fetches, [expected]);
         assert_eq!(result.height_count(), 1_000);
         assert_eq!(result.scanned.len(), 2);
         assert_eq!(selective_scan::tree_sizes(&result.next_state), (0, 6, 0));
@@ -513,7 +496,7 @@ async fn streamed_retry_replaces_a_stale_note_free_prefix() {
     pay_orchard(&mut retried[100], &ufvk);
     pay_orchard(&mut retried[400], &test_ufvk(8));
     crate::scan::ensure_compact_chain_metadata(&mut retried, 0, 0, 0);
-    let result = finish_streamed_with_fetch(
+    let result = finish_streamed(
         prefix_job,
         retried,
         empty_state(0),
@@ -523,11 +506,6 @@ async fn streamed_retry_replaces_a_stale_note_free_prefix() {
         &mut db,
         &context,
         &Arc::new(AtomicU32::new(0)),
-        |_| {
-            std::future::ready(Err(EngineError::Message(
-                "unexpected frontier fetch".into(),
-            )))
-        },
     )
     .await
     .unwrap()

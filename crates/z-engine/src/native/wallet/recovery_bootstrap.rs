@@ -259,8 +259,10 @@ impl NativeWallet {
             expected
         };
         drop(db);
+        let shielded_req = crate::keys::shielded_ua_request_for_ufvk(&ufvk)
+            .map_err(|_| EngineError::Message("native_recovery_setup_failed".into()))?;
         let address = ufvk
-            .default_address(UnifiedAddressRequest::AllAvailableKeys)
+            .default_address(shielded_req)
             .map_err(|_| EngineError::Message("native_recovery_setup_failed".into()))?
             .0
             .encode(&ZNetwork::Regtest);

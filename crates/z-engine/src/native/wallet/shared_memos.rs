@@ -12,7 +12,10 @@ use std::{
     sync::Arc,
 };
 use zcash_client_backend::data_api::{
-    enhance_pir::{EnhancePirRead, EnhancementMode, TransactionEnhancementWork},
+    enhance_pir::{
+        EnhancePirRead, EnhancePirSuspension, EnhancePirWork, EnhancementMode,
+        TransactionEnhancementWork,
+    },
     wallet::decrypt_and_store_transaction,
     WalletRead,
 };
@@ -44,6 +47,7 @@ pub struct NativeSharedMemosPass {
     pending: Vec<(u32, Transaction)>,
     last_block: Option<(u32, [u8; 32])>,
     accepted_bytes: usize,
+    include_private: bool,
 }
 impl NativeSharedMemosPass {
     pub fn ranges(&self) -> Vec<(u32, u32)> {
@@ -67,10 +71,55 @@ struct Bundle {
 
 type ValidatedSharedBlock = (Vec<(u32, Transaction)>, [u8; 32]);
 
+fn work_txid(work: &TransactionEnhancementWork, include_private: bool) -> Option<TxId> {
+    match work {
+        TransactionEnhancementWork::Public(request) => Some(request.txid()),
+        TransactionEnhancementWork::Private(EnhancePirWork::Query(req)) if include_private => {
+            Some(req.request_id().txid())
+        }
+        TransactionEnhancementWork::Private(EnhancePirWork::Suspended(
+            EnhancePirSuspension::OutgoingNotRecoverable(req),
+        )) if include_private => Some(req.request_id().txid()),
+        TransactionEnhancementWork::Private(EnhancePirWork::Suspended(
+            EnhancePirSuspension::Discovery(failure),
+        )) if include_private => Some(failure.txid),
+        _ => None,
+    }
+}
+
 impl NativeWallet {
     pub fn begin_shared_memos_with_source(
         &self,
         source: &NativeWalletSource,
+    ) -> Result<NativeSharedMemosPass> {
+        self.begin_shared_memos_inner(source, false, None)
+    }
+
+    /// Explicit user-requested privacy-preserving cover-bucket pass for transactions outside
+    /// Enhance PIR coverage (Orchard, Sapling, or out-of-PIR Ironwood).
+    /// When `target_txid` is `Some`, plans ONLY the full 10-block cover window containing
+    /// that transaction (never exposing unrelated pending buckets or dropping it behind `.take(2)`).
+    /// Always enforces full 10-block width when `tip >= 10` (shifting backwards near tip so it
+    /// NEVER shrinks to a single block `(h, h)`).
+    pub fn begin_explicit_shared_memos_with_source(
+        &self,
+        source: &NativeWalletSource,
+        target_txid: Option<&str>,
+    ) -> Result<NativeSharedMemosPass> {
+        let parsed = match target_txid.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(hex) => Some(
+                TxId::from_hex(hex).ok_or_else(|| EngineError::Message("invalid_txid".into()))?,
+            ),
+            None => None,
+        };
+        self.begin_shared_memos_inner(source, true, parsed)
+    }
+
+    fn begin_shared_memos_inner(
+        &self,
+        source: &NativeWalletSource,
+        include_private: bool,
+        target_txid: Option<TxId>,
     ) -> Result<NativeSharedMemosPass> {
         let owner = Arc::new(database_lease::shared(&self.paths.data_db)?);
         self.require_wallet_source(source)?;
@@ -82,30 +131,40 @@ impl NativeWallet {
             .map_err(database_error)?
             .map(|b| u32::from(b.block_height()))
             .unwrap_or(0);
-        let mut starts = BTreeSet::new();
-        for work in db.transaction_enhancement_work().map_err(database_error)? {
-            if let TransactionEnhancementWork::Public(request) = work {
-                if let Some(height) = db.get_tx_height(request.txid()).map_err(database_error)? {
-                    let height = u32::from(height);
-                    if height > 0 && height <= tip {
-                        starts.insert(
-                            ((height - 1) / SHARED_MEMO_BUCKET_WIDTH) * SHARED_MEMO_BUCKET_WIDTH
-                                + 1,
-                        );
+        let mut ranges_set = BTreeSet::new();
+        let cover_range = |height: u32| -> (u32, u32) {
+            if tip <= SHARED_MEMO_BUCKET_WIDTH {
+                return (1, tip);
+            }
+            let start = ((height - 1) / SHARED_MEMO_BUCKET_WIDTH) * SHARED_MEMO_BUCKET_WIDTH + 1;
+            let end = start.saturating_add(SHARED_MEMO_BUCKET_WIDTH - 1);
+            if end <= tip {
+                (start, end)
+            } else {
+                // Near tip: shift backwards to full 10-block cover width instead of shrinking to (h, h).
+                (tip.saturating_sub(SHARED_MEMO_BUCKET_WIDTH - 1).max(1), tip)
+            }
+        };
+        if let Some(target) = target_txid {
+            if let Some(height) = db.get_tx_height(target).map_err(database_error)? {
+                let height = u32::from(height);
+                if height > 0 && height <= tip {
+                    ranges_set.insert(cover_range(height));
+                }
+            }
+        } else {
+            for work in db.transaction_enhancement_work().map_err(database_error)? {
+                if let Some(txid) = work_txid(&work, include_private) {
+                    if let Some(height) = db.get_tx_height(txid).map_err(database_error)? {
+                        let height = u32::from(height);
+                        if height > 0 && height <= tip {
+                            ranges_set.insert(cover_range(height));
+                        }
                     }
                 }
             }
         }
-        let buckets: Vec<_> = starts
-            .into_iter()
-            .take(2)
-            .map(|start| {
-                (
-                    start,
-                    start.saturating_add(SHARED_MEMO_BUCKET_WIDTH - 1).min(tip),
-                )
-            })
-            .collect();
+        let buckets: Vec<(u32, u32)> = ranges_set.into_iter().take(2).collect();
         let mut anchors = BTreeMap::new();
         for &(start, end) in &buckets {
             for height in start.saturating_sub(1)..=end {
@@ -117,10 +176,16 @@ impl NativeWallet {
                 return Err(refused("shared_memos_anchor_unavailable"));
             }
         }
-        let ranges = buckets
-            .iter()
-            .flat_map(|(start, end)| (*start..=*end).map(|h| (h, h)))
-            .collect();
+        let ranges = if include_private {
+            // Explicit private cover-bucket fetch sends ONE wire request covering the full
+            // shifted 10-block bucket rather than 10 individual (h, h) lookups.
+            buckets.iter().copied().collect()
+        } else {
+            buckets
+                .iter()
+                .flat_map(|(start, end)| (*start..=*end).map(|h| (h, h)))
+                .collect()
+        };
         let bucket_ends = buckets.iter().map(|(_, end)| *end).collect();
         Ok(NativeSharedMemosPass {
             root: self.paths.root.clone(),
@@ -132,6 +197,7 @@ impl NativeWallet {
             pending: Vec::new(),
             last_block: None,
             accepted_bytes: 0,
+            include_private,
         })
     }
 
@@ -338,18 +404,16 @@ impl NativeWallet {
                         return Err(ApplyError);
                     }
                 }
-                let public: BTreeSet<TxId> = db
+                let include_private = pass.include_private;
+                let eligible: BTreeSet<TxId> = db
                     .transaction_enhancement_work()
                     .map_err(|_| ApplyError)?
                     .into_iter()
-                    .filter_map(|work| match work {
-                        TransactionEnhancementWork::Public(request) => Some(request.txid()),
-                        _ => None,
-                    })
+                    .filter_map(|work| work_txid(&work, include_private))
                     .collect();
                 let mut count = 0;
                 for (height, tx) in decoded {
-                    if public.contains(&tx.txid()) {
+                    if eligible.contains(&tx.txid()) {
                         if db.get_tx_height(tx.txid()).map_err(|_| ApplyError)?
                             != Some(height.into())
                         {

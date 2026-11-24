@@ -1,5 +1,6 @@
 import { syncPrivateTransparent } from "./private-transparent";
 import { syncPrivateEnhance } from "./private-enhance";
+import { alignedCoverBucket } from "./privacy-policy";
 import type { SyncStage } from "@z-stack/core";
 import {
   canShield,
@@ -317,12 +318,13 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     let combinedTransparent = false;
     const combinedTransparentEpoch = ctx.transparentScanEpoch;
     const combinedTransparentSignal = ctx.transparentScanSignal;
+    const usesCompactTransparent = ctx.transparentScan === "compact" || ctx.transparentScan === "compact-plus-pir";
     const assertCombinedTransparentCurrent = () => {
       if (cancelled()) throw new Error("sync cancelled");
-      if (ctx.transparentScan !== "compact" || ctx.transparentScanEpoch !== combinedTransparentEpoch)
+      if ((ctx.transparentScan !== "compact" && ctx.transparentScan !== "compact-plus-pir") || ctx.transparentScanEpoch !== combinedTransparentEpoch)
         throw new Error("Privacy settings changed during retrieval");
     };
-    if (ctx.transparentScan === "compact" && ctx.transport.transparentBlocks && source.applyTransparentBlocks) {
+    if (usesCompactTransparent && ctx.transport.transparentBlocks && source.applyTransparentBlocks) {
       const state = await ctx.snap();
       assertCombinedTransparentCurrent();
       if ((state.transparentScanHeight ?? birthday - 1) === start - 1) {
@@ -700,7 +702,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     await refreshPublicData(signal);
     await refreshPostScanState(recovery, signal);
     if (cancelled()) throw new Error("sync cancelled");
-    if (ctx.memoFetch === "auto") await enhanceMemos(true);
+    if (ctx.memoFetch === "auto" && !ctx.transport.enhance) await enhanceMemos(true);
     if (cancelled()) throw new Error("sync cancelled");
     await rebroadcastPending(source, signal);
     await ctx.persist();
@@ -991,10 +993,18 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     await abortable(wait, () => locks.request("z-stack-wallet-spend", { ifAvailable: true }, (lock) => (lock ? run() : undefined)));
   }
 
+  let lastSharedTipBucketEnd = 0;
+  let privateTxLock: Promise<unknown> | null = null;
+
   async function refreshPrivateEnhance(signal: AbortSignal, manual = false): Promise<void> {
     const source = ctx.session;
     const transport = ctx.transport.enhance;
-    if (!source || !transport || (!manual && ctx.memoFetch !== "shared" && ctx.memoFetch !== "auto")) return;
+    const allowAuto = ctx.memoFetch === "pir-only"
+      || ctx.memoFetch === "pir-plus-shared-tip"
+      || ctx.memoFetch === "shared"
+      || ctx.memoFetch === "shared-sequential"
+      || ctx.memoFetch === "auto";
+    if (!source || !transport || (!manual && !allowAuto)) return;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     const mode = ctx.memoFetch;
     const controller = new AbortController();
@@ -1006,12 +1016,50 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     };
     try {
       await syncPrivateEnhance({ source, transport, signal: wait, assertCurrent: current, checkpoint: ctx.persist });
+      current();
+      // Only declare Enhance PIR complete once Rust confirms zero remaining PIR work
+      // (a single pass processes up to 24 queries).
+      if (mode === "pir-only" || mode === "pir-plus-shared-tip" || mode === "auto") {
+        const pending = source.privateEnhance
+          ? await source.privateEnhance("pending", new Uint8Array(), Math.floor(Date.now() / 1000))
+          : new Uint8Array([0]);
+        current();
+        ctx.selectiveMemoStatus = pending.length === 1 && pending[0] === 0 ? "complete" : "scanning";
+      }
+      // Optional opt-in near-tip aligned 10-block shared cover bucket (unconditional,
+      // note-independent — fetches the newest complete aligned 10-block bucket per sync
+      // session and never shrinks to `(h, h)`). Errors propagate to `selectiveMemoStatus = "unavailable"`.
+      if (mode === "pir-plus-shared-tip" && ctx.transport.sharedMemos && source.applyPrivateTxBucket) {
+        const scanned = await source.scannedHeight();
+        current();
+        if (scanned >= 10 && ctx.maxSharedMemoBlocksPerRequest < 10) {
+          throw new WalletError(
+            "transport",
+            "Private near-tip shared cover buckets require a transport supporting at least 10 blocks per request.",
+          );
+        }
+        const width = Math.min(10, Math.max(2, ctx.maxSharedMemoBlocksPerRequest));
+        if (scanned >= width) {
+          const end = Math.floor(scanned / width) * width;
+          if (end >= width && end > lastSharedTipBucketEnd) {
+            const start = end - width + 1;
+            const json = await abortable(wait, () => ctx.transport.sharedMemos!(start, end, wait));
+            current();
+            if (!json) {
+              throw new WalletError("transport", "Shared tip cover bucket was unavailable.");
+            }
+            await source.applyPrivateTxBucket(json);
+            await ctx.persist();
+            lastSharedTipBucketEnd = end;
+          }
+        }
+      }
     } catch (error) {
       signal.throwIfAborted(); operation.signal.throwIfAborted();
       if (controller.signal.aborted && mode !== ctx.memoFetch) return;
       current();
       if (isWalletError(error) && error.code === "wallet_changed") throw error;
-      if (mode === "shared") ctx.sharedMemoStatus = "unavailable";
+      if (mode === "shared-sequential") ctx.sharedMemoStatus = "unavailable";
       else ctx.selectiveMemoStatus = "unavailable";
       if (manual) throw error;
     } finally {
@@ -1021,15 +1069,22 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
 
   async function refreshPrivateTransparent(signal: AbortSignal): Promise<void> {
     const source = ctx.session;
-    if (!source || ctx.transparentScan !== "pir") return;
+    if (!source || (ctx.transparentScan !== "pir" && ctx.transparentScan !== "compact-plus-pir")) return;
     const transport = ctx.transport.transparentPir;
-    if (!transport) { ctx.transparentScanFailure = undefined; ctx.transparentScanStatus = "unsupported"; return; }
+    if (!transport) {
+      if (ctx.transparentScan === "pir") {
+        ctx.transparentScanFailure = undefined;
+        ctx.transparentScanStatus = "unsupported";
+      }
+      return;
+    }
+    const mode = ctx.transparentScan;
     const epoch = ctx.transparentScanEpoch;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     const wait = AbortSignal.any([operation.signal, signal, ctx.transparentScanSignal]);
     const current = () => {
       wait.throwIfAborted(); ctx.assertSource(operation, source);
-      if (ctx.transparentScan !== "pir" || ctx.transparentScanEpoch !== epoch || ctx.transport.transparentPir !== transport)
+      if (ctx.transparentScan !== mode || ctx.transparentScanEpoch !== epoch || ctx.transport.transparentPir !== transport)
         throw new Error("Privacy settings changed during retrieval");
     };
     let checkpointFailure: { error: unknown } | undefined;
@@ -1058,7 +1113,9 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
   async function refreshPublicData(signal: AbortSignal, manual = false): Promise<void> {
     if (!manual) await refreshPrivateTransparent(signal);
     const source = ctx.session;
-    if (!source || (ctx.transparentScan !== "compact" && ctx.memoFetch !== "shared")) return;
+    const wantsCompact = ctx.transparentScan === "compact" || ctx.transparentScan === "compact-plus-pir";
+    const wantsShared = ctx.memoFetch === "shared" || ctx.memoFetch === "shared-sequential";
+    if (!source || (!wantsCompact && !wantsShared)) return;
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     const mode = ctx.memoFetch;
     const deposits = ctx.transparentScan;
@@ -1084,7 +1141,18 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
           assertCurrent: current, checkpoint: ctx.persist
         });
         current();
-        if (status.transparent) ctx.transparentScanStatus = status.transparent;
+        if (status.transparent) {
+          // In `compact-plus-pir`, never let the compact scan overwrite an incomplete
+          // or unavailable Transparent PIR phase with "complete".
+          if (
+            deposits === "compact-plus-pir" &&
+            (ctx.transparentScanStatus === "unavailable" || ctx.transparentScanStatus === "scanning")
+          ) {
+            // Keep PIR phase failure/in-progress visible to callers.
+          } else {
+            ctx.transparentScanStatus = status.transparent;
+          }
+        }
         if (status.memos) ctx.sharedMemoStatus = status.memos;
       } catch (error) {
         signal.throwIfAborted();
@@ -1105,8 +1173,8 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         if (controller && ctx.memoAbort === controller) ctx.memoAbort = null;
       }
     };
-    if (!manual && deposits === "compact") await run("transparent");
-    if (mode === "shared" && ctx.memoFetch === mode) await run("memos");
+    if (!manual && (deposits === "compact" || deposits === "compact-plus-pir")) await run("transparent");
+    if ((mode === "shared" || mode === "shared-sequential") && ctx.memoFetch === mode) await run("memos");
     if (manual && ctx.sharedMemoStatus === "unsupported") throw new Error("This server does not support shared payment notes yet");
   }
 
@@ -1157,11 +1225,11 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
   }
 
   async function enhanceMemos(automatic = false): Promise<void> {
-    // Enhance PIR replaces public txid lookups. A transport with no tx method
-    // can still fill missing memos from one-block shared ranges.
+    // Enhance PIR replaces public txid lookups and single-block sharedMemos(h, h)
+    // leaks. Only direct transports WITHOUT Enhance PIR may selectively fetch by txid.
     const selectiveTx = !!ctx.transport.tx && !ctx.transport.enhance;
-    const targetedShared = !!ctx.transport.sharedMemos && !ctx.transport.tx;
-    if (!ctx.session || (!selectiveTx && !targetedShared)) {
+    if (!ctx.session || !selectiveTx) {
+      if (ctx.transport.enhance) return;
       ctx.selectiveMemoStatus = "unsupported";
       return;
     }
@@ -1184,107 +1252,44 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         await ctx.refreshIfStale(source, operation);
         if (!current()) return;
       }
-      let need = await source.memoEnhancementTxids(500);
-      const legacy = need === null;
-      if (need === null) {
-        // Compatibility with older generated artifacts. New builds persist the
-        // completion flag independently of memo text, including successful blanks.
-        const rows = JSON.parse(await source.history(80)) as HistoryEntry[];
-        need = rows.filter((e) => !(e.memos && e.memos.length > 0)
-          && ((e.receivedNoteCount ?? 0) + (e.sentNoteCount ?? 0) > 0 || e.isShielding))
-          .slice(0, 40).map((e) => e.txid);
-      }
+      const need = (await source.memoEnhancementTxids(500)) ?? [];
       let n = 0;
       let failed = false;
-      if (selectiveTx) {
-        const conc = 8;
-        for (let i = 0; i < need.length && current(); i += conc) {
-          const chunk = need.slice(i, i + conc);
-          let outages = 0;
-          const hexes = await Promise.all(
-            chunk.map((txid) =>
-              abortable(signal, () => ctx.transport.tx!(txid, signal)).catch((error) => {
-                signal.throwIfAborted();
-                if (isTransientLightServerError(error)) outages++;
-                return null;
-              }),
-            ),
-          );
-          for (const hex of hexes) {
-            if (!current()) return;
-            if (!hex) { failed = true; continue; }
-            try {
-              await source.enhanceRawTx(hex);
-              n += 1;
-            } catch {
-              failed = true; // Keep failed entries in Rust's durable enhancement queue.
-            }
-          }
-          // Persist progress in bounded groups, including successful blank memos.
-          // Storage failures must escape, not masquerade as a network retry.
-          if (n >= 40 && current()) { await ctx.persist(); n = 0; }
-          // A down server must not consume 500 sequential request deadlines.
-          // Permanent per-transaction errors still allow later entries to run.
-          if (outages === chunk.length) break;
-        }
-      } else if (targetedShared && need.length > 0) {
-        // memoEnhancementTxids already skipped completed rows before its limit.
-        // history(500) is the newest page, so an older pending id would never
-        // gain a height. Look each id up directly.
-        const heights = new Set<number>();
-        for (const txid of need) {
-          if (!current()) return;
-          let rows: HistoryEntry[] = [];
-          try {
-            rows = JSON.parse(await source.historyQuery(1, "", txid) || "[]") as HistoryEntry[];
-          } catch (error) {
-            signal.throwIfAborted();
-            failed = true;
-            continue;
-          }
-          const minedHeight = rows.find((row) => row.txid === txid)?.minedHeight;
-          if (typeof minedHeight === "number") heights.add(minedHeight);
-          else failed = true;
-        }
-        const orderedHeights = [...heights].sort((a, b) => a - b);
+      const conc = 8;
+      for (let i = 0; i < need.length && current(); i += conc) {
+        const chunk = need.slice(i, i + conc);
         let outages = 0;
-        for (const height of orderedHeights) {
+        const hexes = await Promise.all(
+          chunk.map((txid) =>
+            abortable(signal, () => ctx.transport.tx!(txid, signal)).catch((error) => {
+              signal.throwIfAborted();
+              if (isTransientLightServerError(error)) outages++;
+              return null;
+            }),
+          ),
+        );
+        for (const hex of hexes) {
           if (!current()) return;
-          let json: string | null = null;
+          if (!hex) { failed = true; continue; }
           try {
-            json = await abortable(signal, () => ctx.transport.sharedMemos!(height, height, signal));
-          } catch (error) {
-            signal.throwIfAborted();
-            if (isTransientLightServerError(error)) outages++;
-            failed = true;
-            if (outages >= 3) break;
-            continue;
-          }
-          if (!json) { failed = true; continue; }
-          try {
-            const bundle = JSON.parse(json) as { transactions?: string[] };
-            if (Array.isArray(bundle.transactions)) {
-              for (const hex of bundle.transactions) {
-                if (!current()) return;
-                try {
-                  await source.enhanceRawTx(hex);
-                  n += 1;
-                } catch {
-                  failed = true;
-                }
-              }
-            }
+            await source.enhanceRawTx(hex);
+            n += 1;
           } catch {
-            failed = true;
+            failed = true; // Keep failed entries in Rust's durable enhancement queue.
           }
-          if (n >= 40 && current()) { await ctx.persist(); n = 0; }
         }
+        // Persist progress in bounded groups, including successful blank memos.
+        // Storage failures must escape, not masquerade as a network retry.
+        if (n >= 40 && current()) { await ctx.persist(); n = 0; }
+        // A down server must not consume 500 sequential request deadlines.
+        // Permanent per-transaction errors still allow later entries to run.
+        if (outages === chunk.length) break;
       }
       if (!current()) return;
       // Also retry a previously failed save when every entry completed in memory.
       await ctx.persist();
-      const pending = legacy ? need.length >= 40 : (await source.memoEnhancementTxids(1))?.length;
-      if (current()) ctx.selectiveMemoStatus = pending ? (failed || need.length < (legacy ? 40 : 500) ? "unavailable" : "scanning") : failed ? "unavailable" : "complete";
+      const pending = (await source.memoEnhancementTxids(1))?.length;
+      if (current()) ctx.selectiveMemoStatus = pending ? (failed || need.length < 500 ? "unavailable" : "scanning") : failed ? "unavailable" : "complete";
     } catch (error) {
       operation.signal.throwIfAborted();
       // Changing memo privacy policy stops this optional phase, while owner
@@ -1294,6 +1299,76 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     } finally {
       if (ctx.memoAbort === controller) ctx.memoAbort = null;
     }
+  }
+
+  /**
+   * Explicitly fetch full details (memo, exact fee, expiry) for a single mined
+   * transaction that is outside Enhance PIR scope using an aligned 10-block
+   * cover bucket over `sharedMemos`. Never sends a single-block `(h, h)` query
+   * or a raw `txid` to the server.
+   */
+  async function fetchTxDetailsPrivate(txid: string): Promise<HistoryEntry | null> {
+    if (ctx.rescanning) throw new WalletError("busy", "rescan is in progress");
+    const id = txid.trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(id)) {
+      throw new WalletError("unknown", "Choose a valid 64-character transaction ID.");
+    }
+    if (!ctx.transport.sharedMemos) {
+      throw new WalletError("transport", "This connection does not support privacy-preserving cover-bucket transaction fetches.");
+    }
+    const operation = captureWalletOperation();
+    const epoch = runtime.runtimeState.wasmSyncEpoch;
+    const precedingSync = ctx.syncLock?.epoch === epoch ? ctx.syncLock.promise : undefined;
+    const precedingMemo = ctx.memoLock?.epoch === epoch ? ctx.memoLock.promise : undefined;
+    const precedingPrivate = privateTxLock;
+    const run = (async (): Promise<HistoryEntry | null> => {
+      await precedingSync?.catch(() => {});
+      await precedingMemo?.catch(() => {});
+      await precedingPrivate?.catch(() => {});
+      await operation.ready();
+      if (epoch !== runtime.runtimeState.wasmSyncEpoch) throw new Error("transaction detail fetch cancelled");
+      if (!ctx.currentSession() && !(await ctx.loadIfNeeded())) throw new WalletError("not_found", "no wasm wallet");
+      const source = ctx.session!;
+      ctx.assertSource(operation, source);
+      await ctx.refreshIfStale(source, operation);
+      ctx.assertSource(operation, source);
+      if (!source.applyPrivateTxBucket) {
+        throw new WalletError("unknown", "WASM engine requires a private-tx-bucket upgrade.");
+      }
+      const rows = JSON.parse(await source.historyQuery(1, "", id) || "[]") as HistoryEntry[];
+      const row = rows.find((r) => r.txid.toLowerCase() === id);
+      if (!row || typeof row.minedHeight !== "number" || row.minedHeight <= 0) {
+        return row ?? null;
+      }
+      const scanned = await source.scannedHeight();
+      ctx.assertSource(operation, source);
+      if (scanned >= 10 && ctx.maxSharedMemoBlocksPerRequest < 10) {
+        throw new WalletError(
+          "transport",
+          "Private cover-bucket transaction fetches require a transport supporting at least 10 blocks per request.",
+        );
+      }
+      const bucketSize = Math.min(10, Math.max(2, ctx.maxSharedMemoBlocksPerRequest));
+      const { start, end } = alignedCoverBucket(row.minedHeight, Math.max(scanned, row.minedHeight), bucketSize);
+      const json = await abortable(operation.signal, () => ctx.transport.sharedMemos!(start, end, operation.signal));
+      ctx.assertSource(operation, source);
+      if (!json) {
+        throw new WalletError("transport", "Cover-bucket transaction range was unavailable from the server.");
+      }
+      await source.applyPrivateTxBucket(json);
+      ctx.assertSource(operation, source);
+      await ctx.persist();
+      ctx.assertSource(operation, source);
+      if (walletStorageAvailable() && await readWalletGeneration(operation.signal) !== ctx.storageGeneration) {
+        throw new WalletError("wallet_changed", "the saved wallet was replaced or forgotten in another tab; reload it");
+      }
+      const updated = JSON.parse(await source.historyQuery(1, "", id) || "[]") as HistoryEntry[];
+      return updated.find((r) => r.txid.toLowerCase() === id) ?? row;
+    })().catch((e) => { throw WalletError.fromUnknown(e); });
+    const settled = run.then(() => undefined, () => undefined);
+    privateTxLock = settled;
+    void settled.then(() => { if (privateTxLock === settled) privateTxLock = null; });
+    return run;
   }
 
   function fetchMemos(): Promise<WalletSnapshot> {
@@ -1317,8 +1392,16 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       ctx.assertSource(operation, source);
       if (epoch !== runtime.runtimeState.wasmSyncEpoch) throw new Error("memo fetch cancelled");
       await refreshPrivateEnhance(operation.signal, true);
-      if (ctx.memoFetch === "shared") await refreshPublicData(operation.signal, true);
-      else await enhanceMemos();
+      if (ctx.memoFetch === "shared" || ctx.memoFetch === "shared-sequential") {
+        await refreshPublicData(operation.signal, true);
+      } else if (ctx.memoFetch === "pir-only" || ctx.memoFetch === "pir-plus-shared-tip") {
+        if (!ctx.transport.enhance) {
+          ctx.selectiveMemoStatus = "unsupported";
+          throw new WalletError("transport", "Enhance PIR is required for pir-only memo retrieval; refusing raw txid fallback.");
+        }
+      } else if (!ctx.transport.enhance) {
+        await enhanceMemos();
+      }
       ctx.assertSource(operation, source);
       if (epoch !== runtime.runtimeState.wasmSyncEpoch) throw new Error("memo fetch cancelled");
       if (walletStorageAvailable() && await readWalletGeneration(operation.signal) !== ctx.storageGeneration) {
@@ -1333,5 +1416,5 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     void promise.then(release, release);
     return promise;
   }
-  return { report, paintNoteBalance, runSync, refreshUtxos, refreshMempool, fetchMemos };
+  return { report, paintNoteBalance, runSync, refreshUtxos, refreshMempool, fetchMemos, fetchTxDetailsPrivate };
 }

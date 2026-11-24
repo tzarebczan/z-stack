@@ -318,7 +318,44 @@ pub fn mnemonic_from_entropy(entropy: &[u8]) -> Result<String> {
         .map_err(|_| EngineError::Message("invalid gift entropy".into()))
 }
 
-/// Derive UFVK + default UA (+ transparent receiver) from a BIP-39 mnemonic.
+/// Shielded-only Unified Address request: requires BOTH Orchard and Sapling, omits P2PKH.
+/// Unlike `UnifiedAddressRequest::SHIELDED` (which only *allows* Sapling and silently drops it
+/// at Sapling-invalid diversifier indices like 0), this always derives a full shielded UA
+/// matching the same default diversifier index as `AllAvailableKeys`.
+pub fn shielded_ua_request() -> UnifiedAddressRequest {
+    use zcash_keys::keys::ReceiverRequirement::{Omit, Require};
+    UnifiedAddressRequest::custom(Require, Require, Omit)
+        .expect("Orchard + Sapling without P2PKH is always a valid UA request")
+}
+
+/// Shielded-only Unified Address request tailored to the receivers present in `ufvk`.
+/// Requires Orchard and Sapling when both are present, or gracefully falls back to
+/// Orchard-only / Sapling-only UFVKs (never embedding P2PKH).
+pub fn shielded_ua_request_for_ufvk(ufvk: &UnifiedFullViewingKey) -> Result<UnifiedAddressRequest> {
+    use zcash_keys::keys::ReceiverRequirement::{Omit, Require};
+    match (ufvk.orchard().is_some(), ufvk.sapling().is_some()) {
+        (true, true) => Ok(shielded_ua_request()),
+        (true, false) => Ok(UnifiedAddressRequest::ORCHARD),
+        (false, true) => UnifiedAddressRequest::custom(Omit, Require, Omit)
+            .map_err(|e| EngineError::Message(format!("sapling-only UA request: {e:?}"))),
+        (false, false) => Err(EngineError::Message(
+            "UFVK has no shielded receivers (Orchard or Sapling required)".into(),
+        )),
+    }
+}
+
+/// Transparent-requiring Unified Address request used ONLY when deriving or rotating
+/// standalone external BIP-44 transparent P2PKH addresses. Requiring `p2pkh` instructs
+/// `zakura-client-sqlite` to allocate from `TransparentKeyScope::EXTERNAL` (indices
+/// `0..gap_limit`) instead of a timestamp-based shielded diversifier index (`>= 2^31`).
+pub fn transparent_ua_request() -> UnifiedAddressRequest {
+    use zcash_keys::keys::ReceiverRequirement::{Allow, Require};
+    UnifiedAddressRequest::unsafe_custom(Allow, Allow, Require)
+}
+
+/// Derive UFVK + default shielded-only UA (+ separate default transparent address) from a BIP-39 mnemonic.
+/// Default UAs omit transparent receivers (`shielded_ua_request()`) so wallets never
+/// downgrade shielded receives to transparent; transparent receives use an explicit standalone `t1` address.
 pub fn account_from_mnemonic(
     mnemonic: &str,
     network: Network,
@@ -331,17 +368,23 @@ pub fn account_from_mnemonic(
     let usk = UnifiedSpendingKey::from_seed(&network, &seed, account)
         .map_err(|e| EngineError::Message(format!("USK: {e:?}")))?;
     let ufvk = usk.to_unified_full_viewing_key();
+    let shielded_req = shielded_ua_request_for_ufvk(&ufvk)?;
     let (ua, _) = ufvk
-        .default_address(UnifiedAddressRequest::AllAvailableKeys)
+        .default_address(shielded_req)
         .map_err(|e| EngineError::Message(format!("address: {e:?}")))?;
+    let transparent_address = ufvk
+        .default_address(UnifiedAddressRequest::AllAvailableKeys)
+        .ok()
+        .and_then(|(full, _)| {
+            full.transparent()
+                .map(|t| encode_transparent_address_p(&network, t))
+        });
     Ok(AccountKeys {
         network,
         account_index,
         unified_address: ua.encode(&network),
         ufvk: ufvk.encode(&network),
-        transparent_address: ua
-            .transparent()
-            .map(|t| encode_transparent_address_p(&network, t)),
+        transparent_address,
     })
 }
 
@@ -365,6 +408,7 @@ pub fn seed_fingerprint(mnemonic: &str) -> Result<String> {
 }
 
 /// Restore a viewing surface from a UFVK string (no spending key).
+/// Default UA is shielded-only (`shielded_ua_request()`).
 pub fn account_from_ufvk(
     ufvk_str: &str,
     network: Network,
@@ -372,17 +416,23 @@ pub fn account_from_ufvk(
 ) -> Result<AccountKeys> {
     let ufvk = UnifiedFullViewingKey::decode(&network, ufvk_str.trim())
         .map_err(|e| EngineError::Message(format!("ufvk: {e}")))?;
+    let shielded_req = shielded_ua_request_for_ufvk(&ufvk)?;
     let (ua, _) = ufvk
-        .default_address(UnifiedAddressRequest::AllAvailableKeys)
+        .default_address(shielded_req)
         .map_err(|e| EngineError::Message(format!("address: {e:?}")))?;
+    let transparent_address = ufvk
+        .default_address(UnifiedAddressRequest::AllAvailableKeys)
+        .ok()
+        .and_then(|(full, _)| {
+            full.transparent()
+                .map(|t| encode_transparent_address_p(&network, t))
+        });
     Ok(AccountKeys {
         network,
         account_index,
         unified_address: ua.encode(&network),
         ufvk: ufvk.encode(&network),
-        transparent_address: ua
-            .transparent()
-            .map(|t| encode_transparent_address_p(&network, t)),
+        transparent_address,
     })
 }
 
@@ -620,9 +670,10 @@ mod tests {
         assert!(acct.unified_address.starts_with("uregtest1"));
         let t = acct.transparent_address.expect("faucet t-addr");
         assert_eq!(t, REGTEST_FAUCET_TRANSPARENT);
+        // Default UAs are shielded-only (no embedded transparent receiver).
         assert_eq!(
             transparent_from_unified(&acct.unified_address, Network::Regtest).unwrap(),
-            Some(t.clone())
+            None
         );
         let view = account_from_ufvk(&acct.ufvk, Network::Regtest, 0).unwrap();
         assert_eq!(view.unified_address, acct.unified_address);
@@ -652,10 +703,16 @@ mod tests {
         assert!(!UaReceiverSet::Orchard.includes_transparent());
 
         let acct = account_from_mnemonic(REGTEST_FAUCET_MNEMONIC, Network::Regtest, 0).unwrap();
-        let full = inspect_address(&acct.unified_address).unwrap();
-        assert_eq!(full.kind, AddressKind::Unified);
+        let default_ua = inspect_address(&acct.unified_address).unwrap();
+        assert_eq!(default_ua.kind, AddressKind::Unified);
+        assert_eq!(default_ua.receiver_set, Some(UaReceiverSet::Shielded));
+        assert!(default_ua.receivers.contains(&UaReceiver::Orchard));
+        assert!(!default_ua.receivers.contains(&UaReceiver::P2pkh));
+
+        let full_ua =
+            unified_address_for_set(&acct.ufvk, Network::Regtest, UaReceiverSet::Full).unwrap();
+        let full = inspect_address(&full_ua).unwrap();
         assert_eq!(full.receiver_set, Some(UaReceiverSet::Full));
-        assert!(full.receivers.contains(&UaReceiver::Orchard));
         assert!(full.receivers.contains(&UaReceiver::P2pkh));
 
         let orchard_only =
@@ -734,7 +791,10 @@ mod tests {
         let opted =
             |index| unified_address_at(&acct.ufvk, Network::Regtest, full, index, Next, true);
         let first = opted(0).unwrap();
-        assert_eq!(first.address, acct.unified_address);
+        assert_eq!(
+            first.address,
+            unified_address_for_set(&acct.ufvk, Network::Regtest, UaReceiverSet::Full).unwrap()
+        );
         assert!(opted(1 << 31).is_err());
     }
 }

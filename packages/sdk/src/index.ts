@@ -60,17 +60,47 @@ export {
   grpcWebTransport,
   httpLwdTransport,
   SDK_TRANSPORT_CAPABILITIES,
-  cdnSegmentTransport,
-  sliceSegmentFrames,
   // A custom transport's `submit` throws this for the node's explicit refusal.
   BroadcastRejection,
   type BlockTransport,
   type SubmissionPolicy,
   type SubmissionContext,
-  type CdnTransportOptions,
   type GrpcWebTransportOpts,
   type TransparentUtxo,
 } from "./lwd";
+
+// Composable privacy transport hops, PIR backend routing, and memo/cover-bucket policies.
+export {
+  HopError,
+  DEFAULT_HOP_RETRY,
+  NO_HOP_RETRY,
+  directHop,
+  nymHop,
+  ohttpHop,
+  createSplitHopRouter,
+  type HopKind,
+  type HopRole,
+  type HopRequest,
+  type HopResponse,
+  type MixFetchFn,
+  type NetworkHop,
+  type OhttpExchangeContext,
+  type OhttpSealer,
+  type RetryPolicy,
+  type SplitHopRouter,
+} from "./hops";
+export {
+  createHopEnhancePirTransport,
+  createHopTransparentPirTransport,
+  type EnhancePirProtocol,
+  type PirBackends,
+  type TransparentPirProtocol,
+} from "./pir-backends";
+export {
+  alignedCoverBucket,
+  resolveMemoPolicy,
+  type MemoPolicy,
+} from "./privacy-policy";
 
 // Pure helpers: amounts, ZIP-321, history, addresses, errors.
 export {

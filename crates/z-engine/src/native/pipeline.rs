@@ -776,24 +776,25 @@ fn roots_start(have: SubtreeHave, sizes: (u32, u32, u32)) -> SubtreeHave {
 
 enum ChainStateSrc {
     Cached(ChainState),
-    Walk(ChainState),
     Fetch,
 }
 
-/// Adopt GetTreeState only when we have no walk yet. After birthday / first
-/// persist, empty-block skips must not fetch a later height (that checkpoints
-/// the birthday orchard size at a note height).
+/// Adopt the cached ChainState whenever it matches the exact prior height of
+/// this contiguous batch (which is always true across contiguous ranges because
+/// `selective_scan` advances the frontier unconditionally on every batch).
+/// For discontiguous range starts (cold start, restart, near-tip verify, or
+/// mid-chain islands), fetch the anchor tree state at `prior` once so
+/// `selective_scan` always starts from a covering frontier.
 fn resolve_chain_state(cached: Option<&ChainState>, prior: BlockHeight) -> ChainStateSrc {
     match cached {
         Some(cs) if cs.block_height() == prior => ChainStateSrc::Cached(cs.clone()),
-        Some(cs) => ChainStateSrc::Walk(cs.clone()),
-        None => ChainStateSrc::Fetch,
+        _ => ChainStateSrc::Fetch,
     }
 }
 
 #[cfg(test)]
-fn should_fetch_tree_state(cached_height: Option<u32>, _prior: u32) -> bool {
-    cached_height.is_none()
+fn should_fetch_tree_state(cached_height: Option<u32>, prior: u32) -> bool {
+    cached_height != Some(prior)
 }
 
 async fn take_tree_state(
@@ -948,7 +949,6 @@ async fn historic(
                 if let Some(prev) = inflight.take() {
                     match finish_inflight(
                         prev,
-                        client,
                         network,
                         db,
                         &context,
@@ -970,9 +970,9 @@ async fn historic(
                 }
             }
             let from_state = match resolve_chain_state(cached_state.as_ref(), prior) {
-                ChainStateSrc::Cached(cs) | ChainStateSrc::Walk(cs) => cs,
+                ChainStateSrc::Cached(cs) => cs,
                 ChainStateSrc::Fetch => {
-                    info!("fetching GetTreeState once at scan start");
+                    info!("fetching GetTreeState at scan range start");
                     let cs = fetch_tree_state(client, u32::from(prior), network).await?;
                     size_cursor = Some(selective_scan::tree_sizes(&cs));
                     cs
@@ -1064,7 +1064,6 @@ async fn historic(
             if let Some(prev) = inflight.take() {
                 match finish_inflight(
                     prev,
-                    client,
                     network,
                     db,
                     &context,
@@ -1116,8 +1115,7 @@ async fn historic(
 
             let decrypted = if let Some(prefix_job) = prefix_job.take() {
                 match finish_streamed(
-                    prefix_job, blocks, from_state, cursor, start, client, network, db, &context,
-                    scanned,
+                    prefix_job, blocks, from_state, cursor, start, network, db, &context, scanned,
                 )
                 .await?
                 {
@@ -1182,9 +1180,7 @@ async fn historic(
             };
 
             size_cursor = Some(decrypted.end_sizes);
-            if decrypted.had_notes {
-                *cached_state = Some(decrypted.next_state.clone());
-            }
+            *cached_state = Some(decrypted.next_state.clone());
             absorb_pending(&mut pending, &mut pending_range, decrypted, range);
             // The streamed-prefix path does not create an `inflight` trial. It
             // must still honor the same historic persist bound as the
@@ -1219,7 +1215,6 @@ async fn historic(
         if let Some(prev) = inflight.take() {
             match finish_inflight(
                 prev,
-                client,
                 network,
                 db,
                 &context,
@@ -1438,7 +1433,6 @@ fn persist_pending(
 
 async fn finish_inflight(
     prev: InflightTrial,
-    client: &mut LwdClient,
     network: ZNetwork,
     db: &mut super::wallet::SyncDb,
     context: &selective_scan::TrialContext,
@@ -1467,12 +1461,7 @@ async fn finish_inflight(
         }
         Ok(t) => t,
     };
-    let mut from_state = prev.from_state;
-    if trial.had_notes && !selective_scan::frontier_covers(&from_state, prev.start_sizes) {
-        let prior = u32::from(prev.range.block_range().start).saturating_sub(1);
-        info!("GetTreeState for note batch after note-free frontier skip");
-        from_state = fetch_tree_state(client, prior, network).await?;
-    }
+    let from_state = prev.from_state;
     let finalized = match selective_scan::finalize_trial(
         from_state,
         trial,
@@ -1518,9 +1507,7 @@ async fn finish_inflight(
         }
         Ok(d) => d,
     };
-    if decrypted.had_notes {
-        *cached_state = Some(decrypted.next_state.clone());
-    }
+    *cached_state = Some(decrypted.next_state.clone());
     info!("full-range decrypt and frontier finalize");
     Ok(InflightOut::Batch(decrypted, prev.range))
 }
@@ -1531,46 +1518,11 @@ async fn finish_streamed(
     from_state: ChainState,
     start_sizes: (u32, u32, u32),
     start: BlockHeight,
-    client: &mut LwdClient,
     network: ZNetwork,
     db: &mut super::wallet::SyncDb,
     context: &selective_scan::TrialContext,
     scanned: &Arc<AtomicU32>,
 ) -> Result<std::result::Result<selective_scan::DecryptedBatch, selective_scan::Continuity>> {
-    finish_streamed_with_fetch(
-        prefix_job,
-        blocks,
-        from_state,
-        start_sizes,
-        start,
-        network,
-        db,
-        context,
-        scanned,
-        |height| {
-            let mut client = client.clone();
-            async move { fetch_tree_state(&mut client, height, network).await }
-        },
-    )
-    .await
-}
-
-async fn finish_streamed_with_fetch<F, Fut>(
-    prefix_job: StreamedTrial,
-    blocks: Vec<CompactBlock>,
-    from_state: ChainState,
-    start_sizes: (u32, u32, u32),
-    start: BlockHeight,
-    network: ZNetwork,
-    db: &mut super::wallet::SyncDb,
-    context: &selective_scan::TrialContext,
-    scanned: &Arc<AtomicU32>,
-    mut fetch_state: F,
-) -> Result<std::result::Result<selective_scan::DecryptedBatch, selective_scan::Continuity>>
-where
-    F: FnMut(u32) -> Fut,
-    Fut: std::future::Future<Output = Result<ChainState>>,
-{
     let prefix_n = STREAM_DECRYPT_BLOCKS as usize;
     let prefix_matches =
         blocks.get(..prefix_job.source.len()) == Some(prefix_job.source.as_slice());
@@ -1595,14 +1547,6 @@ where
             blocks,
         )?;
         let trial = join_trial(handle).await?;
-        let mut from_state = from_state;
-        if trial.as_ref().is_ok_and(|t| t.had_notes)
-            && !selective_scan::frontier_covers(&from_state, start_sizes)
-        {
-            let prior = u32::from(start).saturating_sub(1);
-            info!("GetTreeState for streamed note prefix after frontier skip");
-            from_state = fetch_state(prior).await?;
-        }
         return match trial {
             Err(c) => Ok(Err(c)),
             Ok(t) => {
@@ -1661,14 +1605,7 @@ where
         rest,
     )?;
     let rest_trial = join_trial(rest_handle).await?;
-    let mut rest_state = prefix.next_state.clone();
-    if let Ok(ref t) = rest_trial {
-        if t.had_notes && !selective_scan::frontier_covers(&rest_state, rest_sizes) {
-            let prior = u32::from(rest_start).saturating_sub(1);
-            info!("GetTreeState for streamed note suffix after frontier skip");
-            rest_state = fetch_state(prior).await?;
-        }
-    }
+    let rest_state = prefix.next_state.clone();
     let rest = match rest_trial {
         Err(c) => return Ok(Err(c)),
         Ok(t) => {
@@ -1986,26 +1923,25 @@ async fn scan_inserted(
     )?;
     let start = range.block_range().start;
     let prior = start - 1;
-    let chain_state = if let ChainStateSrc::Cached(cs) | ChainStateSrc::Walk(cs) =
-        resolve_chain_state(cached_state.as_ref(), prior)
-    {
-        *cached_state = None;
-        cs
-    } else {
-        info!("fetching GetTreeState before applying compact blocks");
-        if allow_selective_scan {
-            note(
-                progress,
-                SyncStage::Downloading,
-                format!(
-                    "fetching tree state at {} before a {}-block apply",
-                    u32::from(prior),
-                    blocks.len()
-                ),
-            );
-        }
-        fetch_tree_state(client, u32::from(prior), network).await?
-    };
+    let chain_state =
+        if let ChainStateSrc::Cached(cs) = resolve_chain_state(cached_state.as_ref(), prior) {
+            *cached_state = None;
+            cs
+        } else {
+            info!("fetching GetTreeState before applying compact blocks");
+            if allow_selective_scan {
+                note(
+                    progress,
+                    SyncStage::Downloading,
+                    format!(
+                        "fetching tree state at {} before a {}-block apply",
+                        u32::from(prior),
+                        blocks.len()
+                    ),
+                );
+            }
+            fetch_tree_state(client, u32::from(prior), network).await?
+        };
     let limit = blocks.len();
 
     if allow_selective_scan && selective_scan.should_use(blocks.len()) {
@@ -3235,13 +3171,16 @@ mod tests {
     }
 
     #[test]
-    fn mid_scan_does_not_adopt_get_tree_state() {
+    fn contiguous_batches_reuse_cached_state_and_discontiguous_ranges_fetch() {
         assert!(should_fetch_tree_state(None, 3_335_465));
         assert!(
-            !should_fetch_tree_state(Some(3_335_465), 3_340_375),
-            "walk already started; do not GetTreeState at a later prior"
+            !should_fetch_tree_state(Some(3_335_465), 3_335_465),
+            "contiguous batch reuses locally advanced ChainState without GetTreeState"
         );
-        assert!(!should_fetch_tree_state(Some(3_335_465), 3_335_465));
+        assert!(
+            should_fetch_tree_state(Some(3_335_465), 3_340_375),
+            "discontiguous range jump must fetch anchor tree state at prior instead of failing frontier_covers"
+        );
         match resolve_chain_state(None, 3_335_465.into()) {
             ChainStateSrc::Fetch => {}
             _ => panic!("cold start fetches once"),

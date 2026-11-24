@@ -60,6 +60,9 @@ export type ScanSession = PrivateEnhanceHost & PrivateTransparentHost & {
   supportsTransparentBlocks?: () => Promise<boolean>;
   applyTransparentBlocks?: (blob: Uint8Array) => Promise<number>;
   applySharedMemos?: (json: string) => Promise<number>;
+  applyPrivateTxBucket?: (json: string) => Promise<number>;
+  unverifiedTransparentHeights?: () => Promise<number[]>;
+  verifyTransparentCompactBucket?: (blob: Uint8Array, trustedEndHashHex?: string) => Promise<number>;
   /** null only for older generated WASM without persisted enhancement state. */
   memoEnhancementTxids: (limit: number) => Promise<string[] | null>;
   rewindTo: (height: number) => Promise<number>;
@@ -68,10 +71,12 @@ export type ScanSession = PrivateEnhanceHost & PrivateTransparentHost & {
   rescanFrom: (birthday: number) => Promise<void>;
   recomputePools: (onTick?: (p: { hashed: number; total: number; message: string }) => void) => Promise<void>;
   nextUnifiedAddress: () => Promise<void>;
+  nextTransparentAddress?: () => Promise<string>;
   attachSeed: (mnemonic: string) => Promise<void>;
   balanceWithConfirmations: (minConfirmations: number) => Promise<string>;
   estimateFee: (to: string, amountZec: string, memo?: string, minConfirmations?: number) => Promise<string>;
   estimateTransparentFee?: (to: string, amountZec: string) => Promise<string>;
+  estimateTexFee?: (to: string, amountZec: string) => Promise<string>;
   supportsTransparentSend?: () => Promise<boolean>;
   maxSend: (to?: string) => Promise<string>;
   snapshotJson: (server: string) => Promise<string>;
@@ -104,10 +109,10 @@ export type ScanSession = PrivateEnhanceHost & PrivateTransparentHost & {
    * transaction. Other sessions prove in the single-threaded prove worker.
    */
   prove?: (
-    kind: "send" | "sendTransparent" | "shield",
+    kind: "send" | "sendTransparent" | "sendTex" | "shield",
     mnemonic: string,
     args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; minConfirmations?: number; thresholdZat?: number },
-  ) => Promise<{ hex: string; txid?: string }>;
+  ) => Promise<{ hex: string; txid?: string; steps?: Array<{ txid: string; hex: string }> }>;
   /** Build the Orchard proving key in the instance that proves (see `prove`). */
   warmProvingKey?: () => Promise<{ ready: boolean; ms: number }>;
 };
@@ -123,6 +128,9 @@ type WalletHandle = HardwareWalletHandle & {
   enhanceRawTx?: (hex: string) => number;
   applyTransparentBlocks?: (blob: Uint8Array) => number;
   applySharedMemos?: (json: string) => number;
+  applyPrivateTxBucket?: (json: string) => number;
+  unverifiedTransparentHeights?: () => string;
+  verifyTransparentCompactBucket?: (blob: Uint8Array, trustedEndHashHex?: string) => number;
   privateTransparent?: (operation: PrivateTransparentOperation, bytes: Uint8Array) => Uint8Array;
   privateTransparentSnapshot?: (checkpointId: string) => unknown;
   privateEnhance?: (operation: PrivateEnhanceOperation, bytes: Uint8Array, time: number) => Uint8Array;
@@ -136,11 +144,14 @@ type WalletHandle = HardwareWalletHandle & {
     cb: (hashed: number, total: number, message: string) => void,
   ) => void;
   nextUnifiedAddress: () => string;
+  nextTransparentAddress?: () => string;
   attachSeed?: (mnemonic: string) => void;
   balanceWithConfirmations?: (minConfirmations: number) => string;
   estimateFee?: (to: string, amountZec: string, memo?: string, minConfirmations?: number) => string;
   estimateTransparentFee?: (to: string, amountZec: string) => string;
+  estimateTexFee?: (to: string, amountZec: string) => string;
   proveTransparentSend?: (mnemonic: string, to: string, amountZec: string, maxFeeZat?: string) => string;
+  proveTexSend?: (mnemonic: string, to: string, amountZec: string, maxFeeZat?: string) => string;
   maxSend?: (to?: string) => string;
   snapshotJson: (server: string) => string;
   toSnapshot: () => Uint8Array;
@@ -270,6 +281,21 @@ export function localScanSession(
       if (!wallet.applySharedMemos) throw new Error("WASM needs a public-data upgrade");
       return wallet.applySharedMemos(json);
     },
+    applyPrivateTxBucket: async (json) => {
+      const wallet = w();
+      if (!wallet.applyPrivateTxBucket) throw new Error("WASM needs a private-tx-bucket upgrade");
+      return wallet.applyPrivateTxBucket(json);
+    },
+    unverifiedTransparentHeights: async () => {
+      const wallet = w();
+      if (!wallet.unverifiedTransparentHeights) return [];
+      return JSON.parse(wallet.unverifiedTransparentHeights()) as number[];
+    },
+    verifyTransparentCompactBucket: async (blob, trustedEndHashHex) => {
+      const wallet = w();
+      if (!wallet.verifyTransparentCompactBucket) throw new Error("WASM needs a transparent-verify upgrade");
+      return wallet.verifyTransparentCompactBucket(blob, trustedEndHashHex);
+    },
     supportsPrivateTransparentCheckpoints: async () => typeof w().privateTransparentSnapshot === "function",
     privateTransparentSnapshot: async (checkpointId) => {
       const wallet = w();
@@ -327,6 +353,11 @@ export function localScanSession(
     nextUnifiedAddress: async () => {
       w().nextUnifiedAddress();
     },
+    nextTransparentAddress: async () => {
+      const cur = w();
+      if (typeof cur.nextTransparentAddress !== "function") throw new Error("this wasm build cannot rotate transparent addresses");
+      return cur.nextTransparentAddress();
+    },
     attachSeed: async (mnemonic) => {
       const cur = w();
       if (typeof cur.attachSeed !== "function") throw new Error("attachSeed missing");
@@ -350,6 +381,11 @@ export function localScanSession(
       const cur = w();
       if (typeof cur.estimateTransparentFee !== "function") throw new Error("this wasm build cannot estimate transparent swap outputs");
       return cur.estimateTransparentFee(to, amountZec);
+    },
+    estimateTexFee: async (to, amountZec) => {
+      const cur = w();
+      if (typeof cur.estimateTexFee !== "function") throw new Error("this wasm build cannot estimate ZIP-320 TEX fees");
+      return cur.estimateTexFee(to, amountZec);
     },
     maxSend: async (to) => {
       const cur = w();
@@ -854,6 +890,17 @@ export function workerScanSession(): ScanSession | null {
     applySharedMemos: async (json) => {
       return Number((await sessionRpc("applySharedMemos", { json }, undefined, 180_000)).n) || 0;
     },
+    applyPrivateTxBucket: async (json) => {
+      return Number((await sessionRpc("applyPrivateTxBucket", { json }, undefined, 180_000)).n) || 0;
+    },
+    unverifiedTransparentHeights: async () => {
+      const data = await sessionRpc("unverifiedTransparentHeights");
+      return data.json ? JSON.parse(String(data.json)) as number[] : [];
+    },
+    verifyTransparentCompactBucket: async (blob, trustedEndHashHex) => {
+      const buf = blob.slice().buffer as ArrayBuffer;
+      return Number((await sessionRpc("verifyTransparentCompactBucket", { blob: buf, ...(trustedEndHashHex ? { trustedEndHashHex } : {}) }, [buf], 180_000)).n) || 0;
+    },
     supportsPrivateTransparentCheckpoints: async () => (await sessionRpc("meta")).transparentPirCheckpoint === true,
     privateTransparentSnapshot: async (checkpointId) => {
       const data = await sessionRpc("privateTransparentSnapshot", { checkpointId }, undefined, 180_000);
@@ -906,6 +953,10 @@ export function workerScanSession(): ScanSession | null {
     nextUnifiedAddress: async () => {
       await sessionRpc("nextUnifiedAddress");
     },
+    nextTransparentAddress: async () => {
+      const data = await sessionRpc("nextTransparentAddress");
+      return String(data.address ?? "");
+    },
     attachSeed: async (mnemonic) => {
       await sessionRpc("attachSeed", { mnemonic });
     },
@@ -922,6 +973,10 @@ export function workerScanSession(): ScanSession | null {
     supportsTransparentSend: async () => !!(await sessionRpc("supportsTransparentSend")).supported,
     estimateTransparentFee: async (to, amountZec) => {
       const data = await sessionRpc("estimateTransparentFee", { to, amountZec });
+      return String(data.json ?? "{}");
+    },
+    estimateTexFee: async (to, amountZec) => {
+      const data = await sessionRpc("estimateTexFee", { to, amountZec });
       return String(data.json ?? "{}");
     },
     maxSend: async (to) => {
@@ -1004,13 +1059,17 @@ export function workerScanSession(): ScanSession | null {
     ...(multicore
       ? {
           prove: async (
-            kind: "send" | "sendTransparent" | "shield",
+            kind: "send" | "sendTransparent" | "sendTex" | "shield",
             mnemonic: string,
             args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; minConfirmations?: number; thresholdZat?: number },
           ) => {
             // Same limit as the prove worker; a first send may also build the key.
             const data = await sessionRpc("prove", { kind, mnemonic, ...args }, undefined, 600_000);
-            return { hex: String(data.hex ?? ""), ...(typeof data.txid === "string" ? { txid: data.txid } : {}) };
+            return {
+              hex: String(data.hex ?? ""),
+              ...(typeof data.txid === "string" ? { txid: data.txid } : {}),
+              ...(Array.isArray(data.steps) ? { steps: data.steps as Array<{ txid: string; hex: string }> } : {}),
+            };
           },
           warmProvingKey: async () => {
             const data = await sessionRpc("warmProvingKey", {}, undefined, 600_000);

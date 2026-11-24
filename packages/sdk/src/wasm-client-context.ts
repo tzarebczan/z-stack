@@ -48,7 +48,7 @@ export interface WasmClientContext {
   readonly maxBlocksPerRequest: number;
   readonly maxSharedMemoBlocksPerRequest: number;
   readonly submissionPolicy: SubmissionPolicy;
-  memoFetch: "auto" | "on-demand" | "shared";
+  memoFetch: import("./privacy-policy").MemoPolicy;
   persist: (lineage?: { epoch: number; baseKey: string | null; }, replacement?: runtime.ClaimedGeneration & { unlockPolicy?: UnlockPolicy; }, background?: boolean, transparentCheckpoint?: { checkpointId: string; signal: AbortSignal; assertCurrent: () => void }) => Promise<void>;
   transparentScan: TransparentScanMode;
   localLight: boolean;

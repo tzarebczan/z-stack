@@ -12,7 +12,7 @@ import {
 
 type Req = {
   id: number;
-  kind?: "init" | "send" | "sendTransparent" | "shield" | "warm" | "ready" | "hardwareProve";
+  kind?: "init" | "send" | "sendTransparent" | "sendTex" | "shield" | "warm" | "ready" | "hardwareProve";
   pczt?: ArrayBuffer;
   wasmBasePath?: string;
   regtestNu63Height?: number;
@@ -83,6 +83,17 @@ async function handle(msg: Req): Promise<void> {
     try {
       const minConfirmations = minimumConfirmations(msg.minConfirmations);
       if (minConfirmations !== undefined && (msg.kind !== "send" || typeof w.balanceWithConfirmations !== "function")) throw new Error("this wasm build cannot enforce confirmation policies for this payment");
+      if (msg.kind === "sendTex") {
+        const proveTex = (w as unknown as { proveTexSend?: (m: string, to: string, amt: string, maxFee?: string) => string }).proveTexSend;
+        if (typeof proveTex !== "function") throw new Error("this wasm build cannot prove ZIP-320 TEX sends");
+        const steps = JSON.parse(proveTex.call(w, msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.maxFeeZat)) as Array<{ txid: string; hex: string }>;
+        if (!Array.isArray(steps) || steps.length === 0 || !steps[0]?.hex) throw new Error("proveTexSend returned no transactions");
+        const last = steps[steps.length - 1]!;
+        const snapshot = w.toSnapshot();
+        const post = self.postMessage.bind(self) as (msg: unknown, transfer?: Transferable[]) => void;
+        post({ id: msg.id, hex: last.hex, txid: last.txid, steps, snapshot }, [snapshot.buffer]);
+        return;
+      }
       const out: { hex?: string; txid?: string } = JSON.parse(
         msg.kind === "send"
           ? w.proveSend(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.memo, msg.maxFeeZat, minConfirmations)

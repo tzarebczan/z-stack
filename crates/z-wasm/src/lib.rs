@@ -462,6 +462,36 @@ impl WasmWallet {
         self.inner.apply_shared_memos(json).map_err(js_err)
     }
 
+    #[wasm_bindgen(js_name = applyPrivateTxBucket)]
+    pub fn apply_private_tx_bucket(&mut self, json: &str) -> Result<u32, JsValue> {
+        self.inner.apply_private_tx_bucket(json).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = unverifiedTransparentHeights)]
+    pub fn unverified_transparent_heights(&self) -> String {
+        serde_json::to_string(&self.inner.unverified_transparent_heights())
+            .expect("height list serializes")
+    }
+
+    #[wasm_bindgen(js_name = verifyTransparentCompactBucket)]
+    pub fn verify_transparent_compact_bucket(
+        &mut self,
+        blob: &[u8],
+        trusted_end_hash_hex: Option<String>,
+    ) -> Result<u32, JsValue> {
+        let trusted_hash = match trusted_end_hash_hex
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(hex) => Some(z_engine::web::from_hex(hex).map_err(js_err)?),
+            None => None,
+        };
+        self.inner
+            .verify_transparent_compact_bucket_anchored(blob, trusted_hash.as_deref())
+            .map_err(js_err)
+    }
+
     #[wasm_bindgen(js_name = applyTreeState)]
     pub fn apply_tree_state(&mut self, json: &str) -> Result<(), JsValue> {
         self.inner.apply_tree_state_json(json).map_err(js_err)
@@ -575,6 +605,11 @@ impl WasmWallet {
         self.inner.next_unified_address().map_err(js_err)
     }
 
+    #[wasm_bindgen(js_name = nextTransparentAddress)]
+    pub fn next_transparent_address(&mut self) -> Result<String, JsValue> {
+        self.inner.next_transparent_address().map_err(js_err)
+    }
+
     /// Verify a mnemonic matches this wallet's UFVK and clear view-only.
     #[wasm_bindgen(js_name = attachSeed)]
     pub fn attach_seed(&mut self, mnemonic: &str) -> Result<(), JsValue> {
@@ -633,6 +668,53 @@ impl WasmWallet {
             .estimate_transparent_fee(to, amount_zec)
             .map_err(js_err)?;
         Ok(z_engine::fee_estimate_json(fee).to_string())
+    }
+
+    /// Total ZIP-317 fee across both steps of a ZIP-320 TEX send.
+    #[wasm_bindgen(js_name = estimateTexFee)]
+    pub fn estimate_tex_fee(&mut self, to: &str, amount_zec: &str) -> Result<String, JsValue> {
+        let fee = self
+            .inner
+            .estimate_tex_fee(to, amount_zec)
+            .map_err(js_err)?;
+        Ok(z_engine::fee_estimate_json(fee).to_string())
+    }
+
+    /// ZIP-320 two-step TEX send. Returns JSON array `[{ txid, hex }, ...]` in broadcast order.
+    #[wasm_bindgen(js_name = proveTexSend)]
+    pub fn prove_tex_send(
+        &mut self,
+        mnemonic: &str,
+        to: &str,
+        amount_zec: &str,
+        max_fee_zat: Option<String>,
+    ) -> Result<String, JsValue> {
+        let max_fee = max_fee_zat
+            .as_deref()
+            .map(|value| {
+                if value.is_empty()
+                    || value.len() > 16
+                    || !value.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return Err(js_err("invalid maximum fee in zatoshis"));
+                }
+                let limit = value.parse::<u64>().map_err(js_err)?;
+                if limit > 2_100_000_000_000_000 {
+                    return Err(js_err("invalid maximum fee in zatoshis"));
+                }
+                Ok(limit)
+            })
+            .transpose()?;
+        let raws = self
+            .inner
+            .prove_tex_send(mnemonic, to, amount_zec, max_fee)
+            .map_err(js_err)?;
+        let mut steps = Vec::with_capacity(raws.len());
+        for raw in raws {
+            let txid = self.inner.raw_txid(&raw).map_err(js_err)?;
+            steps.push(serde_json::json!({ "txid": txid, "hex": z_engine::web::to_hex(&raw) }));
+        }
+        Ok(serde_json::Value::Array(steps).to_string())
     }
 
     /// No memo/URI/multipay. The caller must disclose the public address and amount.

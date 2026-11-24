@@ -81,7 +81,7 @@ export type HardwareSendOptions = {
    * Browser only: await a durable receipt after reservation and before submission.
    * Reject before an atomic commit; resolve after it, even if cancellation raced it.
    */
-  beforeSubmit?: (receipt: { txid: string }, signal: AbortSignal) => Promise<void>;
+  beforeSubmit?: (receipt: { txid: string; txids?: string[] }, signal: AbortSignal) => Promise<void>;
 };
 
 /** The error a signer rejects with when the user cancels (code `hardware_cancelled`). */

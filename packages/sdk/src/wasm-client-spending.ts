@@ -41,7 +41,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "network" 
   }
 
   function proveAndSubmit(
-    kind: "send" | "sendTransparent" | "shield",
+    kind: "send" | "sendTransparent" | "sendTex" | "shield",
     seed: string,
     args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; minConfirmations?: number; thresholdZat?: number },
     beforeBroadcast?: () => boolean,
@@ -51,7 +51,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "network" 
   }
 
   async function proveAndSubmitHere(
-    kind: "send" | "sendTransparent" | "shield",
+    kind: "send" | "sendTransparent" | "sendTex" | "shield",
     seed: string,
     args: { to?: string; amountZec?: string; memo?: string; maxFeeZat?: string; minConfirmations?: number; thresholdZat?: number },
     beforeBroadcast?: () => boolean,
@@ -72,11 +72,13 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "network" 
     // missed a second send that captured its own operation.
     if (runtime.runtimeState.spendingOperation) throw new WalletError("busy", "a wallet spend is already in progress");
     runtime.runtimeState.spendingOperation = operation.signal;
+    let scanned = 0;
     try {
       await ctx.refreshIfStale(source, operation);
       // The transaction expires 40 blocks past the scanned height. Far behind the
       // tip, the node would reject it as expired while its inputs stay reserved.
-      const [scanned, tip] = await Promise.all([source.scannedHeight(), abortable(operation.signal, () => ctx.transport.tip(operation.signal))]);
+      const [scannedHeight, tip] = await Promise.all([source.scannedHeight(), abortable(operation.signal, () => ctx.transport.tip(operation.signal))]);
+      scanned = scannedHeight;
       ctx.assertSource(operation, source);
       await assertSpendingConsensus(ctx.transport, ctx.network, scanned, runtime.requireBindings().consensusBranchId, operation.signal);
       ctx.assertSource(operation, source);
@@ -85,6 +87,36 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "network" 
           "sync_required",
           `wallet is ${tip - scanned} blocks behind the chain tip; sync before sending`,
         );
+      }
+      // Verify any pre-birthday Transparent PIR UTXOs via aligned 500-block
+      // publisher-authenticated all-pool compact buckets before proving a shielding transaction.
+      if (kind === "shield" && source.unverifiedTransparentHeights && source.verifyTransparentCompactBucket) {
+        const unverified = await source.unverifiedTransparentHeights();
+        ctx.assertSource(operation, source);
+        const fetchAnchored = ctx.transport.transparentBlocksAnchored;
+        if (unverified.length > 0) {
+          if (!fetchAnchored) {
+            throw new WalletError(
+              "unknown",
+              "transparent_pir_verification_unauthenticated: Pre-birthday transparent outputs require an authenticated compact block source before shielding.",
+            );
+          }
+          const buckets = new Map<string, [number, number]>();
+          for (const h of unverified) {
+            // Strict 500-block alignment matching Rust's verify_transparent_compact_bucket.
+            const start = Math.floor((h - 1) / 500) * 500 + 1;
+            const end = Math.min(scanned, start + 499);
+            buckets.set(`${start}:${end}`, [start, end]);
+          }
+          for (const [start, end] of buckets.values()) {
+            const { blob, endHashHex } = await abortable(operation.signal, () => fetchAnchored(start, end, operation.signal));
+            ctx.assertSource(operation, source);
+            await source.verifyTransparentCompactBucket(blob, endHashHex);
+            ctx.assertSource(operation, source);
+          }
+          await ctx.persist();
+          ctx.assertSource(operation, source);
+        }
       }
     } catch (e) {
       if (runtime.runtimeState.spendingOperation === operation.signal) runtime.runtimeState.spendingOperation = null;
@@ -96,6 +128,9 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "network" 
     let broadcastStarted = false;
     let receiptCommitted = false;
     let sentTxid: string | undefined;
+    let allTxids: string[] = [];
+    let acceptedSteps = 0;
+    let multiStepPartial = false;
     let finishDrain: ((error?: unknown) => void) | undefined;
     let rollbackFailure: unknown;
     const stateAtSend = ctx.stateEpoch;
@@ -107,9 +142,17 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "network" 
         // A wallet_changed reload already holds the other tab's snapshot.
         // Restoring this tab's pre-send backup on top of it would erase their save.
         const adopted = ctx.stateEpoch !== stateAtSend;
-        if (sentTxid) await source.hardware("rollback", { txid: sentTxid });
-        else if (backup && !adopted) await source.fromSnapshot(backup);
-        else return;
+        if (allTxids.length > 0) {
+          for (const id of [...allTxids].reverse()) {
+            await source.hardware("rollback", { txid: id });
+          }
+        } else if (sentTxid) {
+          await source.hardware("rollback", { txid: sentTxid });
+        } else if (backup && !adopted) {
+          await source.fromSnapshot(backup);
+        } else {
+          return;
+        }
         ctx.assertSource(operation, source);
         const epoch = ctx.stateEpoch;
         const base = ctx.savedKeySeen;
@@ -135,6 +178,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "network" 
       assertBroadcastAllowed();
       let hex: string;
       let txid: string | undefined;
+      let steps: Array<{ txid: string; hex: string }> | undefined;
       if (source.prove) {
         // The multicore scan worker proves on its own wallet, whose trees are
         // built, with all of its threads. The wallet records the pending
@@ -143,7 +187,7 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "network" 
         if (!sameLineage()) throw new WalletError("wallet_changed", "the wallet was saved by another tab");
         finishDrain = ctx.beginReservationDrain();
         published = true;
-        ({ hex, txid } = await interruptibleProof(source, operation, () => source.prove!(kind, seed, args), () => {
+        ({ hex, txid, steps } = await interruptibleProof(source, operation, () => source.prove!(kind, seed, args), () => {
           proofInterrupted = true;
           // RPCs behind an unfinished proof cannot serialize its reservation.
           // Retirement discards it; the durable wallet remains unchanged.
@@ -164,13 +208,24 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "network" 
         } else {
           const handle = runtime.requireBindings().WasmWallet.fromSnapshot(backup);
           try {
-            const result = kind === "send"
-              ? handle.proveSend(seed, args.to ?? "", args.amountZec ?? "0", args.memo, args.maxFeeZat, args.minConfirmations)
-              : kind === "sendTransparent"
-                ? handle.proveTransparentSend?.(seed, args.to ?? "", args.amountZec ?? "0", args.maxFeeZat) ?? (() => { throw new Error("this wasm build cannot prove transparent swap outputs"); })()
-                : handle.proveShield(seed, args.thresholdZat ?? 100_000);
-            const parsed = JSON.parse(result) as { hex: string; txid?: string };
-            proved = { hex: parsed.hex, ...(parsed.txid ? { txid: parsed.txid } : {}), snapshot: handle.toSnapshot() };
+            if (kind === "sendTex") {
+              const rawSteps = handle.proveTexSend?.(seed, args.to ?? "", args.amountZec ?? "0", args.maxFeeZat)
+                ?? (() => { throw new Error("this wasm build cannot prove ZIP-320 TEX sends"); })();
+              const parsedSteps = JSON.parse(rawSteps) as Array<{ txid: string; hex: string }>;
+              if (!Array.isArray(parsedSteps) || parsedSteps.length === 0 || !parsedSteps[0]?.hex) {
+                throw new Error("proveTexSend returned no transactions");
+              }
+              const last = parsedSteps[parsedSteps.length - 1]!;
+              proved = { hex: last.hex, txid: last.txid, steps: parsedSteps, snapshot: handle.toSnapshot() };
+            } else {
+              const result = kind === "send"
+                ? handle.proveSend(seed, args.to ?? "", args.amountZec ?? "0", args.memo, args.maxFeeZat, args.minConfirmations)
+                : kind === "sendTransparent"
+                  ? handle.proveTransparentSend?.(seed, args.to ?? "", args.amountZec ?? "0", args.maxFeeZat) ?? (() => { throw new Error("this wasm build cannot prove transparent swap outputs"); })()
+                  : handle.proveShield(seed, args.thresholdZat ?? 100_000);
+              const parsed = JSON.parse(result) as { hex: string; txid?: string };
+              proved = { hex: parsed.hex, ...(parsed.txid ? { txid: parsed.txid } : {}), snapshot: handle.toSnapshot() };
+            }
           } finally { handle.free?.(); }
         }
         ctx.assertSource(operation, source);
@@ -185,11 +240,16 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "network" 
         published = true;
         hex = proved.hex;
         txid = proved.txid;
+        steps = proved.steps;
         sentTxid = txid;
       }
+      allTxids = steps && steps.length > 0 ? steps.map((s) => s.txid) : (sentTxid ? [sentTxid] : []);
       assertBroadcastAllowed();
       if (!sentTxid) throw new WalletError("unknown", "The engine did not return a transaction ID; nothing was broadcast.");
-      await assertSpendingConsensus(ctx.transport, ctx.network, await source.scannedHeight(), runtime.requireBindings().consensusBranchId, operation.signal);
+      ctx.assertSource(operation, source);
+      // Re-verify spending consensus branch immediately before persisting and dispatching
+      // so a long software proof crossing a network upgrade never broadcasts stale-branch bytes.
+      await assertSpendingConsensus(ctx.transport, ctx.network, scanned, runtime.requireBindings().consensusBranchId, operation.signal);
       ctx.assertSource(operation, source);
       const submissionContext = { txid: sentTxid };
       const reservationGeneration = runtime.runtimeState.persistGen;
@@ -205,18 +265,51 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "network" 
         const reservedTxid = sentTxid;
         // Await the commit itself: aborting this wait can race a successful write.
         // The hook must reject before committing or resolve after committing.
-        await beforeSubmit({ txid: reservedTxid }, operation.signal);
+        await beforeSubmit(
+          { txid: reservedTxid, ...(allTxids.length > 1 ? { txids: allTxids } : {}) },
+          operation.signal,
+        );
         receiptCommitted = true;
       }
       ctx.assertSource(operation, source);
       assertBroadcastAllowed();
-      ctx.bus.emit("broadcast", { kind: kind === "sendTransparent" ? "send" : kind, ...(sentTxid ? { txid: sentTxid } : {}) });
+      ctx.bus.emit("broadcast", { kind: (kind === "sendTransparent" || kind === "sendTex") ? "send" : kind, ...(sentTxid ? { txid: sentTxid } : {}) });
       ctx.assertSource(operation, source);
       assertBroadcastAllowed();
       broadcastStarted = true;
       finishDrain?.();
       // Stop waiting on close/replacement without claiming the already-started
       // request was cancelled. The pending transaction and known ID survive.
+      if (steps && steps.length > 1) {
+        let lastSubmitted = "";
+        for (let idx = 0; idx < steps.length; idx++) {
+          const step = steps[idx]!;
+          try {
+            lastSubmitted = await abortable(operation.signal, () => ctx.transport.submit!(step.hex, operation.signal, { txid: step.txid }));
+            ctx.assertSource(operation, source);
+            acceptedSteps = idx + 1;
+          } catch (stepErr) {
+            if (operation.signal.aborted || source !== ctx.session) throw stepErr;
+            const stepVerdict = runtime.submitVerdict(stepErr);
+            if (stepVerdict === "accepted") {
+              acceptedSteps = idx + 1;
+              lastSubmitted = step.txid;
+              continue;
+            }
+            if (idx === 0 && stepVerdict === "rejected") {
+              // Step 1 itself was definitively rejected before entering the mempool;
+              // safe to roll back both saved steps.
+              throw stepErr;
+            }
+            // Step 1 already succeeded (or its outcome is unknown): funds may already
+            // sit at the ephemeral transparent address. Keep the saved bundle durable
+            // and never roll back or claim notes are free again.
+            multiStepPartial = true;
+            throw stepErr;
+          }
+        }
+        return txid ?? (/^[0-9a-f]{64}$/i.test(lastSubmitted) ? lastSubmitted.toLowerCase() : undefined);
+      }
       const submitted = await abortable(operation.signal, () => ctx.transport.submit!(hex, operation.signal, submissionContext));
       ctx.assertSource(operation, source);
       return txid ?? (/^[0-9a-f]{64}$/i.test(submitted) ? submitted.toLowerCase() : undefined);
@@ -238,6 +331,18 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "network" 
         }
       }
       const message = e instanceof Error ? e.message : String(e);
+      if (multiStepPartial || acceptedSteps > 0) {
+        const detail =
+          acceptedSteps > 0
+            ? `after step ${acceptedSteps} was accepted; do not send again—resubmit pending step 2 or shield expired ephemeral funds`
+            : "during step 1 submission; check transaction status before sending again";
+        throw new WalletError(
+          "broadcast_failed",
+          `multi-step TEX payment did not finish ${detail}: ${message}`,
+          e,
+          { txid: sentTxid },
+        );
+      }
       const verdict = broadcastStarted ? runtime.submitVerdict(e) : null;
       if (verdict === "accepted") return sentTxid;
       if (verdict === "rejected") {
@@ -645,11 +750,11 @@ export function createSpendingController(ctx: Pick<WasmClientContext, "network" 
     return seed;
   }
 
-  /** Once submitted, even a failed UI refresh must retain the receipt. */
+  /** Once submitted, even a failed UI refresh must retain the receipt.
+   *  Do not fire a synchronous mempool() probe right after submit() — that
+   *  correlates broadcast timing with wallet polling on the wire. */
   async function finishSpend(txid: string | undefined, operation: WalletOperation, source: ScanSession, publicationSignal?: AbortSignal) {
     try {
-      ctx.assertSource(operation, source);
-      await ctx.refreshMempool();
       ctx.assertSource(operation, source);
       const wallet = await ctx.snap();
       ctx.assertSource(operation, source);
