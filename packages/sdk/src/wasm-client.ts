@@ -1,4 +1,5 @@
 import { transparentScanMode } from "./private-transparent";
+import { resolveMemoPolicy, type MemoPolicy } from "./privacy-policy";
 import {
   filterHistory,
   parseZip321,
@@ -131,7 +132,7 @@ export function createWasmClient(
 
   let unlockPolicy: UnlockPolicy = opts.unlockPolicy ?? "each-spend";
 
-  let memoFetch = opts.memoFetch ?? "on-demand";
+  let memoFetch: MemoPolicy = resolveMemoPolicy(opts.memoFetch, !!transport.enhance);
 
   let prewarmProvingKey = opts.prewarmProvingKey !== false;
 
@@ -146,7 +147,7 @@ export function createWasmClient(
   let transparentScanFailure: WalletSnapshot["transparentScanFailure"];
   let transparentScanStatus: PublicDataStatus = transparentScan !== "off" ? "scanning" : "off";
 
-  let sharedMemoStatus: PublicDataStatus = memoFetch === "shared" ? "scanning" : "off";
+  let sharedMemoStatus: PublicDataStatus = memoFetch === "shared-sequential" ? "scanning" : "off";
 
   const serverLabel = transport.label;
 
@@ -284,10 +285,11 @@ export function createWasmClient(
     if (w.hardware == null) delete w.hardware;
     w.unlockPolicy = unlockPolicy;
     w.transparentScanStatus = transparentScanStatus;
-    if (transparentScan === "pir" && transparentScanStatus === "unavailable" && transparentScanFailure) w.transparentScanFailure = transparentScanFailure;
+    if ((transparentScan === "pir" || transparentScan === "compact-plus-pir") && transparentScanStatus === "unavailable" && transparentScanFailure) w.transparentScanFailure = transparentScanFailure;
     else delete w.transparentScanFailure;
-    w.sharedMemoStatus = memoFetch === "shared" ? sharedMemoStatus : "off";
-    w.memoFetchStatus = memoFetch === "shared" ? sharedMemoStatus : selectiveMemoStatus;
+    const isShared = memoFetch === "shared" || memoFetch === "shared-sequential";
+    w.sharedMemoStatus = isShared ? sharedMemoStatus : "off";
+    w.memoFetchStatus = isShared ? sharedMemoStatus : selectiveMemoStatus;
     return w;
   }
 
@@ -421,7 +423,7 @@ export function createWasmClient(
     get refreshMempool() { return refreshMempool; },
   };
   const { copyLegacy, applyLoaded, persist, adoptSaved, refreshIfStale, peekedNetwork, loadIfNeeded, preferWorker, persistReplacement, releaseReplacement, replaceWallet } = createStorageController(ctx);
-  const { report, paintNoteBalance, runSync, refreshUtxos, refreshMempool, fetchMemos } = createSyncController(ctx);
+  const { report, paintNoteBalance, runSync, refreshUtxos, refreshMempool, fetchMemos, fetchTxDetailsPrivate } = createSyncController(ctx);
   const { retryPendingSubmission, transparentSendSource, proveAndSubmit, proveAndSubmitHere, hardwareSubmit, requireSeed, finishSpend, parseFeeJson, parseMaxJson } = createSpendingController(ctx);
 
   const client: runtime.WasmClient = {
@@ -580,7 +582,9 @@ export function createWasmClient(
           throw WalletError.fromUnknown(e);
         }),
     shield: async (threshold, options) => {
-      if (transparentScan === "pir") throw new Error("Transparent spending is not enabled for publisher-provided PIR history.");
+      if (transparentScan === "pir" && !transport.transparentBlocks) {
+        throw new Error("Transparent shielding requires compact block verification.");
+      }
 
       const beforeBroadcast = () => !options?.signal?.aborted && (options?.beforeBroadcast?.() ?? true);
       if (!beforeBroadcast()) throw new Error("cancelled before broadcast");
@@ -589,12 +593,12 @@ export function createWasmClient(
       const seed = requireSeed("shield");
       const operation = sessionOperation!;
       const source = session!;
-      if (transparentScan === "compact") {
+      if (transparentScan === "compact" || transparentScan === "compact-plus-pir") {
         const wallet = await snap();
         if (!wallet.transparentScanComplete || transparentScanStatus !== "complete") {
           throw new Error("Deposit scanning must finish before shielding. Sync the wallet first.");
         }
-      } else {
+      } else if (transparentScan === "off") {
         if (!transport.utxos) throw new Error("Transparent scan needs GetAddressUtxos, but address lookup is disabled");
         await refreshUtxos(true, options?.signal);
       }
@@ -602,6 +606,36 @@ export function createWasmClient(
         thresholdZat: Number(threshold ?? 100_000),
       }, beforeBroadcast);
       return finishSpend(txid, operation, source, options?.signal);
+    },
+    estimateTexFee: async (to, amountZec) => {
+      if (!currentSession() && !(await loadIfNeeded())) throw new Error("no wasm wallet");
+      const source = session!;
+      if (!source.estimateTexFee) throw new Error("this wasm build cannot estimate ZIP-320 TEX fees");
+      return parseFeeJson(await source.estimateTexFee(to.trim(), amountZec));
+    },
+    sendTex: async (to, amountZec, sendOpts) => {
+      const beforeBroadcast = () => sendOpts?.beforeBroadcast?.() ?? true;
+      if (!beforeBroadcast()) throw new Error("cancelled before broadcast");
+      assertReplacementSaved();
+      if (!currentSession() && !(await loadIfNeeded())) throw new Error("no wasm wallet");
+      const seed = requireSeed("sendTex");
+      const operation = sessionOperation!;
+      const source = session!;
+      const maxFeeZat = sendOpts?.maxFeeZat;
+      if (maxFeeZat !== undefined && (!/^(0|[1-9]\d{0,15})$/.test(maxFeeZat) || BigInt(maxFeeZat) > 2_100_000_000_000_000n)) {
+        throw new Error("invalid maximum fee in zatoshis");
+      }
+      let stepTxids: string[] | undefined;
+      const txid = await proveAndSubmit("sendTex", seed, {
+        to: to.trim(),
+        amountZec,
+        maxFeeZat,
+      }, beforeBroadcast, async (receipt, signal) => {
+        if (receipt.txids && receipt.txids.length > 1) stepTxids = receipt.txids;
+        await sendOpts?.beforeSubmit?.(receipt, signal);
+      });
+      const result = await finishSpend(txid, operation, source);
+      return stepTxids ? { ...result, txids: stepTxids } : result;
     },
     send: async (to, amountZec, memo, sendOpts) => {
       const minConfirmations = minimumConfirmations(sendOpts?.minConfirmations);
@@ -1008,18 +1042,27 @@ export function createWasmClient(
     unlockPolicy: () => unlockPolicy,
     hasSpendingSeed: () => !!(spendingSeed || runtime.runtimeState.moduleSpendingSeed),
     fetchMemos,
+    fetchTxDetailsPrivate,
     setMemoFetch: (mode) => {
-      if (mode !== memoFetch) {
+      const resolved = resolveMemoPolicy(mode, !!transport.enhance);
+      if (resolved !== memoFetch) {
         memoAbort?.abort();
-        selectiveMemoStatus = mode === "on-demand" ? "off" : "scanning";
-        sharedMemoStatus = mode === "shared" ? "scanning" : "off";
+        selectiveMemoStatus = resolved === "on-demand" ? "off" : "scanning";
+        sharedMemoStatus = resolved === "shared-sequential" ? "scanning" : "off";
       }
-      memoFetch = mode;
+      memoFetch = resolved;
     },
     setTransparentScan: (value) => {
       const mode = transparentScanMode(value);
-      if (mode === "pir" && opts.autoShield) throw new Error("Automatic shielding is not enabled for publisher-provided PIR history.");
-      if (mode === "pir" && !transport.transparentPir) throw new Error("Private transparent scanning requires a separately consented PIR transport.");
+      if (mode === "pir" && opts.autoShield) {
+        throw new Error("Automatic shielding is not enabled for publisher-provided PIR history.");
+      }
+      if (mode === "compact-plus-pir" && opts.autoShield && !transport.transparentBlocks) {
+        throw new Error("Automatic shielding in compact-plus-pir mode requires all-pool compact blocks.");
+      }
+      if ((mode === "pir" || mode === "compact-plus-pir") && !transport.transparentPir) {
+        throw new Error("Private transparent scanning requires a separately consented PIR transport.");
+      }
       if (mode !== transparentScan) {
         ++transparentScanEpoch;
         transparentScanAbort.abort(new Error("Privacy settings changed during retrieval"));
@@ -1123,6 +1166,14 @@ export function createWasmClient(
       await persist();
       return snap();
     },
+    nextTransparentAddress: async () => {
+      if (!currentSession() && !(await loadIfNeeded())) throw new Error("no wasm wallet");
+      assertReplacementSaved();
+      if (!session!.nextTransparentAddress) throw new Error("this wasm build cannot rotate transparent addresses");
+      const address = await session!.nextTransparentAddress();
+      await persist();
+      return address;
+    },
     rescan: async ({ birthday }) => {
       runtime.validateBirthdayInput(birthday);
       if (typeof birthday === "string" && (!birthday.trim() || birthday.trim().toLowerCase() === "auto")) {
@@ -1175,7 +1226,7 @@ export function createWasmClient(
             // the previous session's completion statuses during rollback.
             transparentScanFailure = undefined;
             transparentScanStatus = transparentScan !== "off" ? "scanning" : "off";
-            sharedMemoStatus = memoFetch === "shared" ? "scanning" : "off";
+            sharedMemoStatus = memoFetch === "shared-sequential" ? "scanning" : "off";
             selectiveMemoStatus = memoFetch === "on-demand" ? "off" : "scanning";
           } catch (error) {
             // wallet_changed already adopted the other tab's committed snapshot.

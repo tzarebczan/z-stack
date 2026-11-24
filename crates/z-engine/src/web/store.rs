@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use zcash_client_backend::data_api::chain::ChainState;
 use zcash_client_backend::data_api::{BlockMetadata, ORCHARD_SHARD_HEIGHT, SAPLING_SHARD_HEIGHT};
 use zcash_client_backend::proto::service::TreeState;
-use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey};
+use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::block::BlockHash;
 use zcash_primitives::merkle_tree::HashSer;
 use zcash_primitives::transaction::Transaction;
@@ -45,8 +45,8 @@ pub struct PendingSubmission {
     pub hex: String,
 }
 
-/// JSON snapshot layout. Magic stays `zstk1`; this field distinguishes selective shard scanning + tree-size marks.
-const SNAPSHOT_VERSION: u32 = 2;
+/// JSON snapshot layout. Magic stays `zstk1`; v3 adds independent transparent/internal/ephemeral cursors.
+const SNAPSHOT_VERSION: u32 = 3;
 fn snapshot_version_legacy() -> u32 {
     1
 }
@@ -475,6 +475,12 @@ struct Snapshot {
     #[serde(default)]
     total_pending: u64,
     next_diversifier: u32,
+    #[serde(default)]
+    next_transparent_diversifier: u32,
+    #[serde(default)]
+    next_internal_taddr_index: u32,
+    #[serde(default)]
+    next_ephemeral_index: u32,
     prior: Option<PriorMeta>,
     notes: Vec<TrackedNote>,
     txs: BTreeMap<String, TxAgg>,
@@ -561,6 +567,9 @@ struct SnapshotRef<'a> {
     total_available: u64,
     total_pending: u64,
     next_diversifier: u32,
+    next_transparent_diversifier: u32,
+    next_internal_taddr_index: u32,
+    next_ephemeral_index: u32,
     prior: &'a Option<PriorMeta>,
     notes: &'a [TrackedNote],
     txs: &'a BTreeMap<String, TxAgg>,
@@ -662,6 +671,9 @@ pub struct WebWallet {
     birthday: u32,
     scanned_height: u32,
     pub(crate) next_diversifier: u32,
+    pub(crate) next_transparent_diversifier: u32,
+    pub(crate) next_internal_taddr_index: u32,
+    pub(crate) next_ephemeral_index: u32,
     pub(crate) prior: Option<PriorMeta>,
     notes: Vec<TrackedNote>,
     txs: BTreeMap<String, TxAgg>,
@@ -715,7 +727,7 @@ pub struct WebWallet {
     /// step). A repeat mismatch just above the kept height doubles the step.
     /// In memory only; a reload restarts the search with the first step.
     pub(crate) reorg_probe: Option<(u32, u32)>,
-    pub(crate) transparent_scripts: Option<(u32, Vec<(Vec<u8>, String)>)>,
+    pub(crate) transparent_scripts: Option<((u32, u32, u32), Vec<(Vec<u8>, String)>)>,
     pub(crate) cached_scan_keys: Option<std::sync::Arc<super::scan::ScanKeys>>,
 }
 
@@ -727,11 +739,13 @@ impl WebWallet {
         let network = acct.network;
         let ufvk = UnifiedFullViewingKey::decode(&network, &acct.ufvk)
             .map_err(|e| EngineError::Message(format!("ufvk: {e}")))?;
+        let shielded_req = crate::keys::shielded_ua_request_for_ufvk(&ufvk)?;
         let (_ua, found) = ufvk
-            .default_address(UnifiedAddressRequest::AllAvailableKeys)
+            .default_address(shielded_req)
             .map_err(|e| EngineError::Message(format!("default address: {e:?}")))?;
         let mut next = found;
         let _ = next.increment();
+        let next_div = diversifier_u32(next);
         Ok(Self {
             network,
             account_index: acct.account_index,
@@ -740,7 +754,10 @@ impl WebWallet {
             transparent_address: acct.transparent_address,
             birthday,
             scanned_height: birthday.saturating_sub(1),
-            next_diversifier: diversifier_u32(next),
+            next_diversifier: next_div,
+            next_transparent_diversifier: next_div,
+            next_internal_taddr_index: 0,
+            next_ephemeral_index: 0,
             prior: None,
             notes: Vec::new(),
             txs: BTreeMap::new(),
@@ -1128,12 +1145,15 @@ impl WebWallet {
             .map_err(|e| EngineError::Message(format!("ufvk: {e}")))
     }
 
+    /// Rotate to the next diversified shielded-only unified address (Orchard + Sapling).
+    /// Never embeds a transparent receiver or advances transparent gap limits.
     pub fn next_unified_address(&mut self) -> Result<String> {
         let ufvk = self.decode_ufvk()?;
+        let shielded_req = crate::keys::shielded_ua_request_for_ufvk(&ufvk)?;
         let mut j = DiversifierIndex::from(self.next_diversifier);
         for _ in 0..32 {
             let (ua, found) = ufvk
-                .find_address(j, UnifiedAddressRequest::AllAvailableKeys)
+                .find_address(j, shielded_req)
                 .map_err(|e| EngineError::Message(format!("next address: {e:?}")))?;
             let encoded = ua.encode(&self.network);
             let mut next = found;
@@ -1144,15 +1164,97 @@ impl WebWallet {
             self.next_diversifier = diversifier_u32(next);
             if encoded != self.unified_address {
                 self.unified_address = encoded;
-                self.transparent_address = ua
-                    .transparent()
-                    .map(|t| zcash_keys::encoding::encode_transparent_address_p(&self.network, t));
                 return Ok(self.unified_address.clone());
             }
         }
         Err(EngineError::Message(
             "could not find a new unified address".into(),
         ))
+    }
+
+    #[cfg(feature = "transparent-pir")]
+    pub(crate) fn transparent_scope_cursor(&self) -> u32 {
+        self.next_transparent_diversifier
+            .max(self.next_internal_taddr_index)
+            .max(self.next_ephemeral_index)
+    }
+
+    /// Rotate to the next external transparent P2PKH address independently of shielded UAs.
+    /// Enforces a BIP-44 external gap limit of 20 consecutive unused addresses so repeated
+    /// rotations cannot strand future receives outside standard restore discovery windows;
+    /// once the gap limit is reached, safely reuses the newest issued unused address rather
+    /// than hard-failing swaps or checkouts.
+    #[cfg(feature = "transparent-inputs")]
+    pub fn next_transparent_address(&mut self) -> Result<String> {
+        use transparent::{
+            address::TransparentAddress,
+            keys::{NonHardenedChildIndex, TransparentKeyScope},
+        };
+        use zcash_keys::encoding::AddressCodec;
+        const EXTERNAL_GAP_LIMIT: u32 = 20;
+        let ufvk = self.decode_ufvk()?;
+        let key = ufvk
+            .transparent()
+            .ok_or_else(|| EngineError::Message("account has no transparent viewing key".into()))?;
+        // Find the highest external index with observed activity so we never exceed
+        // `highest_used + EXTERNAL_GAP_LIMIT` consecutive unused addresses.
+        let used_addrs: std::collections::BTreeSet<&str> =
+            self.utxos.iter().map(|u| u.address.as_str()).collect();
+        let mut max_allowed = EXTERNAL_GAP_LIMIT;
+        if !used_addrs.is_empty() {
+            for i in 0..self.next_transparent_diversifier {
+                let Some(child) = NonHardenedChildIndex::from_index(i) else {
+                    break;
+                };
+                if let Ok(pk) = key.derive_address_pubkey(TransparentKeyScope::EXTERNAL, child) {
+                    let addr = TransparentAddress::from_pubkey(&pk).encode(&self.network);
+                    if used_addrs.contains(addr.as_str()) {
+                        max_allowed = i.saturating_add(1).saturating_add(EXTERNAL_GAP_LIMIT);
+                    }
+                }
+            }
+        }
+        let reuse_newest = |this: &mut Self| -> Result<String> {
+            if let Some(existing) = this.transparent_address.clone() {
+                return Ok(existing);
+            }
+            let fallback_idx = this.next_transparent_diversifier.saturating_sub(1);
+            let child = NonHardenedChildIndex::from_index(fallback_idx).ok_or_else(|| {
+                EngineError::Message("transparent diversifier space exhausted".into())
+            })?;
+            let pubkey = key
+                .derive_address_pubkey(TransparentKeyScope::EXTERNAL, child)
+                .map_err(|e| EngineError::Message(format!("next transparent address: {e}")))?;
+            let encoded = TransparentAddress::from_pubkey(&pubkey).encode(&this.network);
+            this.transparent_address = Some(encoded.clone());
+            Ok(encoded)
+        };
+        let mut idx = self.next_transparent_diversifier;
+        if idx >= max_allowed {
+            return reuse_newest(self);
+        }
+        for _ in 0..32 {
+            if idx >= max_allowed {
+                return reuse_newest(self);
+            }
+            let child = NonHardenedChildIndex::from_index(idx).ok_or_else(|| {
+                EngineError::Message("transparent diversifier space exhausted".into())
+            })?;
+            let pubkey = key
+                .derive_address_pubkey(TransparentKeyScope::EXTERNAL, child)
+                .map_err(|e| EngineError::Message(format!("next transparent address: {e}")))?;
+            let encoded = TransparentAddress::from_pubkey(&pubkey).encode(&self.network);
+            idx = idx
+                .checked_add(1)
+                .ok_or_else(|| EngineError::Message("transparent diversifier overflow".into()))?;
+            self.next_transparent_diversifier = idx;
+            self.transparent_scripts = None;
+            if self.transparent_address.as_deref() != Some(encoded.as_str()) {
+                self.transparent_address = Some(encoded.clone());
+                return Ok(encoded);
+            }
+        }
+        reuse_newest(self)
     }
 
     pub fn to_snapshot(&self) -> Result<Vec<u8>> {
@@ -1172,6 +1274,9 @@ impl WebWallet {
             total_available: b.total_available,
             total_pending: b.total_pending,
             next_diversifier: self.next_diversifier,
+            next_transparent_diversifier: self.next_transparent_diversifier,
+            next_internal_taddr_index: self.next_internal_taddr_index,
+            next_ephemeral_index: self.next_ephemeral_index,
             prior: &self.prior,
             notes: &self.notes,
             txs: &self.txs,
@@ -1252,15 +1357,46 @@ impl WebWallet {
         let live_trees = snap.live_trees.take();
         let network = Network::parse(&snap.network)
             .ok_or_else(|| EngineError::InvalidNetwork(snap.network.clone()))?;
+        // Strip any legacy embedded transparent P2PKH receiver from a loaded default UA
+        // while preserving its shielded receivers and rotated diversifier.
+        let unified_address =
+            match zcash_address::ZcashAddress::try_from_encoded(&snap.unified_address)
+                .ok()
+                .and_then(|z| {
+                    z.convert_if_network::<zcash_keys::address::Address>(network.network_type())
+                        .ok()
+                }) {
+                Some(zcash_keys::address::Address::Unified(ua)) if ua.has_transparent() => {
+                    zcash_keys::address::UnifiedAddress::from_receivers(
+                        ua.orchard().cloned(),
+                        ua.sapling().cloned(),
+                        None,
+                    )
+                    .map(|stripped| stripped.encode(&network))
+                    .unwrap_or(snap.unified_address)
+                }
+                _ => snap.unified_address,
+            };
         let mut w = Self {
             network,
             account_index: snap.account_index,
             ufvk: snap.ufvk,
-            unified_address: snap.unified_address,
+            unified_address,
             transparent_address: snap.transparent_address,
             birthday: snap.birthday,
             scanned_height: snap.scanned_height,
             next_diversifier: snap.next_diversifier,
+            next_transparent_diversifier: if snap.version >= 3
+                || snap.next_transparent_diversifier > 0
+            {
+                snap.next_transparent_diversifier
+            } else {
+                // Preserve the full historical issuance range from pre-v3 snapshots
+                // so previously handed-out high-index receivers are never lost or reissued.
+                snap.next_diversifier
+            },
+            next_internal_taddr_index: snap.next_internal_taddr_index,
+            next_ephemeral_index: snap.next_ephemeral_index,
             prior: snap.prior,
             notes: snap.notes,
             txs: snap.txs,
@@ -1484,14 +1620,14 @@ impl WebWallet {
 
     /// Filter completion before limiting, so older transactions eventually get
     /// enhanced after the newest page has been processed.
+    /// Transactions completed via Enhance PIR set `enhancement_complete = true`
+    /// (with `history_metadata_complete = false`) and must NOT be re-queued for
+    /// single-block / raw-tx memo fetches.
     pub fn memo_enhancement_txids(&self, limit: usize) -> Vec<String> {
         let mut pending: Vec<_> = self
             .txs
             .iter()
-            .filter(|(_, agg)| {
-                (!agg.enhancement_complete || !agg.history_metadata_complete)
-                    && agg.has_shielded_activity()
-            })
+            .filter(|(_, agg)| !agg.enhancement_complete && agg.has_shielded_activity())
             .collect();
         pending.sort_by(|(a_id, a), (b_id, b)| {
             b.mined_height
@@ -2922,6 +3058,9 @@ impl WebWallet {
         fresh.unified_address = self.unified_address.clone();
         fresh.transparent_address = self.transparent_address.clone();
         fresh.next_diversifier = self.next_diversifier;
+        fresh.next_transparent_diversifier = self.next_transparent_diversifier;
+        fresh.next_internal_taddr_index = self.next_internal_taddr_index;
+        fresh.next_ephemeral_index = self.next_ephemeral_index;
         fresh.view_only = self.view_only;
         fresh.hardware = self.hardware.clone();
         fresh.recent_recipients = self.recent_recipients.clone();
@@ -3013,14 +3152,95 @@ impl WebWallet {
             .collect()
     }
 
-    /// The exact saved bytes and their display-order ID from the Rust wallet.
+    /// The exact saved bytes and their display-order ID from the Rust wallet,
+    /// topologically ordered so parent transactions always precede dependent
+    /// child transactions (e.g. ZIP 320 TEX step 1 -> step 2).
     pub fn pending_submissions(&self) -> Vec<PendingSubmission> {
-        self.unmined_pending_txs()
-            .map(|(txid, raw)| PendingSubmission {
-                txid: txid.to_string(),
-                hex: to_hex(raw),
-            })
-            .collect()
+        let items: Vec<(TxId, &Vec<u8>)> = self.unmined_pending_txs().collect();
+        if items.len() <= 1 {
+            return items
+                .into_iter()
+                .map(|(txid, raw)| PendingSubmission {
+                    txid: txid.to_string(),
+                    hex: to_hex(raw),
+                })
+                .collect();
+        }
+        let id_set: BTreeSet<TxId> = items.iter().map(|(id, _)| *id).collect();
+        let mut deps: BTreeMap<TxId, Vec<TxId>> = BTreeMap::new();
+        for (id, raw) in &items {
+            let mut parent_ids = Vec::new();
+            let branch = self
+                .txs
+                .get(&to_hex(id.as_ref()))
+                .and_then(|agg| agg.expiry_height)
+                .map(|h| {
+                    zcash_protocol::consensus::BranchId::for_height(
+                        &self.network,
+                        BlockHeight::from_u32(h.max(1)),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    zcash_protocol::consensus::BranchId::for_height(
+                        &self.network,
+                        BlockHeight::from_u32(self.scanned_height.max(1)),
+                    )
+                });
+            let mut slice = raw.as_slice();
+            if let Ok(tx) = Transaction::read(&mut slice, branch) {
+                if let Some(bundle) = tx.transparent_bundle() {
+                    for vin in &bundle.vin {
+                        let prev = TxId::from_bytes(*vin.prevout().hash());
+                        if prev != *id && id_set.contains(&prev) {
+                            parent_ids.push(prev);
+                        }
+                    }
+                }
+            }
+            deps.insert(*id, parent_ids);
+        }
+        // Kahn / DFS topological emit: parents strictly before children.
+        let mut emitted = BTreeSet::new();
+        let mut ordered = Vec::with_capacity(items.len());
+        let raw_by_id: BTreeMap<TxId, &Vec<u8>> = items.into_iter().collect();
+        fn visit(
+            id: TxId,
+            deps: &BTreeMap<TxId, Vec<TxId>>,
+            raw_by_id: &BTreeMap<TxId, &Vec<u8>>,
+            emitted: &mut BTreeSet<TxId>,
+            visiting: &mut BTreeSet<TxId>,
+            ordered: &mut Vec<PendingSubmission>,
+        ) {
+            if emitted.contains(&id) || !visiting.insert(id) {
+                return;
+            }
+            if let Some(parents) = deps.get(&id) {
+                for &p in parents {
+                    visit(p, deps, raw_by_id, emitted, visiting, ordered);
+                }
+            }
+            visiting.remove(&id);
+            if emitted.insert(id) {
+                if let Some(raw) = raw_by_id.get(&id) {
+                    ordered.push(PendingSubmission {
+                        txid: id.to_string(),
+                        hex: to_hex(raw),
+                    });
+                }
+            }
+        }
+        let mut visiting = BTreeSet::new();
+        for &id in raw_by_id.keys() {
+            visit(
+                id,
+                &deps,
+                &raw_by_id,
+                &mut emitted,
+                &mut visiting,
+                &mut ordered,
+            );
+        }
+        ordered
     }
 
     fn expired_unmined(&self, agg: &TxAgg) -> bool {

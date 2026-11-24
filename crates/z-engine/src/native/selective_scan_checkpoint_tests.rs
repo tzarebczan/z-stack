@@ -812,13 +812,29 @@ fn external_receipt_spend_or_account_change_blocks_stale_persist_and_final_flush
         let path = dir.path().join("wallet.sqlite");
         let observer = rusqlite::Connection::open(&path).unwrap();
         let context = TrialContext::new(load_ufvks(&db).unwrap(), load_nullifiers(&db).unwrap());
+        let (orig_scanned, _) = scan_batch_parallel(
+            ZNetwork::Regtest,
+            context.keys(),
+            &Nullifiers::empty(),
+            &original_blocks,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let initial_state = chain_state_after(
+            &empty_state(0),
+            &orig_scanned,
+            10_000.into(),
+            compact_block_hash(original_blocks.last().unwrap()).unwrap(),
+        )
+        .unwrap();
         let mut snapshot_blocks: Vec<_> = (10_001..=10_008).map(compact_at).collect();
         ensure_compact_chain_metadata(&mut snapshot_blocks, 0, 4, 0);
         let input = context.snapshot(&db, &snapshot_blocks).unwrap();
         let mut stale = decrypt_owned(
             ZNetwork::Regtest,
             input,
-            empty_state(0),
+            initial_state,
             10_001.into(),
             snapshot_blocks,
             None,
@@ -832,7 +848,7 @@ fn external_receipt_spend_or_account_change_blocks_stale_persist_and_final_flush
             decrypt_owned(
                 ZNetwork::Regtest,
                 context.snapshot(&db, &suffix).unwrap(),
-                empty_state(0),
+                stale.next_state.clone(),
                 10_009.into(),
                 suffix,
                 None,

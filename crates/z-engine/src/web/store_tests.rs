@@ -456,17 +456,18 @@ fn memo_completion_survives_reload_and_filters_before_limit() {
     let restored = WebWallet::from_snapshot(&w.to_snapshot().unwrap()).unwrap();
     assert_eq!(restored.memo_enhancement_txids(500).len(), 20);
 
-    let mut legacy: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
-    for agg in legacy["txs"].as_object_mut().unwrap().values_mut() {
+    let mut pir_only: serde_json::Value =
+        serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+    for agg in pir_only["txs"].as_object_mut().unwrap().values_mut() {
         agg.as_object_mut()
             .unwrap()
             .remove("historyMetadataComplete");
     }
-    let legacy = WebWallet::from_snapshot(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let pir_only = WebWallet::from_snapshot(&serde_json::to_vec(&pir_only).unwrap()).unwrap();
     assert_eq!(
-        legacy.memo_enhancement_txids(500).len(),
-        100,
-        "previously enhanced snapshots need a one-time history metadata upgrade"
+        pir_only.memo_enhancement_txids(500).len(),
+        20,
+        "Enhance PIR sets enhancement_complete=true with history_metadata_complete=false; it must not re-queue for single-block/raw-tx fetches"
     );
 
     let mut old: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
@@ -3227,4 +3228,153 @@ fn pending_submission_identity_and_bytes_survive_reload_without_mined_or_expired
         .mined_height = None;
     record_test_height(&mut reopened, 101);
     assert!(reopened.pending_submissions().is_empty());
+}
+
+#[test]
+fn snapshot_v2_migration_preserves_high_transparent_diversifier_and_bumps_version_to_3() {
+    let w = wallet();
+    let mut snap: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+    assert_eq!(snap["version"].as_u64(), Some(3));
+    snap["version"] = serde_json::json!(2);
+    snap["nextDiversifier"] = serde_json::json!(95);
+    snap.as_object_mut()
+        .unwrap()
+        .remove("nextTransparentDiversifier");
+    let migrated = WebWallet::from_snapshot(&serde_json::to_vec(&snap).unwrap()).unwrap();
+    assert_eq!(
+        migrated.next_transparent_diversifier, 95,
+        "legacy v2 snapshots must preserve full nextDiversifier without capping at 32"
+    );
+    let roundtrip: serde_json::Value =
+        serde_json::from_slice(&migrated.to_snapshot().unwrap()).unwrap();
+    assert_eq!(roundtrip["version"].as_u64(), Some(3));
+    assert_eq!(roundtrip["nextTransparentDiversifier"].as_u64(), Some(95));
+}
+
+#[cfg(feature = "transparent-inputs")]
+#[test]
+fn next_transparent_address_enforces_bip44_external_gap_limit() {
+    let mut w = wallet();
+    let initial_next = w.next_transparent_diversifier;
+    let mut seen = std::collections::BTreeSet::new();
+    seen.insert(w.transparent_address().unwrap().to_string());
+    let mut last = String::new();
+    let mut reused_at_cap = false;
+    for _ in 0..25 {
+        let addr = w.next_transparent_address().unwrap();
+        if !seen.insert(addr.clone()) {
+            assert_eq!(
+                addr, last,
+                "once BIP-44 external gap limit is reached, rotation must reuse newest unused address"
+            );
+            reused_at_cap = true;
+        }
+        last = addr;
+    }
+    assert!(
+        reused_at_cap,
+        "repeated unused rotations must cap at the BIP-44 gap limit"
+    );
+    // Default transparent address starts at the UA's default diversifier (`initial_next - 1`),
+    // and gap limit caps external indices strictly below 20 (`0..20`).
+    let expected_distinct = (20 - initial_next + 1) as usize;
+    assert_eq!(
+        seen.len(),
+        expected_distinct,
+        "expected {expected_distinct} distinct addresses within BIP-44 indices 0..20, got {}",
+        seen.len()
+    );
+    assert_eq!(
+        w.next_transparent_diversifier, 20,
+        "cursor must never advance past the BIP-44 gap limit"
+    );
+}
+
+#[test]
+fn verify_transparent_compact_bucket_rejects_unanchored_or_unaligned_buckets() {
+    let mut w = wallet();
+    // Anchor the wallet at height 1000 only so heights 1..=500 have no known local hash.
+    record_test_height(&mut w, 1000);
+    // Unaligned 2-block bucket (not a 500-block bucket) must fail.
+    let unaligned =
+        super::super::encode_delimited([empty_block(1, vec![0; 32]), empty_block(2, vec![1; 32])]);
+    assert!(
+        w.verify_transparent_compact_bucket(&unaligned).is_err(),
+        "unaligned compact bucket must be rejected"
+    );
+
+    // 500-block aligned bucket [1..=500] with NO anchor in wallet and NO trusted end hash must fail.
+    let mut blocks = Vec::with_capacity(500);
+    let mut prev = vec![0u8; 32];
+    for h in 1u64..=500 {
+        let mut hash = [0u8; 32];
+        hash[..8].copy_from_slice(&h.to_le_bytes());
+        let mut cb_id = [0u8; 32];
+        cb_id[..8].copy_from_slice(&h.to_be_bytes());
+        blocks.push(CompactBlock {
+            height: h,
+            hash: hash.to_vec(),
+            prev_hash: prev.clone(),
+            vtx: vec![zcash_client_backend::proto::compact_formats::CompactTx {
+                index: 0,
+                txid: cb_id.to_vec(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        prev = hash.to_vec();
+    }
+    let end_hash = prev.clone();
+    let blob = super::super::encode_delimited(blocks);
+    assert!(
+        w.verify_transparent_compact_bucket(&blob).is_err(),
+        "unanchored 500-block bucket must be rejected"
+    );
+    // Supplying a wrong trusted end hash must also fail.
+    assert!(
+        w.verify_transparent_compact_bucket_anchored(&blob, Some(&[0xffu8; 32]))
+            .is_err(),
+        "mismatched trusted end hash must be rejected"
+    );
+    // Supplying the matching publisher-verified end hash succeeds.
+    assert_eq!(
+        w.verify_transparent_compact_bucket_anchored(&blob, Some(&end_hash))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn apply_private_tx_bucket_rejects_single_block_when_chain_has_10_blocks() {
+    let mut w = wallet();
+    let mut blocks = Vec::new();
+    let mut prev = vec![0u8; 32];
+    for h in 1u64..=25 {
+        let b = empty_block(h, prev);
+        prev = b.hash.clone();
+        blocks.push(b);
+    }
+    w.apply_compact_blocks_blob(&super::super::encode_delimited(blocks.clone()))
+        .unwrap();
+    let single_hex = to_hex(&super::super::encode_delimited([blocks[20].clone()]));
+    let single = serde_json::json!({
+        "start": 21,
+        "end": 21,
+        "blocks": single_hex,
+        "transactions": []
+    })
+    .to_string();
+    assert!(
+        w.apply_private_tx_bucket(&single).is_err(),
+        "single-block cover bucket must be rejected when scanned >= 10"
+    );
+    let trailing_hex = to_hex(&super::super::encode_delimited(blocks[15..25].to_vec()));
+    let trailing_full = serde_json::json!({
+        "start": 16,
+        "end": 25,
+        "blocks": trailing_hex,
+        "transactions": []
+    })
+    .to_string();
+    assert_eq!(w.apply_private_tx_bucket(&trailing_full).unwrap(), 0);
 }

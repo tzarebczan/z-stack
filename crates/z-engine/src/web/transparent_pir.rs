@@ -131,7 +131,7 @@ impl WebWallet {
         self.transparent_pir
             .unverified_outputs
             .get_or_insert_with(Default::default);
-        self.transparent_pir.wallet_cursor = Some(self.next_diversifier);
+        self.transparent_pir.wallet_cursor = Some(self.transparent_scope_cursor());
         serde_json::to_string(&scope).map_err(|_| refused("transparent_pir_scope_invalid"))
     }
 
@@ -172,7 +172,7 @@ impl WebWallet {
         {
             state.complete = false;
         }
-        if state.wallet_cursor != Some(self.next_diversifier) {
+        if state.wallet_cursor != Some(self.transparent_scope_cursor()) {
             state.complete = false;
         }
         if let Some(scope) = &state.scope {
@@ -291,12 +291,14 @@ impl WebWallet {
             return serde_json::to_string(&self.transparent_pir_status())
                 .map_err(|_| refused("transparent_pir_status_invalid"));
         }
-        let scripts = self.public_transparent_scripts()?;
+        let entries = self.public_transparent_entries()?;
         // Stage all canonical effects on clones. A malformed late record cannot
         // partially mutate outputs, pending reservations or transaction history.
         let mut utxos = self.utxos.clone();
         let mut txs = self.txs.clone();
-        let mut next_diversifier = self.next_diversifier;
+        let mut next_transparent_diversifier = self.next_transparent_diversifier;
+        let mut next_internal_taddr_index = self.next_internal_taddr_index;
+        let mut next_ephemeral_index = self.next_ephemeral_index;
         if let Some(floor) = retirement_floor {
             let incoming: std::collections::BTreeMap<_, _> = records
                 .iter()
@@ -374,10 +376,9 @@ impl WebWallet {
             }
         }
         for (script, event) in &records {
-            let (position, (_, address)) = scripts
+            let (_, address, scope, child_index) = entries
                 .iter()
-                .enumerate()
-                .find(|(_, (s, _))| s == script)
+                .find(|(s, _, _, _)| s == script)
                 .ok_or_else(|| refused("transparent_pir_scope_changed"))?;
             match event {
                 TransparentEvent::Receive(e) => {
@@ -432,10 +433,22 @@ impl WebWallet {
                     if mined {
                         agg.mined_height = Some(e.height);
                     }
-                    next_diversifier = next_diversifier.max(
-                        u32::try_from(position / 2 + 1)
-                            .map_err(|_| refused("transparent_pir_scope_limit"))?,
-                    );
+                    let next_child = child_index
+                        .checked_add(1)
+                        .ok_or_else(|| refused("transparent_pir_scope_limit"))?;
+                    match *scope {
+                        transparent::keys::TransparentKeyScope::EXTERNAL => {
+                            next_transparent_diversifier =
+                                next_transparent_diversifier.max(next_child);
+                        }
+                        transparent::keys::TransparentKeyScope::INTERNAL => {
+                            next_internal_taddr_index = next_internal_taddr_index.max(next_child);
+                        }
+                        transparent::keys::TransparentKeyScope::EPHEMERAL => {
+                            next_ephemeral_index = next_ephemeral_index.max(next_child);
+                        }
+                        _ => {}
+                    }
                 }
                 TransparentEvent::Spend(e) => {
                     let txid = super::super::to_hex(&e.spending_txid.0);
@@ -490,12 +503,18 @@ impl WebWallet {
         state.projection_invalidated = false;
         // A received gap address expands inventory, so this checkpoint cannot
         // assert completeness for the new scripts until a further pass covers them.
-        if next_diversifier != self.next_diversifier {
+        if next_transparent_diversifier != self.next_transparent_diversifier
+            || next_internal_taddr_index != self.next_internal_taddr_index
+            || next_ephemeral_index != self.next_ephemeral_index
+        {
             state.complete = false;
+            self.transparent_scripts = None;
         }
         self.utxos = utxos;
         self.txs = txs;
-        self.next_diversifier = next_diversifier;
+        self.next_transparent_diversifier = next_transparent_diversifier;
+        self.next_internal_taddr_index = next_internal_taddr_index;
+        self.next_ephemeral_index = next_ephemeral_index;
         self.transparent_pir = state;
         self.recompute_pool_fields();
         if retirement_floor.is_some() {
@@ -546,6 +565,9 @@ impl WebWallet {
         let utxos = self.utxos.clone();
         let txs = self.txs.clone();
         let next_diversifier = self.next_diversifier;
+        let next_transparent_diversifier = self.next_transparent_diversifier;
+        let next_internal_taddr_index = self.next_internal_taddr_index;
+        let next_ephemeral_index = self.next_ephemeral_index;
         let state = self.transparent_pir.clone();
         let result = (|| {
             match rewind {
@@ -559,7 +581,12 @@ impl WebWallet {
         self.utxos = utxos;
         self.txs = txs;
         self.next_diversifier = next_diversifier;
+        self.next_transparent_diversifier = next_transparent_diversifier;
+        self.next_internal_taddr_index = next_internal_taddr_index;
+        self.next_ephemeral_index = next_ephemeral_index;
         self.transparent_pir = state;
+        self.transparent_scripts = None;
+        self.recompute_pool_fields();
         result
     }
 

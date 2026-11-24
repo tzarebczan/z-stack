@@ -42,6 +42,9 @@ type Wallet = HardwareWalletHandle & {
   enhanceRawTx?: (hex: string) => number;
   applyTransparentBlocks?: (blob: Uint8Array) => number;
   applySharedMemos?: (json: string) => number;
+  applyPrivateTxBucket?: (json: string) => number;
+  unverifiedTransparentHeights?: () => string;
+  verifyTransparentCompactBucket?: (blob: Uint8Array, trustedEndHashHex?: string) => number;
   privateTransparent?: (operation: PrivateTransparentOperation, bytes: Uint8Array) => Uint8Array;
   privateTransparentSnapshot?: (checkpointId: string) => unknown;
   privateEnhance?: (operation: PrivateEnhanceOperation, bytes: Uint8Array, time: number) => Uint8Array;
@@ -55,11 +58,14 @@ type Wallet = HardwareWalletHandle & {
     cb: (hashed: number, total: number, message: string) => void,
   ) => void;
   nextUnifiedAddress: () => string;
+  nextTransparentAddress?: () => string;
   attachSeed?: (mnemonic: string) => void;
   balanceWithConfirmations?: (minConfirmations: number) => string;
   estimateFee?: (to: string, amountZec: string, memo?: string, minConfirmations?: number) => string;
   estimateTransparentFee?: (to: string, amountZec: string) => string;
+  estimateTexFee?: (to: string, amountZec: string) => string;
   proveTransparentSend?: (mnemonic: string, to: string, amountZec: string, maxFeeZat?: string) => string;
+  proveTexSend?: (mnemonic: string, to: string, amountZec: string, maxFeeZat?: string) => string;
   maxSend?: (to?: string) => string;
   proveSend?: (mnemonic: string, to: string, amountZec: string, memo?: string, maxFeeZat?: string, minConfirmations?: number) => string;
   proveShield?: (mnemonic: string, thresholdZat: number) => string;
@@ -111,7 +117,7 @@ type Req = {
   maxFeeZat?: string;
   minConfirmations?: number;
   memo?: string;
-  kind?: "send" | "sendTransparent" | "shield";
+  kind?: "send" | "sendTransparent" | "sendTex" | "shield";
   thresholdZat?: number;
   regtestNu63Height?: number;
   regtestNu7Height?: number;
@@ -123,6 +129,7 @@ type Req = {
   copy?: "full" | "compact" | "batch";
   appVersion?: string;
   txid?: string;
+  trustedEndHashHex?: string;
 };
 
 let wasm: InitMod | null = null;
@@ -326,6 +333,23 @@ async function handle(msg: Req): Promise<void> {
         post({ id: msg.id, n: w.applySharedMemos(msg.json ?? "") });
         return;
       }
+      case "applyPrivateTxBucket": {
+        const w = needWallet();
+        if (!w.applyPrivateTxBucket) throw new Error("WASM needs a private-tx-bucket upgrade");
+        post({ id: msg.id, n: w.applyPrivateTxBucket(msg.json ?? "") });
+        return;
+      }
+      case "unverifiedTransparentHeights": {
+        const w = needWallet();
+        post({ id: msg.id, json: w.unverifiedTransparentHeights?.() ?? "[]" });
+        return;
+      }
+      case "verifyTransparentCompactBucket": {
+        const w = needWallet();
+        if (!w.verifyTransparentCompactBucket || !msg.blob) throw new Error("WASM needs a transparent-verify upgrade");
+        post({ id: msg.id, n: w.verifyTransparentCompactBucket(new Uint8Array(msg.blob), msg.trustedEndHashHex) });
+        return;
+      }
       case "privateTransparentSnapshot": {
         const w = needWallet();
         if (!w.privateTransparentSnapshot || !msg.checkpointId) throw new Error("WASM needs a transactional transparent PIR upgrade");
@@ -401,6 +425,12 @@ async function handle(msg: Req): Promise<void> {
         post({ id: msg.id, ok: true });
         return;
       }
+      case "nextTransparentAddress": {
+        const w = needWallet();
+        if (typeof w.nextTransparentAddress !== "function") throw new Error("this wasm build cannot rotate transparent addresses");
+        post({ id: msg.id, address: w.nextTransparentAddress() });
+        return;
+      }
       case "attachSeed": {
         const w = needWallet();
         if (typeof w.attachSeed !== "function") throw new Error("attachSeed missing");
@@ -435,6 +465,12 @@ async function handle(msg: Req): Promise<void> {
         post({ id: msg.id, json: w.estimateTransparentFee(msg.to ?? "", msg.amountZec ?? "") });
         return;
       }
+      case "estimateTexFee": {
+        const w = needWallet();
+        if (typeof w.estimateTexFee !== "function") throw new Error("this wasm build cannot estimate ZIP-320 TEX fees");
+        post({ id: msg.id, json: w.estimateTexFee(msg.to ?? "", msg.amountZec ?? "") });
+        return;
+      }
       case "maxSend": {
         const w = needWallet();
         if (typeof w.maxSend !== "function") throw new Error("this wasm build cannot estimate max send");
@@ -448,6 +484,15 @@ async function handle(msg: Req): Promise<void> {
         const w = needWallet();
         const minConfirmations = minimumConfirmations(msg.minConfirmations);
         if (minConfirmations !== undefined && (msg.kind !== "send" || typeof w.balanceWithConfirmations !== "function")) throw new Error("this wasm build cannot enforce confirmation policies for this payment");
+        if (msg.kind === "sendTex") {
+          const out = w.proveTexSend?.(msg.mnemonic ?? "", msg.to ?? "", msg.amountZec ?? "0", msg.maxFeeZat);
+          if (typeof out !== "string") throw new Error("this wasm build cannot prove ZIP-320 TEX sends");
+          const steps = JSON.parse(out) as Array<{ txid: string; hex: string }>;
+          if (!Array.isArray(steps) || steps.length === 0 || !steps[0]?.hex) throw new Error("proveTexSend returned no transactions");
+          const last = steps[steps.length - 1]!;
+          post({ id: msg.id, hex: last.hex, txid: last.txid, steps });
+          return;
+        }
         const out = msg.kind === "shield"
           ? w.proveShield?.(msg.mnemonic ?? "", msg.thresholdZat ?? 100_000)
           : msg.kind === "sendTransparent"

@@ -1,5 +1,8 @@
 import { transparentScanMode } from "./private-transparent";
 import type { TransparentScanMode } from "./private-transparent";
+import { resolveMemoPolicy, type MemoPolicy } from "./privacy-policy";
+import type { NetworkHop, SplitHopRouter } from "./hops";
+import type { PirBackends } from "./pir-backends";
 /**
  * One call from "nothing" to a wallet: load the WASM engine, pick a transport
  * for the light server, and return the wallet client.
@@ -61,6 +64,16 @@ export type WalletOptions = {
    */
   server: string | BlockTransport;
   /**
+   * Optional composable hop or split-hop router (`directHop`, `nymHop`, `ohttpHop`,
+   * `createSplitHopRouter`) used when `server` is a gRPC-Web URL.
+   */
+  router?: NetworkHop | SplitHopRouter;
+  /**
+   * Optional pluggable PIR backends (`enhance`, `transparent`, `status`) merged onto
+   * the wallet's `BlockTransport` (independent of the light server operator).
+   */
+  pirBackends?: PirBackends;
+  /**
    * Look up the wallet's transparent address on the server, so deposits to it
    * show up and can be shielded. The server learns the address. Default: on
    * for local servers, off for remote ones.
@@ -72,14 +85,14 @@ export type WalletOptions = {
    * before sending. No unlocker is called automatically.
    */
   autoShield?: boolean;
-  /** Default saved-bytes-auto resubmits existing signed bytes during sync. Explicit disables sync resubmission. */
+  /** Default explicit disables silent periodic rebroadcasts. Pass "saved-bytes-auto" to opt in. */
   submissionPolicy?: SubmissionPolicy;
   /**
-   * Fetch full wallet transactions for memos during sync (default on-demand). The
-   * server learns their transaction IDs. With on-demand, only fetchMemos()
-   * requests them; local history, compact scanning and broadcasts still work.
+   * Memo enhancement policy. Defaults to "pir-only" when the transport provides
+   * Enhance PIR, else "on-demand". Use "pir-plus-shared-tip" for unconditional
+   * aligned near-tip shared buckets, or call fetchTxDetailsPrivate(txid) on demand.
    */
-  memoFetch?: "auto" | "on-demand" | "shared";
+  memoFetch?: MemoPolicy;
   /**
    * For a URL server, explicitly enable its optional /zstack/memos extension.
    * Default false. memoFetch: "shared" selects privacy policy; it does not
@@ -167,16 +180,39 @@ export type Wallet = Omit<WasmClient, "baseUrl" | "health" | "probeSetup" | "sav
 const AUTO_SYNC_MS = 20_000;
 
 /** Pick the transport for a light-server URL. */
-export function lightServer(url: string, opts: { network: Network; transparent?: boolean; sharedMemos?: boolean }): BlockTransport {
+export function lightServer(
+  url: string,
+  opts: {
+    network: Network;
+    transparent?: boolean;
+    sharedMemos?: boolean;
+    hop?: NetworkHop | SplitHopRouter;
+    pirBackends?: PirBackends;
+  },
+): BlockTransport {
   const trimmed = url.trim();
-  if (looksLikeLwdPipe(trimmed)) {
-    // Port 1239 is the pipe, including on a public host. Transparent lookups
-    // stay on loopback unless the caller opts in.
-    return httpLwdTransport(trimmed, opts.network, undefined, undefined, undefined, {
-      transparent: opts.transparent ?? isLoopbackUrl(trimmed),
-    });
+  const isPipe = looksLikeLwdPipe(trimmed);
+  if (isPipe && opts.hop) {
+    throw new WalletError(
+      "unknown",
+      "Custom network hops are not supported with the local loopback pipe transport.",
+    );
   }
-  return grpcWebTransport(trimmed, { transparent: opts.transparent ?? isLoopbackUrl(trimmed), sharedMemos: opts.sharedMemos });
+  const base = isPipe
+    ? httpLwdTransport(trimmed, opts.network, undefined, undefined, undefined, {
+        transparent: opts.transparent ?? isLoopbackUrl(trimmed),
+      })
+    : grpcWebTransport(trimmed, {
+        transparent: opts.transparent ?? isLoopbackUrl(trimmed),
+        sharedMemos: opts.sharedMemos,
+        hop: opts.hop,
+      });
+  if (!opts.pirBackends) return base;
+  return {
+    ...base,
+    ...(opts.pirBackends.enhance ? { enhance: opts.pirBackends.enhance } : {}),
+    ...(opts.pirBackends.transparent ? { transparentPir: opts.pirBackends.transparent } : {}),
+  };
 }
 
 /**
@@ -197,8 +233,17 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
   if (opts.unlockPolicy !== undefined && !["session", "each-spend"].includes(opts.unlockPolicy)) throw new WalletError("unknown", "Invalid browser unlock policy.");
   const submissionPolicy = resolveSubmissionPolicy(opts.submissionPolicy);
   const transparentScan = transparentScanMode(opts.transparentScan);
-  if (transparentScan === "pir" && opts.autoShield) throw new WalletError("unknown", "Automatic shielding is not enabled for publisher-provided PIR history.");
-  if (transparentScan === "pir" && (typeof opts.server === "string" || !opts.server.transparentPir))
+  if (transparentScan === "pir" && opts.autoShield) {
+    throw new WalletError("unknown", "Automatic shielding is not enabled for publisher-provided PIR history.");
+  }
+  const hasTransparentBlocks =
+    typeof opts.server === "string" ? !looksLikeLwdPipe(opts.server.trim()) : !!opts.server.transparentBlocks;
+  const hasTransparentPir =
+    Boolean(opts.pirBackends?.transparent) || (typeof opts.server !== "string" && !!opts.server.transparentPir);
+  if (transparentScan === "compact-plus-pir" && opts.autoShield && !hasTransparentBlocks) {
+    throw new WalletError("unknown", "Automatic shielding in compact-plus-pir mode requires all-pool compact blocks.");
+  }
+  if ((transparentScan === "pir" || transparentScan === "compact-plus-pir") && !hasTransparentPir)
     throw new WalletError("unknown", "Private transparent scanning requires a separately consented PIR transport.");
   const transportLimits = {
     maxBlocksPerRequest: compactBlockRequestLimit(typeof opts.server === "string" ? undefined : opts.server.maxBlocksPerRequest),
@@ -228,10 +273,29 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
       ...(opts.regtestNu7Height !== undefined ? { regtestNu7Height: opts.regtestNu7Height } : {}),
       ...(opts.wasmBasePath !== undefined ? { wasmBasePath: opts.wasmBasePath } : {}),
     });
-    const transport =
+    if (typeof opts.server !== "string" && opts.router) {
+      throw new WalletError(
+        "unknown",
+        "Cannot combine opts.router with a pre-built BlockTransport; pass the hop when constructing the transport.",
+      );
+    }
+    const baseTransport =
       typeof opts.server === "string"
-        ? lightServer(opts.server, { network: opts.network, transparent: opts.transparent, sharedMemos: opts.sharedMemos })
+        ? lightServer(opts.server, {
+            network: opts.network,
+            transparent: opts.transparent,
+            sharedMemos: opts.sharedMemos,
+            hop: opts.router,
+            pirBackends: opts.pirBackends,
+          })
         : opts.server;
+    const transport: BlockTransport = opts.pirBackends && typeof opts.server !== "string"
+      ? {
+          ...baseTransport,
+          ...(opts.pirBackends.enhance ? { enhance: opts.pirBackends.enhance } : {}),
+          ...(opts.pirBackends.transparent ? { transparentPir: opts.pirBackends.transparent } : {}),
+        }
+      : baseTransport;
     const lightUrl = typeof opts.server === "string" ? opts.server : undefined;
     // `close` drops this. The wasm client keeps the function it was given, so
     // the in-flight sync must call through a binding we can clear.
@@ -260,8 +324,9 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
     createdClient = client;
     Object.defineProperty(client, "runtime", { get: () => wasmRuntime() ?? runtime, enumerable: true });
 
-    let memoFetchMode = opts.memoFetch ?? "on-demand";
-    let timer: ReturnType<typeof setInterval> | null = null;
+    let memoFetchMode: MemoPolicy = resolveMemoPolicy(opts.memoFetch, !!transport.enhance);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let visibleDebounce: ReturnType<typeof setTimeout> | null = null;
     let autoSyncInterval: number | null = null;
     let forgetting = 0;
     let checking = false;
@@ -271,6 +336,11 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
     let keyEpoch = 0;
     function lock(): void { keyEpoch++; unlockAbort.abort(); unlockAbort = new AbortController(); client.lock(); }
     const visible = () => typeof document === "undefined" || document.visibilityState !== "hidden";
+    const jittered = (baseMs: number): number => {
+      // ±20% jitter so periodic tip polls do not emit a fixed-period clock fingerprint.
+      const factor = 0.8 + Math.random() * 0.4;
+      return Math.max(1_000, Math.round(baseMs * factor));
+    };
     async function followTip(): Promise<void> {
       if (closed || forgetting || checking || !visible()) return;
       const epoch = keyEpoch;
@@ -300,17 +370,38 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
         checking = false;
       }
     }
+    let pollGen = 0;
+    const scheduleNextPoll = (gen = pollGen) => {
+      if (closed || forgetting || autoSyncInterval === null || gen !== pollGen) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        if (gen !== pollGen) return;
+        void followTip().finally(() => scheduleNextPoll(gen));
+      }, jittered(autoSyncInterval));
+    };
     const onVisible = () => {
-      if (visible()) void followTip();
+      if (!visible()) return;
+      if (visibleDebounce) clearTimeout(visibleDebounce);
+      const gen = pollGen;
+      // Debounce tab-focus catchup with 750..2000ms jitter to avoid focus-timing correlation.
+      visibleDebounce = setTimeout(() => {
+        visibleDebounce = null;
+        if (gen !== pollGen) return;
+        void followTip();
+      }, 750 + Math.round(Math.random() * 1250));
     };
     function pauseAutoSync(): void {
-      if (timer) clearInterval(timer);
+      pollGen += 1;
+      if (timer) clearTimeout(timer);
       timer = null;
+      if (visibleDebounce) clearTimeout(visibleDebounce);
+      visibleDebounce = null;
       if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisible);
     }
     function resumeAutoSync(): void {
       if (closed || forgetting || autoSyncInterval === null) return;
-      timer = setInterval(() => void followTip(), autoSyncInterval);
+      scheduleNextPoll(pollGen);
       if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisible);
     }
     function startAutoSync(intervalMs = AUTO_SYNC_MS): void {
@@ -432,7 +523,7 @@ export async function createWallet(opts: WalletOptions): Promise<Wallet> {
             const result = value.apply(object, args);
             if (!(result instanceof Promise)) return result;
             const normalized = result.catch(error => { throw WalletError.fromUnknown(error); });
-            return ["send", "sendTransparent", "shield"].includes(String(key))
+            return ["send", "sendTransparent", "sendTex", "shield"].includes(String(key))
               ? normalized.finally(() => { if (epoch === keyEpoch && client.unlockPolicy() === "each-spend") lock(); }) : normalized;
           } catch (error) { throw WalletError.fromUnknown(error); }
         };

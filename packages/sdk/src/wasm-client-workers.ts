@@ -9,7 +9,12 @@ import {
 import { runtimeState } from './wasm-client-coordination';
 import type { Bindings } from './wasm-client-runtime';
 
-export type ProveResult = { hex: string; txid?: string; snapshot?: Uint8Array };
+export type ProveResult = {
+  hex: string;
+  txid?: string;
+  steps?: Array<{ txid: string; hex: string }>;
+  snapshot?: Uint8Array;
+};
 
 export type ProveWorkerSession = {
   pending: Set<(error: unknown) => void>;
@@ -143,9 +148,9 @@ export function workerCall(payload: Record<string, unknown>, transfer?: Transfer
   });
 }
 
-export function proveInWorker(req: Omit<ProveResult, "hex" | "txid" | "snapshot"> & {
+export function proveInWorker(req: Omit<ProveResult, "hex" | "txid" | "steps" | "snapshot"> & {
   snapshot: Uint8Array;
-  kind: "send" | "sendTransparent" | "shield";
+  kind: "send" | "sendTransparent" | "sendTex" | "shield";
   mnemonic: string;
   to?: string;
   amountZec?: string;
@@ -158,6 +163,7 @@ export function proveInWorker(req: Omit<ProveResult, "hex" | "txid" | "snapshot"
   return workerCall({ ...req, snapshot: copy.buffer }, [copy.buffer]).then((data) => ({
     hex: data.hex as string,
     ...(typeof data.txid === "string" ? { txid: data.txid } : {}),
+    ...(Array.isArray(data.steps) ? { steps: data.steps as Array<{ txid: string; hex: string }> } : {}),
     snapshot: data.snapshot as Uint8Array,
   }));
 }

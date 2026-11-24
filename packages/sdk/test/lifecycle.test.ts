@@ -1185,7 +1185,7 @@ test("sync cancellation releases an ignored rebroadcast wait and preserves its e
   const started = deferred<AbortSignal | undefined>();
   const response = deferred<string>();
   const submitted: string[] = [];
-  const c = createWasmClient({ network: "regtest", unlockPolicy: "session", autoShield: false,
+  const c = createWasmClient({ network: "regtest", unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", autoShield: false,
     transparentScan: "off", memoFetch: "on-demand", transport: {
       kind: "fixture", label: "read-provider-fixture", tip: async () => 10,
       blocks: async () => new Uint8Array(), submit: async (bytes, signal) => {

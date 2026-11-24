@@ -90,7 +90,7 @@ use zcash_client_backend::{
     zip321::{Payment, TransactionRequest},
 };
 use zcash_client_sqlite::{util::SystemClock, wallet::init::init_wallet_db, AccountUuid, WalletDb};
-use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey};
+use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
     consensus::{BlockHeight, BranchId},
@@ -1198,7 +1198,10 @@ impl NativeWallet {
         provided: bool,
     ) -> Result<u32> {
         match birthday {
-            NativeBirthday::Height(height) => Ok(height),
+            NativeBirthday::Height(height) => Ok(crate::birthday::coarse_birthday_height(
+                network,
+                height.max(1),
+            )),
             NativeBirthday::Date(_) if provided => {
                 Err(EngineError::Message("native_source_setup_mismatch".into()))
             }
@@ -1224,11 +1227,15 @@ impl NativeWallet {
                         invalid()
                     }
                 })?;
-                crate::parse_birthday_input_for_network(
+                let parsed = crate::parse_birthday_input_for_network(
                     date,
                     Self::fetch_tip(server).await?,
                     network,
-                )
+                )?;
+                Ok(crate::birthday::coarse_birthday_height(
+                    network,
+                    parsed.max(1),
+                ))
             }
         }
     }
@@ -1282,8 +1289,12 @@ impl NativeWallet {
                     .height
                     .try_into()
                     .map_err(|_| EngineError::Message("tip height out of range".into()))?;
-                let height =
-                    birthday_height.unwrap_or_else(|| tip.saturating_sub(BIRTHDAY_SAFETY_BUFFER));
+                let height = birthday_height.unwrap_or_else(|| {
+                    crate::birthday::coarse_birthday_height(
+                        network,
+                        tip.saturating_sub(BIRTHDAY_SAFETY_BUFFER),
+                    )
+                });
                 if height > tip {
                     return Err(EngineError::BirthdayAboveTip {
                         birthday: height,
@@ -1362,8 +1373,13 @@ impl NativeWallet {
             }
         };
 
-        let birthday_h =
-            birthday_height.unwrap_or_else(|| tip.saturating_sub(BIRTHDAY_SAFETY_BUFFER));
+        let birthday_h = match birthday_height {
+            Some(h) => crate::birthday::coarse_birthday_height(network, h.max(1)),
+            None => crate::birthday::coarse_birthday_height(
+                network,
+                tip.saturating_sub(BIRTHDAY_SAFETY_BUFFER),
+            ),
+        };
         if birthday_h > tip {
             return Err(EngineError::BirthdayAboveTip {
                 birthday: birthday_h,
@@ -1405,8 +1421,9 @@ impl NativeWallet {
         };
 
         let ufvk = usk.to_unified_full_viewing_key();
+        let shielded_req = crate::keys::shielded_ua_request_for_ufvk(&ufvk)?;
         let ua = ufvk
-            .default_address(UnifiedAddressRequest::AllAvailableKeys)
+            .default_address(shielded_req)
             .map_err(|e| EngineError::WalletDb(format!("address: {e:?}")))?
             .0
             .encode(&network);
@@ -1600,6 +1617,8 @@ impl NativeWallet {
             }
         };
 
+        let birthday_height =
+            crate::birthday::coarse_birthday_height(network, birthday_height.max(1));
         if birthday_height > tip {
             return Err(EngineError::BirthdayAboveTip {
                 birthday: birthday_height,
@@ -1635,8 +1654,9 @@ impl NativeWallet {
             .map_err(|e| EngineError::WalletDb(format!("import_account_hd: {e}")))?;
 
         let ufvk = usk.to_unified_full_viewing_key();
+        let shielded_req = crate::keys::shielded_ua_request_for_ufvk(&ufvk)?;
         let ua = ufvk
-            .default_address(UnifiedAddressRequest::AllAvailableKeys)
+            .default_address(shielded_req)
             .map_err(|e| EngineError::WalletDb(format!("address: {e:?}")))?
             .0
             .encode(&network);
@@ -1833,6 +1853,8 @@ impl NativeWallet {
             .height
             .try_into()
             .map_err(|_| EngineError::Message("tip height out of range".into()))?;
+        let birthday_height =
+            crate::birthday::coarse_birthday_height(network, birthday_height.max(1));
         if birthday_height > tip {
             return Err(EngineError::BirthdayAboveTip {
                 birthday: birthday_height,
@@ -2491,12 +2513,15 @@ impl NativeWallet {
             )));
         }
 
-        if !provided {
+        if !provided && crate::is_loopback_light_url(&self.server.as_url()) {
             progress.stage = SyncStage::Enhancing;
             progress.percent = 92.0;
             progress.message = "reading memos from mined transactions".into();
             Self::push_progress(&live, &progress);
 
+            // Direct per-txid enhancement and automatic rebroadcast run only
+            // against a loopback (user-owned) light server; remote servers never
+            // receive raw txid lookups or unsolicited mempool broadcasts.
             // Memos are best effort and retried next sync. A hung validator RPC
             // (120 s read timeout per lookup) must not hold the sync, and with it
             // Send, for many minutes.
@@ -2738,46 +2763,131 @@ impl NativeWallet {
         )
     }
 
-    /// Rotate to the next diversified unified address (preferred for privacy).
+    /// Rotate to the next diversified shielded-only unified address (derived from the
+    /// account's available shielded receivers, never embedding P2PKH).
     pub fn next_unified_address(&self) -> Result<String> {
         let _ownership = database_lease::shared(&self.paths.data_db)?;
         let mut db = self.open_db()?;
-        let account = Self::primary_account_id(&db)?;
+        let account_id = Self::primary_account_id(&db)?;
+        let account = db
+            .get_account(account_id)
+            .map_err(|e| EngineError::WalletDb(format!("get_account: {e}")))?
+            .ok_or(EngineError::NoAccount)?;
+        let ufvk = account.ufvk().ok_or(EngineError::NoAccount)?;
+        let req = crate::keys::shielded_ua_request_for_ufvk(ufvk)?;
         let (addr, _idx) = db
-            .get_next_available_address(account, UnifiedAddressRequest::AllAvailableKeys)
+            .get_next_available_address(account_id, req)
             .map_err(|e| EngineError::WalletDb(format!("next address: {e}")))?
             .ok_or(EngineError::NoAccount)?;
         Ok(addr.encode(&self.network))
     }
 
-    /// Current (last generated) unified address, or UFVK default.
+    /// Current (last generated) shielded-only unified address, or UFVK shielded default.
+    /// Legacy rotated wallets whose last generated UA included P2PKH keep their rotated
+    /// diversifier with the transparent receiver stripped rather than reverting to index 0.
     pub fn unified_address(&self) -> Result<String> {
         let db = self.open_db()?;
         let account_id = Self::primary_account_id(&db)?;
+        let account = db
+            .get_account(account_id)
+            .map_err(|e| EngineError::WalletDb(format!("get_account: {e}")))?
+            .ok_or(EngineError::NoAccount)?;
+        let ufvk = account.ufvk().ok_or(EngineError::NoAccount)?;
+        let req = crate::keys::shielded_ua_request_for_ufvk(ufvk)?;
         if let Some(addr) = db
-            .get_last_generated_address_matching(
-                account_id,
-                UnifiedAddressRequest::AllAvailableKeys,
-            )
+            .get_last_generated_address_matching(account_id, req)
             .map_err(|e| EngineError::WalletDb(format!("get address: {e}")))?
         {
             return Ok(addr.encode(&self.network));
+        }
+        if let Some(legacy) = db
+            .get_last_generated_address_matching(
+                account_id,
+                zcash_keys::keys::UnifiedAddressRequest::AllAvailableKeys,
+            )
+            .map_err(|e| EngineError::WalletDb(format!("get legacy address: {e}")))?
+        {
+            if let Some(stripped) = zcash_keys::address::UnifiedAddress::from_receivers(
+                legacy.orchard().cloned(),
+                legacy.sapling().cloned(),
+                None,
+            ) {
+                return Ok(stripped.encode(&self.network));
+            }
+        }
+        Ok(ufvk
+            .default_address(req)
+            .map_err(|e| EngineError::WalletDb(format!("default address: {e:?}")))?
+            .0
+            .encode(&self.network))
+    }
+
+    /// Current standalone transparent P2PKH address (derived separately from shielded UAs).
+    pub fn transparent_address(&self) -> Result<Option<String>> {
+        let db = self.open_db()?;
+        let account_id = Self::primary_account_id(&db)?;
+        let req = crate::keys::transparent_ua_request();
+        if let Some(addr) = db
+            .get_last_generated_address_matching(account_id, req)
+            .map_err(|e| EngineError::WalletDb(format!("get t-address: {e}")))?
+        {
+            return crate::keys::transparent_from_unified(
+                &addr.encode(&self.network),
+                self.network,
+            );
         }
         let account = db
             .get_account(account_id)
             .map_err(|e| EngineError::WalletDb(format!("get_account: {e}")))?
             .ok_or(EngineError::NoAccount)?;
         let ufvk = account.ufvk().ok_or(EngineError::NoAccount)?;
-        Ok(ufvk
-            .default_address(UnifiedAddressRequest::AllAvailableKeys)
-            .map_err(|e| EngineError::WalletDb(format!("default address: {e:?}")))?
+        let full = ufvk
+            .default_address(req)
+            .map_err(|e| EngineError::WalletDb(format!("default t-address: {e:?}")))?
             .0
-            .encode(&self.network))
+            .encode(&self.network);
+        crate::keys::transparent_from_unified(&full, self.network)
     }
 
-    /// Transparent P2PKH receiver of the current unified address (for faucet/mining).
-    pub fn transparent_address(&self) -> Result<Option<String>> {
-        crate::keys::transparent_from_unified(&self.unified_address()?, self.network)
+    /// Rotate to the next standalone external transparent P2PKH address and register it
+    /// in SQLite so compact scanning, shielding, and Transparent PIR all track it.
+    /// If SQLite's BIP-44 external gap limit is reached, safely reuses the newest issued
+    /// unused transparent address rather than hard-failing swaps or Receive.
+    pub fn next_transparent_address(&self) -> Result<String> {
+        let _ownership = database_lease::shared(&self.paths.data_db)?;
+        let current = self.transparent_address()?;
+        let mut db = self.open_db()?;
+        let account = Self::primary_account_id(&db)?;
+        let req = crate::keys::transparent_ua_request();
+        let is_gap_limit = |e: &dyn std::fmt::Display| {
+            let msg = e.to_string().to_ascii_lowercase();
+            msg.contains("gap limit") || msg.contains("reachedgaplimit")
+        };
+        let next_from_db = |db: &mut _| -> Result<Option<String>> {
+            match zcash_client_backend::data_api::WalletWrite::get_next_available_address(
+                db, account, req,
+            ) {
+                Ok(Some((addr, _idx))) => {
+                    crate::keys::transparent_from_unified(&addr.encode(&self.network), self.network)
+                }
+                Ok(None) => Err(EngineError::NoAccount),
+                Err(e) if is_gap_limit(&e) => Ok(None),
+                Err(e) => Err(EngineError::WalletDb(format!(
+                    "next transparent address: {e}"
+                ))),
+            }
+        };
+        let Some(mut next) = next_from_db(&mut db)? else {
+            return current.ok_or_else(|| {
+                EngineError::Message("transparent_address_gap_limit_reached".into())
+            });
+        };
+        if current.as_deref() == Some(next.as_str()) {
+            if let Some(second) = next_from_db(&mut db)? {
+                next = second;
+            }
+        }
+        Ok(next)
     }
 
     pub fn balance(&self) -> Result<Balance> {
@@ -2950,13 +3060,15 @@ impl NativeWallet {
             .height
             .try_into()
             .map_err(|_| EngineError::Message("tip height out of range".into()))?;
-        let birthday_height = self.meta.birthday_height.max(1);
-        if birthday_height > tip {
+        let raw_birthday = self.meta.birthday_height.max(1);
+        if raw_birthday > tip {
             return Err(EngineError::BirthdayAboveTip {
-                birthday: birthday_height,
+                birthday: raw_birthday,
                 tip,
             });
         }
+        let birthday_height =
+            crate::birthday::coarse_birthday_height(self.network, raw_birthday).max(1);
         let prior_height = birthday_height.saturating_sub(1);
         let treestate =
             super::tree_state::fetch(&mut client, prior_height, Some(self.network)).await?;
@@ -2964,6 +3076,59 @@ impl NativeWallet {
             .map_err(|e| EngineError::WalletDb(format!("birthday: {e}")))?;
 
         self.replace_scan_db_locked(&ufvk, &birthday)
+    }
+
+    /// Wipe sqlite + compact-block cache and re-import the UFVK at birthday using
+    /// an enrolled `NativeWalletSource` (e.g. Private Cloud OHTTP) — never opens
+    /// a direct clearnet lightwalletd connection.
+    pub async fn reset_scan_with_wallet_source(
+        &self,
+        source: &super::NativeWalletSource,
+    ) -> Result<()> {
+        self.require_wallet_source(source)?;
+        let _lease = database_lease::exclusive(&self.paths.data_db)?;
+        if has_recovery_marker(&self.paths.data_db)? {
+            return Err(EngineError::Message("native_recovery_reset_refused".into()));
+        }
+        let ufvk_str = match self
+            .meta
+            .ufvk
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(u) => u.to_string(),
+            None => self.viewing_key()?,
+        };
+        let ufvk = UnifiedFullViewingKey::decode(&self.network, ufvk_str.trim())
+            .map_err(|e| EngineError::Message(format!("ufvk: {e}")))?;
+
+        let mut client = source.client();
+        Self::assert_wallet_source_chain(&mut client, self.network).await?;
+        let tip: u32 = client
+            .get_latest_block(ChainSpec::default())
+            .await
+            .map_err(|e| EngineError::Transport(format!("GetLatestBlock: {e}")))?
+            .into_inner()
+            .height
+            .try_into()
+            .map_err(|_| EngineError::Message("tip height out of range".into()))?;
+        let raw_birthday = self.meta.birthday_height.max(1);
+        if raw_birthday > tip {
+            return Err(EngineError::BirthdayAboveTip {
+                birthday: raw_birthday,
+                tip,
+            });
+        }
+        let birthday_height =
+            crate::birthday::coarse_birthday_height(self.network, raw_birthday).max(1);
+        let prior_height = birthday_height.saturating_sub(1);
+        let treestate =
+            super::tree_state::fetch(&mut client, prior_height, Some(self.network)).await?;
+        let birthday = AccountBirthday::from_treestate(treestate, Some(BlockHeight::from(tip)))
+            .map_err(|e| EngineError::WalletDb(format!("birthday: {e}")))?;
+
+        self.replace_scan_db_locked_with_source(&ufvk, &birthday, Some(source))
     }
 
     #[cfg(test)]
@@ -2982,8 +3147,20 @@ impl NativeWallet {
         ufvk: &UnifiedFullViewingKey,
         birthday: &AccountBirthday,
     ) -> Result<()> {
+        self.replace_scan_db_locked_with_source(ufvk, birthday, None)
+    }
+
+    fn replace_scan_db_locked_with_source(
+        &self,
+        ufvk: &UnifiedFullViewingKey,
+        birthday: &AccountBirthday,
+        source: Option<&super::NativeWalletSource>,
+    ) -> Result<()> {
         // The caller retains the exclusive ownership lease through the swap.
-        self.require_source_spending_access()?;
+        match source {
+            Some(s) => self.require_wallet_source(s)?,
+            None => self.require_source_spending_access()?,
+        }
         let db_path = &self.paths.data_db;
         if has_recovery_marker(db_path)? {
             return Err(EngineError::Message("native_recovery_reset_refused".into()));
@@ -3341,17 +3518,20 @@ impl NativeWallet {
         // Older sparse scans could persist notes/rows without a usable
         // checkpoint. A caught-up wallet must recover those anchors too.
         self.recover_spend_checkpoints(scanned).await?;
-        let mut db = self.open_db()?;
-        // Raw enhancement can be deferred while scanning succeeds. Retry its
-        // bounded queue even when no new compact block arrived.
-        let _ = tokio::time::timeout(ENHANCE_BUDGET, self.enhance_memos(&mut db, lease)).await;
-        #[cfg(feature = "transparent-inputs")]
-        self.classify_balance_funding(&mut db, lease).await?;
-        drop(db);
-        // The web bridge syncs through here: resubmit unmined sends even
-        // when no block arrived.
-        let _ =
-            tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip, lease)).await;
+        if crate::is_loopback_light_url(&self.server.as_url()) {
+            let mut db = self.open_db()?;
+            // Raw enhancement and automatic rebroadcast run only against a
+            // loopback (user-owned) light server; remote light servers never
+            // receive exact txid lookups or unsolicited mempool broadcasts.
+            let _ = tokio::time::timeout(ENHANCE_BUDGET, self.enhance_memos(&mut db, lease)).await;
+            #[cfg(feature = "transparent-inputs")]
+            self.classify_balance_funding(&mut db, lease).await?;
+            drop(db);
+            // The web bridge syncs through here: resubmit unmined sends even
+            // when no block arrived.
+            let _ = tokio::time::timeout(REBROADCAST_BUDGET, self.rebroadcast_unmined(tip, lease))
+                .await;
+        }
         Ok((
             scanned,
             SyncProgress {
@@ -3472,35 +3652,33 @@ impl NativeWallet {
         )
         .map_err(|e| EngineError::WalletDb(format!("USK: {e:?}")))?;
 
-        let from_addrs: Vec<_> = db
-            .get_transparent_receivers(account, true, true)
-            .map_err(|e| EngineError::WalletDb(format!("receivers: {e}")))?
-            .into_keys()
-            .collect();
+        let from_addrs = Self::all_shieldable_transparent_receivers(&db, account)?;
         if from_addrs.is_empty() {
             return Err(EngineError::Message("no transparent receivers".into()));
         }
 
-        let rpc = self.validator_rpc_url();
-        let classified = super::transparent_funding::classify_recent_funding(
-            &mut db,
-            &self.paths.data_db,
-            self.network,
-            &from_addrs,
-            shield_confirmations(self.network),
-            |txid| {
-                let txid = txid.to_string();
-                let rpc = rpc.as_deref();
-                let owner = _lease.clone();
-                async move {
-                    Self::fetch_raw_transaction_with_rpc_owned(&self.server, rpc, &txid, owner)
-                        .await
-                }
-            },
-        )
-        .await?;
-        if classified > 0 {
-            info!("classified recent transparent funding before shielding");
+        if crate::is_loopback_light_url(&self.server.as_url()) {
+            let rpc = self.validator_rpc_url();
+            let classified = super::transparent_funding::classify_recent_funding(
+                &mut db,
+                &self.paths.data_db,
+                self.network,
+                &from_addrs,
+                shield_confirmations(self.network),
+                |txid| {
+                    let txid = txid.to_string();
+                    let rpc = rpc.as_deref();
+                    let owner = _lease.clone();
+                    async move {
+                        Self::fetch_raw_transaction_with_rpc_owned(&self.server, rpc, &txid, owner)
+                            .await
+                    }
+                },
+            )
+            .await?;
+            if classified > 0 {
+                info!("classified recent transparent funding before shielding");
+            }
         }
 
         let threshold = Zatoshis::from_u64(threshold_zat.max(1))
@@ -3548,8 +3726,112 @@ impl NativeWallet {
         out
     }
 
+    /// Shield verified transparent UTXOs via an enrolled `NativeWalletSource`
+    /// (e.g. Private Cloud OHTTP). Never fetches raw transactions by txid or opens
+    /// a direct lightwalletd connection; relies on compact-block verification
+    /// (`verify_transparent_compact_bucket`) having cleared `unverified_outputs`.
     #[cfg(feature = "transparent-inputs")]
-    fn propose_shielding_in_snapshot<D>(
+    pub async fn shield_with_wallet_source(
+        &self,
+        source: &super::NativeWalletSource,
+        auth: &SeedAuth,
+        threshold_zat: u64,
+    ) -> Result<Vec<String>> {
+        self.require_wallet_source(source)?;
+        let _lease = Arc::new(database_lease::shared(&self.paths.data_db)?);
+        self.ensure_recovery_selection_ready()?;
+        let mut db = self.open_db()?;
+        let account = Self::primary_account_id(&db)?;
+        let seed = self.load_seed(auth)?;
+        let usk = UnifiedSpendingKey::from_seed(
+            &self.network,
+            seed.expose_secret(),
+            self.account_index(),
+        )
+        .map_err(|e| EngineError::WalletDb(format!("USK: {e:?}")))?;
+
+        let from_addrs = Self::all_shieldable_transparent_receivers(&db, account)?;
+        if from_addrs.is_empty() {
+            return Err(EngineError::Message("no transparent receivers".into()));
+        }
+
+        let threshold = Zatoshis::from_u64(threshold_zat.max(1))
+            .map_err(|_| EngineError::Message("bad threshold".into()))?;
+
+        let (proposal, selected_generation) = db
+            .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
+                let generation = recovery_guard::transaction_recovery_generation(wdb, ext)?;
+                let proposal =
+                    self.propose_shielding_in_snapshot(wdb, ext, &from_addrs, account, threshold)?;
+                Ok((proposal, generation))
+            })
+            .map_err(proposal_transaction_error)?;
+
+        let txids = db
+            .transactionally_with_extension(|wdb, ext| -> anyhow::Result<_> {
+                recovery_guard::transaction_proposal_binding(wdb, ext, selected_generation)?;
+                #[cfg(feature = "transparent-pir")]
+                transparent_pir_funding::check_proposal(ext, &proposal)?;
+                let prover = crate::params::local_tx_prover()?;
+                Ok(create_proposed_transactions::<
+                    _,
+                    _,
+                    Infallible,
+                    _,
+                    Infallible,
+                    _,
+                >(
+                    wdb,
+                    &self.network,
+                    &*prover,
+                    &*prover,
+                    &SpendingKeys::from_unified_spending_key(usk),
+                    OvkPolicy::Sender,
+                    &proposal,
+                    None,
+                )?)
+            })
+            .map_err(|e| map_funds_err(format!("create shielding tx: {e}")))?;
+
+        let mut supplied = source.submission_client();
+        Self::assert_wallet_source_chain(&mut supplied, self.network).await?;
+        let mut client = Some(BroadcastConnection::Supplied(
+            Box::new(supplied),
+            _lease.clone(),
+            source.clone(),
+        ));
+        let mut sent = Vec::with_capacity(txids.len());
+        for txid in txids {
+            self.broadcast_one(&mut client, &mut db, txid, &_lease)
+                .await?;
+            sent.push(txid.to_string());
+        }
+        Ok(sent)
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    pub(crate) fn all_shieldable_transparent_receivers(
+        db: &Db,
+        account: AccountUuid,
+    ) -> Result<Vec<transparent::address::TransparentAddress>> {
+        let mut receivers = db
+            .get_transparent_receivers(account, true, true)
+            .map_err(|e| EngineError::WalletDb(format!("receivers: {e}")))?;
+        if db
+            .chain_height()
+            .map_err(|e| EngineError::WalletDb(format!("chain_height: {e}")))?
+            .is_some()
+        {
+            if let Ok(ephemeral) = db.get_ephemeral_transparent_receivers(account, u32::MAX, false)
+            {
+                receivers.extend(ephemeral);
+            }
+        }
+        Ok(receivers.into_keys().collect())
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    pub(crate) fn propose_shielding_in_snapshot<D>(
         &self,
         db: &mut D,
         ext: &zcash_client_sqlite::ExtensionTransaction<'_>,
@@ -3885,6 +4167,89 @@ impl NativeWallet {
             .map_err(anyhow::Error::new)
         })
         .map_err(proposal_transaction_error)
+    }
+
+    /// Estimate total ZIP-317 fee across both steps of a ZIP-320 TEX send.
+    pub fn estimate_tex_fee(&self, to: &str, amount_zatoshis: u64) -> Result<u64> {
+        let parsed = crate::keys::parse_address(to)?;
+        if parsed.kind != crate::keys::AddressKind::Tex {
+            return Err(EngineError::Message(
+                "destination must be a ZIP-320 TEX address".into(),
+            ));
+        }
+        let mut db = self.open_db()?;
+        let account = Self::primary_account_id(&db)?;
+        let address = ZcashAddress::try_from_encoded(to.trim())
+            .map_err(|e| EngineError::Message(format!("invalid address: {e}")))?;
+        let value =
+            Zatoshis::from_u64(amount_zatoshis).map_err(|_| EngineError::InsufficientFunds)?;
+        if amount_zatoshis == 0 {
+            return Err(EngineError::Message(
+                "TEX send amount must be greater than zero".into(),
+            ));
+        }
+        let request = TransactionRequest::new(vec![Payment::without_memo(address, value)])
+            .map_err(|e| EngineError::Message(format!("ZIP-321: {e}")))?;
+        let input_selector = GreedyInputSelector::new();
+        let change_strategy = SingleOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            ShieldedPool::Orchard,
+            DustOutputPolicy::default(),
+        );
+        let proposal = propose_transfer::<_, _, _, _, Infallible>(
+            &mut db,
+            &self.network,
+            account,
+            &input_selector,
+            &change_strategy,
+            request,
+            crate::confirmations_policy(self.network),
+            &shielded_spend_policy(),
+            None,
+            None,
+        )
+        .map_err(|e| map_funds_err(format!("propose_transfer: {e}")))?;
+        Ok(crate::proposal_fee_zat(&proposal))
+    }
+
+    /// Execute a two-step ZIP-320 TEX send (shielded -> ephemeral transparent -> TEX).
+    pub async fn send_tex(
+        &self,
+        auth: &SeedAuth,
+        to: &str,
+        amount_zatoshis: u64,
+    ) -> Result<Vec<String>> {
+        let _lease = self.network_operation_lease()?;
+        self.ensure_recovery_selection_ready()?;
+        let parsed = crate::keys::parse_address(to)?;
+        if parsed.kind != crate::keys::AddressKind::Tex {
+            return Err(EngineError::Message(
+                "destination must be a ZIP-320 TEX address".into(),
+            ));
+        }
+        if amount_zatoshis == 0 {
+            return Err(EngineError::Message(
+                "TEX send amount must be greater than zero".into(),
+            ));
+        }
+        let db = self.open_db()?;
+        let account = Self::primary_account_id(&db)?;
+        let seed = self.load_seed(auth)?;
+        let usk = UnifiedSpendingKey::from_seed(
+            &self.network,
+            seed.expose_secret(),
+            self.account_index(),
+        )
+        .map_err(|e| EngineError::WalletDb(format!("USK: {e:?}")))?;
+        let address = ZcashAddress::try_from_encoded(to.trim())
+            .map_err(|e| EngineError::Message(format!("invalid address: {e}")))?;
+        let value =
+            Zatoshis::from_u64(amount_zatoshis).map_err(|_| EngineError::InsufficientFunds)?;
+        let request = TransactionRequest::new(vec![Payment::without_memo(address, value)])
+            .map_err(|e| EngineError::Message(format!("ZIP-321: {e}")))?;
+        self.finish_send(db, account, usk, request, shielded_spend_policy())
+            .await
     }
 
     pub async fn send(

@@ -325,11 +325,9 @@ impl DecryptedBatch {
         self.scanned.extend(other.scanned);
         self.span.extend(other.span);
         self.last_height = other.last_height;
-        // A note-free suffix did not hash a frontier. Keep the earlier real one
-        // so the next note batch can see it is stale and fetch GetTreeState.
-        if other.had_notes {
-            self.next_state = other.next_state;
-        }
+        // Always advance the frontier unconditionally so subsequent batches never
+        // need a note-triggered GetTreeState that would reveal which batches contain notes.
+        self.next_state = other.next_state;
         self.had_notes |= other.had_notes;
         self.end_sizes = other.end_sizes;
         self.watermark = other.watermark;
@@ -638,22 +636,18 @@ fn finish_decrypted(
     if let Some(tick) = scanned_tick {
         tick.fetch_max(u32::from(last_height), std::sync::atomic::Ordering::Relaxed);
     }
-    // Note-free batches do not hash every commitment into the frontier. The
-    // next decrypt uses `end_sizes` from compact metadata. A later note batch
-    // fetches GetTreeState when this frontier no longer covers `start_sizes`.
-    let (next_state, row_runs) = if had_notes {
-        if !frontier_covers(&from_state, start_sizes) {
-            return Err(EngineError::Message(
-                "selective-scan note frontier does not cover batch start".into(),
-            ));
-        }
-        walk_with_row_frontiers(&from_state, &scanned, &span)?
-    } else {
-        (from_state.clone(), Vec::new())
-    };
-    if had_notes && !frontier_covers(&next_state, watermark_sizes(&watermark)) {
+    // Always advance the frontier locally on every batch (even note-free batches)
+    // so the scanner never issues a note-triggered GetTreeState(prior) call that
+    // would reveal which batches contain wallet notes.
+    if !frontier_covers(&from_state, start_sizes) {
         return Err(EngineError::Message(
-            "selective-scan note frontier does not cover batch end".into(),
+            "selective-scan frontier does not cover batch start".into(),
+        ));
+    }
+    let (next_state, row_runs) = walk_with_row_frontiers(&from_state, &scanned, &span)?;
+    if !frontier_covers(&next_state, watermark_sizes(&watermark)) {
+        return Err(EngineError::Message(
+            "selective-scan frontier does not cover batch end".into(),
         ));
     }
     Ok(Ok(DecryptedBatch {

@@ -12,8 +12,8 @@ export type UaReceiver = "orchard" | "sapling" | "p2pkh";
 
 export type UaReceiverSet = "full" | "orchard" | "shielded";
 
-/** Default receive set: orchard + sapling + p2pkh (`AllAvailableKeys`). */
-export const DEFAULT_UA_RECEIVER_SET: UaReceiverSet = "full";
+/** Default receive set: shielded-only (Orchard + Sapling, no embedded P2PKH). */
+export const DEFAULT_UA_RECEIVER_SET: UaReceiverSet = "shielded";
 
 export const UA_RECEIVERS: Record<UaReceiverSet, readonly UaReceiver[]> = {
   full: ["orchard", "sapling", "p2pkh"],

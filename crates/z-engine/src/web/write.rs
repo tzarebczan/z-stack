@@ -560,8 +560,8 @@ impl WebWallet {
         let encoded = addr.encode(&self.network);
         if let Ok(ufvk) = self.decode_ufvk() {
             if let Some(tpk) = ufvk.transparent() {
-                let hi = self.next_diversifier.saturating_add(32).max(32);
-                for i in 0..=hi {
+                let ext_hi = self.next_transparent_diversifier.saturating_add(32).max(32);
+                for i in 0..=ext_hi {
                     let Some(idx) = NonHardenedChildIndex::from_index(i) else {
                         break;
                     };
@@ -576,6 +576,12 @@ impl WebWallet {
                             );
                         }
                     }
+                }
+                let int_hi = self.next_internal_taddr_index.saturating_add(32).max(32);
+                for i in 0..=int_hi {
+                    let Some(idx) = NonHardenedChildIndex::from_index(i) else {
+                        break;
+                    };
                     if let Ok(pk) = tpk.derive_address_pubkey(TransparentKeyScope::INTERNAL, idx) {
                         let derived = transparent::address::TransparentAddress::from_pubkey(&pk);
                         if derived.encode(&self.network) == encoded {
@@ -588,6 +594,24 @@ impl WebWallet {
                         }
                     }
                 }
+                if let Ok(eph_ivk) = tpk.derive_ephemeral_ivk() {
+                    let eph_hi = self.next_ephemeral_index.saturating_add(16).max(16);
+                    for i in 0..=eph_hi {
+                        let Some(idx) = NonHardenedChildIndex::from_index(i) else {
+                            break;
+                        };
+                        if let Ok(derived) = eph_ivk.derive_ephemeral_address(idx) {
+                            if derived.encode(&self.network) == encoded {
+                                return TransparentAddressMetadata::derived(
+                                    TransparentKeyScope::EPHEMERAL,
+                                    idx,
+                                    Exposure::Unknown,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
         Self::taddr_metadata()
@@ -595,6 +619,7 @@ impl WebWallet {
 
     #[cfg(feature = "transparent-inputs")]
     fn known_taddrs(&self) -> Vec<transparent::address::TransparentAddress> {
+        use transparent::keys::NonHardenedChildIndex;
         use zcash_keys::encoding::AddressCodec;
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -611,6 +636,23 @@ impl WebWallet {
         }
         for u in &self.utxos {
             push(&u.address);
+        }
+        // Include reserved ephemeral addresses so stranded step-0 funds can be shielded back.
+        if self.next_ephemeral_index > 0 {
+            if let Ok(ufvk) = self.decode_ufvk() {
+                if let Some(eph_ivk) = ufvk
+                    .transparent()
+                    .and_then(|t| t.derive_ephemeral_ivk().ok())
+                {
+                    for i in 0..self.next_ephemeral_index {
+                        if let Some(idx) = NonHardenedChildIndex::from_index(i) {
+                            if let Ok(addr) = eph_ivk.derive_ephemeral_address(idx) {
+                                push(&addr.encode(&self.network));
+                            }
+                        }
+                    }
+                }
+            }
         }
         out
     }
@@ -920,14 +962,52 @@ impl WalletRead for WebWallet {
     #[cfg(feature = "transparent-inputs")]
     fn get_ephemeral_transparent_receivers(
         &self,
-        _account: Self::AccountId,
+        account: Self::AccountId,
         _exposure_depth: u32,
-        _exclude_used: bool,
+        exclude_used: bool,
     ) -> Result<
         HashMap<transparent::address::TransparentAddress, TransparentAddressMetadata>,
         Self::Error,
     > {
-        Ok(HashMap::new())
+        use transparent::keys::{NonHardenedChildIndex, TransparentKeyScope};
+        use zcash_keys::encoding::AddressCodec;
+        if account != ACCOUNT || self.next_ephemeral_index == 0 {
+            return Ok(HashMap::new());
+        }
+        let ufvk = self.decode_ufvk().map_err(|e| e.to_string())?;
+        let Some(eph_ivk) = ufvk
+            .transparent()
+            .and_then(|t| t.derive_ephemeral_ivk().ok())
+        else {
+            return Ok(HashMap::new());
+        };
+        let used: HashSet<&str> = if exclude_used {
+            self.utxos.iter().map(|u| u.address.as_str()).collect()
+        } else {
+            HashSet::new()
+        };
+        let mut out = HashMap::new();
+        for i in 0..self.next_ephemeral_index {
+            let Some(idx) = NonHardenedChildIndex::from_index(i) else {
+                break;
+            };
+            if let Ok(addr) = eph_ivk.derive_ephemeral_address(idx) {
+                let encoded = addr.encode(&self.network);
+                if exclude_used && used.contains(encoded.as_str()) {
+                    continue;
+                }
+                out.insert(
+                    addr,
+                    TransparentAddressMetadata::derived(
+                        TransparentKeyScope::EPHEMERAL,
+                        idx,
+                        Exposure::Unknown,
+                        None,
+                    ),
+                );
+            }
+        }
+        Ok(out)
     }
 
     #[cfg(feature = "transparent-inputs")]
@@ -1686,7 +1766,7 @@ impl WalletWrite for WebWallet {
     #[cfg(feature = "transparent-inputs")]
     fn reserve_next_n_ephemeral_addresses(
         &mut self,
-        _account_id: u32,
+        account_id: u32,
         n: usize,
     ) -> Result<
         Vec<(
@@ -1695,16 +1775,49 @@ impl WalletWrite for WebWallet {
         )>,
         String,
     > {
+        use transparent::keys::{NonHardenedChildIndex, TransparentKeyScope};
+        if account_id != ACCOUNT {
+            return Err("unknown account".into());
+        }
         if n == 0 {
             return Ok(vec![]);
         }
-        Err("wasm snapshot wallet has no ephemeral t-addrs".into())
+        let ufvk = self.decode_ufvk().map_err(|e| e.to_string())?;
+        let eph_ivk = ufvk
+            .transparent()
+            .ok_or_else(|| "account has no transparent viewing key".to_string())?
+            .derive_ephemeral_ivk()
+            .map_err(|e| format!("ephemeral ivk: {e}"))?;
+        let mut out = Vec::with_capacity(n);
+        let mut next = self.next_ephemeral_index;
+        for _ in 0..n {
+            let child = NonHardenedChildIndex::from_index(next)
+                .ok_or_else(|| "ephemeral transparent index space exhausted".to_string())?;
+            let addr = eph_ivk
+                .derive_ephemeral_address(child)
+                .map_err(|e| format!("ephemeral address: {e}"))?;
+            out.push((
+                addr,
+                TransparentAddressMetadata::derived(
+                    TransparentKeyScope::EPHEMERAL,
+                    child,
+                    Exposure::Unknown,
+                    None,
+                ),
+            ));
+            next = next
+                .checked_add(1)
+                .ok_or_else(|| "ephemeral transparent index overflow".to_string())?;
+        }
+        self.next_ephemeral_index = next;
+        self.transparent_scripts = None;
+        Ok(out)
     }
 
     #[cfg(feature = "transparent-inputs")]
     fn reserve_next_n_internal_addresses(
         &mut self,
-        _account_id: u32,
+        account_id: u32,
         n: usize,
     ) -> Result<
         Vec<(
@@ -1713,10 +1826,45 @@ impl WalletWrite for WebWallet {
         )>,
         String,
     > {
+        use transparent::{
+            address::TransparentAddress,
+            keys::{NonHardenedChildIndex, TransparentKeyScope},
+        };
+        if account_id != ACCOUNT {
+            return Err("unknown account".into());
+        }
         if n == 0 {
             return Ok(vec![]);
         }
-        Err("wasm snapshot wallet has no internal t-addrs".into())
+        let ufvk = self.decode_ufvk().map_err(|e| e.to_string())?;
+        let tpk = ufvk
+            .transparent()
+            .ok_or_else(|| "account has no transparent viewing key".to_string())?;
+        let mut out = Vec::with_capacity(n);
+        let mut next = self.next_internal_taddr_index;
+        for _ in 0..n {
+            let child = NonHardenedChildIndex::from_index(next)
+                .ok_or_else(|| "internal transparent index space exhausted".to_string())?;
+            let pk = tpk
+                .derive_address_pubkey(TransparentKeyScope::INTERNAL, child)
+                .map_err(|e| format!("internal transparent address: {e}"))?;
+            let addr = TransparentAddress::from_pubkey(&pk);
+            out.push((
+                addr,
+                TransparentAddressMetadata::derived(
+                    TransparentKeyScope::INTERNAL,
+                    child,
+                    Exposure::Unknown,
+                    None,
+                ),
+            ));
+            next = next
+                .checked_add(1)
+                .ok_or_else(|| "internal transparent index overflow".to_string())?;
+        }
+        self.next_internal_taddr_index = next;
+        self.transparent_scripts = None;
+        Ok(out)
     }
 
     #[cfg(feature = "transparent-inputs")]

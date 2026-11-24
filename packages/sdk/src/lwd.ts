@@ -1,5 +1,6 @@
 import type { PrivateTransparentTransport } from "./private-transparent";
 import type { PrivateEnhanceTransport } from "./private-enhance";
+import type { NetworkHop, SplitHopRouter } from "./hops";
 import { BATCH_LOCAL, WalletError } from "@z-stack/core";
 import { COMPACT_RANGE_MAX_BYTES } from "./transport-bounds";
 /**
@@ -60,6 +61,8 @@ export type BlockTransport = {
   blocks: (start: number, end: number, signal?: AbortSignal) => Promise<Uint8Array>;
   /** Wallet-independent all-pool ranges; negotiate protocolVersion >= 0.5 first. */
   transparentBlocks?: (start: number, end: number, signal?: AbortSignal) => Promise<Uint8Array>;
+  /** Optional publisher-anchored all-pool range returning the verified end block hash. */
+  transparentBlocksAnchored?: (start: number, end: number, signal?: AbortSignal) => Promise<{ blob: Uint8Array; endHashHex?: string }>;
   /** Public range bundle: compact blocks and every shielded raw transaction. */
   sharedMemos?: (start: number, end: number, signal?: AbortSignal) => Promise<string | null>;
   /**
@@ -143,7 +146,7 @@ export function sharedMemoBlockRequestLimit(value: unknown): number {
 export type SubmissionPolicy = "explicit" | "saved-bytes-auto";
 
 export function resolveSubmissionPolicy(value: unknown): SubmissionPolicy {
-  if (value === undefined) return "saved-bytes-auto";
+  if (value === undefined) return "explicit";
   if (value === "explicit" || value === "saved-bytes-auto") return value;
   throw new WalletError("unknown", "submissionPolicy must be explicit or saved-bytes-auto.");
 }
@@ -208,10 +211,11 @@ export function looksLikeGrpcWeb(url: string): boolean {
 /** One `GET /lwd/blocks` on `z-wallet pipe` (matches Rust `PIPE_MAX_BLOCKS`). */
 export const PIPE_HTTP_MAX = 8_000;
 
-/** `z-wallet pipe` — native gRPC fan-out, one HTTP stream to the tab. */
+/** `z-wallet pipe` — native gRPC fan-out, one HTTP stream to the tab (loopback only). */
 export function looksLikeLwdPipe(url: string): boolean {
   try {
     const u = new URL(url.includes("://") ? url : `http://${url}`);
+    if (!isLoopbackUrl(u.toString())) return false;
     const port = u.port || (u.protocol === "https:" ? "443" : "80");
     return port === "1239";
   } catch {
@@ -1009,6 +1013,11 @@ export type GrpcWebTransportOpts = {
    * advertise this capability through GetLightdInfo.
    */
   sharedMemos?: boolean;
+  /**
+   * Optional composable hop or split-hop router (e.g. `nymHop`, `ohttpHop`, or
+   * `createSplitHopRouter`) for routing gRPC-Web reads and submissions.
+   */
+  hop?: NetworkHop | SplitHopRouter;
 };
 
 /**
@@ -1018,6 +1027,7 @@ export type GrpcWebTransportOpts = {
  */
 export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}): BlockTransport {
   const base = lwdUrl.replace(/\/$/, "");
+  const hop = opts.hop;
   let sharedMemosUnsupported = false;
   async function call(method: string, body: Uint8Array, timeoutMs = 15_000, signal?: AbortSignal, limits: FrameLimits = { messages: 1 }, onDataFrame?: (frame: Uint8Array) => void): Promise<GrpcMessages> {
     signal?.throwIfAborted();
@@ -1026,26 +1036,59 @@ export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}
     const both = AbortSignal.any([request.signal, deadline, ...(signal ? [signal] : [])]);
     let response: Response | undefined;
     try {
-      const r = response = await fetch(`${base}${STREAMER}/${method}`, {
-        ...transportFetchOptions,
-        method: "POST",
-        headers: {
-          "content-type": "application/grpc-web+proto",
-          "x-grpc-web": "1",
-          accept: "application/grpc-web+proto",
-        },
-        body: frameGrpc(body) as unknown as BodyInit,
-        signal: both,
-        // keepalive bodies are capped at 64 KiB; large transactions must not use it.
-        keepalive: body.length < 32_768,
-      });
-      if (!r.ok) throw responseError(r.status, `grpc-web ${method}: HTTP ${r.status}`);
-      // A trailers-only error arrives as HTTP 200 with the status in the headers.
-      const headerStatus = r.headers.get("grpc-status");
-      grpcStatusError(headerStatus, r.headers.get("grpc-message"));
-      checkContentLength(r, RANGE_BODY_MAX);
+      let headerStatus: string | null;
+      let headerMessage: string | null;
+      let bodyStream: ReadableStream<Uint8Array> | null;
+      if (hop) {
+        const isSubmit = method === "SendTransaction";
+        const hopRes = await hop.exchange(
+          {
+            method: "POST",
+            target: `${base}${STREAMER}/${method}`,
+            headers: {
+              "content-type": "application/grpc-web+proto",
+              "x-grpc-web": "1",
+              accept: "application/grpc-web+proto",
+            },
+            body: frameGrpc(body),
+            role: isSubmit ? "submit" : "read",
+            maxResponseBytes: RANGE_BODY_MAX,
+            timeoutMs,
+            idempotent: !isSubmit,
+          },
+          both,
+        );
+        if (hopRes.status < 200 || hopRes.status >= 300) {
+          throw responseError(hopRes.status, `grpc-web ${method}: HTTP ${hopRes.status}`);
+        }
+        headerStatus = hopRes.headers["grpc-status"] ?? null;
+        headerMessage = hopRes.headers["grpc-message"] ?? null;
+        grpcStatusError(headerStatus, headerMessage);
+        bodyStream = hopRes.body.byteLength > 0 ? new Response(new Uint8Array(hopRes.body)).body : null;
+      } else {
+        const r = response = await fetch(`${base}${STREAMER}/${method}`, {
+          ...transportFetchOptions,
+          method: "POST",
+          headers: {
+            "content-type": "application/grpc-web+proto",
+            "x-grpc-web": "1",
+            accept: "application/grpc-web+proto",
+          },
+          body: frameGrpc(body) as unknown as BodyInit,
+          signal: both,
+          // keepalive bodies are capped at 64 KiB; large transactions must not use it.
+          keepalive: body.length < 32_768,
+        });
+        if (!r.ok) throw responseError(r.status, `grpc-web ${method}: HTTP ${r.status}`);
+        // A trailers-only error arrives as HTTP 200 with the status in the headers.
+        headerStatus = r.headers.get("grpc-status");
+        headerMessage = r.headers.get("grpc-message");
+        grpcStatusError(headerStatus, headerMessage);
+        checkContentLength(r, RANGE_BODY_MAX);
+        bodyStream = r.body;
+      }
       const messages: GrpcMessages = [];
-      if (r.body) await readFrames(r.body, "grpc", limits, async (frame, trailer) => {
+      if (bodyStream) await readFrames(bodyStream, "grpc", limits, async (frame, trailer) => {
         const payload = frame.subarray(5);
         if (trailer) {
           const text = new TextDecoder().decode(payload);
@@ -1086,7 +1129,34 @@ export function grpcWebTransport(lwdUrl: string, opts: GrpcWebTransportOpts = {}
       signal?.throwIfAborted();
       if (sharedMemosUnsupported) return null;
       const requestAbort = requestSignal(signal, 180_000);
-      const r = await fetch(`${base}/zstack/memos?start=${start}&end=${end}`, {
+      const target = `${base}/zstack/memos?start=${start}&end=${end}`;
+      if (hop) {
+        const hopRes = await hop.exchange(
+          {
+            method: "GET",
+            target,
+            headers: { accept: "application/json" },
+            role: "read",
+            maxResponseBytes: 64 * 1024 * 1024,
+            timeoutMs: 180_000,
+            idempotent: true,
+          },
+          requestAbort,
+        );
+        requestAbort.throwIfAborted();
+        if ([403, 404, 405, 501].includes(hopRes.status)) {
+          sharedMemosUnsupported = true;
+          return null;
+        }
+        if (hopRes.status < 200 || hopRes.status >= 300) {
+          throw responseError(hopRes.status, "Shared payment notes are temporarily unavailable");
+        }
+        if (hopRes.body.byteLength > 64 * 1024 * 1024) {
+          throw new Error("Shared memo range exceeds size limit");
+        }
+        return new TextDecoder("utf-8", { fatal: true }).decode(hopRes.body);
+      }
+      const r = await fetch(target, {
         ...transportFetchOptions, priority: "low", signal: requestAbort,
       });
       requestAbort.throwIfAborted();
@@ -1405,12 +1475,3 @@ function decodeBlockIdHeight(buf: Uint8Array): number {
   }
   throw new Error("GetLatestBlock missing height");
 }
-
-export {
-  cdnSegmentTransport,
-  sliceSegmentFrames,
-  DEFAULT_SEGMENT_BLOCKS,
-  DEFAULT_REORG_DEPTH,
-  DEFAULT_CDN_CONCURRENCY,
-  type CdnTransportOptions,
-} from "./cdn-transport";

@@ -387,16 +387,45 @@ on this contract. Pending resubmission requires the matching WASM
 causes the SDK to skip that resubmission pass.
 
 The root export `SubmissionPolicy` is `"explicit" | "saved-bytes-auto"`.
-Pass `submissionPolicy: "explicit"` to `createWallet` to keep ordinary sync from
-resubmitting saved signed transactions. The default, `"saved-bytes-auto"`, retains
-same-byte resubmission after sync. Both policies preserve pending transactions,
+The default is `"explicit"`, keeping ordinary sync from silently resubmitting
+saved signed transactions without user action. Pass
+`submissionPolicy: "saved-bytes-auto"` to opt in to automatic same-byte
+resubmission after sync. Both policies preserve pending transactions,
 reserved inputs and application receipts after an unknown submission result.
-Explicit `send` and its `beforeSubmit` durability checks are unchanged, and no
+Explicit `send`, `sendTex`, and their `beforeSubmit` durability checks are unchanged, and no
 policy constructs a replacement payment. This option controls saved transaction
 resubmission; automatic shielding remains a separate opt-in. The policy is
 captured for the client's lifetime. Supply it again when reopening the wallet.
 Check `SDK_TRANSPORT_CAPABILITIES.submissionPolicy === true` before relying on
 explicit mode with another archive. The capability object is frozen.
+
+### Privacy-preserving memo retrieval, transparent support, TEX, and composable hops
+
+- **Shielded-only default UAs & standalone transparent addresses**:
+  `DEFAULT_UA_RECEIVER_SET` is `"shielded"` (Orchard + Sapling, never embedding
+  P2PKH). Use `wallet.nextTransparentAddress()` to rotate standalone BIP-44
+  external transparent addresses (enforcing a 20-address unused gap limit).
+- **PIR-only memo retrieval (`memoFetch`)**:
+  Defaults to `"pir-only"` when the transport provides Enhance PIR (and
+  `"on-demand"` otherwise). Pure-Ironwood receipts recover memos privately via
+  Enhance PIR; out-of-PIR transactions never trigger automatic single-block or
+  raw-txid fetches. Pass `memoFetch: "pir-plus-shared-tip"` to opt in to
+  unconditional aligned 10-block near-tip cover buckets, or call
+  `wallet.fetchTxDetailsPrivate(txid)` on demand for a single mined transaction
+  (fetches a full aligned 10-block cover window, never `(h, h)`).
+- **End-to-end transparent discovery & ZIP-320 TEX**:
+  Use `transparentScan: "compact-plus-pir"` to combine all-pool compact block
+  scanning (`birthday..tip`) with Transparent PIR v12 for pre-birthday history.
+  Call `wallet.sendTex(texAddress, amountZec, opts)` for compliant two-step
+  shielded → ephemeral transparent → TEX sends; `beforeSubmit` receives both
+  ordered `txids` and any partial step-2 failure preserves reservations without
+  rolling back an accepted step 1.
+- **Composable network hops & pluggable PIR backends**:
+  Combine `directHop`, `nymHop`, `ohttpHop`, and `createSplitHopRouter`, then
+  pass `router` and/or `pirBackends` (`createHopEnhancePirTransport`,
+  `createHopTransparentPirTransport`) to `createWallet(...)` or
+  `grpcWebTransport(url, { hop })`. Note: `cdnSegmentTransport` has been removed
+  in favor of direct/OHTTP/PIR transports.
 
 Call `wallet.retryPendingSubmission(txid, { signal })` from an explicit recovery
 action to resubmit one saved transaction. The canonical lowercase transaction ID

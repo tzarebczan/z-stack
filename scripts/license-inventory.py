@@ -51,7 +51,7 @@ for locked in lock["package"]:
     git_sources[locked["name"]] = f"https://github.com/valargroup/wallet-pir/tree/{revision}/{relative_source}"
 packages = []
 for name, version in sorted(selected):
-    if name in {"z-engine", "z-wasm", "z-enhance-pir", "z-transparent-pir-v2"}:
+    if name in {"z-engine", "z-wasm", "z-enhance-pir", "z-transparent-pir-v2", "z-transport"}:
         continue
     candidates = [paths[(name, version)]] if (name, version) in paths else list(registry.glob(f"*/{name}-{version}"))
     assert len(candidates) == 1, f"ambiguous/missing source for {name} {version}: build the engine first"
@@ -88,7 +88,7 @@ text = ["z-stack browser engine and SDK: third-party license texts\n",
         "Original project code: Apache-2.0. Third-party code retains the following licenses.\n"]
 for package in packages:
     name, version = package["name"], package["version"]
-    if (name, version) not in selected or name in {"z-engine", "z-wasm", "z-enhance-pir", "z-transparent-pir-v2"}:
+    if (name, version) not in selected or name in {"z-engine", "z-wasm", "z-enhance-pir", "z-transparent-pir-v2", "z-transport"}:
         continue
     assert package["license"], f"missing license declaration: {name}"
     directory = Path(package["manifest_path"]).parent

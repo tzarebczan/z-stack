@@ -1,7 +1,7 @@
 {
   "target": "wasm32-unknown-unknown",
   "edges": "normal,build",
-  "cargoLockSha256": "68aadd942ec27e3f1a0dcdc54adb0f5f4a47c792fc9fe69ee19839637ea4b43e",
+  "cargoLockSha256": "96e30bdf82773d6d7da90df439b271b167d3e546995b7daed14912ff45a8c9ef",
   "dependencies": [
     {
       "name": "aead",
@@ -171,6 +171,25 @@
           "file": "LICENSE-MIT",
           "sha256": "4da95ec4ecb65b738d470b7d762894ad9c97da93e6cbfb18b570fc2c96f4b871",
           "origin": "https://docs.rs/crate/arrayvec/0.7.8/source/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "async-trait",
+      "version": "0.1.92",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://crates.io/crates/async-trait/0.1.92",
+      "repository": "https://github.com/dtolnay/async-trait",
+      "texts": [
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "origin": "https://docs.rs/crate/async-trait/0.1.92/source/LICENSE-APACHE"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "origin": "https://docs.rs/crate/async-trait/0.1.92/source/LICENSE-MIT"
         }
       ]
     },
@@ -1737,6 +1756,25 @@
           "file": "LICENSE-MIT",
           "sha256": "9e0dfd2dd4173a530e238cb6adb37aa78c34c6bc7444e0e10c1ab5d8881f63ba",
           "origin": "https://docs.rs/crate/hmac/0.13.0-pre.4/source/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "http",
+      "version": "1.5.0",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://crates.io/crates/http/1.5.0",
+      "repository": "https://github.com/hyperium/http",
+      "texts": [
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "8bb1b50b0e5c9399ae33bd35fab2769010fa6c14e8860c729a52295d84896b7a",
+          "origin": "https://docs.rs/crate/http/1.5.0/source/LICENSE-APACHE"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "dc91f8200e4b2a1f9261035d4c18c33c246911a6c0f7b543d75347e61b249cff",
+          "origin": "https://docs.rs/crate/http/1.5.0/source/LICENSE-MIT"
         }
       ]
     },

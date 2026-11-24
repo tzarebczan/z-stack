@@ -422,7 +422,7 @@ test("WalletError maps known engine strings and leaves unknown intact", () => {
 });
 
 test("UA receiver sets are full / orchard / shielded", () => {
-  assert.equal(DEFAULT_UA_RECEIVER_SET, "full");
+  assert.equal(DEFAULT_UA_RECEIVER_SET, "shielded");
   assert.deepEqual([...uaReceivers("full")], ["orchard", "sapling", "p2pkh"]);
   assert.deepEqual([...uaReceivers("orchard")], ["orchard"]);
   assert.deepEqual([...uaReceivers("shielded")], ["orchard", "sapling"]);

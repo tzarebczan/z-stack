@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/z-transport",
     "crates/z-engine",
     "crates/z-enhance-pir",
     "crates/z-transparent-pir-v2",

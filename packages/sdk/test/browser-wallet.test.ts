@@ -887,12 +887,12 @@ test("load retires an unlocked wallet when its saved record was removed", async 
 function autoSyncClock(t: TestContext) {
   const callbacks = new Map<number, { callback: () => void; interval: number }>();
   let nextId = 0;
-  t.mock.method(globalThis, "setInterval", (callback: () => void, interval: number) => {
+  t.mock.method(globalThis, "setTimeout", (callback: () => void, interval = 0) => {
     const id = ++nextId;
     callbacks.set(id, { callback, interval });
-    return id;
+    return id as never;
   });
-  t.mock.method(globalThis, "clearInterval", (id: number) => callbacks.delete(id));
+  t.mock.method(globalThis, "clearTimeout", (id: number) => callbacks.delete(id));
   const previous = Object.getOwnPropertyDescriptor(globalThis, "document");
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   const document = Object.assign(new EventTarget(), { visibilityState: "visible" });
@@ -902,11 +902,27 @@ function autoSyncClock(t: TestContext) {
     previous ? Object.defineProperty(globalThis, "document", previous) : Reflect.deleteProperty(globalThis, "document");
     previousWindow ? Object.defineProperty(globalThis, "window", previousWindow) : Reflect.deleteProperty(globalThis, "window");
   });
-  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  const flush = async () => {
+    for (let i = 0; i < 6; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  };
   return {
     intervals: () => [...callbacks.values()].map(timer => timer.interval),
-    async tick() { for (const timer of callbacks.values()) timer.callback(); await flush(); },
-    async visible() { document.dispatchEvent(new Event("visibilitychange")); await flush(); },
+    async tick() {
+      const pending = [...callbacks.entries()];
+      callbacks.clear();
+      for (const [, timer] of pending) timer.callback();
+      await flush();
+    },
+    async visible() {
+      document.dispatchEvent(new Event("visibilitychange"));
+      // Run the debounced visibility timeout if one was scheduled.
+      const pending = [...callbacks.entries()].filter(([, timer]) => timer.interval >= 750 && timer.interval <= 2000);
+      for (const [id, timer] of pending) {
+        callbacks.delete(id);
+        timer.callback();
+      }
+      await flush();
+    },
     flush,
   };
 }
@@ -922,7 +938,8 @@ test("auto-sync survives forgetting and follows a new wallet on the same client"
   tips = 0;
   await clock.tick(); assert.equal(tips, 1);
   await wallet.forget();
-  assert.deepEqual(clock.intervals(), [3200]);
+  assert.equal(clock.intervals().length, 1);
+  assert.ok(clock.intervals()[0]! >= Math.round(3200 * 0.8) && clock.intervals()[0]! <= Math.round(3200 * 1.2));
   await clock.tick(); assert.equal(tips, 1, "an empty client must not query the server");
   await wallet.create({ birthday: 1 });
   tips = 1;
@@ -984,7 +1001,12 @@ for (const action of ["stop", "start", "close"] as const) {
     } finally {
       release(); await forgetting; await closing;
     }
-    assert.deepEqual(clock.intervals(), action === "start" ? [4500] : []);
+    if (action === "start") {
+      assert.equal(clock.intervals().length, 1);
+      assert.ok(clock.intervals()[0]! >= Math.round(4500 * 0.8) && clock.intervals()[0]! <= Math.round(4500 * 1.2));
+    } else {
+      assert.deepEqual(clock.intervals(), []);
+    }
     if (action !== "close") await wallet.create({ birthday: 1 });
     tips = 0;
     await clock.tick(); await clock.visible();
@@ -1593,13 +1615,13 @@ for (const policy of [undefined, "saved-bytes-auto", "explicit"] as const) {
     assert.equal((await wallet.pending())[0]?.txid, txid);
     submitted.length = 0;
     await wallet.sync();
-    assert.deepEqual(submitted, policy === "explicit" ? [] : ["synthetic-transaction"]);
+    assert.deepEqual(submitted, policy === "saved-bytes-auto" ? ["synthetic-transaction"] : []);
     await wallet.close();
     const reopened = await f.open(options);
     await reopened.load();
     submitted.length = 0;
     await reopened.sync();
-    assert.deepEqual(submitted, policy === "explicit" ? [] : ["synthetic-transaction"]);
+    assert.deepEqual(submitted, policy === "saved-bytes-auto" ? ["synthetic-transaction"] : []);
     assert.equal((await reopened.pending())[0]?.txid, txid);
     assert.equal((await reopened.getWallet()).balance.totalAvailable, 0);
   });

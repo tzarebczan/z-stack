@@ -254,6 +254,90 @@ impl WebWallet {
         self.finish_prove_send_capped(mnemonic, request, Some(to), max_fee_zat)
     }
 
+    /// ZIP-320 two-step TEX send (shielded -> ephemeral transparent -> TEX).
+    /// Returns all signed transaction payloads in broadcast order (`[deshield_tx, tex_tx]`).
+    #[cfg(feature = "transparent-inputs")]
+    pub fn prove_tex_send(
+        &mut self,
+        mnemonic: &str,
+        to: &str,
+        amount_zec: &str,
+        max_fee_zat: Option<u64>,
+    ) -> Result<Vec<Vec<u8>>> {
+        let request = self.tex_send_request(to, amount_zec)?;
+        let usk = usk_from_mnemonic(self, mnemonic)?;
+        let policy = crate::confirmations_policy(self.network());
+        let proposal = self.propose_send_policy(request, None, policy)?;
+        if max_fee_zat.is_some_and(|limit| crate::proposal_fee_zat(&proposal) > limit) {
+            return Err(EngineError::Message(
+                "TEX transaction fee exceeds the approved maximum".into(),
+            ));
+        }
+        let prover = NoSaplingProver;
+        let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
+            self,
+            &self.network(),
+            &prover,
+            &prover,
+            &SpendingKeys::from_unified_spending_key(usk),
+            OvkPolicy::Sender,
+            &proposal,
+            None,
+        )
+        .map_err(|e| map_funds(format!("create TEX send tx: {e}")))?;
+
+        let mut raws = Vec::with_capacity(txids.len());
+        for txid in txids {
+            let raw = self
+                .pending_txs
+                .get(&txid)
+                .ok_or_else(|| EngineError::Message("proved TEX tx missing from store".into()))?
+                .clone();
+            raws.push(raw);
+        }
+        self.record_recipient(to);
+        Ok(raws)
+    }
+
+    /// Total ZIP-317 fee across both steps of a ZIP-320 TEX send.
+    #[cfg(feature = "transparent-inputs")]
+    pub fn estimate_tex_fee(&mut self, to: &str, amount_zec: &str) -> Result<u64> {
+        let request = self.tex_send_request(to, amount_zec)?;
+        self.propose_fee(request)
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn tex_send_request(&self, to: &str, amount_zec: &str) -> Result<TransactionRequest> {
+        if self.hardware.is_some() {
+            return Err(EngineError::Message(
+                "TEX sends are not yet supported for hardware wallets".into(),
+            ));
+        }
+        let parsed = crate::keys::parse_address(to)?;
+        if parsed.kind != crate::keys::AddressKind::Tex {
+            return Err(EngineError::Message(
+                "destination must be a ZIP-320 TEX address".into(),
+            ));
+        }
+        let matches_network = parsed.network == self.network()
+            || (self.network() == crate::Network::Regtest
+                && parsed.network == crate::Network::Testnet);
+        if !matches_network {
+            return Err(EngineError::Message(
+                "TEX destination belongs to another network".into(),
+            ));
+        }
+        let amount = parse_zec_to_zatoshis(amount_zec).map_err(EngineError::Message)?;
+        if amount == 0 {
+            return Err(EngineError::Message(
+                "TEX send amount must be greater than zero".into(),
+            ));
+        }
+        let payment = zip_payment(to, amount, None)?;
+        TransactionRequest::new(vec![payment])
+            .map_err(|e| EngineError::Message(format!("ZIP-321: {e}")))
+    }
+
     /// One shielded recipient with the approved fee enforced on the actual proposal.
     pub fn prove_send_capped(
         &mut self,

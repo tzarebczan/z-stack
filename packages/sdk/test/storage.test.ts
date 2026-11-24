@@ -362,7 +362,7 @@ test("already-caught-up sync reports synced only after pending work and its snap
   let submitted!: () => void;
   const submitting = new Promise<void>(resolve => { submitted = resolve; });
   const progress: WasmProgress[] = [];
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "on-demand", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => 10,
     blocks: async () => { throw new Error("already caught up"); },
     submit: async () => { submitted(); await pending; return "ok"; },
@@ -395,7 +395,7 @@ test("already-caught-up sync cannot report synced when cancelled during its fina
   await restartScanWorker(() => worker as unknown as Worker);
   await attachScanWorker(worker as unknown as Worker, { threads: 1, preferMulticore: false });
   const progress: WasmProgress[] = [];
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", memoFetch: "on-demand", network: "regtest", autoShield: false, transport: {
     kind: "mock", label: "mock", tip: async () => 10,
     blocks: async () => { throw new Error("already caught up"); },
     submit: async () => "ok",
@@ -458,7 +458,7 @@ test("unchanged checkpoints observe another tab's save and Forget", async (t) =>
     attachWasmBindings({} as never);
     await restartScanWorker(() => worker as unknown as Worker);
     await attachScanWorker(worker as unknown as Worker, { threads: 1, preferMulticore: false });
-    const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
+    const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
       kind: "mock", label: "mock", tip: async () => 10, blocks: async () => new Uint8Array(),
     } });
     await client.restore("test-only worker fixture", "regtest", 1);
@@ -517,7 +517,7 @@ test("a mutation during a skipped checkpoint's revision check is saved", async (
   attachWasmBindings({} as never);
   await restartScanWorker(() => worker as unknown as Worker);
   await attachScanWorker(worker as unknown as Worker, { threads: 1, preferMulticore: false });
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
     kind: "mock", label: "mock", tip: async () => 10, blocks: async () => new Uint8Array(),
   } });
   await client.restore("test-only worker fixture", "regtest", 1);
@@ -560,7 +560,7 @@ test("on-demand memos keep both sync paths and pending rebroadcasts while histor
   const txids: string[] = [];
   const submissions: { hex: string; txid: string | undefined }[] = [];
   let blocks = 0;
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
     kind: "mock", label: "mock", tip: async () => 11,
     blocks: async () => { blocks++; return new Uint8Array([1]); },
     tx: async (id) => { txids.push(id); return id; },
@@ -635,7 +635,7 @@ test("manual memo loading deduplicates callers, serializes sync, and cannot pers
   const started = new Promise<void>((resolve) => { firstFetch = resolve; });
   let tips = 0;
   let fetched = 0;
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
     kind: "mock", label: "mock", tip: async () => { tips++; return 10; }, blocks: async () => new Uint8Array(),
     tx: async (id) => { fetched++; firstFetch(); await blocked; return id; },
   } });
@@ -661,7 +661,7 @@ test("manual memo loading rejects an obsolete durable generation before leaking 
   const worker = new MemoWorker();
   await restartScanWorker(() => worker as unknown as Worker);
   let fetched = 0;
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
     kind: "mock", label: "mock", tip: async () => 10, blocks: async () => new Uint8Array(),
     tx: async (id) => { fetched++; return id; },
   } });
@@ -1038,18 +1038,6 @@ test("disabling deposits rejects stale combined apply and preserves fresh off-mo
   assert.deepEqual(worker.combinedApplies, [false]);
 });
 
-test("a full legacy memo page reports ongoing work rather than a server failure", async (t) => {
-  installDb(t); const worker = new MemoWorker(); worker.legacyEnhancement = true;
-  worker.candidates = Array.from({ length: 40 }, (_, i) => `tx${i}`);
-  await restartScanWorker(() => worker as unknown as Worker);
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, transport: {
-    kind: "mock", label: "mock", tip: async () => 10, blocks: async () => new Uint8Array(), tx: async id => id,
-  } });
-  await client.restore("test-only worker fixture", "regtest", 1);
-  assert.equal((await client.sync()).memoFetchStatus, "scanning");
-  assert.equal((await client.sync()).memoFetchStatus, "complete");
-});
-
 test("combined gRPC scans bound queued ranges independently of worker parallelism", async (t) => {
   installDb(t);
   const worker = new MemoWorker(); worker.scanned = 0; worker.transparentHeight = 0;
@@ -1232,7 +1220,7 @@ for (const birthday of [1, 2]) test(`same-tip wallets retry roots without resett
   await restartScanWorker(() => worker as unknown as Worker);
   await attachScanWorker(worker as unknown as Worker, { threads: 1, preferMulticore: false });
   const requested: string[] = [];
-  const client = createWasmClient({ unlockPolicy: "session", memoFetch: "auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
+  const client = createWasmClient({ unlockPolicy: "session", submissionPolicy: "saved-bytes-auto", network: "regtest", autoShield: false, memoFetch: "on-demand", transport: {
     kind: "mock", label: "mock", tip: async () => 10, blocks: async () => { throw new Error("already at tip"); },
     treeState: async () => { throw new Error("must not reset the frontier"); },
     subtreeRoots: async (pool) => { requested.push(pool); return [{ completingHeight: 5, rootHash: "11".repeat(32) }]; },
@@ -1807,11 +1795,12 @@ for (const compactAdvance of [false, true]) {
   });
 }
 
-test("on-demand enhances pending transactions via targeted sharedMemos block queries when tx lookup is absent", async t => {
+test("on-demand never issues single-block sharedMemos queries; fetchTxDetailsPrivate uses aligned 10-block cover buckets", async t => {
   installDb(t); const worker = new MemoWorker();
-  worker.candidates = ["tx-old", "tx-new"];
+  worker.candidates = ["a".repeat(64), "b".repeat(64)];
   await restartScanWorker(() => worker as unknown as Worker);
-  const requestedBlocks: number[] = [];
+  const requestedRanges: Array<[number, number]> = [];
+  const appliedBuckets: string[] = [];
   const client = createWasmClient({
     unlockPolicy: "session",
     memoFetch: "on-demand",
@@ -1823,33 +1812,36 @@ test("on-demand enhances pending transactions via targeted sharedMemos block que
       tip: async () => 1000,
       blocks: async () => new Uint8Array(),
       sharedMemos: async (start, end) => {
-        requestedBlocks.push(start);
-        const txid = start === 7 ? "tx-old" : "tx-new";
-        return JSON.stringify({ start, end, transactions: [txid] });
+        requestedRanges.push([start, end]);
+        return JSON.stringify({ start, end, transactions: [] });
       },
     },
   });
-  const mined = new Map([["tx-old", 7], ["tx-new", 900]]);
+  const txOld = "a".repeat(64);
+  const txNew = "b".repeat(64);
+  const mined = new Map([[txOld, 7], [txNew, 900]]);
   const origPost = worker.postMessage.bind(worker);
-  worker.postMessage = (msg: { id: number; op: string; txid?: string }) => {
-    if (msg.op === "history") {
-      // Newest page only. The older id is absent here on purpose.
-      const rows = [{ txid: "tx-new", minedHeight: 900, receivedNoteCount: 1 }];
-      queueMicrotask(() => worker.dispatchEvent(new MessageEvent("message", { data: { id: msg.id, json: JSON.stringify(rows) } })));
-      return;
-    }
+  worker.postMessage = (msg: { id: number; op: string; txid?: string; json?: string }) => {
     if (msg.op === "historyQuery") {
       const height = mined.get(msg.txid ?? "");
       const rows = height === undefined ? [] : [{ txid: msg.txid, minedHeight: height, receivedNoteCount: 1 }];
       queueMicrotask(() => worker.dispatchEvent(new MessageEvent("message", { data: { id: msg.id, json: JSON.stringify(rows) } })));
       return;
     }
+    if (msg.op === "applyPrivateTxBucket") {
+      appliedBuckets.push(msg.json ?? "");
+      queueMicrotask(() => worker.dispatchEvent(new MessageEvent("message", { data: { id: msg.id, result: 1 } })));
+      return;
+    }
     origPost(msg as never);
   };
   await client.restore("test-only worker fixture", "regtest", 1);
-  assert.equal((await client.fetchMemos()).memoFetchStatus, "complete");
-  assert.deepEqual(requestedBlocks, [7, 900], "older pending ids are queried by txid, not the newest history page");
-  assert.deepEqual(worker.enhanced, ["tx-old", "tx-new"]);
-  assert.equal((await client.fetchMemos()).memoFetchStatus, "complete");
-  assert.equal(requestedBlocks.length, 2, "completed transactions are not requested again");
+  // fetchMemos without raw tx lookup must NEVER fall back to single-block sharedMemos(h, h).
+  assert.equal((await client.fetchMemos()).memoFetchStatus, "unsupported");
+  assert.deepEqual(requestedRanges, [], "fetchMemos must never leak exact block heights via sharedMemos(h, h)");
+  // Explicit one-off private fetch uses aligned 10-block cover buckets.
+  await client.fetchTxDetailsPrivate(txOld);
+  await client.fetchTxDetailsPrivate(txNew);
+  assert.deepEqual(requestedRanges, [[1, 10], [891, 900]]);
+  assert.equal(appliedBuckets.length, 2);
 });

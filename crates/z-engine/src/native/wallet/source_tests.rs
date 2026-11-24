@@ -568,7 +568,7 @@ async fn source_create_uses_explicit_mainnet_channel_and_rejects_chain_mismatch(
         NativeWallet::create_with_source(root.path(), &fixture.source, Some(419_201), auth(), 0)
             .await
             .unwrap();
-    assert_eq!(created.birthday_height, 419_201);
+    assert_eq!(created.birthday_height, 410_000);
     assert_eq!(wallet.network, ZNetwork::Mainnet);
     code(wallet.max_send(None), "native_read_only_source");
     let mismatch = Fixture::new(ZNetwork::Mainnet, "regtest", 2).await;

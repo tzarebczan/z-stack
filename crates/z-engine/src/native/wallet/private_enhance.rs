@@ -90,6 +90,17 @@ impl NativeWallet {
                     anchor_height: anchor.height as u32,
                 });
             }
+            EnhancePirSnapshotStatus::Mismatch
+                if anchor.height < u64::from(self.birthday_height()) =>
+            {
+                // The publisher's Enhance PIR snapshot predates this wallet's birthday, so
+                // no wallet block metadata exists at `anchor.height` and no wallet notes
+                // exist at or below that height yet. Defer cleanly until a newer snapshot
+                // reaches `birthday_height()`.
+                return Ok(NativeEnhanceStart::DeferredUntilScanned {
+                    anchor_height: anchor.height as u32,
+                });
+            }
             EnhancePirSnapshotStatus::Mismatch => return Err(refused("enhance_anchor_mismatch")),
         }
         let mut work = Vec::new();
