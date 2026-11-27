@@ -45,8 +45,9 @@ pub struct PendingSubmission {
     pub hex: String,
 }
 
-/// JSON snapshot layout. Magic stays `zstk1`; v3 adds independent transparent/internal/ephemeral cursors.
-const SNAPSHOT_VERSION: u32 = 3;
+/// JSON snapshot layout. Magic stays `zstk1`; v3 adds independent transparent/internal/ephemeral cursors;
+/// v4 packs commitment-tree leaves as `"b1:<base64>"`.
+const SNAPSHOT_VERSION: u32 = 4;
 fn snapshot_version_legacy() -> u32 {
     1
 }
@@ -488,11 +489,23 @@ struct Snapshot {
     spend_notes: Vec<StoredNote>,
     #[serde(default)]
     private_enhance: Vec<super::private_enhance::CompactEnhanceAction>,
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "serialize_leaves",
+        deserialize_with = "deserialize_leaves"
+    )]
     sapling_leaves: Vec<TreeLeaf>,
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "serialize_leaves",
+        deserialize_with = "deserialize_leaves"
+    )]
     orchard_leaves: Vec<TreeLeaf>,
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "serialize_leaves",
+        deserialize_with = "deserialize_leaves"
+    )]
     ironwood_leaves: Vec<TreeLeaf>,
     #[serde(default)]
     utxos: Vec<StoredUtxo>,
@@ -611,19 +624,198 @@ struct SnapshotLeaves<'a> {
     buffered: Vec<KeptLeaf>,
 }
 
+const COMPACT_LEAVES_PREFIX: &str = "b1:";
+const B64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn b64_encode(input: &[u8], out: &mut String) {
+    let mut chunks = input.chunks_exact(3);
+    for c in chunks.by_ref() {
+        let n = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
+        out.push(B64_TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(B64_TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(B64_TABLE[((n >> 6) & 63) as usize] as char);
+        out.push(B64_TABLE[(n & 63) as usize] as char);
+    }
+    let rem = chunks.remainder();
+    if rem.len() == 1 {
+        let n = (rem[0] as u32) << 16;
+        out.push(B64_TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(B64_TABLE[((n >> 12) & 63) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem.len() == 2 {
+        let n = ((rem[0] as u32) << 16) | ((rem[1] as u32) << 8);
+        out.push(B64_TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(B64_TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(B64_TABLE[((n >> 6) & 63) as usize] as char);
+        out.push('=');
+    }
+}
+
+fn b64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
+    let bytes = input.as_bytes();
+    if bytes.len() % 4 != 0 {
+        return Err("compact leaves base64 length".into());
+    }
+    fn val(b: u8) -> Option<u32> {
+        match b {
+            b'A'..=b'Z' => Some((b - b'A') as u32),
+            b'a'..=b'z' => Some((b - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((b - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for (idx, c) in bytes.chunks_exact(4).enumerate() {
+        let is_last = (idx + 1) * 4 == bytes.len();
+        let a = val(c[0]).ok_or_else(|| "compact leaves base64 char".to_string())?;
+        let b = val(c[1]).ok_or_else(|| "compact leaves base64 char".to_string())?;
+        if c[2] == b'=' && c[3] == b'=' && is_last {
+            out.push(((a << 2) | (b >> 4)) as u8);
+        } else if c[3] == b'=' && is_last {
+            let cv = val(c[2]).ok_or_else(|| "compact leaves base64 char".to_string())?;
+            out.push(((a << 2) | (b >> 4)) as u8);
+            out.push((((b & 0x0f) << 4) | (cv >> 2)) as u8);
+        } else {
+            let cv = val(c[2]).ok_or_else(|| "compact leaves base64 char".to_string())?;
+            let d = val(c[3]).ok_or_else(|| "compact leaves base64 char".to_string())?;
+            out.push(((a << 2) | (b >> 4)) as u8);
+            out.push((((b & 0x0f) << 4) | (cv >> 2)) as u8);
+            out.push((((cv & 0x03) << 6) | d) as u8);
+        }
+    }
+    Ok(out)
+}
+
+fn push_packed_leaf(
+    out: &mut Vec<u8>,
+    hash_bytes: Option<&[u8; 32]>,
+    kind: u8,
+    height: u32,
+    position: u64,
+) {
+    let flags = (kind & 0x7f) | if hash_bytes.is_some() { 0x80 } else { 0 };
+    out.push(flags);
+    out.extend_from_slice(&height.to_le_bytes());
+    out.extend_from_slice(&position.to_le_bytes());
+    if let Some(h) = hash_bytes {
+        out.extend_from_slice(h);
+    }
+}
+
+fn decode_packed_leaves(encoded: &str) -> std::result::Result<Vec<TreeLeaf>, String> {
+    let b64 = encoded
+        .strip_prefix(COMPACT_LEAVES_PREFIX)
+        .ok_or_else(|| "unknown compact leaves prefix".to_string())?;
+    let bytes = b64_decode(b64)?;
+    let mut leaves = Vec::with_capacity(bytes.len() / 45);
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes.len() - cursor < 13 {
+            return Err("truncated compact leaf header".into());
+        }
+        let flags = bytes[cursor];
+        let kind = flags & 0x7f;
+        let has_hash = (flags & 0x80) != 0;
+        let height = u32::from_le_bytes(bytes[cursor + 1..cursor + 5].try_into().unwrap());
+        let position = u64::from_le_bytes(bytes[cursor + 5..cursor + 13].try_into().unwrap());
+        cursor += 13;
+        let hash = if has_hash {
+            if bytes.len() - cursor < 32 {
+                return Err("truncated compact leaf hash".into());
+            }
+            let h = to_hex(&bytes[cursor..cursor + 32]);
+            cursor += 32;
+            h
+        } else {
+            String::new()
+        };
+        leaves.push(TreeLeaf {
+            hash,
+            kind,
+            height,
+            position,
+        });
+    }
+    Ok(leaves)
+}
+
+fn serialize_leaves<S: serde::Serializer>(
+    leaves: &[TreeLeaf],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    SnapshotLeaves {
+        retained: leaves,
+        buffered: Vec::new(),
+    }
+    .serialize(serializer)
+}
+
+fn deserialize_leaves<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<TreeLeaf>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Compact(String),
+        Legacy(Vec<TreeLeaf>),
+    }
+    match Stored::deserialize(deserializer)? {
+        Stored::Compact(s) => decode_packed_leaves(&s).map_err(serde::de::Error::custom),
+        Stored::Legacy(v) => Ok(v),
+    }
+}
+
 impl Serialize for SnapshotLeaves<'_> {
     fn serialize<S: serde::Serializer>(
         &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
-        let mut seq = serializer.serialize_seq(Some(self.retained.len() + self.buffered.len()))?;
+        let total = self.retained.len() + self.buffered.len();
+        let mut raw = Vec::with_capacity(total * 45);
         for leaf in self.retained {
-            seq.serialize_element(leaf)?;
+            if leaf.hash.is_empty() {
+                push_packed_leaf(&mut raw, None, leaf.kind, leaf.height, leaf.position);
+            } else if let Ok(bytes) = from_hex(&leaf.hash) {
+                if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                    push_packed_leaf(&mut raw, Some(&arr), leaf.kind, leaf.height, leaf.position);
+                } else {
+                    let mut seq = serializer.serialize_seq(Some(total))?;
+                    for l in self.retained {
+                        seq.serialize_element(l)?;
+                    }
+                    for l in &self.buffered {
+                        seq.serialize_element(&kept_to_tree_leaf(l.clone()))?;
+                    }
+                    return seq.end();
+                }
+            } else {
+                let mut seq = serializer.serialize_seq(Some(total))?;
+                for l in self.retained {
+                    seq.serialize_element(l)?;
+                }
+                for l in &self.buffered {
+                    seq.serialize_element(&kept_to_tree_leaf(l.clone()))?;
+                }
+                return seq.end();
+            }
         }
         for leaf in &self.buffered {
-            seq.serialize_element(&kept_to_tree_leaf(leaf.clone()))?;
+            push_packed_leaf(
+                &mut raw,
+                Some(&leaf.hash),
+                leaf.kind,
+                leaf.height,
+                leaf.position,
+            );
         }
-        seq.end()
+        let mut encoded =
+            String::with_capacity(COMPACT_LEAVES_PREFIX.len() + raw.len().div_ceil(3) * 4);
+        encoded.push_str(COMPACT_LEAVES_PREFIX);
+        b64_encode(&raw, &mut encoded);
+        serializer.serialize_str(&encoded)
     }
 }
 
@@ -5800,11 +5992,20 @@ mod tests {
         let mut v: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
         v["saplingNext"] = serde_json::json!(0);
         v["version"] = serde_json::json!(1);
-        if let Some(leaves) = v["saplingLeaves"].as_array_mut() {
-            for leaf in leaves {
-                leaf["position"] = serde_json::json!(0);
-            }
-        }
+        // Simulate a pre-selective-scan legacy v1 JSON array with zeroed positions.
+        let legacy_leaves: Vec<serde_json::Value> = w
+            .sapling_leaves
+            .iter()
+            .map(|l| {
+                serde_json::json!({
+                    "hash": l.hash,
+                    "kind": l.kind,
+                    "height": l.height,
+                    "position": 0,
+                })
+            })
+            .collect();
+        v["saplingLeaves"] = serde_json::Value::Array(legacy_leaves);
         let restored = WebWallet::from_snapshot(&serde_json::to_vec(&v).unwrap()).unwrap();
         let hashed = restored
             .sapling_leaves

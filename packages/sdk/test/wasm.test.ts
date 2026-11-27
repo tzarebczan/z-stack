@@ -282,7 +282,11 @@ test("strict custom transport cold restore and incremental sync use only supplie
   tip = 3;
   const incremental = await wallet.sync();
   assert.equal(incremental.scannedHeight, 3);
-  assert.deepEqual(calls, ["tip", "blocks:2-2", "blocks:3-3"]);
+  assert.deepEqual(calls, ["tip", "blocks:3-3"]);
+  // Same-tip verifyChainTip still fetches the overlap block to detect equal-height reorgs.
+  calls.length = 0;
+  await wallet.sync();
+  assert.deepEqual(calls, ["tip", "blocks:3-3"]);
   await wallet.close();
 });
 

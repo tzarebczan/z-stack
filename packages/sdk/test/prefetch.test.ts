@@ -219,6 +219,30 @@ test("synchronous and falsy fetch failures reject without hanging", async () => 
   }
 });
 
+test("alignGrid snaps intermediate batch end heights to grid boundaries", async () => {
+  const ranges: Array<[number, number]> = [];
+  const p = createBlockPrefetch({
+    start: 1234,
+    tip: 3456,
+    batch: 1000,
+    prefetch: 2,
+    alignGrid: 500,
+    fetch: async (start, end) => {
+      ranges.push([start, end]);
+      return new Uint8Array([1]);
+    },
+  });
+  for (;;) {
+    const next = await p.next();
+    if (!next) break;
+  }
+  assert.deepEqual(ranges, [
+    [1234, 2000],
+    [2001, 3000],
+    [3001, 3456],
+  ]);
+});
+
 test("block transports propagate cancellation without retrying", async (t) => {
   const { httpLwdTransport, grpcWebTransport } = await import("../src/lwd.ts");
   let calls = 0;

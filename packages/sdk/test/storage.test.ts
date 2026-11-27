@@ -1233,7 +1233,7 @@ for (const birthday of [1, 2]) test(`same-tip wallets retry roots without resett
   assert.equal(worker.ops.includes("applyTreeState"), false);
   await client.sync();
   assert.equal(requested.length, 2, "root refresh is bounded within a session");
-  const later = Date.now() + 600_001;
+  const later = Date.now() + 6 * 60 * 60_000 + 1;
   t.mock.method(Date, "now", () => later);
   await client.sync();
   assert.equal(requested.length, 4, "long-lived sessions refresh roots periodically");
