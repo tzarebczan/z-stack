@@ -36,8 +36,10 @@ struct Head {
     orch: u32,
     iron: u32,
     shielded: bool,
+    /// Only txids already present in `self.txs` (avoids per-tx hex allocations).
     txids: Vec<String>,
-    spends: Vec<(String, Vec<u8>)>,
+    /// Raw `(txid_bytes, nullifier_bytes)` pairs (zero heap allocations per spend).
+    spends: Vec<([u8; 32], [u8; 32])>,
     enhance: Vec<super::private_enhance::CompactEnhanceAction>,
 }
 
@@ -302,13 +304,13 @@ impl WebWallet {
         for tx in &block.vtx {
             let txid = to_hex(&tx.txid);
             for s in &tx.spends {
-                spends_found += self.mark_spent(&s.nf, &txid, height);
+                spends_found += self.mark_spent(&s.nf, &txid, height, block.time);
             }
             for a in &tx.actions {
-                spends_found += self.mark_spent(&a.nullifier, &txid, height);
+                spends_found += self.mark_spent(&a.nullifier, &txid, height, block.time);
             }
             for a in &tx.ironwood_actions {
-                spends_found += self.mark_spent(&a.nullifier, &txid, height);
+                spends_found += self.mark_spent(&a.nullifier, &txid, height, block.time);
             }
         }
 
@@ -442,6 +444,25 @@ impl WebWallet {
         let n = blocks.len();
         let mut decrypts = Decrypts::new(network, n);
 
+        // Precompute raw 32-byte lookup sets once per batch so non-matching
+        // transactions and spends allocate zero hex Strings and run in O(1).
+        let tracked_txids: std::collections::HashSet<[u8; 32]> = self
+            .txs()
+            .keys()
+            .filter_map(|hex| super::from_hex(hex).ok())
+            .filter_map(|b| <[u8; 32]>::try_from(b).ok())
+            .collect();
+        let mut tracked_nfs: std::collections::HashMap<[u8; 32], usize> = self
+            .notes()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, n)| {
+                let b = super::from_hex(&n.nf).ok()?;
+                let arr = <[u8; 32]>::try_from(b).ok()?;
+                Some((arr, idx))
+            })
+            .collect();
+
         let mut heads = Vec::with_capacity(n);
         for (i, block) in blocks.into_iter().enumerate() {
             let height = block.height as u32;
@@ -456,19 +477,34 @@ impl WebWallet {
                 None => (0, 0, 0),
             };
             if shielded {
-                let mut txids = Vec::with_capacity(block.vtx.len());
+                let mut txids = Vec::new();
                 let mut spends = Vec::new();
                 for tx in &block.vtx {
-                    let txid = to_hex(&tx.txid);
-                    txids.push(txid.clone());
-                    for s in &tx.spends {
-                        spends.push((txid.clone(), s.nf.clone()));
-                    }
-                    for a in &tx.actions {
-                        spends.push((txid.clone(), a.nullifier.clone()));
-                    }
-                    for a in &tx.ironwood_actions {
-                        spends.push((txid.clone(), a.nullifier.clone()));
+                    let txid_arr: Option<[u8; 32]> = tx.txid.as_slice().try_into().ok();
+                    if let Some(arr) = txid_arr {
+                        if tracked_txids.contains(&arr) {
+                            txids.push(to_hex(&tx.txid));
+                        }
+                        for s in &tx.spends {
+                            if let Ok(nf) = <[u8; 32]>::try_from(s.nf.as_slice()) {
+                                spends.push((arr, nf));
+                            }
+                        }
+                        for a in &tx.actions {
+                            if let Ok(nf) = <[u8; 32]>::try_from(a.nullifier.as_slice()) {
+                                spends.push((arr, nf));
+                            }
+                        }
+                        for a in &tx.ironwood_actions {
+                            if let Ok(nf) = <[u8; 32]>::try_from(a.nullifier.as_slice()) {
+                                spends.push((arr, nf));
+                            }
+                        }
+                    } else if !tracked_txids.is_empty() {
+                        let txid = to_hex(&tx.txid);
+                        if self.txs().contains_key(&txid) {
+                            txids.push(txid);
+                        }
                     }
                 }
                 heads.push(Head {
@@ -485,6 +521,16 @@ impl WebWallet {
                 });
                 decrypts.push(self, i, block)?;
             } else {
+                let mut txids = Vec::new();
+                if !tracked_txids.is_empty() {
+                    for t in &block.vtx {
+                        if let Ok(arr) = <[u8; 32]>::try_from(t.txid.as_slice()) {
+                            if tracked_txids.contains(&arr) {
+                                txids.push(to_hex(&t.txid));
+                            }
+                        }
+                    }
+                }
                 heads.push(Head {
                     height,
                     time: block.time,
@@ -493,7 +539,7 @@ impl WebWallet {
                     orch,
                     iron,
                     shielded: false,
-                    txids: block.vtx.iter().map(|t| to_hex(&t.txid)).collect(),
+                    txids,
                     spends: Vec::new(),
                     enhance: Vec::new(),
                 });
@@ -516,8 +562,14 @@ impl WebWallet {
             let head = &heads[i];
             let sc = decrypts.take(i)?;
             let mut spends_found = 0u32;
-            for (txid, nf) in &head.spends {
-                spends_found += self.mark_spent(nf, txid, head.height);
+            if !tracked_nfs.is_empty() {
+                for (txid_bytes, nf_bytes) in &head.spends {
+                    if let Some(&note_idx) = tracked_nfs.get(nf_bytes) {
+                        let txid = to_hex(txid_bytes);
+                        spends_found +=
+                            self.mark_spent_at(note_idx, nf_bytes, &txid, head.height, head.time);
+                    }
+                }
             }
             match sc {
                 DecryptOut::Empty {
@@ -546,6 +598,7 @@ impl WebWallet {
                 }
                 DecryptOut::Scanned(sc) => {
                     let mut notes_found = 0u32;
+                    let notes_before = self.notes().len();
                     for wtx in sc.transactions() {
                         let txid = to_hex(wtx.txid().as_ref());
                         notes_found +=
@@ -562,6 +615,22 @@ impl WebWallet {
                             "ironwood",
                             wtx.ironwood_outputs(),
                         )?;
+                        if head.time != 0 {
+                            if let Some(agg) = self.txs_mut().get_mut(&txid) {
+                                if agg.block_time.is_none() {
+                                    agg.block_time = Some(head.time);
+                                }
+                            }
+                        }
+                    }
+                    // Index any newly decrypted note nullifiers so intra-batch
+                    // receive-then-spend is matched in O(1) too.
+                    for idx in notes_before..self.notes().len() {
+                        if let Ok(b) = super::from_hex(&self.notes()[idx].nf) {
+                            if let Ok(arr) = <[u8; 32]>::try_from(b) {
+                                tracked_nfs.insert(arr, idx);
+                            }
+                        }
                     }
                     self.append_sapling(head.height, sc.sapling().commitments())?;
                     self.append_orchard(head.height, sc.orchard().commitments())?;
@@ -655,7 +724,51 @@ impl WebWallet {
         Ok(())
     }
 
-    fn mark_spent(&mut self, nf: &[u8], spent_in: &str, height: u32) -> u32 {
+    fn mark_spent_at(
+        &mut self,
+        note_idx: usize,
+        nf: &[u8],
+        spent_in: &str,
+        height: u32,
+        time: u32,
+    ) -> u32 {
+        let nf_hex = to_hex(nf);
+        let mut newly = false;
+        let mut value = 0u64;
+        if let Some(n) = self.notes_mut().get_mut(note_idx) {
+            if n.nf == nf_hex {
+                if !n.spent {
+                    n.spent = true;
+                    n.spent_in = Some(spent_in.to_string());
+                    n.spent_height = Some(height);
+                    value = n.value_zat;
+                    newly = true;
+                } else if n.spent_height.is_none() {
+                    n.spent_in = Some(spent_in.to_string());
+                    n.spent_height = Some(height);
+                }
+            } else {
+                return self.mark_spent(nf, spent_in, height, time);
+            }
+        } else {
+            return self.mark_spent(nf, spent_in, height, time);
+        }
+        self.mark_spend_nf(&nf_hex, Some(spent_in));
+        #[cfg(feature = "transparent-pir")]
+        self.transparent_pir.projected_transactions.remove(spent_in);
+        let agg = self.txs_mut().entry(spent_in.to_string()).or_default();
+        agg.mined_height = Some(height);
+        if time != 0 && agg.block_time.is_none() {
+            agg.block_time = Some(time);
+        }
+        if newly {
+            agg.spent_zat = agg.spent_zat.saturating_add(value);
+            agg.spent_notes = agg.spent_notes.saturating_add(1);
+        }
+        1
+    }
+
+    fn mark_spent(&mut self, nf: &[u8], spent_in: &str, height: u32, time: u32) -> u32 {
         if nf.is_empty() {
             return 0;
         }
@@ -686,6 +799,9 @@ impl WebWallet {
             self.transparent_pir.projected_transactions.remove(spent_in);
             let agg = self.txs_mut().entry(spent_in.to_string()).or_default();
             agg.mined_height = Some(height);
+            if time != 0 && agg.block_time.is_none() {
+                agg.block_time = Some(time);
+            }
             if newly {
                 agg.spent_zat = agg.spent_zat.saturating_add(value);
                 agg.spent_notes = agg.spent_notes.saturating_add(1);

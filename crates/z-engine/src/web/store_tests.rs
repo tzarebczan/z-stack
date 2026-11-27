@@ -3231,10 +3231,10 @@ fn pending_submission_identity_and_bytes_survive_reload_without_mined_or_expired
 }
 
 #[test]
-fn snapshot_v2_migration_preserves_high_transparent_diversifier_and_bumps_version_to_3() {
+fn snapshot_v2_migration_preserves_high_transparent_diversifier_and_bumps_version_to_4() {
     let w = wallet();
     let mut snap: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
-    assert_eq!(snap["version"].as_u64(), Some(3));
+    assert_eq!(snap["version"].as_u64(), Some(4));
     snap["version"] = serde_json::json!(2);
     snap["nextDiversifier"] = serde_json::json!(95);
     snap.as_object_mut()
@@ -3247,8 +3247,101 @@ fn snapshot_v2_migration_preserves_high_transparent_diversifier_and_bumps_versio
     );
     let roundtrip: serde_json::Value =
         serde_json::from_slice(&migrated.to_snapshot().unwrap()).unwrap();
-    assert_eq!(roundtrip["version"].as_u64(), Some(3));
+    assert_eq!(roundtrip["version"].as_u64(), Some(4));
     assert_eq!(roundtrip["nextTransparentDiversifier"].as_u64(), Some(95));
+}
+
+#[test]
+fn snapshot_v3_legacy_leaves_migrate_to_v4_b1_and_reject_future_versions() {
+    let mut w = wallet();
+    w.sapling_leaves.push(TreeLeaf {
+        position: 7,
+        height: 100,
+        hash: "11".repeat(32),
+        kind: 1,
+    });
+    w.sapling_leaves.push(TreeLeaf {
+        position: 8,
+        height: 101,
+        hash: String::new(),
+        kind: 0,
+    });
+    let mut snap: serde_json::Value = serde_json::from_slice(&w.to_snapshot().unwrap()).unwrap();
+    assert_eq!(snap["version"].as_u64(), Some(4));
+    assert!(snap["saplingLeaves"]
+        .as_str()
+        .is_some_and(|s| s.starts_with("b1:")));
+    // Simulate a legacy v3 snapshot with JSON array leaves.
+    snap["version"] = serde_json::json!(3);
+    snap["saplingLeaves"] = serde_json::json!([
+        {"position": 7, "height": 100, "hash": "11".repeat(32), "kind": 1},
+        {"position": 8, "height": 101, "hash": "", "kind": 0}
+    ]);
+    let loaded = WebWallet::from_snapshot(&serde_json::to_vec(&snap).unwrap()).unwrap();
+    assert_eq!(loaded.sapling_leaves.len(), 2);
+    assert_eq!(loaded.sapling_leaves[0].hash, "11".repeat(32));
+    assert_eq!(loaded.sapling_leaves[0].kind, 1);
+    assert!(loaded.sapling_leaves[1].hash.is_empty());
+    // Re-serialize as v4 b1 and reload.
+    let v4_bytes = loaded.to_snapshot().unwrap();
+    let reloaded = WebWallet::from_snapshot(&v4_bytes).unwrap();
+    assert_eq!(reloaded.sapling_leaves.len(), 2);
+    assert_eq!(reloaded.sapling_leaves[0].hash, "11".repeat(32));
+    assert!(reloaded.sapling_leaves[1].hash.is_empty());
+    // Future snapshot version fails closed with explicit unsupported version message.
+    snap["version"] = serde_json::json!(5);
+    let err = WebWallet::from_snapshot(&serde_json::to_vec(&snap).unwrap())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("unsupported snapshot version 5"), "got: {err}");
+}
+
+#[test]
+fn parallel_scan_spend_without_change_preserves_block_time() {
+    use prost::Message;
+    use zcash_client_backend::proto::compact_formats::{
+        CompactBlock, CompactSaplingSpend, CompactTx,
+    };
+
+    let mut w = wallet();
+    let nf = [0x99u8; 32];
+    w.notes.push(TrackedNote {
+        pool: "sapling".into(),
+        txid: "aa".repeat(32),
+        output_index: 0,
+        value_zat: 50_000,
+        nf: to_hex(&nf),
+        is_change: false,
+        spent: false,
+        spent_in: None,
+        spent_height: None,
+        mined_height: 99,
+    });
+    let spend_txid = [0xbbu8; 32];
+    let block = CompactBlock {
+        height: 1,
+        hash: vec![0x01; 32],
+        prev_hash: vec![0x00; 32],
+        time: 1_700_000_123,
+        vtx: vec![CompactTx {
+            txid: spend_txid.to_vec(),
+            spends: vec![CompactSaplingSpend { nf: nf.to_vec() }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut raw = Vec::new();
+    block.encode(&mut raw).unwrap();
+    let mut blob = Vec::with_capacity(4 + raw.len());
+    blob.extend_from_slice(&(raw.len() as u32).to_be_bytes());
+    blob.extend_from_slice(&raw);
+    let deltas = w.apply_compact_blocks_blob(&blob).unwrap();
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].spends_found, 1);
+    let agg = w.txs.get(&to_hex(&spend_txid)).expect("spend tx tracked");
+    assert_eq!(agg.mined_height, Some(1));
+    assert_eq!(agg.block_time, Some(1_700_000_123));
 }
 
 #[cfg(feature = "transparent-inputs")]

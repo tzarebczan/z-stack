@@ -445,9 +445,10 @@ test("Private Cloud keeps fetching through a slow scan within the bounded queue"
   try {
     for (let i = 0; i < 10 && requests.length < 12; i++) await turn();
     assert.ok(scanner.held, "the sequential scan is still applying its first block range");
-    assert.deepEqual(requests.slice(0, 12), Array.from({ length: 12 }, (_, i) =>
-      [11 + 1000 * i, 1010 + 1000 * i],
-    ));
+    assert.deepEqual(requests.slice(0, 12), [
+      [11, 1000],
+      ...Array.from({ length: 11 }, (_, i) => [1001 + 1000 * i, 2000 + 1000 * i]),
+    ]);
     assert.ok(requests.length <= 17, "the sixteen-range queue and one yielded range bound work");
   } finally {
     cancelWasmSync();

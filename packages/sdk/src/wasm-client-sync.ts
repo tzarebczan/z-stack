@@ -40,8 +40,14 @@ import { abortable, readWalletGeneration, walletStorageAvailable } from "./walle
 import type { WasmClientContext } from './wasm-client-context';
 import * as runtime from './wasm-client-runtime';
 
+/** Minimum interval between automatic Transparent PIR passes once enrolled scope is complete. */
+const PRIVATE_TRANSPARENT_AUTO_INTERVAL_MS = 30 * 60_000;
+/** Minimum interval between periodic subtree root polls once birthday trees are ready. */
+const SUBTREE_ROOTS_POLL_INTERVAL_MS = 6 * 60 * 60_000;
+
 /** Block scanning and optional public-data enhancement. */
 export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" | "bus" | "session" | "snap" | "currentSession" | "syncLock" | "memoLock" | "loadIfNeeded" | "preferWorker" | "transport" | "memoFetch" | "persist" | "opts" | "transparentScan" | "localLight" | "maxBlocksPerRequest" | "maxSharedMemoBlocksPerRequest" | "submissionPolicy" | "syncOpts" | "grpcWeb" | "lwdPipe" | "retireFailedSession" | "spendingSeed" | "prewarmProvingKey" | "sessionOperation" | "client" | "unlockPolicy" | "rootsChecked" | "assertSource" | "network" | "refreshIfStale" | "stateEpoch" | "transparentScanStatus" | "transparentScanFailure" | "transparentScanEpoch" | "transparentScanSignal" | "sharedMemoStatus" | "selectiveMemoStatus" | "memoAbort" | "storageGeneration" | "rescanning">) {
+  let lastTransparentPirComplete: { source: ScanSession; epoch: number; taddr?: string; at: number } | null = null;
 
   function progressScope(): () => boolean {
     const epoch = runtime.runtimeState.wasmSyncEpoch;
@@ -205,9 +211,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     if (ctx.opts.requireBirthdayTreeState && birthday > 1 && !await source.treesReady()) {
       await seedBirthdayTrees(undefined, recovery, signal, true);
     }
-    if (ctx.opts.verifyChainTip && start > birthday) {
-      // A height alone cannot establish that a previously mined payment is
-      // still mined. Check the overlap even when no new block has arrived.
+    if (ctx.opts.verifyChainTip && start > birthday && start > tip) {
+      // When new blocks arrived (start <= tip), applying block `start` already
+      // verifies `block.prev_hash == hash_at(start - 1)` and rewinds on reorg.
+      // Only fetch a standalone overlap block when no new block arrived (`start > tip`).
       const overlap = Math.min(start - 1, tip);
       if (overlap < birthday) throw new Error("reorg before wallet birthday; retry sync after the chain recovers");
       const blob = await recovery.run(() => ctx.transport.blocks(overlap, overlap, signal));
@@ -347,10 +354,10 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         : ctx.lwdPipe
           ? pipePrefetch(runtime.radioConstrained())
           : tuned.prefetch;
-    // Dense all-pool ranges can exceed 14 MB per 1k blocks. Sixteen requests
-    // queue behind browser sockets/Zaino and exhaust their response deadlines.
-    // Bound both range size and concurrency, keeping the same checkpoint span.
-    const prefetch = combinedTransparent ? Math.min(shieldedPrefetch, 4) : shieldedPrefetch;
+    // Dense all-pool ranges can exceed 14 MB per 1k blocks on uncompacted relays.
+    // On Private Cloud v2, `batch` is already halved to 500 for combinedTransparent and
+    // `maxReservedBytes` bounds scan-worker memory, so keep full concurrency there.
+    const prefetch = combinedTransparent && !privateCloud ? Math.min(shieldedPrefetch, 4) : shieldedPrefetch;
     const batch = Math.min(combinedTransparent ? Math.min(tuned.batch, 500) : tuned.batch, ctx.maxBlocksPerRequest);
     const persistEvery = Math.ceil(tuned.batch * tuned.persistEvery / batch);
     let batches = 0;
@@ -513,6 +520,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
         prefetch,
         buffer: prefetchBuffer(prefetch),
         maxReservedBytes: privateCloud && prefetch === 8 ? COMPACT_PREFETCH_PRIVATE_CLOUD_MAX_BYTES : undefined,
+        alignGrid: privateCloud ? 500 : undefined,
         fetch: (h, end, signal) => {
           if (combinedTransparent) {
             assertCombinedTransparentCurrent();
@@ -814,7 +822,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     // Roots are an optimization that can be unavailable on the first scan.
     // Refresh on a new session and periodically while running, so an existing
     // wallet can prune settled shards without resetting its scan history.
-    if (treesReady && ctx.rootsChecked?.source === source && Date.now() - ctx.rootsChecked.at < 600_000) return;
+    if (treesReady && ctx.rootsChecked?.source === source && Date.now() - ctx.rootsChecked.at < SUBTREE_ROOTS_POLL_INTERVAL_MS) return;
     // The birthday frontier goes first: its tree sizes decide which shard the
     // roots start at. Asking from shard 0 made Zaino walk every root since the
     // pool activated (about a second each), which never finished, so the scan
@@ -1067,7 +1075,7 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     }
   }
 
-  async function refreshPrivateTransparent(signal: AbortSignal): Promise<void> {
+  async function refreshPrivateTransparent(signal: AbortSignal, force = false): Promise<void> {
     const source = ctx.session;
     if (!source || (ctx.transparentScan !== "pir" && ctx.transparentScan !== "compact-plus-pir")) return;
     const transport = ctx.transport.transparentPir;
@@ -1080,6 +1088,23 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
     }
     const mode = ctx.transparentScan;
     const epoch = ctx.transparentScanEpoch;
+    // In `compact-plus-pir`, post-birthday transparent activity is already covered
+    // by compact blocks. Once PIR completes for the enrolled scope, avoid re-running
+    // full PIR on every ~75s new block; refresh periodically, when a new t-addr is
+    // issued, or on explicit trigger.
+    const currentTaddr = await source.transparentAddress().catch(() => undefined);
+    if (
+      !force &&
+      mode === "compact-plus-pir" &&
+      ctx.transparentScanStatus === "complete" &&
+      lastTransparentPirComplete &&
+      lastTransparentPirComplete.source === source &&
+      lastTransparentPirComplete.epoch === epoch &&
+      lastTransparentPirComplete.taddr === currentTaddr &&
+      Date.now() - lastTransparentPirComplete.at < PRIVATE_TRANSPARENT_AUTO_INTERVAL_MS
+    ) {
+      return;
+    }
     const operation = ctx.sessionOperation ?? captureWalletOperation();
     const wait = AbortSignal.any([operation.signal, signal, ctx.transparentScanSignal]);
     const current = () => {
@@ -1102,6 +1127,11 @@ export function createSyncController(ctx: Pick<WasmClientContext, "onProgress" |
       current();
       ctx.transparentScanFailure = result === "history-metadata-limit" ? result : undefined;
       ctx.transparentScanStatus = result === "history-metadata-limit" ? "unavailable" : result;
+      if (result === "complete") {
+        lastTransparentPirComplete = { source, epoch, taddr: currentTaddr, at: Date.now() };
+      } else {
+        lastTransparentPirComplete = null;
+      }
     } catch (error) {
       signal.throwIfAborted(); operation.signal.throwIfAborted();
       if (checkpointFailure?.error === error) throw error;

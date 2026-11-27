@@ -31,6 +31,8 @@ export type BlockPrefetchOpts = {
   buffer?: number;
   /** Aggregate byte reservation. Defaults to the 256 MiB transport cap. */
   maxReservedBytes?: number;
+  /** Optional height grid alignment (e.g. 500 for Private Cloud) so batches end on grid boundaries. */
+  alignGrid?: number;
   fetch: (start: number, end: number, signal: AbortSignal) => Promise<Uint8Array>;
   signal?: AbortSignal;
   cancelled?: () => boolean;
@@ -44,6 +46,9 @@ export function createBlockPrefetch(opts: BlockPrefetchOpts): BlockPrefetch {
   }
   const prefetch = Math.max(1, Math.floor(opts.prefetch));
   const buffer = Math.max(prefetch, Math.floor(opts.buffer ?? prefetch * 2));
+  const alignGrid = opts.alignGrid && Number.isSafeInteger(opts.alignGrid) && opts.alignGrid > 1
+    ? opts.alignGrid
+    : 0;
   const maxReservedBytes = opts.maxReservedBytes ?? COMPACT_PREFETCH_MAX_BYTES;
   if (!Number.isSafeInteger(maxReservedBytes) || maxReservedBytes < COMPACT_RANGE_WORKING_BYTES) {
     throw new Error(`invalid prefetch maxReservedBytes: ${opts.maxReservedBytes}`);
@@ -103,7 +108,11 @@ export function createBlockPrefetch(opts: BlockPrefetchOpts): BlockPrefetch {
     while (inFlight < prefetch && ready.size + inFlight < buffer && nextFetch <= opts.tip &&
         reservedBytes() + COMPACT_RANGE_WORKING_BYTES <= maxReservedBytes) {
       const start = nextFetch;
-      const end = Math.min(opts.tip, start + opts.batch - 1);
+      let end = Math.min(opts.tip, start + opts.batch - 1);
+      if (alignGrid > 0 && end < opts.tip) {
+        const aligned = end - (end % alignGrid);
+        if (aligned >= start) end = aligned;
+      }
       nextFetch = end + 1;
       inFlight += 1;
       let released = false;
